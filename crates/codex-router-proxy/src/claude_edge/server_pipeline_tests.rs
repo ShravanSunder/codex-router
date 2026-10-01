@@ -36,6 +36,7 @@ struct ClaudeLoopbackScenario {
     case: &'static str,
     request_body: Vec<u8>,
     reserve_primary: bool,
+    quota_refresh_interval: Duration,
     responses: Vec<String>,
 }
 
@@ -190,7 +191,10 @@ fn run_claude_loopback_scenario(scenario: ClaudeLoopbackScenario) -> ClaudeLoopb
         database_path.clone(),
         secret_root,
     )
-    .with_claude_edge_local_token(local_router_token("claude-local", 1))
+    .with_claude_edge_local_token(
+        local_router_token("claude-local", 1),
+        scenario.quota_refresh_interval,
+    )
     .with_quota_clock(1_100, 300)
     .with_debug_claude_upstream_endpoint(
         ClaudeUpstreamEndpoint::isolated_debug_override(format!("http://{upstream_address}"), true)
@@ -258,6 +262,7 @@ fn claude_server_success_preserves_request_and_renews_pin_after_body_completion(
         reserve_primary: false,
         case: "claude_server_success",
         request_body: body.clone(),
+        quota_refresh_interval: Duration::from_secs(180),
         responses: vec![claude_fixture_response(
             "200 OK",
             "Content-Type: application/json\r\n",
@@ -292,6 +297,47 @@ fn claude_server_success_preserves_request_and_renews_pin_after_body_completion(
     assert_eq!(pin.last_seen_unix_seconds(), 1_100);
 }
 
+#[test]
+fn claude_server_persists_passive_windows_with_the_configured_interval_deadline() {
+    let receipt = run_claude_loopback_scenario(ClaudeLoopbackScenario {
+        case: "claude_server_passive_quota_freshness",
+        request_body: b"{}".to_vec(),
+        reserve_primary: false,
+        quota_refresh_interval: Duration::from_secs(400),
+        responses: vec![claude_fixture_response(
+            "200 OK",
+            "anthropic-ratelimit-unified-5h-utilization: 0.25\r\nanthropic-ratelimit-unified-5h-reset: 3000\r\nanthropic-ratelimit-unified-7d-utilization: 0.8\r\nanthropic-ratelimit-unified-7d-reset: 4000\r\n",
+            "{}",
+        )],
+    });
+    assert!(receipt.response.starts_with("HTTP/1.1 200 OK"));
+    assert_eq!(receipt.requests.len(), 1);
+
+    let observations = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("read runtime")
+        .block_on(async {
+            AsyncSqliteStateStore::open(&receipt.database_path)
+                .await
+                .expect("read state")
+                .window_observations_for_account(&receipt.account_ids[0])
+                .await
+                .expect("read passive observations")
+        });
+    assert_eq!(observations.len(), 2);
+    for observation in &observations {
+        assert_eq!(observation.observation_started_at(), 1_100);
+        assert_eq!(observation.fresh_until_unix_seconds(), Some(1_620));
+    }
+    assert!(observations.iter().any(|observation| {
+        observation.window_kind() == codex_router_core::route_profile::WindowKind::FiveHour
+    }));
+    assert!(observations.iter().any(|observation| {
+        observation.window_kind() == codex_router_core::route_profile::WindowKind::Weekly
+    }));
+}
+
 fn claude_shared_window_rejection() -> String {
     claude_fixture_response(
         "429 Too Many Requests",
@@ -307,6 +353,7 @@ fn claude_server_shared_window_rejection_replays_body_and_publishes_replacement_
         reserve_primary: false,
         case: "claude_server_retry",
         request_body: body.clone(),
+        quota_refresh_interval: Duration::from_secs(180),
         responses: vec![
             claude_shared_window_rejection(),
             claude_fixture_response(
@@ -345,6 +392,7 @@ fn claude_server_final_credential_rejection_marks_generation_without_third_attem
         reserve_primary: false,
         case: "claude_server_final_rejection",
         request_body: b"{}".to_vec(),
+        quota_refresh_interval: Duration::from_secs(180),
         responses: vec![
             claude_shared_window_rejection(),
             claude_fixture_response("401 Unauthorized", "", rejection),
@@ -385,6 +433,7 @@ fn claude_server_pass_through_preserves_long_error_body_without_renewing_pin() {
         reserve_primary: false,
         case: "claude_server_pass_through",
         request_body: b"{}".to_vec(),
+        quota_refresh_interval: Duration::from_secs(180),
         responses: vec![claude_fixture_response(
             "529 Overloaded",
             "X-Fixture: retained\r\n",
@@ -408,6 +457,7 @@ fn claude_server_incomplete_success_stream_does_not_renew_pin() {
         reserve_primary: false,
         case: "claude_server_incomplete",
         request_body: b"{}".to_vec(),
+        quota_refresh_interval: Duration::from_secs(180),
         responses: vec![claude_fixture_response(
             "200 OK",
             "Content-Type: text/event-stream\r\n",
@@ -430,6 +480,7 @@ fn claude_server_complete_sse_message_stop_renews_pin() {
         case: "claude_server_sse_complete",
         request_body: b"{}".to_vec(),
         reserve_primary: false,
+        quota_refresh_interval: Duration::from_secs(180),
         responses: vec![claude_fixture_response(
             "200 OK",
             "Content-Type: text/event-stream\r\n",
@@ -450,6 +501,7 @@ fn claude_server_reserve_pin_releases_through_writable_pool_before_preferred_att
         case: "claude_server_reserve_release",
         request_body: b"{}".to_vec(),
         reserve_primary: true,
+        quota_refresh_interval: Duration::from_secs(180),
         responses: vec![claude_fixture_response(
             "200 OK",
             "Content-Type: application/json\r\n",

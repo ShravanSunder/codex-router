@@ -9,14 +9,19 @@ use codex_router_core::audit::{AuditFileSink, RouteKind as AuditRouteKind, Trans
 use codex_router_core::ids::TokenGeneration;
 use codex_router_core::local_auth::LocalAuthError;
 use codex_router_core::provider::Provider;
+use codex_router_core::route_profile::CLAUDE_MESSAGES;
 use codex_router_core::route_profile::ClaudeFiveHourReservePercent;
 use codex_router_state::sqlite::AsyncSqliteStateStore;
-use codex_router_state::window_observation::{WindowRejection, WindowRejectionProps};
+use codex_router_state::sqlite::StateStoreError;
+use codex_router_state::window_observation::{
+    WindowObservation, WindowRejection, WindowRejectionProps,
+};
 use futures_util::future::BoxFuture;
 use http::{Request as HttpRequest, Response as HttpResponse, StatusCode};
 use http_body_util::BodyExt;
 use http_body_util::combinators::BoxBody;
 use hyper::body::Incoming;
+use std::time::Duration;
 use tokio_util::task::TaskTracker;
 
 use crate::account_selection::{
@@ -28,9 +33,10 @@ use crate::credential_runtime::AsyncProxyCredentialResolver;
 use crate::db_write_actor::DbWriteActor;
 use crate::headers::Header;
 use crate::http_sse::{
-    AsyncHttpBodyError, AsyncStreamingHttpProxyResponse, AsyncStreamingUpstreamHttpTransport,
-    HttpProxyError, HttpProxyRequest, StderrAuditFailureReporter, allowed_audit_event,
-    append_audit_event_with_reporter, redacted_account_hash,
+    AsyncClaudeQuotaObservationWriter, AsyncHttpBodyError, AsyncStreamingHttpProxyResponse,
+    AsyncStreamingUpstreamHttpTransport, HttpProxyError, HttpProxyRequest,
+    StderrAuditFailureReporter, allowed_audit_event, append_audit_event_with_reporter,
+    record_passive_claude_quota_observations, redacted_account_hash,
 };
 use crate::local_auth::{ProxyLocalAuthGate, extract_presented_local_token_from_request};
 use crate::server::{
@@ -57,6 +63,7 @@ pub(crate) struct ClaudeServerRuntime {
     pub(crate) selector_runtime_state: AsyncAccountSelectorRuntimeState,
     pub(crate) session_affinity_cache: SharedSessionAccountAffinityCache,
     pub(crate) claude_five_hour_reserve_percent: ClaudeFiveHourReservePercent,
+    pub(crate) quota_refresh_interval: Duration,
     pub(crate) db_write_actor: DbWriteActor,
     pub(crate) clock: Arc<dyn Fn() -> u64 + Send + Sync>,
     pub(crate) affinity_record_tasks: TaskTracker,
@@ -68,6 +75,7 @@ impl ClaudeServerRuntime {
         &self,
         request: HttpRequest<Incoming>,
     ) -> HttpResponse<BoxBody<Bytes, AsyncHttpBodyError>> {
+        let request_started_at_unix_seconds = (self.clock)();
         let (parts, body) = request.into_parts();
         let path = parts
             .uri
@@ -114,6 +122,8 @@ impl ClaudeServerRuntime {
             handler: self,
             request,
             token_generation,
+            request_started_at_unix_seconds,
+            quota_refresh_interval: self.quota_refresh_interval,
             credential_resolver: self.credential_resolver.clone(),
         };
         let first_attempt = match pipeline.select_attempt(&pipeline.request).await {
@@ -202,7 +212,30 @@ struct ClaudeServerAttemptPipeline<'a> {
     handler: &'a ClaudeServerRuntime,
     request: HttpProxyRequest,
     token_generation: TokenGeneration,
+    request_started_at_unix_seconds: u64,
+    quota_refresh_interval: Duration,
     credential_resolver: AsyncProxyCredentialResolver,
+}
+
+struct StateBackedClaudeQuotaObservationWriter {
+    state: AsyncSqliteStateStore,
+    clock: Arc<dyn Fn() -> u64 + Send + Sync>,
+}
+
+impl AsyncClaudeQuotaObservationWriter for StateBackedClaudeQuotaObservationWriter {
+    fn record_window_observation<'a>(
+        &'a self,
+        observation: WindowObservation,
+    ) -> BoxFuture<'a, Result<(), StateStoreError>> {
+        let state = self.state.clone();
+        let clock = Arc::clone(&self.clock);
+        Box::pin(async move {
+            state
+                .record_window_observation(&observation, || clock())
+                .await
+                .map(|_observation_was_newest| ())
+        })
+    }
 }
 
 impl ClaudeServerAttemptPipeline<'_> {
@@ -301,11 +334,29 @@ impl ClaudeAttemptPipeline for ClaudeServerAttemptPipeline<'_> {
                 .map_err(|_error| TransportFailure::Connection)?;
             let request = ClaudeEdge::prepare_upstream(&self.request, &body, &attempt.credential)
                 .map_err(|_error| TransportFailure::Connection)?;
-            self.handler
+            let response = self
+                .handler
                 .upstream
                 .send_streaming(request)
                 .await
-                .map_err(|_error| TransportFailure::Connection)
+                .map_err(|_error| TransportFailure::Connection)?;
+            let observation_writer = StateBackedClaudeQuotaObservationWriter {
+                state: self.handler.provider_error_state_store.clone(),
+                clock: Arc::clone(&self.handler.clock),
+            };
+            if let Err(error) = record_passive_claude_quota_observations(
+                &CLAUDE_MESSAGES,
+                attempt.selected.account_id(),
+                response.headers(),
+                self.request_started_at_unix_seconds,
+                self.quota_refresh_interval,
+                &observation_writer,
+            )
+            .await
+            {
+                tracing::warn!(error = %error, "codex_router.claude_passive_quota_observation_failed");
+            }
+            Ok(response)
         })
     }
 

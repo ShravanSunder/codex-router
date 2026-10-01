@@ -344,6 +344,12 @@ fn is_websocket_upgrade(headers: &HeaderMap) -> bool {
     has_upgrade_header && has_connection_upgrade
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ClaudeEdgeRuntimeConfig {
+    local_token: LocalRouterTokenRecord,
+    quota_refresh_interval: Duration,
+}
+
 /// Runtime configuration for the assembled loopback router.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LoopbackRouterRuntimeConfig {
@@ -354,7 +360,7 @@ pub struct LoopbackRouterRuntimeConfig {
     state_database_path: PathBuf,
     secret_store_root: PathBuf,
     local_token: Option<LocalRouterTokenRecord>,
-    claude_edge_local_token: Option<LocalRouterTokenRecord>,
+    claude_edge_runtime_config: Option<ClaudeEdgeRuntimeConfig>,
     fixed_now_unix_seconds: Option<u64>,
     max_snapshot_age_seconds: u64,
     session_pin_idle_ttl: Duration,
@@ -423,7 +429,7 @@ impl LoopbackRouterRuntimeConfig {
             state_database_path,
             secret_store_root,
             local_token: Some(local_token),
-            claude_edge_local_token: None,
+            claude_edge_runtime_config: None,
             fixed_now_unix_seconds: None,
             max_snapshot_age_seconds: 300,
             session_pin_idle_ttl: DEFAULT_SESSION_PIN_IDLE_TTL,
@@ -449,7 +455,7 @@ impl LoopbackRouterRuntimeConfig {
             state_database_path,
             secret_store_root,
             local_token: None,
-            claude_edge_local_token: None,
+            claude_edge_runtime_config: None,
             fixed_now_unix_seconds: None,
             max_snapshot_age_seconds: 300,
             session_pin_idle_ttl: DEFAULT_SESSION_PIN_IDLE_TTL,
@@ -466,10 +472,17 @@ impl LoopbackRouterRuntimeConfig {
         self
     }
 
-    /// Requires a local bearer token only for Claude edge requests.
+    /// Requires a local bearer token and freshness interval for Claude edge requests.
     #[must_use]
-    pub fn with_claude_edge_local_token(mut self, local_token: LocalRouterTokenRecord) -> Self {
-        self.claude_edge_local_token = Some(local_token);
+    pub fn with_claude_edge_local_token(
+        mut self,
+        local_token: LocalRouterTokenRecord,
+        quota_refresh_interval: Duration,
+    ) -> Self {
+        self.claude_edge_runtime_config = Some(ClaudeEdgeRuntimeConfig {
+            local_token,
+            quota_refresh_interval,
+        });
         self
     }
 
@@ -541,6 +554,7 @@ pub struct LoopbackRouterRuntime {
     affinity_owner_recorder: Arc<dyn AsyncHttpAffinityOwnerRecorder>,
     auth_gate: crate::local_auth::ProxyLocalAuthGate,
     claude_edge_auth_gate: Option<crate::local_auth::ProxyLocalAuthGate>,
+    claude_edge_runtime_config: Option<ClaudeEdgeRuntimeConfig>,
     local_model_authentication_required: bool,
     upstream: HyperHttpUpstreamTransport,
     upstream_endpoint: UpstreamEndpoint,
@@ -623,6 +637,7 @@ impl LoopbackRouterRuntime {
             .build()
             .map_err(LoopbackRouterRuntimeError::TokioRuntime)?;
         let fixed_now_unix_seconds = config.fixed_now_unix_seconds;
+        let claude_edge_runtime_config = config.claude_edge_runtime_config.clone();
         let credential_resources =
             ProxyRuntimeCredentialResources::open(credential_store, fixed_now_unix_seconds)?;
         let affinity_secret_provider = credential_resources.affinity_secret_provider();
@@ -641,12 +656,14 @@ impl LoopbackRouterRuntime {
             )),
             None => crate::local_auth::ProxyLocalAuthGate::disabled(),
         };
-        let claude_edge_auth_gate = config.claude_edge_local_token.as_ref().map(|local_token| {
-            crate::local_auth::ProxyLocalAuthGate::required(LocalRouterAuth::new(
-                local_token.clone(),
-                Vec::new(),
-            ))
-        });
+        let claude_edge_auth_gate = claude_edge_runtime_config
+            .as_ref()
+            .map(|claude_edge_config| {
+                crate::local_auth::ProxyLocalAuthGate::required(LocalRouterAuth::new(
+                    claude_edge_config.local_token.clone(),
+                    Vec::new(),
+                ))
+            });
         let upstream_endpoint = config.upstream_endpoint;
         let upstream = HyperHttpUpstreamTransport::new(upstream_endpoint.clone());
         #[cfg(debug_assertions)]
@@ -689,6 +706,7 @@ impl LoopbackRouterRuntime {
             affinity_owner_recorder,
             auth_gate,
             claude_edge_auth_gate,
+            claude_edge_runtime_config,
             local_model_authentication_required,
             upstream,
             upstream_endpoint,
@@ -945,6 +963,7 @@ impl LoopbackRouterRuntime {
             affinity_record_tasks,
             auth_gate: self.auth_gate.clone(),
             claude_edge_auth_gate: self.claude_edge_auth_gate.clone(),
+            claude_edge_runtime_config: self.claude_edge_runtime_config.clone(),
             local_model_authentication_required: self.local_model_authentication_required,
             upstream: self.upstream.clone(),
             upstream_endpoint: self.upstream_endpoint.clone(),
@@ -1239,6 +1258,7 @@ struct LoopbackProtocolConnectionHandler {
     affinity_record_tasks: TaskTracker,
     auth_gate: crate::local_auth::ProxyLocalAuthGate,
     claude_edge_auth_gate: Option<crate::local_auth::ProxyLocalAuthGate>,
+    claude_edge_runtime_config: Option<ClaudeEdgeRuntimeConfig>,
     local_model_authentication_required: bool,
     upstream: HyperHttpUpstreamTransport,
     upstream_endpoint: UpstreamEndpoint,
@@ -1647,6 +1667,10 @@ impl LoopbackProtocolConnectionHandler {
         &self,
         request: HttpRequest<Incoming>,
     ) -> HttpResponse<BoxBody<Bytes, AsyncHttpBodyError>> {
+        let Some(claude_edge_config) = &self.claude_edge_runtime_config else {
+            tracing::error!("codex_router.claude_edge_configuration_missing_after_auth_preflight");
+            return empty_response(StatusCode::INTERNAL_SERVER_ERROR);
+        };
         ClaudeServerRuntime {
             auth_gate: self.claude_edge_auth_gate.clone(),
             upstream: self.upstream.clone(),
@@ -1667,6 +1691,7 @@ impl LoopbackProtocolConnectionHandler {
                 ),
             session_affinity_cache: Arc::clone(&self.session_affinity_cache),
             claude_five_hour_reserve_percent: self.claude_five_hour_reserve_percent,
+            quota_refresh_interval: claude_edge_config.quota_refresh_interval,
             db_write_actor: self.db_write_actor.clone(),
             clock: self.runtime_clock(),
             affinity_record_tasks: self.affinity_record_tasks.clone(),
@@ -2850,7 +2875,10 @@ mod tests {
             database_path,
             secret_root,
         )
-        .with_claude_edge_local_token(local_router_token("initial-token", 1));
+        .with_claude_edge_local_token(
+            local_router_token("initial-token", 1),
+            Duration::from_secs(400),
+        );
         let runtime = LoopbackRouterRuntime::start_for_test(config)
             .expect("router runtime should start for token-scope test");
         let router_address = runtime.local_addr();

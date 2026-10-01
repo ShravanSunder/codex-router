@@ -752,8 +752,6 @@ impl PreparedAsyncStreamingHttpProxyRequest {
 pub struct StreamingHttpProxyCompletion {
     affinity_secret: Option<RouterAffinityHashSecret>,
     account_id: AccountId,
-    route_profile: RouteProfile,
-    observation_started_at_unix_seconds: u64,
     route_band: RouteBand,
     credential_generation: u64,
     allowed_audit_event: AuditEvent,
@@ -774,8 +772,6 @@ impl StreamingHttpProxyCompletion {
         Self {
             affinity_secret,
             account_id,
-            route_profile: RESPONSES_HTTP.clone(),
-            observation_started_at_unix_seconds: 0,
             route_band: RouteBand::Responses,
             credential_generation,
             allowed_audit_event,
@@ -802,24 +798,6 @@ impl StreamingHttpProxyCompletion {
     #[must_use]
     pub const fn account_id(&self) -> &AccountId {
         &self.account_id
-    }
-
-    /// Writes passive Claude quota observations for this completed response's headers.
-    pub(crate) async fn record_passive_claude_quota_observations(
-        &self,
-        response_headers: &HeaderCollection,
-        refresh_interval: Duration,
-        writer: &dyn AsyncClaudeQuotaObservationWriter,
-    ) -> Result<usize, PassiveClaudeQuotaObservationError> {
-        record_passive_claude_quota_observations(
-            &self.route_profile,
-            &self.account_id,
-            response_headers,
-            self.observation_started_at_unix_seconds,
-            refresh_interval,
-            writer,
-        )
-        .await
     }
 
     /// Returns selected route band.
@@ -1062,7 +1040,6 @@ where
         &self,
         request: HttpProxyRequest,
     ) -> Result<PreparedStreamingHttpProxyRequest, HttpProxyError> {
-        let observation_started_at_unix_seconds = current_unix_seconds();
         let audit_route_kind = audit_route_kind_for_request(&request);
         let presented_token = match extract_presented_local_token_from_request(
             request.header_value("x-codex-router-token"),
@@ -1157,8 +1134,6 @@ where
             let completion = StreamingHttpProxyCompletion {
                 affinity_secret,
                 account_id: selected.account_id().clone(),
-                route_profile,
-                observation_started_at_unix_seconds,
                 route_band,
                 credential_generation: resolved.credential_generation(),
                 allowed_audit_event: allowed_audit_event(
@@ -1189,7 +1164,6 @@ where
         &self,
         request: HttpProxyRequest,
     ) -> Result<PreparedStreamingHttpProxyRequest, HttpProxyError> {
-        let observation_started_at_unix_seconds = current_unix_seconds();
         let audit_route_kind = audit_route_kind_for_request(&request);
         let presented_token = match extract_presented_local_token_from_request(
             request.header_value("x-codex-router-token"),
@@ -1289,8 +1263,6 @@ where
             let completion = StreamingHttpProxyCompletion {
                 affinity_secret,
                 account_id: selected.account_id().clone(),
-                route_profile,
-                observation_started_at_unix_seconds,
                 route_band,
                 credential_generation: resolved.credential_generation(),
                 allowed_audit_event: allowed_audit_event(
@@ -1837,20 +1809,17 @@ mod tests {
     use super::HttpAffinitySecretProvider;
     use super::HttpProxyError;
     use super::HttpProxyRequest;
-    use super::StreamingHttpProxyCompletion;
     use super::audit_route_kind_for_route_kind;
     use codex_router_auth::resolver::CredentialResolverError;
     use codex_router_auth::resolver::ResolvedProviderCredential;
     use codex_router_core::affinity::RouterAffinityHashSecret;
     use codex_router_core::audit::RouteKind as AuditRouteKind;
-    use codex_router_core::audit::TransportKind;
     use codex_router_core::ids::AccountId;
     use codex_router_core::ids::TokenGeneration;
     use codex_router_core::provider::Provider;
     use codex_router_core::redaction::SecretString;
     use codex_router_core::route_profile::CLAUDE_MESSAGES;
     use codex_router_core::route_profile::WindowKind;
-    use codex_router_core::routes::RouteBand;
     use codex_router_state::account::AccountRecord;
     use codex_router_state::account::AccountStatus;
     use codex_router_state::sqlite::AsyncSqliteStateStore;
@@ -2027,7 +1996,6 @@ mod tests {
                 AuthenticatedHttpProxyService::new(&auth_gate, &selector, &resolver, &upstream)
                     .with_affinity_secret_provider(&affinity_secret_provider);
 
-            let request_started_at_lower_bound = super::current_unix_seconds();
             let prepared = service
                 .prepare_streaming_request_async(HttpProxyRequest::new(Method::Post, path))
                 .await;
@@ -2041,13 +2009,7 @@ mod tests {
                 vec![expected_provider],
                 "route {path} should pass its profile provider to credential resolution"
             );
-            let (_upstream_request, completion) = prepared.into_parts();
-            assert!(
-                completion.observation_started_at_unix_seconds >= request_started_at_lower_bound
-                    && completion.observation_started_at_unix_seconds
-                        <= super::current_unix_seconds(),
-                "route {path} should retain the proxy request-start timestamp"
-            );
+            let (_upstream_request, _completion) = prepared.into_parts();
         }
     }
 
@@ -2085,26 +2047,16 @@ mod tests {
         ]);
         let request_started_at = 100;
         let refresh_interval = std::time::Duration::from_secs(400);
-        let completion = StreamingHttpProxyCompletion {
-            affinity_secret: None,
-            account_id: account_id.clone(),
-            route_profile: CLAUDE_MESSAGES.clone(),
-            observation_started_at_unix_seconds: request_started_at,
-            route_band: RouteBand::ClaudeMessages,
-            credential_generation: 1,
-            allowed_audit_event: super::allowed_audit_event(
-                TransportKind::Http,
-                AuditRouteKind::ClaudeMessages,
-                "test-account-hash".to_owned(),
-            ),
-            active_reservation_guard: None,
-            provider_error_observer: None,
-        };
-
-        completion
-            .record_passive_claude_quota_observations(&headers, refresh_interval, &writer)
-            .await
-            .unwrap_or_else(|error| panic!("passive observations should persist: {error}"));
+        super::record_passive_claude_quota_observations(
+            &CLAUDE_MESSAGES,
+            &account_id,
+            &headers,
+            request_started_at,
+            refresh_interval,
+            &writer,
+        )
+        .await
+        .unwrap_or_else(|error| panic!("passive observations should persist: {error}"));
         let active_fresh_until = calculate_window_observation_fresh_until_unix_seconds(
             request_started_at,
             refresh_interval.as_secs(),

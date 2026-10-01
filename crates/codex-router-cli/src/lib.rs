@@ -9,6 +9,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use codex_router_auth::live_quota::DEFAULT_CHATGPT_BACKEND_BASE_URL;
+use codex_router_core::local_auth::LocalRouterTokenRecord;
 use codex_router_proxy::server::LoopbackBindAddress;
 use codex_router_proxy::server::LoopbackRouterRuntime;
 use codex_router_proxy::server::LoopbackRouterRuntimeConfig;
@@ -260,7 +261,7 @@ fn run_serve_command_with_upkeep_start_and_token_reload_observer(
     let mut runtime_config = base_serve_runtime_config(&command)?;
     let state_db = command.state_db.clone();
     let secret_root = command.secret_root.clone();
-    if let Some(audit_file) = command.audit_file {
+    if let Some(audit_file) = command.audit_file.clone() {
         runtime_config = runtime_config.with_audit_file(audit_file);
     }
     if let Some(report_file) = command.websocket_registry_report_file.clone() {
@@ -272,7 +273,8 @@ fn run_serve_command_with_upkeep_start_and_token_reload_observer(
     let token_service = LocalRouterTokenService::new(local_token_store.clone());
     let local_token = token_service.ensure_local_token(&secret_root)?;
     let initial_token_generation = local_token.generation();
-    runtime_config = runtime_config.with_claude_edge_local_token(local_token.clone());
+    let (mut runtime_config, quota_refresh_interval) =
+        configure_serve_claude_edge_runtime(runtime_config, &command, local_token.clone());
     if command.require_local_token {
         runtime_config = runtime_config.with_required_local_token(local_token);
     }
@@ -302,7 +304,7 @@ fn run_serve_command_with_upkeep_start_and_token_reload_observer(
             secret_root,
             credential_store,
             DEFAULT_CHATGPT_BACKEND_BASE_URL.to_owned(),
-            Duration::from_secs(command.quota_refresh_interval_seconds),
+            quota_refresh_interval,
             runtime.websocket_quota_floor_notifier(),
         )?)
     } else {
@@ -341,6 +343,18 @@ fn base_serve_runtime_config(
     Ok(runtime_config)
 }
 
+fn configure_serve_claude_edge_runtime(
+    runtime_config: LoopbackRouterRuntimeConfig,
+    command: &cli_argument_parsing::ServeCommand,
+    local_token: LocalRouterTokenRecord,
+) -> (LoopbackRouterRuntimeConfig, Duration) {
+    let quota_refresh_interval = Duration::from_secs(command.quota_refresh_interval_seconds);
+    (
+        runtime_config.with_claude_edge_local_token(local_token, quota_refresh_interval),
+        quota_refresh_interval,
+    )
+}
+
 #[cfg(test)]
 mod session_pin_idle_ttl_tests {
     use super::*;
@@ -368,6 +382,41 @@ mod session_pin_idle_ttl_tests {
             command.secret_root,
         )
         .with_session_pin_idle_ttl(Duration::from_secs(1_800))
+        .with_claude_five_hour_reserve_percent(command.claude_five_hour_reserve_percent);
+
+        assert_eq!(runtime_config, expected_config);
+    }
+
+    #[test]
+    fn serve_quota_refresh_interval_reaches_runtime_configuration() {
+        let command = match CliCommand::parse([
+            OsString::from("serve"),
+            OsString::from("--quota-refresh-interval-seconds"),
+            OsString::from("400"),
+        ]) {
+            Ok(CliCommand::Serve(command)) => command,
+            Ok(_) => panic!("serve arguments should parse as a serve command"),
+            Err(error) => panic!("serve arguments should parse: {error}"),
+        };
+        let base_config = base_serve_runtime_config(&command)
+            .unwrap_or_else(|error| panic!("serve runtime config should build: {error}"));
+        let local_token = LocalRouterTokenRecord::new(
+            codex_router_core::redaction::SecretString::new("serve-test-token"),
+            codex_router_core::ids::TokenGeneration::new(1),
+        );
+        let (runtime_config, quota_refresh_interval) =
+            configure_serve_claude_edge_runtime(base_config, &command, local_token.clone());
+        assert_eq!(quota_refresh_interval, Duration::from_secs(400));
+        let expected_config = LoopbackRouterRuntimeConfig::new_tokenless(
+            LoopbackBindAddress::new(&command.listen_host, command.port)
+                .expect("serve bind address should be valid"),
+            UpstreamEndpoint::new(command.upstream_base_url.clone())
+                .expect("serve upstream endpoint should be valid"),
+            command.state_db,
+            command.secret_root,
+        )
+        .with_session_pin_idle_ttl(Duration::from_secs(command.session_pin_idle_ttl_seconds))
+        .with_claude_edge_local_token(local_token, quota_refresh_interval)
         .with_claude_five_hour_reserve_percent(command.claude_five_hour_reserve_percent);
 
         assert_eq!(runtime_config, expected_config);
