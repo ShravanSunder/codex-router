@@ -99,7 +99,7 @@ impl MachineId {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, JsonSchema, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Hash, JsonSchema, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct PushId(String);
 

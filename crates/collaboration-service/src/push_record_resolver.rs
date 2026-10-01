@@ -46,6 +46,7 @@ pub(crate) fn delivery_result(
         link: link_for(record, identity),
         target: record.target.clone(),
         target_identity,
+        delivery_state: record.delivery_state,
         receipt: record
             .last_outcome
             .clone()

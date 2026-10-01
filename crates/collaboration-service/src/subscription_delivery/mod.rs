@@ -1,4 +1,5 @@
 mod board_availability;
+mod direct_message_push;
 mod reader_delivery_owner;
 mod subscription_clock;
 mod subscription_facts;

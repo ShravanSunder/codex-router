@@ -77,6 +77,8 @@ fn push_draft(
     created_at: chrono::DateTime<Utc>,
 ) -> PushRecordDraft {
     PushRecordDraft {
+        mode: Some(collaboration_protocol::MessageDelivery::Auto),
+        guard: None,
         push_id,
         kind: PushKind::DirectMessage,
         origin,
@@ -109,6 +111,8 @@ fn wake_push_draft(
     .canonical_string()
     .expect("canonical wake origin reference");
     PushRecordDraft {
+        mode: None,
+        guard: None,
         push_id,
         kind: PushKind::Wake,
         origin: PushOrigin::Router(PushKind::Wake),
@@ -135,6 +139,8 @@ fn schedule_run_push_draft(
     .canonical_string()
     .expect("canonical schedule-run origin reference");
     PushRecordDraft {
+        mode: None,
+        guard: None,
         push_id,
         kind: PushKind::ScheduleRun,
         origin: PushOrigin::Router(PushKind::ScheduleRun),

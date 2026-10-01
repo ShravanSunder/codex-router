@@ -1,5 +1,5 @@
 //! Reply to one stored direct message using its push id or Router link.
-use crate::{DeliveryReceipt, MessageText, PushId, SessionRef};
+use crate::{DeliveryReceipt, MessageText, PushDeliveryState, PushId, SessionRef};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -21,5 +21,6 @@ pub struct SessionMessageReplyResult {
     pub target_identity: String,
     pub push_id: PushId,
     pub link: String,
+    pub delivery_state: PushDeliveryState,
     pub receipt: DeliveryReceipt,
 }

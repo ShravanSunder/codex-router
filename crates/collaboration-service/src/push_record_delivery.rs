@@ -1,12 +1,8 @@
 //! Store-first direct-message delivery through Layer 0's PreparedPush path.
-use crate::{
-    DeliveryPrecondition, LoadPolicy, ServiceIdentity, push_record_resolver::line_for,
-    session_delivery_contract::UnstoredAttemptEvidenceSink,
-};
+use crate::ServiceIdentity;
 use automation_storage::StorageError;
 use collaboration_protocol::{
-    AttemptId, CodexGeneration, DeliveryCorrelationId, DeliveryOutcome, DeliveryReceipt,
-    MessageContent, MessageDelivery, MessageText, PushId, PushIdError, PushKind, PushOrigin,
+    CodexGeneration, MessageContent, MessageDelivery, PushId, PushIdError, PushKind, PushOrigin,
     PushRecord, PushRecordDraft, PushRecordValidationError, SessionDisplayNameLookup,
     SessionMessageReplyParams, SessionMessageReplyResult, SessionMessageSendParams, SessionRef,
     session_identity,
@@ -18,7 +14,6 @@ pub(crate) enum PushDeliveryFailure {
     DeliveryUnavailable,
     InvalidRecord(PushRecordValidationError),
     StoreFailed,
-    LineInvalid,
 }
 
 pub(crate) async fn dispatch_message(
@@ -94,6 +89,8 @@ pub(crate) async fn dispatch_message(
         },
         body: Some(text),
         activity: None,
+        mode: Some(params.mode),
+        guard: params.generation_guard.clone(),
         created_at: chrono::Utc::now(),
     };
     let target_identity = target_identity(&target, identity);
@@ -176,6 +173,8 @@ pub(crate) async fn dispatch_reply(
         },
         body: Some(reply_text),
         activity: None,
+        mode: Some(MessageDelivery::Auto),
+        guard: None,
         created_at: chrono::Utc::now(),
     };
     let target_identity = target_identity(&origin, identity);
@@ -195,6 +194,7 @@ pub(crate) async fn dispatch_reply(
                 target_identity,
                 push_id: record.push_id.clone(),
                 link: crate::push_record_resolver::link_for(&record, identity),
+                delivery_state: record.delivery_state,
                 receipt,
             };
             json!({"jsonrpc":"2.0","id":id,"result":result})
@@ -212,16 +212,18 @@ pub(crate) async fn store_first_and_deliver(
     let Some(store) = identity.automation.as_ref() else {
         return Err(PushDeliveryFailure::StoreUnavailable);
     };
-    let Some(delivery) = identity.session_delivery.as_ref() else {
+    let Some(service) = identity.subscription_delivery.as_ref() else {
         return Err(PushDeliveryFailure::DeliveryUnavailable);
     };
+    let mut draft = draft;
+    draft.mode = Some(mode);
+    draft.guard = generation_guard;
     let target = draft.target.clone();
     let push_id = draft.push_id.clone();
-    let pending_draft = draft
+    draft
         .clone()
         .into_pending()
         .map_err(PushDeliveryFailure::InvalidRecord)?;
-    let line = line_for(&pending_draft, identity).map_err(|_| PushDeliveryFailure::LineInvalid)?;
     store
         .lock()
         .await
@@ -233,48 +235,8 @@ pub(crate) async fn store_first_and_deliver(
             }
             _ => PushDeliveryFailure::StoreFailed,
         })?;
-    store
-        .lock()
-        .await
-        .mark_push_attempted(&push_id)
-        .await
-        .map_err(|_| PushDeliveryFailure::StoreFailed)?;
-    let line: MessageText = line
-        .try_into()
-        .map_err(|_| PushDeliveryFailure::LineInvalid)?;
-    let prepared = crate::layer_zero::PreparedPush {
-        push_id: push_id.clone(),
-        line,
-        load_policy: LoadPolicy::MayLoad,
-    };
-    let correlation = DeliveryCorrelationId::try_from(push_id.as_str().to_owned())
-        .map_err(|_| PushDeliveryFailure::LineInvalid)?;
-    let request = crate::layer_zero::DeliveryRequest {
-        payload: prepared,
-        target,
-        mode,
-        precondition: generation_guard.map_or(DeliveryPrecondition::Unpinned, |expected| {
-            DeliveryPrecondition::EndpointGeneration { expected }
-        }),
-        correlation,
-        attempt: AttemptId::generate(),
-    };
-    let outcome = match delivery
-        .deliver_prepared(request, &UnstoredAttemptEvidenceSink)
-        .await
-    {
-        Ok(receipt) => receipt,
-        Err(_) => DeliveryReceipt {
-            outcome: DeliveryOutcome::Unknown,
-            reachability: None,
-            client: None,
-        },
-    };
-    let settled_at = chrono::Utc::now();
-    store
-        .lock()
-        .await
-        .settle_push_record(&push_id, outcome, settled_at)
+    service
+        .deliver_direct_message(target, push_id)
         .await
         .map_err(|_| PushDeliveryFailure::StoreFailed)
 }
@@ -321,13 +283,6 @@ fn delivery_failure(id: Value, failure: PushDeliveryFailure) -> Value {
             "unavailable",
             "discovery",
             "Push record could not be stored or settled",
-        ),
-        PushDeliveryFailure::LineInvalid => crate::push_record_resolver::failure(
-            id,
-            -32050,
-            "unavailable",
-            "discovery",
-            "Push line could not be prepared",
         ),
     }
 }

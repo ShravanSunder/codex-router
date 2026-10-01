@@ -1,7 +1,7 @@
 //! Validated record shapes shared by Router storage and push-reading surfaces.
 use crate::{
-    DeliveryOutcome, DeliveryReceipt, MessageText, PushHeaderFacts, PushId, PushKind, PushOrigin,
-    SessionRef,
+    CodexGeneration, DeliveryOutcome, DeliveryReceipt, MessageDelivery, MessageText,
+    PushHeaderFacts, PushId, PushKind, PushOrigin, SessionRef,
 };
 use chrono::{DateTime, Utc};
 use message_board::{ActivitySequence, MessageId};
@@ -54,6 +54,10 @@ pub struct PushRecordDraft {
     pub origin: PushOrigin,
     pub origin_router_ref: Option<String>,
     pub target: SessionRef,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<MessageDelivery>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guard: Option<CodexGeneration>,
     pub reply_to_push_id: Option<PushId>,
     pub header_facts: PushHeaderFacts,
     pub body: Option<String>,
@@ -78,6 +82,14 @@ impl PushRecordDraft {
         }
         if self.reply_to_push_id.is_some() && self.kind != PushKind::DirectMessage {
             return Err(PushRecordValidationError::InvalidReplyTarget);
+        }
+
+        match (self.kind, self.mode, self.guard.as_ref()) {
+            (PushKind::DirectMessage, Some(_), _) => {}
+            (PushKind::DirectMessage, None, _) | (_, Some(_), _) | (_, None, Some(_)) => {
+                return Err(PushRecordValidationError::InvalidDirectMessageIntent);
+            }
+            (_, None, None) => {}
         }
 
         let is_subscription_activity = self.kind == PushKind::SubscriptionActivity;
@@ -121,6 +133,8 @@ impl PushRecordDraft {
             origin: self.origin,
             origin_router_ref: self.origin_router_ref,
             target: self.target,
+            mode: self.mode,
+            guard: self.guard,
             reply_to_push_id: self.reply_to_push_id,
             header_facts: self.header_facts,
             body: self.body,
@@ -153,6 +167,10 @@ pub struct PushRecord {
     pub origin: PushOrigin,
     pub origin_router_ref: Option<String>,
     pub target: SessionRef,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<MessageDelivery>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guard: Option<CodexGeneration>,
     pub reply_to_push_id: Option<PushId>,
     pub header_facts: PushHeaderFacts,
     pub body: Option<String>,
@@ -229,6 +247,7 @@ pub struct PushMessageSendResult {
     pub link: String,
     pub target: SessionRef,
     pub target_identity: String,
+    pub delivery_state: PushDeliveryState,
     pub receipt: DeliveryReceipt,
 }
 
@@ -241,6 +260,11 @@ impl PushRecord {
         read_at: Option<DateTime<Utc>>,
     ) -> Result<Self, PushRecordValidationError> {
         let mut record = draft.into_pending()?;
+        if delivery_state == PushDeliveryState::Held
+            && (record.mode == Some(MessageDelivery::Steer) || record.guard.is_some())
+        {
+            return Err(PushRecordValidationError::InvalidDirectMessageIntent);
+        }
         if read_at.is_some() && record.kind != PushKind::DirectMessage {
             return Err(PushRecordValidationError::InvalidReadState);
         }
@@ -317,6 +341,8 @@ pub enum PushRecordValidationError {
     InvalidOriginReference,
     #[error("reply-to is only valid for direct messages")]
     InvalidReplyTarget,
+    #[error("direct-message delivery intent does not agree with the push kind or held state")]
+    InvalidDirectMessageIntent,
     #[error("direct-message body exceeds 64 KiB")]
     DirectMessageTooLarge,
     #[error("push body is invalid")]

@@ -2,8 +2,9 @@
 use crate::StorageError;
 use chrono::{DateTime, Utc};
 use collaboration_protocol::{
-    EndpointId, EndpointRef, PushActivitySnapshot, PushDeliveryState, PushId, PushKind, PushOrigin,
-    PushRecord, PushRecordDraft, RouterOriginRef, SessionId, SessionRef, UuidIdentity,
+    EndpointId, EndpointRef, MessageDelivery, PushActivitySnapshot, PushDeliveryState, PushId,
+    PushKind, PushOrigin, PushRecord, PushRecordDraft, RouterOriginRef, SessionId, SessionRef,
+    UuidIdentity,
 };
 use serde::Serialize;
 use sqlx::FromRow;
@@ -20,6 +21,8 @@ pub(crate) struct PushRecordRow {
     pub target_service_id: String,
     pub target_endpoint_id: String,
     pub target_session_id: String,
+    pub dm_delivery_mode: Option<String>,
+    pub dm_generation_guard_json: Option<String>,
     pub reply_to_push_id: Option<String>,
     pub header_facts_json: String,
     pub body: Option<String>,
@@ -92,7 +95,20 @@ impl PushRecordRow {
             .transpose()
             .map_err(|_| StorageError::InvalidRecord)?;
         let delivery_state = decode_delivery_state(&self.delivery_state)?;
+        let mode = self
+            .dm_delivery_mode
+            .as_deref()
+            .map(decode_direct_message_mode)
+            .transpose()?;
+        let guard = self
+            .dm_generation_guard_json
+            .as_deref()
+            .map(serde_json::from_str::<collaboration_protocol::CodexGeneration>)
+            .transpose()
+            .map_err(|_| StorageError::InvalidRecord)?;
         let draft = PushRecordDraft {
+            mode,
+            guard,
             push_id,
             kind,
             origin,
@@ -204,7 +220,7 @@ fn decode_json_enum<TEnum: serde::de::DeserializeOwned>(
         .map_err(|_| StorageError::InvalidRecord)
 }
 
-fn session_from_parts(
+pub(crate) fn session_from_parts(
     service_id: String,
     endpoint_id: String,
     session_id: String,
@@ -217,5 +233,22 @@ fn session_from_parts(
                 .map_err(|_| StorageError::InvalidRecord)?,
         },
         session_id: SessionId::try_from(session_id).map_err(|_| StorageError::InvalidRecord)?,
+    })
+}
+
+fn decode_direct_message_mode(value: &str) -> Result<MessageDelivery, StorageError> {
+    match value {
+        "auto" => Ok(MessageDelivery::Auto),
+        "queue" => Ok(MessageDelivery::Queue),
+        "steer" => Ok(MessageDelivery::Steer),
+        _ => Err(StorageError::InvalidRecord),
+    }
+}
+
+pub(crate) fn serialize_direct_message_mode(mode: Option<MessageDelivery>) -> Option<&'static str> {
+    mode.map(|mode| match mode {
+        MessageDelivery::Auto => "auto",
+        MessageDelivery::Queue => "queue",
+        MessageDelivery::Steer => "steer",
     })
 }

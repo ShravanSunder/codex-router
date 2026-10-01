@@ -409,6 +409,8 @@ impl ScheduledRunWorker {
             .map_err(|_| StorageError::InvalidRecord)?;
         let body = inputs.instruction_text.as_str().to_owned();
         let draft = PushRecordDraft {
+            mode: None,
+            guard: None,
             push_id: push_id.clone(),
             kind: PushKind::ScheduleRun,
             origin: PushOrigin::Router(PushKind::ScheduleRun),

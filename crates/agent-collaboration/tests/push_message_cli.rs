@@ -529,6 +529,7 @@ fn send_result(target: Value) -> Value {
         "link": PUSH_LINK,
         "target": target,
         "targetIdentity": "Claude target",
+        "deliveryState":"delivered",
         "receipt": {
             "outcome": {"kind":"peerMessageWritten"},
             "reachability": "claudeCodePeer",
@@ -541,6 +542,7 @@ fn reply_result() -> Value {
     json!({
         "target": session_ref(SENDER_SESSION_ID, "claude-local"),
         "targetIdentity": "Claude sender",
+        "deliveryState":"delivered",
         "pushId": PUSH_ID,
         "link": PUSH_LINK,
         "receipt": {

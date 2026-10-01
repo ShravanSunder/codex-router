@@ -112,6 +112,16 @@ impl AutomationStore {
         ) {
             return Err(StorageError::InvalidRecord);
         }
+        let record = self
+            .get_push_record(push_id)
+            .await?
+            .ok_or(StorageError::PushNotFound)?;
+        if record.kind == PushKind::DirectMessage
+            && (record.mode == Some(collaboration_protocol::MessageDelivery::Steer)
+                || record.guard.is_some())
+        {
+            return Err(StorageError::InvalidRecord);
+        }
         let outcome_json = push_record_rows::serialize_json(&outcome)?;
         let result = sqlx::query!(
             "UPDATE router_pushes SET delivery_state='held',last_outcome_json=?,settled_at=NULL WHERE push_id=? AND delivery_state='attempted'",
@@ -160,7 +170,7 @@ impl AutomationStore {
     ) -> Result<Option<PushRecord>, StorageError> {
         let row = sqlx::query_as!(
             push_record_rows::PushRecordRow,
-            "SELECT push_id,kind,origin_kind,origin_service_id,origin_endpoint_id,origin_session_id,origin_router_ref,target_service_id,target_endpoint_id,target_session_id,reply_to_push_id,header_facts_json,body,ranges_json,delivery_state,last_outcome_json,created_at,settled_at,read_at FROM router_pushes WHERE push_id=?",
+            "SELECT push_id,kind,origin_kind,origin_service_id,origin_endpoint_id,origin_session_id,origin_router_ref,target_service_id,target_endpoint_id,target_session_id,reply_to_push_id,header_facts_json,body,ranges_json,delivery_state,last_outcome_json,created_at,settled_at,read_at,dm_delivery_mode,dm_generation_guard_json FROM router_pushes WHERE push_id=?",
             push_id.as_str()
         )
         .fetch_optional(&mut self.connection)
@@ -175,7 +185,7 @@ impl AutomationStore {
     ) -> Result<Option<PushRecord>, StorageError> {
         let rows = sqlx::query_as!(
             push_record_rows::PushRecordRow,
-            "SELECT push_id,kind,origin_kind,origin_service_id,origin_endpoint_id,origin_session_id,origin_router_ref,target_service_id,target_endpoint_id,target_session_id,reply_to_push_id,header_facts_json,body,ranges_json,delivery_state,last_outcome_json,created_at,settled_at,read_at FROM router_pushes WHERE origin_kind='router' AND origin_router_ref=? ORDER BY created_at,push_id",
+            "SELECT push_id,kind,origin_kind,origin_service_id,origin_endpoint_id,origin_session_id,origin_router_ref,target_service_id,target_endpoint_id,target_session_id,reply_to_push_id,header_facts_json,body,ranges_json,delivery_state,last_outcome_json,created_at,settled_at,read_at,dm_delivery_mode,dm_generation_guard_json FROM router_pushes WHERE origin_kind='router' AND origin_router_ref=? ORDER BY created_at,push_id",
             origin_router_ref
         )
         .fetch_all(&mut self.connection)
@@ -215,7 +225,7 @@ impl AutomationStore {
         let (service_id, endpoint_id, session_id) = session_key(target);
         let rows = sqlx::query_as!(
             push_record_rows::PushRecordRow,
-            "SELECT push_id,kind,origin_kind,origin_service_id,origin_endpoint_id,origin_session_id,origin_router_ref,target_service_id,target_endpoint_id,target_session_id,reply_to_push_id,header_facts_json,body,ranges_json,delivery_state,last_outcome_json,created_at,settled_at,read_at FROM router_pushes WHERE target_service_id=? AND target_endpoint_id=? AND target_session_id=? AND delivery_state='pending' ORDER BY created_at,push_id",
+            "SELECT push_id,kind,origin_kind,origin_service_id,origin_endpoint_id,origin_session_id,origin_router_ref,target_service_id,target_endpoint_id,target_session_id,reply_to_push_id,header_facts_json,body,ranges_json,delivery_state,last_outcome_json,created_at,settled_at,read_at,dm_delivery_mode,dm_generation_guard_json FROM router_pushes WHERE target_service_id=? AND target_endpoint_id=? AND target_session_id=? AND delivery_state='pending' ORDER BY created_at,push_id",
             service_id,
             endpoint_id,
             session_id
@@ -234,7 +244,7 @@ impl AutomationStore {
         let (service_id, endpoint_id, session_id) = session_key(target);
         let rows = sqlx::query_as!(
             push_record_rows::PushRecordRow,
-            "SELECT push_id,kind,origin_kind,origin_service_id,origin_endpoint_id,origin_session_id,origin_router_ref,target_service_id,target_endpoint_id,target_session_id,reply_to_push_id,header_facts_json,body,ranges_json,delivery_state,last_outcome_json,created_at,settled_at,read_at FROM router_pushes WHERE target_service_id=? AND target_endpoint_id=? AND target_session_id=? AND delivery_state='held' ORDER BY created_at,push_id",
+            "SELECT push_id,kind,origin_kind,origin_service_id,origin_endpoint_id,origin_session_id,origin_router_ref,target_service_id,target_endpoint_id,target_session_id,reply_to_push_id,header_facts_json,body,ranges_json,delivery_state,last_outcome_json,created_at,settled_at,read_at,dm_delivery_mode,dm_generation_guard_json FROM router_pushes WHERE target_service_id=? AND target_endpoint_id=? AND target_session_id=? AND delivery_state='held' ORDER BY created_at,push_id",
             service_id,
             endpoint_id,
             session_id
@@ -255,7 +265,7 @@ impl AutomationStore {
         let (service_id, endpoint_id, session_id) = session_key(&request.target);
         let rows = sqlx::query_as!(
             push_record_rows::PushRecordRow,
-            "SELECT push_id,kind,origin_kind,origin_service_id,origin_endpoint_id,origin_session_id,origin_router_ref,target_service_id,target_endpoint_id,target_session_id,reply_to_push_id,header_facts_json,body,ranges_json,delivery_state,last_outcome_json,created_at,settled_at,read_at FROM router_pushes WHERE kind=? AND target_service_id=? AND target_endpoint_id=? AND target_session_id=? AND read_at IS NULL ORDER BY created_at DESC,push_id DESC LIMIT ?",
+            "SELECT push_id,kind,origin_kind,origin_service_id,origin_endpoint_id,origin_session_id,origin_router_ref,target_service_id,target_endpoint_id,target_session_id,reply_to_push_id,header_facts_json,body,ranges_json,delivery_state,last_outcome_json,created_at,settled_at,read_at,dm_delivery_mode,dm_generation_guard_json FROM router_pushes WHERE kind=? AND target_service_id=? AND target_endpoint_id=? AND target_session_id=? AND read_at IS NULL ORDER BY created_at DESC,push_id DESC LIMIT ?",
             kind,
             service_id,
             endpoint_id,
@@ -280,7 +290,7 @@ impl AutomationStore {
         let (with_service_id, with_endpoint_id, with_session_id) = session_key(&request.with);
         let rows = sqlx::query_as!(
             push_record_rows::PushRecordRow,
-            "SELECT push_id,kind,origin_kind,origin_service_id,origin_endpoint_id,origin_session_id,origin_router_ref,target_service_id,target_endpoint_id,target_session_id,reply_to_push_id,header_facts_json,body,ranges_json,delivery_state,last_outcome_json,created_at,settled_at,read_at FROM router_pushes WHERE kind=? AND ((target_service_id=? AND target_endpoint_id=? AND target_session_id=? AND origin_service_id=? AND origin_endpoint_id=? AND origin_session_id=?) OR (target_service_id=? AND target_endpoint_id=? AND target_session_id=? AND origin_service_id=? AND origin_endpoint_id=? AND origin_session_id=?)) ORDER BY created_at DESC,push_id DESC LIMIT ?",
+            "SELECT push_id,kind,origin_kind,origin_service_id,origin_endpoint_id,origin_session_id,origin_router_ref,target_service_id,target_endpoint_id,target_session_id,reply_to_push_id,header_facts_json,body,ranges_json,delivery_state,last_outcome_json,created_at,settled_at,read_at,dm_delivery_mode,dm_generation_guard_json FROM router_pushes WHERE kind=? AND ((target_service_id=? AND target_endpoint_id=? AND target_session_id=? AND origin_service_id=? AND origin_endpoint_id=? AND origin_session_id=?) OR (target_service_id=? AND target_endpoint_id=? AND target_session_id=? AND origin_service_id=? AND origin_endpoint_id=? AND origin_session_id=?)) ORDER BY created_at DESC,push_id DESC LIMIT ?",
             kind,
             caller_service_id,
             caller_endpoint_id,
@@ -399,9 +409,15 @@ pub(crate) async fn insert_push_record_with_connection(
         .map(push_record_rows::serialize_json)
         .transpose()?;
     let created_at = push_record_rows::serialize_timestamp(record.created_at);
+    let dm_delivery_mode = push_record_rows::serialize_direct_message_mode(record.mode);
+    let dm_generation_guard_json = record
+        .guard
+        .as_ref()
+        .map(push_record_rows::serialize_json)
+        .transpose()?;
 
     let result = sqlx::query!(
-        "INSERT INTO router_pushes (push_id,kind,origin_kind,origin_service_id,origin_endpoint_id,origin_session_id,origin_router_ref,target_service_id,target_endpoint_id,target_session_id,reply_to_push_id,header_facts_json,body,ranges_json,delivery_state,last_outcome_json,created_at,settled_at,read_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,'pending',NULL,?,NULL,NULL) ON CONFLICT(push_id) DO NOTHING",
+        "INSERT INTO router_pushes (push_id,kind,origin_kind,origin_service_id,origin_endpoint_id,origin_session_id,origin_router_ref,target_service_id,target_endpoint_id,target_session_id,reply_to_push_id,header_facts_json,body,ranges_json,delivery_state,last_outcome_json,created_at,settled_at,read_at,dm_delivery_mode,dm_generation_guard_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,'pending',NULL,?,NULL,NULL,?,?) ON CONFLICT(push_id) DO NOTHING",
         record.push_id.as_str(),
         kind,
         origin_kind,
@@ -416,7 +432,9 @@ pub(crate) async fn insert_push_record_with_connection(
         header_facts_json,
         record.body.as_deref(),
         ranges_json,
-        created_at
+        created_at,
+        dm_delivery_mode,
+        dm_generation_guard_json
     )
     .execute(connection)
     .await?;

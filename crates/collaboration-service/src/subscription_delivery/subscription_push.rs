@@ -21,11 +21,11 @@ use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
 pub(super) struct SubscriptionPushStore {
-    store: Arc<Mutex<AutomationStore>>,
-    delivery: Arc<dyn SessionMessageDelivery>,
-    machine: MachineIdentity,
-    clock: Arc<dyn SubscriptionClock>,
-    shutdown: CancellationToken,
+    pub(super) store: Arc<Mutex<AutomationStore>>,
+    pub(super) delivery: Arc<dyn SessionMessageDelivery>,
+    pub(super) machine: MachineIdentity,
+    pub(super) clock: Arc<dyn SubscriptionClock>,
+    pub(super) shutdown: CancellationToken,
     #[cfg(test)]
     observations: tokio::sync::broadcast::Sender<super::subscription_service::OwnerObservation>,
 }
@@ -164,6 +164,8 @@ impl SubscriptionPushStore {
                     .map_err(|_| BoardError::board_unavailable())?,
             ),
             target: target.clone(),
+            mode: None,
+            guard: None,
             reply_to_push_id: None,
             header_facts,
             body,
@@ -244,7 +246,7 @@ impl SubscriptionPushStore {
         {
             receipt = self.reconcile_queued(target, &prepared, &sink).await;
         }
-        self.record_receipt(&prepared, &receipt).await?;
+        self.record_receipt(&prepared, &receipt, true).await?;
         let evidence = serde_json::json!({ "receipt": receipt, "routeEvidence": sink.recorded.lock().await.clone() });
         Ok(SubscriptionPushReceipt { receipt, evidence })
     }
@@ -286,18 +288,21 @@ impl SubscriptionPushStore {
         &self,
         prepared: &PreparedPush,
         receipt: &DeliveryReceipt,
+        allow_hold: bool,
     ) -> Result<(), BoardError> {
         let mut delay = std::time::Duration::from_secs(1);
         loop {
             let result = {
                 let mut store = self.store.lock().await;
-                if matches!(
-                    receipt.outcome,
-                    DeliveryOutcome::NotSubmitted {
-                        retryable: true,
-                        ..
-                    }
-                ) {
+                if allow_hold
+                    && matches!(
+                        receipt.outcome,
+                        DeliveryOutcome::NotSubmitted {
+                            retryable: true,
+                            ..
+                        }
+                    )
+                {
                     store
                         .hold_push_record(&prepared.push_id, receipt.clone())
                         .await
@@ -316,7 +321,7 @@ impl SubscriptionPushStore {
                 .send(super::subscription_service::OwnerObservation::PushSettlementRetry);
             tracing::warn!(
                 push_id = prepared.push_id.as_str(),
-                "retrying subscription push settlement without redelivery"
+                "retrying stored push settlement without redelivery"
             );
             let deadline = self
                 .clock

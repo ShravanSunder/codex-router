@@ -237,6 +237,27 @@ impl OwnerFixture {
         clock: Arc<dyn SubscriptionClock>,
         reachability: collaboration_protocol::SessionReachability,
     ) -> OwnerRuntime {
+        self.runtime_with_availability(
+            clock,
+            reachability,
+            BoardAvailability::Available(Arc::clone(&self.store)),
+        )
+        .await
+    }
+    pub async fn runtime_without_board(&self) -> OwnerRuntime {
+        self.runtime_with_availability(
+            self.clock.clone(),
+            collaboration_protocol::SessionReachability::CodexAppServer,
+            BoardAvailability::Unavailable,
+        )
+        .await
+    }
+    async fn runtime_with_availability(
+        &self,
+        clock: Arc<dyn SubscriptionClock>,
+        reachability: collaboration_protocol::SessionReachability,
+        board_availability: BoardAvailability,
+    ) -> OwnerRuntime {
         let (requests, receiver) = mpsc::unbounded_channel();
         let (completions, completion_receiver) = mpsc::unbounded_channel();
         let (reconciliations, reconciliation_receiver) = mpsc::unbounded_channel();
@@ -251,7 +272,7 @@ impl OwnerFixture {
         });
         let router = Arc::new(crate::SessionDeliveryRouter::new(vec![route]));
         let service = SubscriptionDeliveryService::new(SubscriptionDeliveryServiceProps {
-            board_availability: BoardAvailability::Available(Arc::clone(&self.store)),
+            board_availability,
             push_store: Arc::clone(&self.push_store),
             delivery: router,
             presence: self.presence.clone(),

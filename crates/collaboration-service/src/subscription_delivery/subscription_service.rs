@@ -5,6 +5,7 @@ use super::{
     subscription_wait::SubscriptionWaitFilter,
 };
 use crate::{MachineIdentity, SessionMessageDelivery, TargetPresenceProbe};
+use collaboration_protocol::{PushId, PushRecord, SessionRef};
 use message_board::{BoardError, Identity};
 use std::{
     collections::{HashMap, HashSet},
@@ -37,6 +38,9 @@ pub(super) enum OwnerObservation {
     RetryScheduled,
     WaitQueued,
     Sleeping(Option<tokio::time::Instant>),
+    DirectMessageQueued,
+    DirectMessageHeld,
+    DirectMessageSettled,
     Stopped,
 }
 
@@ -113,11 +117,15 @@ impl SubscriptionDeliveryService {
             }
             BoardAvailability::Unavailable => Vec::new(),
         };
+        let dm_targets = self.inner.push.restore_direct_messages().await?;
         *started = true;
-        let readers = records
+        let mut readers = records
             .iter()
             .map(|record| record.reader().clone())
             .collect::<HashSet<_>>();
+        for target in dm_targets {
+            readers.insert(reader_for_target(&target)?);
+        }
         for reader in readers {
             self.ensure_owner(reader).await?;
         }
@@ -127,11 +135,57 @@ impl SubscriptionDeliveryService {
     pub async fn reconcile_reader(&self, reader: Identity) -> Result<(), BoardError> {
         self.inner.board_availability.require_store()?;
         self.require_started().await?;
-        self.ensure_owner(reader)
-            .await?
-            .send(ReaderDeliveryCommand::Reconcile)
-            .await
-            .map_err(|_| BoardError::board_unavailable())
+        loop {
+            let (reply, response) = oneshot::channel();
+            let sender = self.ensure_owner(reader.clone()).await?;
+            if sender
+                .send(ReaderDeliveryCommand::Reconcile(reply))
+                .await
+                .is_err()
+            {
+                self.require_started().await?;
+                continue;
+            }
+            if response.await.is_ok() {
+                return Ok(());
+            }
+            self.require_started().await?;
+        }
+    }
+
+    /// The record already exists: route its known-unsent work through the target's owner.
+    pub async fn deliver_direct_message(
+        &self,
+        target: SessionRef,
+        push_id: PushId,
+    ) -> Result<PushRecord, BoardError> {
+        self.require_started().await?;
+        let reader = reader_for_target(&target)?;
+        loop {
+            let (reply, response) = oneshot::channel();
+            let sender = self.ensure_owner(reader.clone()).await?;
+            if sender
+                .send(ReaderDeliveryCommand::DmQueued {
+                    push_id: push_id.clone(),
+                    reply,
+                })
+                .await
+                .is_err()
+            {
+                continue;
+            }
+            #[cfg(test)]
+            let _ = self
+                .inner
+                .observations
+                .send(OwnerObservation::DirectMessageQueued);
+            match response.await {
+                Ok(result) => return result,
+                Err(_) => {
+                    self.require_started().await?;
+                }
+            }
+        }
     }
 
     /// Internal batch handoff. The public stored-notice conversion belongs to the surface.
@@ -156,19 +210,25 @@ impl SubscriptionDeliveryService {
             .monotonic_now()
             .checked_add(std::time::Duration::from_secs(max_wait_seconds))
             .ok_or_else(BoardError::board_unavailable)?;
-        let (reply, response) = oneshot::channel();
-        self.ensure_owner(reader)
-            .await?
-            .send(ReaderDeliveryCommand::Wait {
-                filter,
-                deadline,
-                reply,
-            })
-            .await
-            .map_err(|_| BoardError::board_unavailable())?;
-        response
-            .await
-            .map_err(|_| BoardError::board_unavailable())?
+        loop {
+            let (reply, response) = oneshot::channel();
+            let sender = self.ensure_owner(reader.clone()).await?;
+            if sender
+                .send(ReaderDeliveryCommand::Wait {
+                    filter: filter.clone(),
+                    deadline,
+                    reply,
+                })
+                .await
+                .is_err()
+            {
+                self.require_started().await?;
+                continue;
+            }
+            return response
+                .await
+                .map_err(|_| BoardError::board_unavailable())?;
+        }
     }
 
     pub fn cancel(&self) {
@@ -259,5 +319,79 @@ impl Drop for SubscriptionDeliveryService {
         if Arc::strong_count(&self.lifetime) == 1 {
             self.cancel();
         }
+    }
+}
+
+fn reader_for_target(target: &SessionRef) -> Result<Identity, BoardError> {
+    let session = serde_json::from_value(
+        serde_json::to_value(target).map_err(|_| BoardError::board_unavailable())?,
+    )
+    .map_err(|_| BoardError::board_unavailable())?;
+    Ok(Identity::Session { session })
+}
+
+#[cfg(test)]
+mod reconcile_retry_proofs {
+    use super::*;
+    use collaboration_protocol::{EndpointId, EndpointRef, SessionId, UuidIdentity};
+
+    #[tokio::test]
+    async fn accepted_reconcile_dropped_by_an_idle_owner_is_acknowledged_by_its_replacement()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let directory = tempfile::tempdir()?;
+        let board =
+            message_board_storage::BoardStore::open(&directory.path().join("board.sqlite")).await?;
+        let automation =
+            automation_storage::AutomationStore::open(&directory.path().join("automation.sqlite"))
+                .await?;
+        let service_id = UuidIdentity::try_from("00000000-0000-4000-8000-000000000001".to_owned())?;
+        let target = SessionRef {
+            endpoint: EndpointRef {
+                service_id: service_id.clone(),
+                endpoint_id: EndpointId::try_from("codex-local".to_owned())?,
+            },
+            session_id: SessionId::try_from("closing-reader".to_owned())?,
+        };
+        let reader = reader_for_target(&target)?;
+        let routes = Arc::new(crate::SessionDeliveryRouter::new(Vec::new()));
+        let service = SubscriptionDeliveryService::new(SubscriptionDeliveryServiceProps {
+            board_availability: BoardAvailability::Available(Arc::new(Mutex::new(board))),
+            push_store: Arc::new(Mutex::new(automation)),
+            delivery: routes.clone(),
+            presence: routes,
+            machine_identity: MachineIdentity::new(service_id, Some("closing-owner-proof"))?,
+            clock: Arc::new(super::super::SystemSubscriptionClock),
+        });
+        service.start().await?;
+        let mut observations = service.observe_owners();
+        // The existing command channel is the race seam: acceptance precedes the
+        // stale owner's close, while the response is never acknowledged.
+        let (stale_sender, mut stale_receiver) = mpsc::channel(1);
+        service
+            .inner
+            .owners
+            .lock()
+            .await
+            .insert(reader.clone(), stale_sender);
+        let reconciler = service.clone();
+        let reconcile = tokio::spawn(async move { reconciler.reconcile_reader(reader).await });
+        let accepted =
+            tokio::time::timeout(std::time::Duration::from_secs(5), stale_receiver.recv())
+                .await?
+                .ok_or("stale owner received no command")?;
+        let ReaderDeliveryCommand::Reconcile(reply) = accepted else {
+            return Err("expected a reconcile command".into());
+        };
+        stale_receiver.close();
+        drop(reply);
+        drop(stale_receiver);
+        tokio::time::timeout(std::time::Duration::from_secs(5), reconcile).await???;
+        let started =
+            tokio::time::timeout(std::time::Duration::from_secs(5), observations.recv()).await??;
+        if !matches!(started, OwnerObservation::Started) {
+            return Err("replacement owner did not start".into());
+        }
+        service.shutdown().await;
+        Ok(())
     }
 }

@@ -360,6 +360,7 @@ mod tests {
                 "link":format!("router://{SERVICE_ID}/push/{PUSH_ID}"),
                 "target":{"endpoint":{"serviceId":SERVICE_ID,"endpointId":"codex-local"},"sessionId":"target"},
                 "targetIdentity":"✳️ Codex target",
+                "deliveryState":"rejected",
                 "receipt":{
                     "outcome":{"kind":"notSubmitted","retryable":false,"reason":"staleGeneration"},
                     "reachability":"codexAppServer","client":null
@@ -430,6 +431,7 @@ mod tests {
                 "link":format!("router://{SERVICE_ID}/push/{PUSH_ID}"),
                 "target":{"endpoint":{"serviceId":SERVICE_ID,"endpointId":"codex-local"},"sessionId":"target"},
                 "targetIdentity":"✳️ Codex target",
+                "deliveryState":"held",
                 "receipt":{
                     "outcome":{"kind":"notSubmitted","retryable":true,"reason":"provider starting"},
                     "reachability":null,"client":null
@@ -736,6 +738,7 @@ mod tests {
             "link":format!("router://{SERVICE_ID}/push/{link_push_id}"),
             "target":target,
             "targetIdentity":"✳️ Codex target",
+            "deliveryState":"delivered",
             "receipt":{
                 "outcome":{"kind":"peerMessageWritten"},
                 "reachability":"claudeCodePeer",
@@ -757,6 +760,7 @@ mod tests {
             "link":format!("router://{SERVICE_ID}/push/{push_id}"),
             "target":target,
             "targetIdentity":"✳️ Codex target",
+            "deliveryState":"delivered",
             "receipt":{
                 "outcome":{"kind":outcome},
                 "reachability":"codexAppServer",

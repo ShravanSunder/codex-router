@@ -211,6 +211,8 @@ mod tests {
     fn expired_push(now_ms: i64) -> PushRecordDraft {
         let sender = session("claude-local", "sender");
         PushRecordDraft {
+            mode: Some(collaboration_protocol::MessageDelivery::Auto),
+            guard: None,
             push_id: PushId::try_from(uuid::Uuid::now_v7().to_string()).expect("UUIDv7 push id"),
             kind: PushKind::DirectMessage,
             origin: PushOrigin::Session(sender),

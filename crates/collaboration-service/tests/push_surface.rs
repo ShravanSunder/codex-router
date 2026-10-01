@@ -34,6 +34,7 @@ struct RecordingDelivery {
     prepared_requests: Mutex<Vec<collaboration_service::layer_zero::DeliveryRequest>>,
     store: Arc<TokioMutex<AutomationStore>>,
     stored_before_delivery: AtomicBool,
+    planned_outcome: Mutex<Option<DeliveryOutcome>>,
 }
 
 impl RecordingDelivery {
@@ -43,7 +44,12 @@ impl RecordingDelivery {
             prepared_requests: Mutex::new(Vec::new()),
             store,
             stored_before_delivery: AtomicBool::new(false),
+            planned_outcome: Mutex::new(None),
         }
+    }
+
+    fn set_outcome(&self, outcome: DeliveryOutcome) {
+        *self.planned_outcome.lock().expect("planned outcome") = Some(outcome);
     }
 }
 
@@ -107,7 +113,12 @@ impl SessionMessageDelivery for RecordingDelivery {
                 .map_err(|_| DeliveryContractError::ClientOperation)?
                 .push(request);
             Ok(DeliveryReceipt {
-                outcome: DeliveryOutcome::PeerMessageWritten,
+                outcome: self
+                    .planned_outcome
+                    .lock()
+                    .map_err(|_| DeliveryContractError::ClientOperation)?
+                    .clone()
+                    .unwrap_or(DeliveryOutcome::PeerMessageWritten),
                 reachability: Some(collaboration_protocol::SessionReachability::ClaudeCodePeer),
                 client: Some(DeliveryClientReceipt::ClaudeCodePeer),
             })
@@ -127,6 +138,7 @@ struct ControlHarness {
     responses: Lines<BufReader<OwnedReadHalf>>,
     service: JoinHandle<Result<(), String>>,
     next_id: u64,
+    owner: Option<collaboration_service::SubscriptionDeliveryService>,
 }
 
 impl ControlHarness {
@@ -143,6 +155,7 @@ impl ControlHarness {
             responses: BufReader::new(reader).lines(),
             service,
             next_id: 1,
+            owner: None,
         };
         let initialized = harness
             .call(
@@ -190,9 +203,13 @@ impl ControlHarness {
             responses: _,
             service,
             next_id: _,
+            owner,
         } = self;
         writer.shutdown().await.expect("close control client");
         service.await.expect("service task").expect("service exit");
+        if let Some(owner) = owner {
+            owner.shutdown().await;
+        }
     }
 }
 
@@ -227,7 +244,25 @@ async fn setup() -> (
     .expect("service identity")
     .with_automation_store(Arc::clone(&store))
     .with_session_delivery(delivery.clone());
-    let control = ControlHarness::start(identity).await;
+    let presence = Arc::new(RunningPresence);
+    let owner = collaboration_service::SubscriptionDeliveryService::new(
+        collaboration_service::SubscriptionDeliveryServiceProps {
+            board_availability: collaboration_service::BoardAvailability::Unavailable,
+            push_store: Arc::clone(&store),
+            delivery: delivery.clone(),
+            presence: presence.clone(),
+            machine_identity: collaboration_service::MachineIdentity::new(
+                UuidIdentity::try_from(SERVICE_ID.to_owned()).expect("service UUID"),
+                Some("push-surface-test"),
+            )
+            .expect("machine identity"),
+            clock: Arc::new(collaboration_service::SystemSubscriptionClock),
+        },
+    );
+    owner.start().await.expect("single owner starts");
+    let identity = identity.with_subscription_delivery_service(owner.clone(), presence);
+    let mut control = ControlHarness::start(identity).await;
+    control.owner = Some(owner);
     (directory, store, delivery, control)
 }
 
@@ -317,7 +352,7 @@ async fn message_send_persists_before_delivery_and_submits_one_linked_line() {
         assert_eq!(prepared.payload.push_id, push_id);
         assert_eq!(
             prepared.payload.load_policy,
-            collaboration_service::LoadPolicy::MayLoad
+            collaboration_service::LoadPolicy::LoadedOnly
         );
         assert_eq!(prepared.correlation.as_str(), push_id.as_str());
         let text = &prepared.payload.line;
@@ -340,6 +375,68 @@ async fn message_send_persists_before_delivery_and_submits_one_linked_line() {
         "stored DM should use the prepared-push route"
     );
     control.close().await;
+}
+
+#[tokio::test]
+async fn show_returns_stored_rejected_and_unknown_delivery_outcomes() {
+    for (outcome, expected_state, expected_kind) in [
+        (
+            DeliveryOutcome::Rejected(collaboration_protocol::DeliveryRejection {
+                reason: collaboration_protocol::DeliveryRejectionReason::Busy,
+                next_action: collaboration_protocol::DeliveryNextAction::RetryLater,
+                client_code: None,
+                detail: Some("target is busy".to_owned()),
+            }),
+            "rejected",
+            "rejected",
+        ),
+        (DeliveryOutcome::Unknown, "outcome-unknown", "unknown"),
+    ] {
+        let (_directory, _store, delivery, mut control) = setup().await;
+        delivery.set_outcome(outcome);
+        let sender = session("claude-local", "sender-session");
+        let target = session("codex-local", "target-session");
+
+        let sent = control
+            .call(
+                "message/send",
+                send_params(&target, &sender, "stored outcome"),
+            )
+            .await;
+        let result = sent.get("result").expect("send returns typed receipt");
+        let link = result["link"].as_str().expect("push link").to_owned();
+        assert_eq!(
+            result
+                .pointer("/receipt/outcome/kind")
+                .and_then(Value::as_str),
+            Some(expected_kind)
+        );
+
+        let shown = control
+            .call("router/show", json!({"caller":target,"reference":link}))
+            .await;
+        assert_eq!(
+            shown
+                .pointer("/result/record/deliveryState")
+                .and_then(Value::as_str),
+            Some(expected_state)
+        );
+        assert_eq!(
+            shown
+                .pointer("/result/record/lastOutcome/outcome/kind")
+                .and_then(Value::as_str),
+            Some(expected_kind)
+        );
+        if expected_kind == "rejected" {
+            assert_eq!(
+                shown
+                    .pointer("/result/record/lastOutcome/outcome/detail")
+                    .and_then(Value::as_str),
+                Some("target is busy")
+            );
+        }
+        control.close().await;
+    }
 }
 
 #[tokio::test]
@@ -602,6 +699,8 @@ async fn reply_rejects_missing_reference_and_non_dm_records() {
         through_activity_sequence: message_board::ActivitySequence::ZERO,
     };
     let non_dm = PushRecordDraft {
+        mode: None,
+        guard: None,
         push_id: PushId::try_from(uuid::Uuid::now_v7().to_string()).expect("push id"),
         kind: PushKind::SubscriptionActivity,
         origin: PushOrigin::Router(PushKind::SubscriptionActivity),
@@ -716,4 +815,14 @@ async fn reply_uses_the_selected_message_id_after_a_later_dm_arrives() {
         "reply push should use the prepared-push route"
     );
     control.close().await;
+}
+
+struct RunningPresence;
+impl collaboration_service::TargetPresenceProbe for RunningPresence {
+    fn presence(
+        &self,
+        _: &SessionRef,
+    ) -> DeliveryFuture<'_, collaboration_service::TargetPresence> {
+        Box::pin(async { Ok(collaboration_service::TargetPresence::Running) })
+    }
 }

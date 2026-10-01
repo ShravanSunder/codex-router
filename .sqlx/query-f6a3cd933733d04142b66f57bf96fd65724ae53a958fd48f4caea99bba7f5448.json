@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT push_id,kind,origin_kind,origin_service_id,origin_endpoint_id,origin_session_id,origin_router_ref,target_service_id,target_endpoint_id,target_session_id,reply_to_push_id,header_facts_json,body,ranges_json,delivery_state,last_outcome_json,created_at,settled_at,read_at FROM router_pushes WHERE target_service_id=? AND target_endpoint_id=? AND target_session_id=? AND delivery_state='held' ORDER BY created_at,push_id",
+  "query": "SELECT push_id,kind,origin_kind,origin_service_id,origin_endpoint_id,origin_session_id,origin_router_ref,target_service_id,target_endpoint_id,target_session_id,reply_to_push_id,header_facts_json,body,ranges_json,delivery_state,last_outcome_json,created_at,settled_at,read_at,dm_delivery_mode,dm_generation_guard_json FROM router_pushes WHERE push_id=?",
   "describe": {
     "columns": [
       {
@@ -211,10 +211,32 @@
             "name": "read_at"
           }
         }
+      },
+      {
+        "name": "dm_delivery_mode",
+        "ordinal": 19,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "router_pushes",
+            "name": "dm_delivery_mode"
+          }
+        }
+      },
+      {
+        "name": "dm_generation_guard_json",
+        "ordinal": 20,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "router_pushes",
+            "name": "dm_generation_guard_json"
+          }
+        }
       }
     ],
     "parameters": {
-      "Right": 3
+      "Right": 1
     },
     "nullable": [
       false,
@@ -235,8 +257,10 @@
       true,
       false,
       true,
+      true,
+      true,
       true
     ]
   },
-  "hash": "2f8412de166fc9543deebda75dcf7828252993689b7de46771fd62ae204110a6"
+  "hash": "f6a3cd933733d04142b66f57bf96fd65724ae53a958fd48f4caea99bba7f5448"
 }

@@ -9,6 +9,8 @@ CREATE TABLE router_pushes (
     target_service_id TEXT NOT NULL,
     target_endpoint_id TEXT NOT NULL,
     target_session_id TEXT NOT NULL,
+    dm_delivery_mode TEXT,
+    dm_generation_guard_json TEXT,
     reply_to_push_id TEXT REFERENCES router_pushes(push_id) ON DELETE SET NULL,
     header_facts_json TEXT NOT NULL,
     body TEXT,

@@ -763,6 +763,7 @@ mod reply_argument_tests {
             target_identity: "✳️ Claude Main".to_owned(),
             push_id: PUSH_ID.to_owned().try_into().expect("push id"),
             link: PUSH_LINK.to_owned(),
+            delivery_state: collaboration_client::protocol::PushDeliveryState::Delivered,
             receipt: collaboration_client::protocol::DeliveryReceipt {
                 outcome: collaboration_client::protocol::DeliveryOutcome::PeerMessageWritten,
                 reachability: Some(

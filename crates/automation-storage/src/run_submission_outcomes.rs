@@ -264,7 +264,7 @@ impl AutomationStore {
                 .map_err(|_| StorageError::InvalidRecord)?;
             let push_row = sqlx::query_as!(
                 crate::push_record_rows::PushRecordRow,
-                "SELECT push_id,kind,origin_kind,origin_service_id,origin_endpoint_id,origin_session_id,origin_router_ref,target_service_id,target_endpoint_id,target_session_id,reply_to_push_id,header_facts_json,body,ranges_json,delivery_state,last_outcome_json,created_at,settled_at,read_at FROM router_pushes WHERE push_id=?",
+                "SELECT push_id,kind,origin_kind,origin_service_id,origin_endpoint_id,origin_session_id,origin_router_ref,target_service_id,target_endpoint_id,target_session_id,dm_delivery_mode,dm_generation_guard_json,reply_to_push_id,header_facts_json,body,ranges_json,delivery_state,last_outcome_json,created_at,settled_at,read_at FROM router_pushes WHERE push_id=?",
                 push_update.push_id.as_str()
             )
             .fetch_optional(&mut *transaction)

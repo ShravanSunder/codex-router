@@ -1,4 +1,5 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
+mod direct_message_proofs;
 mod flight_proofs;
 mod lifecycle_proofs;
 mod owner_fixture;

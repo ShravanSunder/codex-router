@@ -1,5 +1,7 @@
 #[path = "reader_delivery_actions.rs"]
 mod reader_delivery_actions;
+#[path = "reader_direct_messages.rs"]
+mod reader_direct_messages;
 #[path = "reader_wait_handoff.rs"]
 mod reader_wait_handoff;
 #[cfg(test)]
@@ -13,7 +15,7 @@ use super::{
     subscription_wait::{PollWaiter, SubscriptionWaitFilter, SubscriptionWaitResult},
 };
 use crate::{LoadPolicy, TargetPresence, TargetPresenceProbe};
-use collaboration_protocol::{DeliveryOutcome, DeliveryReceipt};
+use collaboration_protocol::{DeliveryOutcome, DeliveryReceipt, PushId, PushRecord};
 use message_board::{
     BoardError, EndReason, Identity, MessageId, SubscriptionBatch, SubscriptionBatchSettlement,
     SubscriptionDeliveryOutcome, SubscriptionMode, SubscriptionScope, SubscriptionState,
@@ -29,10 +31,16 @@ use tokio::sync::{Mutex, broadcast, mpsc, oneshot};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
+type DirectMessageReply = oneshot::Sender<Result<PushRecord, BoardError>>;
+
 pub(super) enum ReaderDeliveryCommand {
     #[cfg(test)]
     Barrier(oneshot::Sender<()>),
-    Reconcile,
+    Reconcile(oneshot::Sender<()>),
+    DmQueued {
+        push_id: PushId,
+        reply: DirectMessageReply,
+    },
     Wait {
         filter: SubscriptionWaitFilter,
         deadline: Instant,
@@ -66,6 +74,8 @@ pub(super) struct ReaderDeliveryOwner {
     checked_presence: HashMap<MessageId, Instant>,
     prior_records: Vec<ThreadSubscriptionRecord>,
     rescan: bool,
+    dm_checked_presence: HashMap<PushId, Instant>,
+    dm_replies: HashMap<PushId, Vec<DirectMessageReply>>,
     #[cfg(test)]
     barriers: Vec<oneshot::Sender<()>>,
     #[cfg(test)]
@@ -99,6 +109,8 @@ impl ReaderDeliveryOwner {
             checked_presence: HashMap::new(),
             prior_records: Vec::new(),
             rescan: true,
+            dm_checked_presence: HashMap::new(),
+            dm_replies: HashMap::new(),
             #[cfg(test)]
             barriers: Vec::new(),
             #[cfg(test)]
@@ -111,6 +123,19 @@ impl ReaderDeliveryOwner {
         self.observe(OwnerObservation::Started);
         while !self.shutdown.is_cancelled() {
             self.expire_waiters();
+            while let Ok(command) = self.commands.try_recv() {
+                self.handle_command(command).await;
+            }
+            let pending_dms = match self.deliver_direct_messages().await {
+                Ok(pending) => pending,
+                Err(error) => {
+                    tracing::warn!(%error, "direct-message reload or delivery failed");
+                    if !self.wait_for_input(Some(self.retry_deadline())).await {
+                        break;
+                    }
+                    continue;
+                }
+            };
             if self.rescan {
                 let result = match &self.board_availability {
                     BoardAvailability::Available(store) => {
@@ -155,7 +180,10 @@ impl ReaderDeliveryOwner {
             self.observe(OwnerObservation::RowsLoaded(records.len()));
             self.expiry_notices(&records).await;
             self.prior_records = records.clone();
-            if records.is_empty() && self.waiters.is_empty() {
+            if records.is_empty() && self.waiters.is_empty() && !pending_dms {
+                // Closing makes a concurrent sender retry with a new owner. Commands accepted
+                // before this close lose their response and retry through the service.
+                self.commands.close();
                 break;
             }
             if self.complete_drains(&records).await {
@@ -206,6 +234,15 @@ impl ReaderDeliveryOwner {
                 }
             }
             let deadline = self.next_deadline(&records, &facts).await;
+            let dm_deadline = self
+                .dm_checked_presence
+                .values()
+                .filter_map(|checked| checked.checked_add(PRESENCE_INTERVAL))
+                .min();
+            let deadline = match (deadline, dm_deadline) {
+                (Some(left), Some(right)) => Some(left.min(right)),
+                (left, right) => left.or(right),
+            };
             if !self.wait_for_input(deadline).await {
                 break;
             }
@@ -317,14 +354,7 @@ impl ReaderDeliveryOwner {
             () = self.shutdown.cancelled() => false,
             command = self.commands.recv() => {
                 match command {
-                    #[cfg(test)]
-                    Some(ReaderDeliveryCommand::Barrier(reply)) => { self.barriers.push(reply); true },
-                    Some(ReaderDeliveryCommand::Reconcile) => { self.rescan = true; true },
-                    Some(ReaderDeliveryCommand::Wait { filter, deadline, reply }) => {
-                        let result = self.renew_wait(&filter).await;
-                        match result { Ok(()) => { self.waiters.push_back(PollWaiter { filter, deadline, reply }); #[cfg(test)] self.observe(OwnerObservation::WaitQueued); }, Err(error) => { let _ = reply.send(Err(error)); } }
-                        true
-                    }
+                    Some(command) => { self.handle_command(command).await; true },
                     None => false,
                 }
             },
@@ -333,6 +363,39 @@ impl ReaderDeliveryOwner {
                 None => std::future::pending().await,
             } } => { if matches!(activity, Err(broadcast::error::RecvError::Lagged(_))) { self.rescan = true; } !matches!(activity, Err(broadcast::error::RecvError::Closed)) },
             () = timer => true,
+        }
+    }
+
+    async fn handle_command(&mut self, command: ReaderDeliveryCommand) {
+        match command {
+            #[cfg(test)]
+            ReaderDeliveryCommand::Barrier(reply) => self.barriers.push(reply),
+            ReaderDeliveryCommand::Reconcile(reply) => {
+                self.rescan = true;
+                let _ = reply.send(());
+            }
+            ReaderDeliveryCommand::DmQueued { push_id, reply } => {
+                self.dm_checked_presence.remove(&push_id);
+                self.dm_replies.entry(push_id).or_default().push(reply);
+            }
+            ReaderDeliveryCommand::Wait {
+                filter,
+                deadline,
+                reply,
+            } => match self.renew_wait(&filter).await {
+                Ok(()) => {
+                    self.waiters.push_back(PollWaiter {
+                        filter,
+                        deadline,
+                        reply,
+                    });
+                    #[cfg(test)]
+                    self.observe(OwnerObservation::WaitQueued);
+                }
+                Err(error) => {
+                    let _ = reply.send(Err(error));
+                }
+            },
         }
     }
 

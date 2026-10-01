@@ -80,6 +80,7 @@ impl ReaderDeliveryOwner {
                             reachability: None,
                             client: None,
                         },
+                        true,
                     )
                     .await?;
             }

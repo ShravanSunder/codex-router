@@ -89,6 +89,8 @@ async fn deliver_notice(
     let push_id = PushId::try_from(uuid::Uuid::now_v7().hyphenated().to_string())
         .map_err(|_| InteractionHistoryError::Unavailable)?;
     let draft = PushRecordDraft {
+        mode: None,
+        guard: None,
         push_id,
         kind,
         origin: PushOrigin::Router(kind),
@@ -142,6 +144,8 @@ pub(super) async fn deliver_legacy_approval_record_notice(
     let push_id = PushId::try_from(uuid::Uuid::now_v7().hyphenated().to_string())
         .map_err(|_| InteractionHistoryError::Unavailable)?;
     let draft = PushRecordDraft {
+        mode: None,
+        guard: None,
         push_id,
         kind: PushKind::Approval,
         origin: PushOrigin::Router(PushKind::Approval),

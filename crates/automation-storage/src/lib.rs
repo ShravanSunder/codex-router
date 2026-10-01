@@ -35,6 +35,7 @@ mod wakeup_worker_inventory;
 pub use delivery_preparation::DeliveryPreparation;
 mod delivery_inspection;
 pub use delivery_inspection::DeliveryRecord;
+mod direct_message_recovery;
 mod push_records;
 pub use push_records::{
     DirectMessageHistoryQuery, MAX_PUSH_LIST_LIMIT, MAX_PUSH_PRUNE_BATCH, PushInboxQuery,

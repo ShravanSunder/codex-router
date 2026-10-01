@@ -36,6 +36,8 @@ pub(super) fn build_test_wake_push_draft<TMessage: DurableMessage>(
     let created_at = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(fire.fired_at_ms)
         .ok_or(StorageError::InvalidRecord)?;
     Ok(PushRecordDraft {
+        mode: None,
+        guard: None,
         push_id,
         kind: PushKind::Wake,
         origin: PushOrigin::Router(PushKind::Wake),

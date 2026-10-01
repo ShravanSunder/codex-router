@@ -77,6 +77,7 @@ mod tests {
                 "link":"router://00000000-0000-4000-8000-000000000001/push/01900000-0000-7000-8000-000000000003",
                 "target":request["params"]["target"],
                 "targetIdentity":"fixture",
+                "deliveryState":"rejected",
                 "receipt":{
                 "outcome":{"kind":"rejected","reason":"childThread","nextAction":"inspectTarget","clientCode":-32000,"detail":null},
                 "reachability":"codexAppServer","client":null

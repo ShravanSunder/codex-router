@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT push_id,kind,origin_kind,origin_service_id,origin_endpoint_id,origin_session_id,origin_router_ref,target_service_id,target_endpoint_id,target_session_id,reply_to_push_id,header_facts_json,body,ranges_json,delivery_state,last_outcome_json,created_at,settled_at,read_at FROM router_pushes WHERE kind=? AND ((target_service_id=? AND target_endpoint_id=? AND target_session_id=? AND origin_service_id=? AND origin_endpoint_id=? AND origin_session_id=?) OR (target_service_id=? AND target_endpoint_id=? AND target_session_id=? AND origin_service_id=? AND origin_endpoint_id=? AND origin_session_id=?)) ORDER BY created_at DESC,push_id DESC LIMIT ?",
+  "query": "SELECT push_id,kind,origin_kind,origin_service_id,origin_endpoint_id,origin_session_id,origin_router_ref,target_service_id,target_endpoint_id,target_session_id,reply_to_push_id,header_facts_json,body,ranges_json,delivery_state,last_outcome_json,created_at,settled_at,read_at,dm_delivery_mode,dm_generation_guard_json FROM router_pushes WHERE origin_kind='router' AND origin_router_ref=? ORDER BY created_at,push_id",
   "describe": {
     "columns": [
       {
@@ -211,10 +211,32 @@
             "name": "read_at"
           }
         }
+      },
+      {
+        "name": "dm_delivery_mode",
+        "ordinal": 19,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "router_pushes",
+            "name": "dm_delivery_mode"
+          }
+        }
+      },
+      {
+        "name": "dm_generation_guard_json",
+        "ordinal": 20,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "router_pushes",
+            "name": "dm_generation_guard_json"
+          }
+        }
       }
     ],
     "parameters": {
-      "Right": 14
+      "Right": 1
     },
     "nullable": [
       false,
@@ -235,8 +257,10 @@
       true,
       false,
       true,
+      true,
+      true,
       true
     ]
   },
-  "hash": "fec0f7b80fbd03d30e9bb359ca4b0b461a412ff7fd8f5b6736ddcb296aca87f8"
+  "hash": "18e297bab9c42de8cb834ee117140d243a3d6acc931b0d994d9dd09e8914c2bd"
 }
