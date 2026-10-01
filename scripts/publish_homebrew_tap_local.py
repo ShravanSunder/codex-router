@@ -206,7 +206,10 @@ def commit_and_push_formula(*, tap_path: Path, version: str, push: bool) -> str:
 def restore_formula(tap_path: Path) -> None:
     """Undo an unvalidated formula edit so the live tap never keeps it."""
     restored = subprocess.run(
-        ["git", "checkout", "--", str(FORMULA_RELATIVE_PATH)], cwd=tap_path, check=False
+        # From HEAD, not the index: the edit may already be staged.
+        ["git", "checkout", "HEAD", "--", str(FORMULA_RELATIVE_PATH)],
+        cwd=tap_path,
+        check=False,
     )
     if restored.returncode != 0:
         print(f"could not restore {tap_path / FORMULA_RELATIVE_PATH}", file=sys.stderr)
