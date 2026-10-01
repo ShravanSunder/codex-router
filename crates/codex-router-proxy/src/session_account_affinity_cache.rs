@@ -9,8 +9,13 @@ use std::time::Duration;
 use codex_router_core::ids::AccountId;
 use codex_router_core::provider::Provider;
 use codex_router_core::routes::RouteBand;
+use codex_router_state::session_account_affinity::PinObservation;
 use codex_router_state::session_account_affinity::SessionAccountAffinity;
+use codex_router_state::sqlite::AsyncSessionAccountAffinityRepository;
+use codex_router_state::sqlite::StateStoreError;
+use thiserror::Error;
 
+use crate::claude_edge::response_completion::ClaudeResponseCompletion;
 use crate::db_write_actor::DbWriteActor;
 use crate::db_write_actor::DbWriteCommand;
 
@@ -25,9 +30,21 @@ pub type SharedSessionAccountAffinityCache = Arc<Mutex<SessionAccountAffinityCac
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SessionAccountAffinityCacheUnavailable;
 
+/// Failure while publishing a completed Claude session pin.
+#[derive(Debug, Error)]
+pub(crate) enum SessionAccountAffinityPublicationError {
+    /// The process-local cache could not be accessed.
+    #[error("session account affinity cache is unavailable")]
+    CacheUnavailable,
+    /// The versioned pin write failed.
+    #[error("session account affinity persistence failed: {0}")]
+    Persistence(#[from] StateStoreError),
+}
+
 #[derive(Debug)]
 struct SessionAccountAffinityEntry {
     account_id: AccountId,
+    pin_version: u64,
     last_seen_unix_seconds: u64,
     owner_token: Arc<()>,
 }
@@ -120,6 +137,9 @@ impl SessionAffinityActivityHandle {
         &self,
         now_unix_seconds: u64,
     ) -> Result<bool, SessionAccountAffinityCacheUnavailable> {
+        if self.provider == Provider::Claude {
+            return Ok(false);
+        }
         let mut cache = self
             .cache
             .lock()
@@ -221,12 +241,16 @@ pub fn reconcile_persisted_session_account_affinity(
     let owner_token = cache_guard
         .entries
         .get(&key)
-        .filter(|entry| entry.account_id == *persisted_account_id)
+        .filter(|entry| {
+            entry.account_id == *persisted_account_id
+                && entry.pin_version == persisted.pin_version()
+        })
         .map_or_else(|| Arc::new(()), |entry| Arc::clone(&entry.owner_token));
     cache_guard.entries.insert(
         key,
         SessionAccountAffinityEntry {
             account_id: persisted_account_id.clone(),
+            pin_version: persisted.pin_version(),
             last_seen_unix_seconds: persisted.last_seen_unix_seconds(),
             owner_token: Arc::clone(&owner_token),
         },
@@ -245,7 +269,7 @@ pub fn reconcile_persisted_session_account_affinity(
     }))
 }
 
-/// Publishes the selected owner and queues durability before selector serialization is released.
+/// Publishes Codex's selected owner immediately; Claude waits for response completion.
 pub fn publish_session_account_affinity(
     cache: &SharedSessionAccountAffinityCache,
     provider: Provider,
@@ -255,6 +279,21 @@ pub fn publish_session_account_affinity(
     writer: Option<&DbWriteActor>,
     now_unix_seconds: u64,
 ) -> Result<SessionAccountAffinitySelection, SessionAccountAffinityCacheUnavailable> {
+    if provider == Provider::Claude {
+        return Ok(SessionAccountAffinitySelection {
+            account_id: account_id.clone(),
+            activity_handle: SessionAffinityActivityHandle {
+                cache: Arc::clone(cache),
+                provider,
+                session_id: session_id.to_owned(),
+                account_id: account_id.clone(),
+                owner_token: Arc::new(()),
+                route_band,
+                writer: None,
+            },
+        });
+    }
+
     let mut cache_guard = cache
         .lock()
         .map_err(|_error| SessionAccountAffinityCacheUnavailable)?;
@@ -268,6 +307,7 @@ pub fn publish_session_account_affinity(
         .entry(key)
         .or_insert_with(|| SessionAccountAffinityEntry {
             account_id: account_id.clone(),
+            pin_version: 0,
             last_seen_unix_seconds: now_unix_seconds,
             owner_token: Arc::new(()),
         });
@@ -287,6 +327,106 @@ pub fn publish_session_account_affinity(
     Ok(selection_from_entry(
         cache, provider, session_id, route_band, writer, entry,
     ))
+}
+
+/// Publishes a Claude pin only after its final response completion was successful.
+pub(crate) async fn publish_claude_session_account_affinity_on_success<TRepository, TClock>(
+    cache: &SharedSessionAccountAffinityCache,
+    session_id: &str,
+    observation: &PinObservation,
+    attempt_account_id: &AccountId,
+    completion: tokio::sync::oneshot::Receiver<ClaudeResponseCompletion>,
+    repository: &TRepository,
+    success_clock: TClock,
+) -> Result<bool, SessionAccountAffinityPublicationError>
+where
+    TRepository: AsyncSessionAccountAffinityRepository + Sync,
+    TClock: Fn() -> u64,
+{
+    if !matches!(completion.await, Ok(ClaudeResponseCompletion::Success)) {
+        return Ok(false);
+    }
+
+    let pin_version = match observation.active_account() {
+        None => {
+            let Some(next_version) = observation.version().checked_add(1) else {
+                return Ok(false);
+            };
+            next_version
+        }
+        Some(active_account) if active_account == attempt_account_id => observation.version(),
+        Some(_) => return Ok(false),
+    };
+    let now_unix_seconds = success_clock();
+    let pin_ttl_seconds = cache
+        .lock()
+        .map_err(|_error| SessionAccountAffinityPublicationError::CacheUnavailable)?
+        .idle_ttl
+        .as_secs();
+    let desired_affinity = SessionAccountAffinity::with_pin_state(
+        Provider::Claude,
+        session_id,
+        Some(attempt_account_id.clone()),
+        pin_version,
+        now_unix_seconds,
+    );
+    let compare_and_set_won = repository
+        .compare_and_set_session_account_affinity(observation, &desired_affinity, pin_ttl_seconds)
+        .await?;
+    if !compare_and_set_won {
+        return Ok(false);
+    }
+
+    cache_successful_claude_pin(
+        cache,
+        session_id,
+        attempt_account_id,
+        pin_version,
+        now_unix_seconds,
+    )?;
+    Ok(true)
+}
+
+fn cache_successful_claude_pin(
+    cache: &SharedSessionAccountAffinityCache,
+    session_id: &str,
+    account_id: &AccountId,
+    pin_version: u64,
+    now_unix_seconds: u64,
+) -> Result<(), SessionAccountAffinityPublicationError> {
+    let mut cache_guard = cache
+        .lock()
+        .map_err(|_error| SessionAccountAffinityPublicationError::CacheUnavailable)?;
+    prune_if_due(&mut cache_guard, now_unix_seconds);
+    let key = SessionAffinityKey {
+        provider: Provider::Claude,
+        session_id: session_id.to_owned(),
+    };
+    if let Some(entry) = cache_guard.entries.get_mut(&key)
+        && entry.pin_version == pin_version
+        && entry.account_id == *account_id
+    {
+        entry.last_seen_unix_seconds = entry.last_seen_unix_seconds.max(now_unix_seconds);
+        return Ok(());
+    }
+    if cache_guard
+        .entries
+        .get(&key)
+        .is_some_and(|entry| entry.pin_version > pin_version)
+    {
+        return Ok(());
+    }
+
+    cache_guard.entries.insert(
+        key,
+        SessionAccountAffinityEntry {
+            account_id: account_id.clone(),
+            pin_version,
+            last_seen_unix_seconds: now_unix_seconds,
+            owner_token: Arc::new(()),
+        },
+    );
+    Ok(())
 }
 
 fn selection_from_entry(
@@ -349,274 +489,5 @@ fn enqueue_affinity_write(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn account_id(value: &str) -> AccountId {
-        AccountId::new(value).unwrap_or_else(|error| panic!("test account id: {error}"))
-    }
-
-    #[test]
-    fn default_ttl_expires_after_75_idle_minutes_without_renewal() {
-        for (age, expected_fresh) in [(4_499, true), (4_500, false), (4_501, false)] {
-            let cache = SessionAccountAffinityCache::shared(DEFAULT_SESSION_PIN_IDLE_TTL);
-            let selected = publish_session_account_affinity(
-                &cache,
-                Provider::Openai,
-                "session-boundary",
-                &account_id("acct-a"),
-                RouteBand::Responses,
-                None,
-                1_000,
-            )
-            .unwrap_or_else(|_| panic!("publication should succeed"));
-            drop(selected);
-
-            let lookup = lookup_session_account_affinity(
-                &cache,
-                Provider::Openai,
-                "session-boundary",
-                RouteBand::Responses,
-                None,
-                1_000 + age,
-            )
-            .unwrap_or_else(|_| panic!("lookup should succeed"));
-            assert_eq!(lookup.is_some(), expected_fresh, "age={age}");
-        }
-    }
-
-    #[test]
-    fn configured_ttl_is_used_for_expiry() {
-        let cache = SessionAccountAffinityCache::shared(Duration::from_secs(30 * 60));
-        let _selected = publish_session_account_affinity(
-            &cache,
-            Provider::Openai,
-            "session-configured-ttl",
-            &account_id("acct-a"),
-            RouteBand::Responses,
-            None,
-            1_000,
-        )
-        .unwrap_or_else(|_| panic!("publication should succeed"));
-
-        for (age, expected_fresh) in [(1_799, true), (1_800, false)] {
-            let lookup = lookup_session_account_affinity(
-                &cache,
-                Provider::Openai,
-                "session-configured-ttl",
-                RouteBand::Responses,
-                None,
-                1_000 + age,
-            )
-            .unwrap_or_else(|_| panic!("lookup should succeed"));
-            assert_eq!(lookup.is_some(), expected_fresh, "age={age}");
-        }
-    }
-
-    #[test]
-    fn same_session_id_has_independent_provider_owners() {
-        let cache = SessionAccountAffinityCache::shared(DEFAULT_SESSION_PIN_IDLE_TTL);
-        let openai_selection = publish_session_account_affinity(
-            &cache,
-            Provider::Openai,
-            "shared-session-id",
-            &account_id("acct-openai"),
-            RouteBand::Responses,
-            None,
-            1_000,
-        )
-        .unwrap_or_else(|_| panic!("OpenAI publication should succeed"));
-        let _claude_selection = publish_session_account_affinity(
-            &cache,
-            Provider::Claude,
-            "shared-session-id",
-            &account_id("acct-claude"),
-            RouteBand::Responses,
-            None,
-            1_100,
-        )
-        .unwrap_or_else(|_| panic!("Claude publication should succeed"));
-
-        let openai_lookup = lookup_session_account_affinity(
-            &cache,
-            Provider::Openai,
-            "shared-session-id",
-            RouteBand::Responses,
-            None,
-            1_101,
-        )
-        .unwrap_or_else(|_| panic!("OpenAI lookup should succeed"));
-        assert_eq!(
-            openai_lookup.map(|selection| selection.account_id().clone()),
-            Some(openai_selection.account_id().clone())
-        );
-    }
-
-    #[test]
-    fn stale_handle_cannot_renew_after_a_to_b_to_a() {
-        let cache = SessionAccountAffinityCache::shared(DEFAULT_SESSION_PIN_IDLE_TTL);
-        let original_a = publish_session_account_affinity(
-            &cache,
-            Provider::Openai,
-            "session-cycle",
-            &account_id("acct-a"),
-            RouteBand::Responses,
-            None,
-            1_000,
-        )
-        .unwrap_or_else(|_| panic!("A publication should succeed"));
-        let _b = publish_session_account_affinity(
-            &cache,
-            Provider::Openai,
-            "session-cycle",
-            &account_id("acct-b"),
-            RouteBand::Responses,
-            None,
-            1_100,
-        )
-        .unwrap_or_else(|_| panic!("B publication should succeed"));
-        let current_a = publish_session_account_affinity(
-            &cache,
-            Provider::Openai,
-            "session-cycle",
-            &account_id("acct-a"),
-            RouteBand::Responses,
-            None,
-            1_200,
-        )
-        .unwrap_or_else(|_| panic!("second A publication should succeed"));
-
-        assert!(
-            !original_a
-                .activity_handle()
-                .touch_if_current(2_000)
-                .unwrap()
-        );
-        assert!(current_a.activity_handle().touch_if_current(2_000).unwrap());
-    }
-
-    #[test]
-    fn persisted_reconciliation_preserves_last_seen_and_live_touch_wins() {
-        let cache = SessionAccountAffinityCache::shared(DEFAULT_SESSION_PIN_IDLE_TTL);
-        let persisted = SessionAccountAffinity::new(
-            codex_router_core::provider::Provider::Openai,
-            "session-db",
-            account_id("acct-a"),
-            1_000,
-        );
-        let seeded = reconcile_persisted_session_account_affinity(
-            &cache,
-            Provider::Openai,
-            "session-db",
-            Some(&persisted),
-            RouteBand::Responses,
-            None,
-            5_499,
-        )
-        .unwrap_or_else(|_| panic!("reconciliation should succeed"))
-        .unwrap_or_else(|| panic!("4,499-second row should seed"));
-        assert!(
-            lookup_session_account_affinity(
-                &cache,
-                Provider::Openai,
-                "session-db",
-                RouteBand::Responses,
-                None,
-                5_500,
-            )
-            .unwrap_or_else(|_| panic!("lookup-only boundary check should succeed"))
-            .is_none(),
-            "seeding at age 4,499 must preserve persisted last-seen and expire at age 4,500"
-        );
-        assert!(seeded.activity_handle().touch_if_current(5_600).unwrap());
-
-        let older = SessionAccountAffinity::new(
-            codex_router_core::provider::Provider::Openai,
-            "session-db",
-            account_id("acct-b"),
-            8_250,
-        );
-        let reconciled = reconcile_persisted_session_account_affinity(
-            &cache,
-            Provider::Openai,
-            "session-db",
-            Some(&older),
-            RouteBand::Responses,
-            None,
-            5_601,
-        )
-        .unwrap_or_else(|_| panic!("second reconciliation should succeed"))
-        .unwrap_or_else(|| panic!("live owner should remain"));
-        assert_eq!(reconciled.account_id().as_str(), "acct-a");
-    }
-
-    #[test]
-    fn persisted_reconciliation_uses_default_75_minute_ttl() {
-        for (age, expected_fresh) in [(4_499, true), (4_500, false), (4_501, false)] {
-            let cache = SessionAccountAffinityCache::shared(DEFAULT_SESSION_PIN_IDLE_TTL);
-            let persisted = SessionAccountAffinity::new(
-                codex_router_core::provider::Provider::Openai,
-                "session-db-boundary",
-                account_id("acct-a"),
-                1_000,
-            );
-            let reconciled = reconcile_persisted_session_account_affinity(
-                &cache,
-                Provider::Openai,
-                "session-db-boundary",
-                Some(&persisted),
-                RouteBand::Responses,
-                None,
-                1_000 + age,
-            )
-            .unwrap_or_else(|_| panic!("reconciliation should succeed"));
-            assert_eq!(reconciled.is_some(), expected_fresh, "age={age}");
-        }
-    }
-
-    #[test]
-    fn expired_entry_with_current_handle_can_renew_after_real_activity() {
-        let cache = SessionAccountAffinityCache::shared(DEFAULT_SESSION_PIN_IDLE_TTL);
-        let published = publish_session_account_affinity(
-            &cache,
-            Provider::Openai,
-            "session-idle-activity",
-            &account_id("acct-a"),
-            RouteBand::Responses,
-            None,
-            1_000,
-        )
-        .unwrap_or_else(|_| panic!("publication should succeed"));
-
-        assert!(
-            lookup_session_account_affinity(
-                &cache,
-                Provider::Openai,
-                "session-idle-activity",
-                RouteBand::Responses,
-                None,
-                5_500,
-            )
-            .unwrap_or_else(|_| panic!("lookup should succeed"))
-            .is_none()
-        );
-        assert!(
-            published
-                .activity_handle()
-                .touch_if_current(5_600)
-                .unwrap_or_else(|_| panic!("touch should succeed"))
-        );
-        assert!(
-            lookup_session_account_affinity(
-                &cache,
-                Provider::Openai,
-                "session-idle-activity",
-                RouteBand::Responses,
-                None,
-                5_600,
-            )
-            .unwrap_or_else(|_| panic!("lookup should succeed"))
-            .is_some()
-        );
-    }
-}
+#[path = "session_account_affinity_cache_tests.rs"]
+mod tests;
