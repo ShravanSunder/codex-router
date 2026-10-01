@@ -96,6 +96,10 @@ fn add_pruned_total(total: &mut u64, count: u64) -> Result<(), StorageError> {
 }
 
 #[cfg(test)]
+#[path = "automation_retention_worker/interaction_history_retention_tests.rs"]
+mod interaction_history_retention_tests;
+
+#[cfg(test)]
 mod tests {
     use agent_automation::{EventId, InstructionText, OperationId};
     use sqlx::Connection;
