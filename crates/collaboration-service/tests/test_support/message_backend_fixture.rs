@@ -35,14 +35,12 @@ type FixtureError = Box<dyn std::error::Error + Send + Sync>;
 pub async fn exercise(
     scenario: MessageScenario,
 ) -> Result<(Result<DeliveryReceipt, ClientError>, Vec<Value>), FixtureError> {
-    let fixture_id = String::from(new_service_uuid()?);
-    // Keep the Unix socket path below SUN_LEN even when the host temp prefix is long.
-    let short_fixture_id = fixture_id
-        .get(24..)
-        .ok_or_else(|| std::io::Error::other("generated service UUID is shorter than 24 bytes"))?;
-    let root = std::env::temp_dir().join(format!("mf-{short_fixture_id}"));
+    let root = std::path::PathBuf::from("/tmp").join(format!(
+        "message-fixture-{}",
+        String::from(new_service_uuid()?)
+    ));
     std::fs::DirBuilder::new().mode(0o700).create(&root)?;
-    let socket_path = root.join("n.sock");
+    let socket_path = root.join("native.sock");
     let listener = tokio::net::UnixListener::bind(&socket_path)?;
     let service_id = "00000000-0000-4000-8000-000000000001";
     let generation: CodexGeneration =
