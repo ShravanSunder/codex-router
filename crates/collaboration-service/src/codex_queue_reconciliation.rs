@@ -5,10 +5,24 @@ use crate::{
 use agent_automation::{PreparationEffect, RouteEffectEvidence};
 use codex_native_integration::{NativeConnectionError, NativeOperation, NativeProtocolConnection};
 use collaboration_protocol::{
-    AcceptedResumeEffect, DeliveryReceipt, MessageDelivery, NativeSendAcceptance,
-    NativeSendReceipt, SessionRef,
+    AcceptedResumeEffect, DeliveryReceipt, MessageContent, MessageDelivery, MessageText,
+    NativeSendAcceptance, NativeSendReceipt, PushId, RouterLink, SessionRef,
 };
 use serde_json::{Value, json};
+
+pub(crate) fn prepared_push_id_from_line(line: &MessageText) -> Option<PushId> {
+    collaboration_protocol::parse_push_line_header(line.as_str())?;
+    let (_, link_text) = line.as_str().rsplit_once(" · ")?;
+    let link = RouterLink::parse(link_text).ok()?;
+    Some(link.push_id().clone())
+}
+
+fn prepared_push_id_from_message(message: &MessageContent) -> Option<PushId> {
+    match message {
+        MessageContent::Router { text } => prepared_push_id_from_line(text),
+        MessageContent::Agent { .. } | MessageContent::HumanUser { .. } => None,
+    }
+}
 
 pub(crate) async fn reconcile(
     backend: &NativeControlBackend,
@@ -28,6 +42,11 @@ pub(crate) async fn reconcile(
     else {
         return AttemptReconciliation::StillUnknown;
     };
+    if prepared_push_id_from_message(&context.message)
+        .is_some_and(|push_id| push_id.as_str() != correlation)
+    {
+        return AttemptReconciliation::StillUnknown;
+    }
     if backend.endpoint != context.target.endpoint {
         return AttemptReconciliation::StillUnknown;
     }
@@ -74,6 +93,12 @@ async fn find_queued_input(
     correlation: &str,
     message: &collaboration_protocol::MessageContent,
 ) -> Result<Option<String>, NativeConnectionError> {
+    let raw_prepared_push_line = prepared_push_id_from_message(message)
+        .filter(|push_id| push_id.as_str() == correlation)
+        .and_then(|_| match message {
+            MessageContent::Router { text } => Some(text.as_str()),
+            MessageContent::Agent { .. } | MessageContent::HumanUser { .. } => None,
+        });
     let schemas = admission
         .schemas()
         .ok_or(NativeConnectionError::InvalidInput)?;
@@ -110,7 +135,7 @@ async fn find_queued_input(
                     .is_some_and(|text| {
                         collaboration_protocol::queued_message_matches_content(
                             target, message, text,
-                        )
+                        ) || raw_prepared_push_line == Some(text)
                     })
                 || input
                     .get("text_elements")

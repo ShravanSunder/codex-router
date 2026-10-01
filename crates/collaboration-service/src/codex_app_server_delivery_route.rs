@@ -1,12 +1,13 @@
 //! Codex app-server delivery owns native admission and its recorded effects.
 use crate::native_message_dispatch::{
-    NativeThreadStatus, NativeThreadStatusReadError, read_native_thread_status,
+    NativeMessageBody, NativeMessageParams, NativeThreadStatus, NativeThreadStatusReadError,
+    read_native_thread_status,
 };
 use crate::{
     AttemptEvidenceSink, AttemptReconciliation, AttemptReconciliationContext,
     DeliveryClientReceipt, DeliveryContractError, DeliveryFuture, DeliveryPrecondition,
-    DeliveryReceipt, DeliveryRequest, EndpointDirectory, NOT_LOADED_REASON, NativeControlBackend,
-    RouteClaim, RoutePresence, RouteUnavailableReason, SessionDeliveryRoute,
+    DeliveryReceipt, DeliveryRequest, EndpointDirectory, LoadPolicy, NOT_LOADED_REASON,
+    NativeControlBackend, RouteClaim, RoutePresence, RouteUnavailableReason, SessionDeliveryRoute,
 };
 use agent_automation::{
     CessationEvidence, NativeEffectEvidence, PreparationEffect, RouteEffectEvidence,
@@ -15,9 +16,10 @@ use agent_automation::{
 use codex_acp_adapter::{HeldBindingCheckout, UnmaterializedBindingStore};
 use codex_native_integration::NativeProtocolConnection;
 use collaboration_protocol::{
-    AcceptedResumeEffect, ChannelDescription, CodexGeneration, DeliveryNextAction, DeliveryOutcome,
-    DeliveryRejection, DeliveryRejectionReason, MessageDelivery, NativeSendAcceptance,
-    NativeSendParams, SessionReachability, SessionRef, UuidIdentity,
+    AcceptedResumeEffect, ChannelDescription, CodexGeneration, DeliveryCorrelationId,
+    DeliveryNextAction, DeliveryOutcome, DeliveryRejection, DeliveryRejectionReason,
+    MessageDelivery, MessageHeaderContext, NativeSendAcceptance, SessionReachability, SessionRef,
+    UuidIdentity,
 };
 use serde_json::{Value, json};
 use std::time::Duration;
@@ -28,6 +30,32 @@ pub struct CodexAppServerDeliveryRoute {
     backend: NativeControlBackend,
     holder: std::sync::Arc<crate::UnmaterializedThreadHolder>,
     display_names: crate::SessionDisplayNameCache,
+}
+
+struct NativeRouteDeliveryRequest {
+    target: SessionRef,
+    body: NativeMessageBody,
+    header_context: MessageHeaderContext,
+    mode: MessageDelivery,
+    load_policy: LoadPolicy,
+    precondition: DeliveryPrecondition,
+    correlation: DeliveryCorrelationId,
+    attempt: agent_automation::AttemptId,
+}
+
+impl From<DeliveryRequest> for NativeRouteDeliveryRequest {
+    fn from(request: DeliveryRequest) -> Self {
+        Self {
+            target: request.target,
+            body: NativeMessageBody::Content(request.message),
+            header_context: request.header_context,
+            mode: request.mode,
+            load_policy: request.load_policy,
+            precondition: request.precondition,
+            correlation: request.correlation,
+            attempt: request.attempt,
+        }
+    }
 }
 
 impl CodexAppServerDeliveryRoute {
@@ -55,7 +83,7 @@ impl CodexAppServerDeliveryRoute {
 
     async fn deliver_native(
         &self,
-        request: DeliveryRequest,
+        request: NativeRouteDeliveryRequest,
         sink: &dyn AttemptEvidenceSink,
     ) -> Result<DeliveryReceipt, DeliveryContractError> {
         let Ok(admission) = self.backend.gate.acquire() else {
@@ -93,10 +121,10 @@ impl CodexAppServerDeliveryRoute {
             .map_err(|_| DeliveryContractError::ClientOperation)?
             .endpoints;
         let load_policy = request.load_policy;
-        let params = NativeSendParams {
+        let params = NativeMessageParams {
             target: request.target.clone(),
             generation: generation.clone(),
-            message: request.message,
+            body: request.body,
             delivery: request.mode,
             client_user_message_id: Some(
                 request
@@ -351,7 +379,39 @@ impl SessionDeliveryRoute for CodexAppServerDeliveryRoute {
         request: DeliveryRequest,
         sink: &'a dyn AttemptEvidenceSink,
     ) -> DeliveryFuture<'a, DeliveryReceipt> {
-        Box::pin(async move { self.deliver_native(request, sink).await })
+        Box::pin(async move { self.deliver_native(request.into(), sink).await })
+    }
+
+    fn deliver_prepared<'a>(
+        &'a self,
+        request: crate::layer_zero::DeliveryRequest,
+        sink: &'a dyn AttemptEvidenceSink,
+    ) -> DeliveryFuture<'a, DeliveryReceipt> {
+        Box::pin(async move {
+            let push_id = &request.payload.push_id;
+            let line_push_id = crate::codex_queue_reconciliation::prepared_push_id_from_line(
+                &request.payload.line,
+            );
+            if request.correlation.as_str() != push_id.as_str()
+                || line_push_id.as_ref() != Some(push_id)
+            {
+                return Err(DeliveryContractError::InvalidEvidence);
+            }
+            self.deliver_native(
+                NativeRouteDeliveryRequest {
+                    target: request.target,
+                    body: NativeMessageBody::PreparedPush(request.payload.line),
+                    header_context: MessageHeaderContext::default(),
+                    mode: request.mode,
+                    load_policy: request.payload.load_policy,
+                    precondition: request.precondition,
+                    correlation: request.correlation,
+                    attempt: request.attempt,
+                },
+                sink,
+            )
+            .await
+        })
     }
 
     fn reconcile_attempt(

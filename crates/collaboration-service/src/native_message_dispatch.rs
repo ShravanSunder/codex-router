@@ -6,9 +6,10 @@ use codex_native_integration::{
     NativeConnectionError, NativeOperation, NativePayloadSchemas, NativeProtocolConnection,
 };
 use collaboration_protocol::{
-    AcceptedResumeEffect, ChannelDescription, EndpointDescription, MessageDelivery,
-    MessageHeaderContext, NativeInputDisposition, NativeInputOperation, NativeSendAcceptance,
-    NativeSendParams, NativeSendReceipt, NonEmptyText, SessionRef, UuidIdentity,
+    AcceptedResumeEffect, ChannelDescription, CodexGeneration, EndpointDescription, MessageContent,
+    MessageDelivery, MessageHeaderContext, MessageInputKind, MessageRepresentation, MessageText,
+    NativeInputDisposition, NativeInputOperation, NativeSendAcceptance, NativeSendReceipt,
+    NonEmptyText, RenderedMessage, SessionRef, UuidIdentity,
 };
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -105,7 +106,7 @@ pub(crate) async fn read_native_thread_status(
 }
 
 pub(crate) struct NativeMessageRequest<'a> {
-    pub params: NativeSendParams,
+    pub params: NativeMessageParams,
     pub id: Value,
     pub service_id: &'a UuidIdentity,
     pub backend: &'a NativeControlBackend,
@@ -114,6 +115,36 @@ pub(crate) struct NativeMessageRequest<'a> {
     pub display_names: &'a crate::SessionDisplayNameCache,
     pub held_connection: Option<&'a mut NativeProtocolConnection>,
     pub load_policy: LoadPolicy,
+}
+
+pub(crate) struct NativeMessageParams {
+    pub target: SessionRef,
+    pub generation: CodexGeneration,
+    pub body: NativeMessageBody,
+    pub delivery: MessageDelivery,
+    pub client_user_message_id: Option<NonEmptyText>,
+}
+
+pub(crate) enum NativeMessageBody {
+    Content(MessageContent),
+    PreparedPush(MessageText),
+}
+
+fn render_native_message(
+    target: &SessionRef,
+    body: &NativeMessageBody,
+    header_context: &MessageHeaderContext,
+) -> Result<RenderedMessage, serde_json::Error> {
+    match body {
+        NativeMessageBody::Content(message) => {
+            collaboration_protocol::render_message_with_context(target, message, header_context)
+        }
+        NativeMessageBody::PreparedPush(line) => Ok(RenderedMessage {
+            text: line.as_str().to_owned(),
+            kind: MessageInputKind::Agent,
+            representation: MessageRepresentation::DeclaredAgentText,
+        }),
+    }
 }
 
 pub(crate) enum NativeMessageOutcome {
@@ -160,11 +191,8 @@ pub(crate) async fn dispatch_message(
     {
         return NativeMessageOutcome::Failed(effects.failure("unsupportedCapability", "queue"));
     }
-    let Ok(rendered) = collaboration_protocol::render_message_with_context(
-        &params.target,
-        &params.message,
-        &request.header_context,
-    ) else {
+    let Ok(rendered) = render_native_message(&params.target, &params.body, &request.header_context)
+    else {
         return NativeMessageOutcome::Failed(effects.failure("overloaded", "inspect"));
     };
     let correlation = match &params.client_user_message_id {
@@ -253,7 +281,7 @@ struct MessageSession<'a> {
 
 struct NativeMessageDeliveryContext<'a> {
     thread_id: &'a str,
-    params: &'a NativeSendParams,
+    params: &'a NativeMessageParams,
     header_context: &'a MessageHeaderContext,
     display_names: &'a crate::SessionDisplayNameCache,
     correlation: &'a str,
@@ -379,15 +407,18 @@ impl MessageSession<'_> {
                 &snapshot.thread,
             );
         }
-        let current_header_context = MessageHeaderContext::resolve(
+        let current_header_context = match &request.params.body {
+            NativeMessageBody::Content(message) => MessageHeaderContext::resolve(
+                &request.params.target,
+                message,
+                request.display_names,
+                request.header_context.origin,
+            ),
+            NativeMessageBody::PreparedPush(_) => request.header_context.clone(),
+        };
+        let rendered = render_native_message(
             &request.params.target,
-            &request.params.message,
-            request.display_names,
-            request.header_context.origin,
-        );
-        let rendered = collaboration_protocol::render_message_with_context(
-            &request.params.target,
-            &request.params.message,
+            &request.params.body,
             &current_header_context,
         )
         .map_err(|_| self.effects.failure("overloaded", "inspect"))?;
