@@ -1,0 +1,18 @@
+{
+  "status": 429,
+  "headers": {
+    "content-type": "application/json",
+    "anthropic-ratelimit-unified-status": "rejected",
+    "anthropic-ratelimit-unified-5h-status": "allowed",
+    "anthropic-ratelimit-unified-7d-status": "allowed",
+    "anthropic-ratelimit-unified-7d_oi-status": "rejected",
+    "retry-after": "120"
+  },
+  "body": {
+    "type": "error",
+    "error": {
+      "type": "rate_limit_error",
+      "message": "Fable usage window rejected."
+    }
+  }
+}
