@@ -44,6 +44,15 @@ pub enum SessionsCommandError {
         /// Exit status string.
         status: String,
     },
+    /// Router-backed Claude Code launch or inventory failed.
+    #[error("{0}")]
+    ClaudeLaunch(String),
+    /// Claude Code exited unsuccessfully.
+    #[error("Claude Code exited with {status}")]
+    ClaudeExit {
+        /// Exit status string.
+        status: String,
+    },
     /// CODEX_HOME and HOME were both unavailable.
     #[error("could not locate Codex home; set CODEX_HOME or HOME")]
     CodexHomeUnavailable,
