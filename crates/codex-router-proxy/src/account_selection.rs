@@ -14,6 +14,7 @@ use codex_router_core::affinity::hash_previous_response_id;
 use codex_router_core::ids::AccountId;
 use codex_router_core::ids::TokenGeneration;
 use codex_router_core::provider::Provider;
+use codex_router_core::route_profile::CLAUDE_MESSAGES;
 use codex_router_core::route_profile::ClaudeFiveHourReservePercent;
 use codex_router_core::route_profile::DEFAULT_CLAUDE_FIVE_HOUR_RESERVE_PERCENT;
 use codex_router_core::route_profile::RESPONSES_HTTP;
@@ -2471,6 +2472,7 @@ fn route_kind_for_request(
 fn route_profile_for_kind(route_kind: RouteKind) -> RouteProfile {
     match route_kind {
         RouteKind::ResponsesWebSocket => RESPONSES_WEBSOCKET.clone(),
+        RouteKind::ClaudeMessages => CLAUDE_MESSAGES.clone(),
         RouteKind::Responses
         | RouteKind::Models
         | RouteKind::MemoriesTraceSummarize
@@ -2691,9 +2693,11 @@ mod tests {
     use super::QuotaAwareAccountState;
     use super::RouteBandReservationBooks;
     use super::SqliteActiveClientLeaseReporter;
+    use crate::routes::RouteKind;
     use codex_router_core::ids::AccountId;
     use codex_router_core::ids::TokenGeneration;
     use codex_router_core::provider::Provider;
+    use codex_router_core::route_profile::CLAUDE_MESSAGES;
     use codex_router_core::route_profile::RESPONSES_HTTP;
     use codex_router_core::routes::RouteBand;
     use codex_router_quota::snapshot::SnapshotFreshness;
@@ -2724,6 +2728,14 @@ mod tests {
         assert_eq!(
             super::session_affinity_lookup_session_id(Some("session-id"), true),
             None
+        );
+    }
+
+    #[test]
+    fn claude_messages_route_uses_the_claude_selection_profile() {
+        assert_eq!(
+            super::route_profile_for_kind(RouteKind::ClaudeMessages),
+            CLAUDE_MESSAGES
         );
     }
 

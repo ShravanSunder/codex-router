@@ -1578,6 +1578,7 @@ fn audit_route_kind_for_request(request: &HttpProxyRequest) -> AuditRouteKind {
 fn audit_route_kind_for_route_kind(route_kind: RouteKind) -> AuditRouteKind {
     match route_kind {
         RouteKind::Responses => AuditRouteKind::Responses,
+        RouteKind::ClaudeMessages => AuditRouteKind::ClaudeMessages,
         RouteKind::ResponsesWebSocket => AuditRouteKind::ResponsesWebSocket,
         RouteKind::Models => AuditRouteKind::Models,
         RouteKind::MemoriesTraceSummarize => AuditRouteKind::MemoryTrace,
@@ -1682,6 +1683,14 @@ mod tests {
         assert_eq!(
             audit_route_kind_for_route_kind(RouteKind::ImageEdits),
             AuditRouteKind::ImageEdits
+        );
+    }
+
+    #[test]
+    fn claude_messages_route_maps_to_its_audit_route_kind() {
+        assert_eq!(
+            audit_route_kind_for_route_kind(RouteKind::ClaudeMessages),
+            AuditRouteKind::ClaudeMessages
         );
     }
 }

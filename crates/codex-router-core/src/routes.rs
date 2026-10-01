@@ -11,6 +11,8 @@ use serde::Serialize;
 pub enum RouteBand {
     /// `/v1/responses`.
     Responses,
+    /// Claude `POST /anthropic/v1/messages`.
+    ClaudeMessages,
     /// `/v1/responses/compact`.
     ResponsesCompact,
     /// `/v1/models`.
@@ -25,6 +27,7 @@ impl RouteBand {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Responses => "responses",
+            Self::ClaudeMessages => "claude_messages",
             Self::ResponsesCompact => "responses_compact",
             Self::Models => "models",
             Self::MemoriesTraceSummarize => "memories_trace_summarize",
@@ -36,6 +39,7 @@ impl RouteBand {
     pub fn parse(value: &str) -> Option<Self> {
         match value {
             "responses" => Some(Self::Responses),
+            "claude_messages" => Some(Self::ClaudeMessages),
             "responses_compact" => Some(Self::ResponsesCompact),
             "models" => Some(Self::Models),
             "memories_trace_summarize" => Some(Self::MemoriesTraceSummarize),
@@ -60,6 +64,7 @@ mod tests {
             (RouteBand::Responses, "responses"),
             (RouteBand::ResponsesCompact, "responses_compact"),
             (RouteBand::Models, "models"),
+            (RouteBand::ClaudeMessages, "claude_messages"),
             (
                 RouteBand::MemoriesTraceSummarize,
                 "memories_trace_summarize",
