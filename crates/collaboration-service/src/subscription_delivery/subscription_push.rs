@@ -11,9 +11,11 @@ use collaboration_protocol::{
     CodexGeneration, DeliveryCorrelationId, DeliveryOutcome, DeliveryReceipt, MachineId,
     MessageContent, MessageDelivery, MessageText, PushActivityRange, PushActivitySnapshot,
     PushHeaderFacts, PushId, PushKind, PushLineInput, PushOrigin, PushRecordDraft, RouterLink,
-    SessionReachability, SessionRef, render_push_line,
+    RouterOriginRef, SessionReachability, SessionRef, render_push_line,
 };
-use message_board::{BoardError, Identity, SubscriptionBatch, SubscriptionScope};
+use message_board::{
+    BoardError, Identity, SubscriptionBatch, SubscriptionGeneration, SubscriptionScope,
+};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
@@ -97,9 +99,14 @@ impl SubscriptionPushStore {
             held: batch.held,
             draining: batch.draining,
         };
+        let origin_router_ref = RouterOriginRef::SubscriptionActivity {
+            target: target.clone(),
+            batch_id: batch.batch_id.clone(),
+        };
         let draft = self.draft(
             target,
             PushKind::SubscriptionActivity,
+            origin_router_ref,
             header_facts,
             None,
             Some(activity),
@@ -111,6 +118,7 @@ impl SubscriptionPushStore {
         &self,
         target: &SessionRef,
         scope: &SubscriptionScope,
+        subscription_generation: SubscriptionGeneration,
     ) -> Result<PreparedPush, BoardError> {
         let (kind, id) = scope.kind_and_id();
         let argument = match scope {
@@ -120,6 +128,11 @@ impl SubscriptionPushStore {
         let draft = self.draft(
             target,
             PushKind::SubscriptionExpiry,
+            RouterOriginRef::SubscriptionExpiry {
+                target: target.clone(),
+                scope: scope.clone(),
+                subscription_generation,
+            },
             PushHeaderFacts::SubscriptionExpiry {
                 scope: format!("{kind} {id}"),
             },
@@ -135,6 +148,7 @@ impl SubscriptionPushStore {
         &self,
         target: &SessionRef,
         kind: PushKind,
+        origin_router_ref: RouterOriginRef,
         header_facts: PushHeaderFacts,
         body: Option<String>,
         activity: Option<PushActivitySnapshot>,
@@ -144,7 +158,11 @@ impl SubscriptionPushStore {
                 .map_err(|_| BoardError::board_unavailable())?,
             kind,
             origin: PushOrigin::Router(kind),
-            origin_router_ref: None,
+            origin_router_ref: Some(
+                origin_router_ref
+                    .canonical_string()
+                    .map_err(|_| BoardError::board_unavailable())?,
+            ),
             target: target.clone(),
             reply_to_push_id: None,
             header_facts,
@@ -245,6 +263,7 @@ impl SubscriptionPushStore {
             message: MessageContent::Router {
                 text: prepared.line.clone(),
             },
+            prepared_push_id: Some(prepared.push_id.clone()),
             mode: MessageDelivery::Auto,
             recorded,
         };

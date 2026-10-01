@@ -30,7 +30,11 @@ impl ReaderDeliveryOwner {
             ) {
                 continue;
             }
-            if let Ok(prepared) = self.push.expiry(&target, expired.scope()).await {
+            if let Ok(prepared) = self
+                .push
+                .expiry(&target, expired.scope(), expired.generation())
+                .await
+            {
                 let _ = self.push.deliver(&target, prepared).await;
             }
         }

@@ -370,10 +370,19 @@ impl TestClock {
             advanced: tokio::sync::Notify::new(),
         }
     }
-    pub async fn advance(&self, seconds: u64) {
+    fn advance_wall_and_monotonic(&self, seconds: u64) {
         *self.wall.lock().unwrap() += chrono::Duration::seconds(i64::try_from(seconds).unwrap());
         *self.monotonic.lock().unwrap() += std::time::Duration::from_secs(seconds);
+    }
+
+    pub async fn advance(&self, seconds: u64) {
+        self.advance_wall_and_monotonic(seconds);
         tokio::time::advance(std::time::Duration::from_secs(seconds)).await;
+        self.advanced.notify_waiters();
+    }
+
+    pub fn advance_without_tokio_time(&self, seconds: u64) {
+        self.advance_wall_and_monotonic(seconds);
         self.advanced.notify_waiters();
     }
 }
