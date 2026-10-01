@@ -138,56 +138,189 @@ mod tests {
     use crate::{ExternalProviderLaunchBinding, ExternalProviderStartup};
     use codex_router_core::local_auth::LocalRouterTokenRecord;
     use collaboration_protocol::ProviderKind;
+    use std::io::{Read, Write};
+    use std::net::{SocketAddr, TcpListener};
+    use std::path::PathBuf;
+
+    const TEST_ROUTER_SECRET_ROOT_ENV: &str = "CODEX_ROUTER_HOST_TEST_SECRET_ROOT";
+    const TEST_ROUTER_ENDPOINT_ENV: &str = "CODEX_ROUTER_HOST_TEST_ENDPOINT";
+    const TEST_ROUTER_TOKEN_OBSERVATION_ENV: &str = "CODEX_ROUTER_HOST_TEST_TOKEN_OBSERVATION";
 
     #[tokio::test]
-    async fn owned_router_provisions_a_tokenless_root_for_the_claude_acp_environment() {
+    async fn owned_router_startup_provisions_once_before_router_and_claude_acp_launches() {
         let router_root = tempfile::tempdir().expect("isolated Router root");
         let secret_root = router_root.path().join("secrets");
+        let router_token_observation_path = router_root.path().join("router-token-at-startup");
+        let claude_token_observation_path = router_root.path().join("claude-token-at-launch");
+        let router_endpoint = unused_loopback_endpoint();
         assert!(
             !secret_root.exists(),
             "test root starts without a token store"
         );
 
-        provision_local_router_token(&secret_root)
-            .expect("Host provisions the local Router token before serving");
-        let first_record = load_current_local_router_token(&secret_root);
-        provision_local_router_token(&secret_root)
-            .expect("repeated Host ensure preserves the existing token");
-        let second_record = load_current_local_router_token(&secret_root);
+        let config = HostConfig::new(crate::HostConfigInputs {
+            coordination_paths: crate::HostCoordinationPaths::new(
+                router_root.path().join("operator.sock"),
+                router_root.path().join("instance.lock"),
+            ),
+            router_endpoint,
+            mcp_bind: "127.0.0.1:0".parse().expect("MCP endpoint"),
+            app_server_socket: router_root.path().join("app-server.sock"),
+            managed_executable: PathBuf::from("/unused/codex"),
+            deadlines: crate::HostDeadlines::production(),
+        });
+        let router_command =
+            ChildCommandSpec::new(std::env::current_exe().expect("Host test executable"))
+                .with_arguments([
+                    "--ignored",
+                    "router_child_reads_host_token_and_serves_health",
+                ])
+                .with_environment(TEST_ROUTER_SECRET_ROOT_ENV, secret_root.as_os_str())
+                .with_environment(
+                    TEST_ROUTER_ENDPOINT_ENV,
+                    std::ffi::OsString::from(router_endpoint.to_string()),
+                )
+                .with_environment(
+                    TEST_ROUTER_TOKEN_OBSERVATION_ENV,
+                    router_token_observation_path.as_os_str(),
+                )
+                .with_output(crate::ChildOutput::Null);
 
-        assert_eq!(first_record.generation(), second_record.generation());
+        let (router_condition, mut router_child) = start_router(&config, Some(&router_command))
+            .await
+            .expect("Host startup convergence starts its owned Router");
+        let router_shutdown = match router_child.as_mut() {
+            Some(router_child) => router_child.shutdown().await,
+            None => panic!("tokenless root must start an owned Router child"),
+        };
+        router_shutdown.expect("stop the isolated Router fixture");
+
+        let router_token = load_current_local_router_token(&secret_root);
         assert!(
-            first_record.token() == second_record.token(),
-            "Host ensure preserves the current token"
+            secret_root.join(".token.lock").is_file(),
+            "Host token provisioning uses the shared creation lock"
         );
-
-        let claude_launch = ExternalProviderStartup::Launch(
-            ExternalProviderLaunchBinding::claude("claude-agent-acp".into(), Vec::new())
-                .expect("Claude ACP launch binding"),
-        );
+        let router_observed_token = std::fs::read_to_string(&router_token_observation_path)
+            .expect("Router process reads the provisioned token before serving");
         let configured =
             crate::claude_provider_launch_environment::configure_claude_provider_launches(
-                vec![claude_launch],
-                "127.0.0.1:18787".parse().expect("Router endpoint"),
+                vec![ExternalProviderStartup::Launch(
+                    ExternalProviderLaunchBinding::claude("claude-agent-acp".into(), Vec::new())
+                        .expect("Claude ACP launch binding"),
+                )],
+                router_endpoint,
                 Some(&secret_root),
             )
             .await
             .expect("configured Host provider launches");
-        let ExternalProviderStartup::Launch(binding) = &configured[0] else {
-            panic!("Claude ACP is available after token provisioning")
+        let ExternalProviderStartup::Launch(mut claude_binding) = configured
+            .into_iter()
+            .next()
+            .expect("configured Claude ACP launch")
+        else {
+            panic!("Claude ACP remains available after Host token provisioning")
         };
-        let environment_token = binding
+        let environment_token = claude_binding
             .launch
             .environment
             .iter()
             .find(|(name, _)| name == "ANTHROPIC_AUTH_TOKEN")
-            .map(|(_, value)| value);
+            .map(|(_, value)| value.clone());
+        let claude_provider = claude_binding.provider();
+        let fake_acp_launch =
+            crate::external_provider_runtime::acp_scripted_fixture::AcpFixtureScript::new()
+                .expect_request(
+                    "initialize",
+                    "initialize",
+                    serde_json::json!({"protocolVersion": 1}),
+                )
+                .respond(
+                    "initialize",
+                    serde_json::json!({
+                        "protocolVersion": 1,
+                        "agentCapabilities": {},
+                        "agentInfo": {"name": "claude-token-startup-fixture", "version": "1"}
+                    }),
+                )
+                .launch();
+        let fixture_executable = fake_acp_launch.executable.to_string_lossy().into_owned();
+        let fixture_arguments = fake_acp_launch.arguments;
+        claude_binding.launch.executable = fake_acp_launch.executable;
+        claude_binding.launch.arguments = vec![
+            "-u".to_owned(),
+            "-c".to_owned(),
+            "import os, sys\nwith open(sys.argv[1], 'w', encoding='utf-8') as output:\n    output.write(os.environ['ANTHROPIC_AUTH_TOKEN'])\nexecutable = sys.argv[2]\nos.execvpe(executable, [executable, *sys.argv[3:]], os.environ)\n".to_owned(),
+            claude_token_observation_path.to_string_lossy().into_owned(),
+            fixture_executable,
+        ];
+        claude_binding.launch.arguments.extend(fixture_arguments);
+
+        let runtime = crate::ExternalProviderRuntime::initialize(claude_binding.launch)
+            .await
+            .expect("isolated Claude ACP fixture initializes through the Host runtime");
+        let claude_observed_token_result = std::fs::read_to_string(&claude_token_observation_path);
+        runtime.shutdown().await;
+
+        assert_eq!(router_condition, RouterCondition::OwnedReachable);
+        assert_eq!(router_token.generation().as_u64(), 1);
+        assert!(
+            router_observed_token == router_token.token().expose_secret(),
+            "owned Router reads the one token created by startup convergence"
+        );
+        assert_eq!(claude_provider, ProviderKind::ClaudeCode);
         assert!(
             environment_token
-                .is_some_and(|token| token.as_str() == first_record.token().expose_secret()),
-            "Claude ACP receives the token provisioned by Host"
+                .as_deref()
+                .is_some_and(|token| token == router_token.token().expose_secret()),
+            "Claude ACP launch environment uses the Host-provisioned token"
         );
-        assert_eq!(binding.provider(), ProviderKind::ClaudeCode);
+        let claude_observed_token = claude_observed_token_result
+            .expect("Claude ACP subprocess receives its configured token environment");
+        assert!(
+            claude_observed_token == router_token.token().expose_secret(),
+            "Claude ACP subprocess receives the same local token observed by Router"
+        );
+    }
+
+    #[test]
+    #[ignore = "spawned by the Host startup-convergence acceptance test"]
+    fn router_child_reads_host_token_and_serves_health() {
+        let secret_root = std::env::var_os(TEST_ROUTER_SECRET_ROOT_ENV)
+            .map(PathBuf::from)
+            .expect("isolated Router secret root");
+        let endpoint = std::env::var(TEST_ROUTER_ENDPOINT_ENV)
+            .expect("isolated Router endpoint")
+            .parse::<SocketAddr>()
+            .expect("valid isolated Router endpoint");
+        let observation_path = std::env::var_os(TEST_ROUTER_TOKEN_OBSERVATION_ENV)
+            .map(PathBuf::from)
+            .expect("Router token observation path");
+
+        let store = FileSecretStore::open_read_only(&secret_root).expect("Host token store");
+        let token = LocalRouterTokenService::new(store)
+            .load_current()
+            .expect("Host provisions the token before spawning Router");
+        std::fs::write(&observation_path, token.token().expose_secret())
+            .expect("record token observed at Router process start");
+
+        let listener = TcpListener::bind(endpoint).expect("bind isolated Router endpoint");
+        let body = serde_json::to_string(
+            &codex_router_core::router_compatibility::RouterCompatibility::current(false),
+        )
+        .expect("serialize Host-compatible Router health");
+        for incoming in listener.incoming() {
+            let mut stream = incoming.expect("Host Router readiness probe");
+            let mut health_request_buffer = [0; 1024];
+            let _request_bytes = stream
+                .read(&mut health_request_buffer)
+                .expect("read health request");
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .expect("write Host-compatible Router health");
+        }
     }
 
     fn load_current_local_router_token(secret_root: &Path) -> LocalRouterTokenRecord {
@@ -195,6 +328,13 @@ mod tests {
             .expect("Host secret store remains available");
         let service = LocalRouterTokenService::new(store);
         service.load_current().expect("Host local Router token")
+    }
+
+    fn unused_loopback_endpoint() -> SocketAddr {
+        TcpListener::bind(("127.0.0.1", 0))
+            .expect("reserve an available loopback port")
+            .local_addr()
+            .expect("read the available loopback port")
     }
 
     #[test]
