@@ -101,7 +101,24 @@ pub async fn exercise(
     ));
     let delivery: Arc<dyn SessionMessageDelivery> =
         Arc::new(SessionDeliveryRouter::new(vec![route]));
-    let identity = identity.with_session_delivery(delivery);
+    let presence = Arc::new(RunningPresence);
+    let owner = collaboration_service::SubscriptionDeliveryService::new(
+        collaboration_service::SubscriptionDeliveryServiceProps {
+            board_availability: collaboration_service::BoardAvailability::Unavailable,
+            push_store: Arc::clone(&automation_store),
+            delivery: delivery.clone(),
+            presence: presence.clone(),
+            machine_identity: collaboration_service::MachineIdentity::new(
+                service_id.to_owned().try_into()?,
+                Some("message-backend-fixture"),
+            )?,
+            clock: Arc::new(collaboration_service::SystemSubscriptionClock),
+        },
+    );
+    owner.start().await?;
+    let identity = identity
+        .with_session_delivery(delivery)
+        .with_subscription_delivery_service(owner.clone(), presence);
     let (client, server) = tokio::net::UnixStream::pair()?;
     let service = tokio::spawn(serve_control_connection(server, identity));
     let backend = tokio::spawn(async move {
@@ -198,6 +215,8 @@ pub async fn exercise(
     .await?;
     client.close().await?;
     service.await??;
+    owner.shutdown().await;
+    drop(owner);
     let requests = backend.await??;
     let automation_store = Arc::try_unwrap(automation_store)
         .map_err(|_| std::io::Error::other("service retained automation store"))?
@@ -208,6 +227,18 @@ pub async fn exercise(
     std::fs::remove_dir(root)?;
     Ok((result, requests))
 }
+
+struct RunningPresence;
+
+impl collaboration_service::TargetPresenceProbe for RunningPresence {
+    fn presence(
+        &self,
+        _: &SessionRef,
+    ) -> collaboration_service::DeliveryFuture<'_, collaboration_service::TargetPresence> {
+        Box::pin(async { Ok(collaboration_service::TargetPresence::Running) })
+    }
+}
+
 pub fn read(status: &str) -> NativeStep {
     NativeStep {
         method: "thread/read",

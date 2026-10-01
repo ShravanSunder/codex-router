@@ -38,15 +38,16 @@ pub(super) fn prepare_subscribe(
         .map(|value| parse_subscription_duration(value, "--cap", true))
         .transpose()?;
     if quiet_seconds.is_some_and(|seconds| seconds > MAX_SUBSCRIPTION_QUIET_SECONDS) {
-        return Err("--quiet must be at most 30 minutes; for example --quiet 2m".into());
+        return Err(
+            "--quiet must be between 0 seconds and 30 minutes; for example --quiet 2m".into(),
+        );
     }
     if cap_seconds.is_some_and(|seconds| seconds > MAX_SUBSCRIPTION_CAP_SECONDS) {
         return Err("--cap must be at most 60 minutes; for example --cap 10m".into());
     }
     if let (Some(quiet_seconds), Some(cap_seconds)) = (quiet_seconds, cap_seconds) {
         BatchTiming::new(quiet_seconds, cap_seconds).map_err(|_| {
-            "--cap must be at least --quiet and at most 60 minutes; for example --quiet 2m --cap 10m"
-                .to_owned()
+            "invalid subscription capSeconds: must be at least quietSeconds; --cap must be at least --quiet and at most 60 minutes; for example --quiet 2m --cap 10m".to_owned()
         })?;
     }
     let lifetime_seconds = arguments
@@ -56,7 +57,7 @@ pub(super) fn prepare_subscribe(
         .transpose()?;
     if let Some(seconds) = lifetime_seconds {
         SubscriptionLifetime::new(seconds).map_err(|_| {
-            "--for must be between 10 minutes and 7 days; for example --for 24h".to_owned()
+            "invalid subscription forSeconds: must be between 600 seconds and 604800 seconds; for example --for 24h".to_owned()
         })?;
     }
     let request = ThreadSubscribeRequest {

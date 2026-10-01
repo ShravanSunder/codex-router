@@ -187,7 +187,7 @@ fn router_push_tools_expose_reported_caller_and_reference_contracts() {
     let required = output_schema["$defs"][success_definition]["required"]
         .as_array()
         .expect("message_send success fields");
-    for field in ["pushId", "link", "target", "receipt"] {
+    for field in ["pushId", "link", "target", "deliveryState", "receipt"] {
         assert!(
             required.contains(&serde_json::json!(field)),
             "message_send result must require {field}"
@@ -205,6 +205,7 @@ async fn message_send_returns_push_identity_and_forwards_the_reported_agent_send
         "link":format!("router://{FIXTURE_SERVICE_ID}/push/{FIXTURE_PUSH_ID}"),
         "target":target,
         "targetIdentity":"✳️ claude-local/target-s",
+        "deliveryState":"delivered",
         "receipt":{
             "outcome":{"kind":"peerMessageWritten"},
             "reachability":"claudeCodePeer",
@@ -365,6 +366,7 @@ async fn message_reply_targets_the_referenced_push_without_expect_sender() {
         "targetIdentity":"✳️ claude-local/sender-s",
         "pushId":reply_push_id,
         "link":format!("router://{FIXTURE_SERVICE_ID}/push/{reply_push_id}"),
+        "deliveryState":"delivered",
         "receipt":{
             "outcome":{"kind":"peerMessageWritten"},
             "reachability":"claudeCodePeer",
@@ -1385,7 +1387,7 @@ fn representative_catalog_descriptions_explain_operation_specific_behavior() {
         (
             "board_thread_subscribe",
             &[
-                "creates, updates or reactivates",
+                "Creates, updates or reactivates",
                 "thread or topic",
                 "policy",
             ][..],
