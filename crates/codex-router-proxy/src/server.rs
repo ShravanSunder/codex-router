@@ -129,6 +129,7 @@ use crate::provider_error::record_provider_error_observation;
 use crate::routes::Method;
 use crate::routes::RouteClass;
 use crate::routes::classify_route;
+use crate::routes::is_claude_edge_path;
 use crate::session_account_affinity_cache::DEFAULT_SESSION_PIN_IDLE_TTL;
 use crate::session_account_affinity_cache::SessionAccountAffinityCache;
 use crate::session_account_affinity_cache::SharedSessionAccountAffinityCache;
@@ -348,6 +349,7 @@ pub struct LoopbackRouterRuntimeConfig {
     state_database_path: PathBuf,
     secret_store_root: PathBuf,
     local_token: Option<LocalRouterTokenRecord>,
+    claude_edge_local_token: Option<LocalRouterTokenRecord>,
     fixed_now_unix_seconds: Option<u64>,
     max_snapshot_age_seconds: u64,
     session_pin_idle_ttl: Duration,
@@ -414,6 +416,7 @@ impl LoopbackRouterRuntimeConfig {
             state_database_path,
             secret_store_root,
             local_token: Some(local_token),
+            claude_edge_local_token: None,
             fixed_now_unix_seconds: None,
             max_snapshot_age_seconds: 300,
             session_pin_idle_ttl: DEFAULT_SESSION_PIN_IDLE_TTL,
@@ -437,6 +440,7 @@ impl LoopbackRouterRuntimeConfig {
             state_database_path,
             secret_store_root,
             local_token: None,
+            claude_edge_local_token: None,
             fixed_now_unix_seconds: None,
             max_snapshot_age_seconds: 300,
             session_pin_idle_ttl: DEFAULT_SESSION_PIN_IDLE_TTL,
@@ -450,6 +454,13 @@ impl LoopbackRouterRuntimeConfig {
     #[must_use]
     pub fn with_required_local_token(mut self, local_token: LocalRouterTokenRecord) -> Self {
         self.local_token = Some(local_token);
+        self
+    }
+
+    /// Requires a local bearer token only for Claude edge requests.
+    #[must_use]
+    pub fn with_claude_edge_local_token(mut self, local_token: LocalRouterTokenRecord) -> Self {
+        self.claude_edge_local_token = Some(local_token);
         self
     }
 
@@ -512,6 +523,7 @@ pub struct LoopbackRouterRuntime {
     affinity_secret_provider: RuntimeAffinitySecretProvider,
     affinity_owner_recorder: Arc<dyn AsyncHttpAffinityOwnerRecorder>,
     auth_gate: crate::local_auth::ProxyLocalAuthGate,
+    claude_edge_auth_gate: Option<crate::local_auth::ProxyLocalAuthGate>,
     local_model_authentication_required: bool,
     upstream: HyperHttpUpstreamTransport,
     upstream_endpoint: UpstreamEndpoint,
@@ -612,6 +624,12 @@ impl LoopbackRouterRuntime {
             )),
             None => crate::local_auth::ProxyLocalAuthGate::disabled(),
         };
+        let claude_edge_auth_gate = config.claude_edge_local_token.as_ref().map(|local_token| {
+            crate::local_auth::ProxyLocalAuthGate::required(LocalRouterAuth::new(
+                local_token.clone(),
+                Vec::new(),
+            ))
+        });
         let upstream_endpoint = config.upstream_endpoint;
         let upstream = HyperHttpUpstreamTransport::new(upstream_endpoint.clone());
         let server = runtime.block_on(AsyncLoopbackServerRuntime::bind(config.bind_address))?;
@@ -648,6 +666,7 @@ impl LoopbackRouterRuntime {
             affinity_secret_provider,
             affinity_owner_recorder,
             auth_gate,
+            claude_edge_auth_gate,
             local_model_authentication_required,
             upstream,
             upstream_endpoint,
@@ -686,6 +705,8 @@ impl LoopbackRouterRuntime {
     pub fn local_auth_reloader(&self) -> LocalAuthReloader {
         LocalAuthReloader {
             auth_gate: self.auth_gate.clone(),
+            claude_edge_auth_gate: self.claude_edge_auth_gate.clone(),
+            codex_local_token_authentication_required: self.local_model_authentication_required,
             websocket_revocations: self.websocket_revocations.clone(),
         }
     }
@@ -901,6 +922,7 @@ impl LoopbackRouterRuntime {
             affinity_owner_recorder: Arc::clone(&self.affinity_owner_recorder),
             affinity_record_tasks,
             auth_gate: self.auth_gate.clone(),
+            claude_edge_auth_gate: self.claude_edge_auth_gate.clone(),
             local_model_authentication_required: self.local_model_authentication_required,
             upstream: self.upstream.clone(),
             upstream_endpoint: self.upstream_endpoint.clone(),
@@ -1194,6 +1216,7 @@ struct LoopbackProtocolConnectionHandler {
     affinity_owner_recorder: Arc<dyn AsyncHttpAffinityOwnerRecorder>,
     affinity_record_tasks: TaskTracker,
     auth_gate: crate::local_auth::ProxyLocalAuthGate,
+    claude_edge_auth_gate: Option<crate::local_auth::ProxyLocalAuthGate>,
     local_model_authentication_required: bool,
     upstream: HyperHttpUpstreamTransport,
     upstream_endpoint: UpstreamEndpoint,
@@ -1261,6 +1284,9 @@ impl LoopbackProtocolConnectionHandler {
         ) {
             return response;
         }
+        if let Some(response) = self.preflight_claude_edge_request(&request) {
+            return response;
+        }
         match HyperProtocolSwitchpoint::classify(request.method(), request.uri(), request.headers())
         {
             HyperProtocolDispatch::WebSocketUpgrade => {
@@ -1268,6 +1294,75 @@ impl LoopbackProtocolConnectionHandler {
                     .await
             }
             HyperProtocolDispatch::Http => self.handle_hyper_http_request(request).await,
+        }
+    }
+
+    fn preflight_claude_edge_local_auth(
+        &self,
+        request: &HttpRequest<Incoming>,
+    ) -> Option<HttpResponse<BoxBody<Bytes, AsyncHttpBodyError>>> {
+        let path = request
+            .uri()
+            .path_and_query()
+            .map_or("/", http::uri::PathAndQuery::as_str);
+        let router_token = header_value(request.headers(), "x-codex-router-token");
+        let authorization = header_value(request.headers(), "authorization");
+        let cookie = header_value(request.headers(), "cookie");
+        let presented_token = extract_presented_local_token_from_request(
+            router_token.as_deref(),
+            authorization.as_deref(),
+            cookie.as_deref(),
+            path,
+            &[],
+            false,
+        );
+        let authorization_result = match presented_token {
+            Err(reason) => Err(reason),
+            Ok(presented_token) => match &self.claude_edge_auth_gate {
+                Some(auth_gate) => auth_gate.authorize(presented_token),
+                None => Err(LocalAuthError::Missing),
+            },
+        };
+        match authorization_result {
+            Ok(_generation) => None,
+            Err(reason) => {
+                self.emit_claude_edge_local_auth_rejection(reason);
+                Some(empty_response(StatusCode::UNAUTHORIZED))
+            }
+        }
+    }
+
+    fn preflight_claude_edge_request(
+        &self,
+        request: &HttpRequest<Incoming>,
+    ) -> Option<HttpResponse<BoxBody<Bytes, AsyncHttpBodyError>>> {
+        let path = request.uri().path();
+        if !is_claude_edge_path(path) {
+            return None;
+        }
+
+        match classify_route(
+            method_from_hyper(request.method()),
+            path,
+            is_websocket_upgrade(request.headers()),
+        ) {
+            RouteClass::Supported(crate::routes::RouteKind::ClaudeMessages) => {
+                self.preflight_claude_edge_local_auth(request)
+            }
+            RouteClass::Supported(_) | RouteClass::Rejected { .. } => {
+                Some(unsupported_claude_path_response(path))
+            }
+        }
+    }
+
+    fn emit_claude_edge_local_auth_rejection(&self, reason: LocalAuthError) {
+        if let Some(audit_sink) = &self.audit_sink {
+            let event = local_auth_rejection_audit_event(
+                TransportKind::Http,
+                AuditRouteKind::ClaudeMessages,
+                reason,
+            );
+            append_audit_event_with_reporter(audit_sink, &event, &StderrAuditFailureReporter);
         }
     }
 
@@ -1745,6 +1840,8 @@ fn current_unix_seconds() -> Result<u64, std::time::SystemTimeError> {
 #[derive(Clone, Debug)]
 pub struct LocalAuthReloader {
     auth_gate: crate::local_auth::ProxyLocalAuthGate,
+    claude_edge_auth_gate: Option<crate::local_auth::ProxyLocalAuthGate>,
+    codex_local_token_authentication_required: bool,
     websocket_revocations: WebSocketRevocationRegistry,
 }
 
@@ -1752,9 +1849,14 @@ impl LocalAuthReloader {
     /// Replaces local auth from an already loaded auth snapshot.
     pub fn reload_auth(&self, auth: LocalRouterAuth) {
         let active_generation = auth.current_generation();
-        self.auth_gate.replace(auth);
-        self.websocket_revocations
-            .close_all_except(active_generation);
+        if self.codex_local_token_authentication_required {
+            self.auth_gate.replace(auth.clone());
+            self.websocket_revocations
+                .close_all_except(active_generation);
+        }
+        if let Some(claude_edge_auth_gate) = &self.claude_edge_auth_gate {
+            claude_edge_auth_gate.replace(auth);
+        }
     }
 
     /// Replaces local auth and closes WebSocket connections authenticated with old generations.
@@ -2401,6 +2503,17 @@ fn empty_response(status: StatusCode) -> HttpResponse<BoxBody<Bytes, AsyncHttpBo
         .unwrap_or_else(|_error| HttpResponse::new(empty_body()))
 }
 
+fn unsupported_claude_path_response(
+    path: &str,
+) -> HttpResponse<BoxBody<Bytes, AsyncHttpBodyError>> {
+    let body = format!("Path {path} is unsupported by Router");
+    HttpResponse::builder()
+        .status(StatusCode::NOT_FOUND)
+        .header(http::header::CONTENT_TYPE, "text/plain; charset=utf-8")
+        .body(box_body_from_bytes(body.into_bytes()))
+        .unwrap_or_else(|_error| HttpResponse::new(empty_body()))
+}
+
 fn all_accounts_exhausted_response() -> HttpResponse<BoxBody<Bytes, AsyncHttpBodyError>> {
     HttpResponse::builder()
         .status(StatusCode::SERVICE_UNAVAILABLE)
@@ -2608,6 +2721,153 @@ mod tests {
     use tokio::io::AsyncWriteExt;
 
     static TEMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+    fn local_router_token(token: &str, generation: u64) -> LocalRouterTokenRecord {
+        LocalRouterTokenRecord::new(
+            SecretString::new(token),
+            codex_router_core::ids::TokenGeneration::new(generation),
+        )
+    }
+
+    fn send_loopback_http_request(
+        address: SocketAddr,
+        path: &str,
+        authorization: Option<&str>,
+    ) -> String {
+        use std::io::Read as _;
+        use std::io::Write as _;
+        use std::net::TcpStream;
+        use std::time::Duration;
+
+        let mut stream = TcpStream::connect(address)
+            .unwrap_or_else(|error| panic!("loopback client should connect: {error}"));
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap_or_else(|error| panic!("loopback read timeout should set: {error}"));
+        let authorization_header =
+            authorization.map_or(String::new(), |value| format!("Authorization: {value}\r\n"));
+        let request = format!(
+            "POST {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\nContent-Length: 2\r\n{authorization_header}\r\n{{}}"
+        );
+        stream
+            .write_all(request.as_bytes())
+            .unwrap_or_else(|error| panic!("loopback request should write: {error}"));
+        stream
+            .shutdown(std::net::Shutdown::Write)
+            .unwrap_or_else(|error| panic!("loopback client write side should close: {error}"));
+
+        let mut response = String::new();
+        stream
+            .read_to_string(&mut response)
+            .unwrap_or_else(|error| panic!("loopback response should read: {error}"));
+        response
+    }
+
+    #[test]
+    fn claude_edge_local_token_is_scoped_and_reloaded_without_enabling_codex_auth() {
+        use codex_router_core::local_auth::LocalRouterAuth;
+        use std::io::ErrorKind;
+        use std::net::TcpListener;
+
+        let upstream_listener =
+            TcpListener::bind("127.0.0.1:0").expect("test upstream listener should bind");
+        upstream_listener
+            .set_nonblocking(true)
+            .expect("test upstream listener should be nonblocking");
+        let upstream_address = upstream_listener
+            .local_addr()
+            .expect("test upstream listener address should be available");
+        let bind_address = LoopbackBindAddress::new("127.0.0.1", 0)
+            .expect("router loopback address should validate");
+        let database_path = test_database_path("claude_local_token_admission");
+        let secret_root = database_path.with_extension("secrets");
+        let config = LoopbackRouterRuntimeConfig::new_tokenless(
+            bind_address,
+            UpstreamEndpoint::new(format!("http://{upstream_address}/v1"))
+                .expect("test upstream endpoint should validate"),
+            database_path,
+            secret_root,
+        )
+        .with_claude_edge_local_token(local_router_token("initial-token", 1));
+        let runtime = LoopbackRouterRuntime::start_for_test(config)
+            .expect("router runtime should start for token-scope test");
+        let router_address = runtime.local_addr();
+        let local_auth_reloader = runtime.local_auth_reloader();
+        let server_thread = std::thread::spawn(move || runtime.serve_http_connections(6));
+
+        let unsupported_claude =
+            send_loopback_http_request(router_address, "/anthropic/v1/messages/count_tokens", None);
+        let unsupported_claude_body = unsupported_claude
+            .split_once("\r\n\r\n")
+            .map_or("", |(_headers, body)| body);
+        assert!(
+            unsupported_claude.starts_with("HTTP/1.1 404 Not Found\r\n"),
+            "unsupported Claude paths should return 404 without authentication: {unsupported_claude}"
+        );
+        assert!(
+            unsupported_claude_body.contains("/anthropic/v1/messages/count_tokens")
+                && unsupported_claude_body.contains("unsupported by Router"),
+            "unsupported Claude response should name its path: {unsupported_claude_body}"
+        );
+
+        let unauthenticated_claude =
+            send_loopback_http_request(router_address, "/anthropic/v1/messages", None);
+        assert!(
+            unauthenticated_claude.starts_with("HTTP/1.1 401 Unauthorized\r\n"),
+            "missing Claude token should reject before selection: {unauthenticated_claude}"
+        );
+
+        let unauthenticated_codex =
+            send_loopback_http_request(router_address, "/v1/responses", None);
+        assert!(
+            unauthenticated_codex.starts_with("HTTP/1.1 503 Service Unavailable\r\n"),
+            "Codex with optional local auth should reach its no-account result: {unauthenticated_codex}"
+        );
+
+        local_auth_reloader.reload_auth(LocalRouterAuth::new(
+            local_router_token("reloaded-token", 2),
+            Vec::new(),
+        ));
+
+        let stale_claude = send_loopback_http_request(
+            router_address,
+            "/anthropic/v1/messages",
+            Some("Bearer initial-token"),
+        );
+        assert!(
+            stale_claude.starts_with("HTTP/1.1 401 Unauthorized\r\n"),
+            "the replaced Claude token should reject: {stale_claude}"
+        );
+
+        let reloaded_claude = send_loopback_http_request(
+            router_address,
+            "/anthropic/v1/messages",
+            Some("Bearer reloaded-token"),
+        );
+        assert!(
+            reloaded_claude.starts_with("HTTP/1.1 503 Service Unavailable\r\n"),
+            "the reloaded Claude token should pass admission and reach selection: {reloaded_claude}"
+        );
+
+        let codex_after_reload = send_loopback_http_request(router_address, "/v1/responses", None);
+        assert!(
+            codex_after_reload.starts_with("HTTP/1.1 503 Service Unavailable\r\n"),
+            "token watcher reload must leave optional Codex auth disabled: {codex_after_reload}"
+        );
+
+        assert_eq!(
+            server_thread
+                .join()
+                .unwrap_or_else(|error| panic!("router server thread should join: {error:?}"))
+                .expect("router should serve all six test requests"),
+            6
+        );
+        match upstream_listener.accept() {
+            Err(error) if error.kind() == ErrorKind::WouldBlock => {}
+            Ok((_stream, _peer)) => panic!("no test request should reach upstream"),
+            Err(error) => panic!("upstream listener check should succeed: {error}"),
+        }
+    }
 
     #[derive(Clone)]
     struct HeldProxyRefreshClient {

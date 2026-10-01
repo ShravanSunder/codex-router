@@ -97,6 +97,33 @@ pub fn classify_route(method: Method, path: &str, websocket_upgrade: bool) -> Ro
     }
 }
 
+/// Returns whether a path belongs to the Claude edge prefix.
+#[must_use]
+pub(crate) fn is_claude_edge_path(path: &str) -> bool {
+    let path = path.split_once('?').map_or(path, |(path, _query)| path);
+    path == "/anthropic" || path.starts_with("/anthropic/")
+}
+
+#[cfg(test)]
+mod path_scope_tests {
+    use super::is_claude_edge_path;
+
+    #[test]
+    fn claude_edge_auth_scope_matches_only_the_anthropic_prefix() {
+        for path in [
+            "/anthropic",
+            "/anthropic/v1/messages",
+            "/anthropic/v1/messages?stream=true",
+        ] {
+            assert!(is_claude_edge_path(path), "path={path}");
+        }
+
+        for path in ["/anthropicx/v1/messages", "/v1/responses", "/anthropicish"] {
+            assert!(!is_claude_edge_path(path), "path={path}");
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::Method;
