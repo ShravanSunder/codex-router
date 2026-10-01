@@ -5,3 +5,5 @@ pub(crate) mod classifier;
 pub mod forward;
 pub(crate) mod response_completion;
 pub(crate) mod upstream_endpoint;
+
+pub(crate) mod server_pipeline;

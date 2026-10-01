@@ -42,11 +42,14 @@ pub(crate) fn observe_completion(
             .is_some_and(|media_type| media_type.trim().eq_ignore_ascii_case("text/event-stream"))
     });
     let (sender, receiver) = oneshot::channel();
-    let observed = CompletionObservingBody {
+    let mut observed = CompletionObservingBody {
         body,
         sender: Some(sender),
         tracker: streaming.then(SseCompletionTracker::default),
     };
+    if observed.body.is_end_stream() {
+        observed.finish_completed_body();
+    }
     (
         AsyncStreamingHttpProxyResponse::new(status, headers, observed.boxed()),
         receiver,
@@ -60,6 +63,14 @@ struct CompletionObservingBody {
 }
 
 impl CompletionObservingBody {
+    fn finish_completed_body(&mut self) {
+        let completion = self.tracker.as_ref().map_or(
+            ClaudeResponseCompletion::Success,
+            SseCompletionTracker::completion,
+        );
+        self.finish(completion);
+    }
+
     fn finish(&mut self, completion: ClaudeResponseCompletion) {
         if let Some(sender) = self.sender.take() {
             let _result = sender.send(completion);
@@ -87,14 +98,15 @@ impl Body for CompletionObservingBody {
                 if let (Some(tracker), Some(bytes)) = (&mut self.tracker, frame.data_ref()) {
                     tracker.observe(bytes);
                 }
+                // Known-length consumers can stop after this frame without polling EOF.
+                // The inner Body contract establishes that no error or trailer remains.
+                if self.body.is_end_stream() {
+                    self.finish_completed_body();
+                }
             }
             Poll::Ready(Some(Err(_error))) => self.finish(ClaudeResponseCompletion::Incomplete),
             Poll::Ready(None) => {
-                let completion = self.tracker.as_ref().map_or(
-                    ClaudeResponseCompletion::Success,
-                    SseCompletionTracker::completion,
-                );
-                self.finish(completion);
+                self.finish_completed_body();
             }
             Poll::Pending => {}
         }

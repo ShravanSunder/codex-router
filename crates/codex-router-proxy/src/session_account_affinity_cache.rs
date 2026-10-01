@@ -352,15 +352,17 @@ pub(crate) struct ClaudePinRelease {
 }
 
 /// Releases only the observed active pin; a lost race re-reads current authority.
-pub(crate) async fn release_claude_session_account_affinity<TRepository>(
+pub(crate) async fn release_claude_session_account_affinity<TReadRepository, TWriteRepository>(
     cache: &SharedSessionAccountAffinityCache,
     session_id: &str,
     observation: &PinObservation,
-    repository: &TRepository,
+    read_repository: &TReadRepository,
+    write_repository: &TWriteRepository,
     now_unix_seconds: u64,
 ) -> Result<ClaudePinRelease, SessionAccountAffinityPublicationError>
 where
-    TRepository: AsyncSessionAccountAffinityRepository + Sync,
+    TReadRepository: AsyncSessionAccountAffinityRepository + Sync,
+    TWriteRepository: AsyncSessionAccountAffinityRepository + Sync + ?Sized,
 {
     let next_version = observation.version().checked_add(1);
     if observation.active_account().is_some()
@@ -378,7 +380,7 @@ where
             next_version,
             now_unix_seconds,
         );
-        if repository
+        if write_repository
             .compare_and_set_session_account_affinity(observation, &released_pin, pin_ttl_seconds)
             .await?
         {
@@ -398,7 +400,7 @@ where
         observation: observe_claude_session_account_affinity(
             cache,
             session_id,
-            repository,
+            read_repository,
             now_unix_seconds,
         )
         .await?,
@@ -684,9 +686,27 @@ mod pin_authority_tests {
             .await
             .unwrap_or_else(|error| panic!("pin should observe: {error}"));
 
+        let read_store = AsyncSqliteStateStore::open_read_only(store.database_path())
+            .await
+            .unwrap_or_else(|error| panic!("read-only pin pool: {error}"));
+
         let (first, second) = tokio::join!(
-            release_claude_session_account_affinity(&cache, "session", &observation, &store, 1_002),
-            release_claude_session_account_affinity(&cache, "session", &observation, &store, 1_002),
+            release_claude_session_account_affinity(
+                &cache,
+                "session",
+                &observation,
+                &read_store,
+                &store,
+                1_002
+            ),
+            release_claude_session_account_affinity(
+                &cache,
+                "session",
+                &observation,
+                &read_store,
+                &store,
+                1_002
+            ),
         );
         let first = first.unwrap_or_else(|error| panic!("first release: {error}"));
         let second = second.unwrap_or_else(|error| panic!("second release: {error}"));
@@ -756,6 +776,7 @@ mod pin_authority_tests {
             &cache,
             "session",
             &stale_observation,
+            &store,
             &store,
             1_001,
         )

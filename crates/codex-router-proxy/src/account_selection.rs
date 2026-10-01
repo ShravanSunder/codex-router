@@ -799,6 +799,7 @@ where
         + Sync,
 {
     state_repository: &'a R,
+    claude_affinity_writer: &'a (dyn AsyncSessionAccountAffinityRepository + Sync),
     weighted_selectors: RouteBandWeightedSelectors,
     account_holds: RouteBandAccountHolds,
     active_reservations: RouteBandReservationBooks,
@@ -877,6 +878,7 @@ where
     pub fn new(state_repository: &'a R) -> Self {
         Self {
             state_repository,
+            claude_affinity_writer: state_repository,
             weighted_selectors: Arc::new(Mutex::new(HashMap::new())),
             account_holds: Arc::new(Mutex::new(HashMap::new())),
             active_reservations: Arc::new(Mutex::new(HashMap::new())),
@@ -903,6 +905,7 @@ where
     ) -> Self {
         Self {
             state_repository,
+            claude_affinity_writer: state_repository,
             weighted_selectors,
             account_holds,
             active_reservations: Arc::new(Mutex::new(HashMap::new())),
@@ -931,6 +934,7 @@ where
     ) -> Self {
         Self {
             state_repository,
+            claude_affinity_writer: state_repository,
             weighted_selectors,
             account_holds,
             active_reservations: Arc::new(Mutex::new(HashMap::new())),
@@ -960,6 +964,7 @@ where
     ) -> Self {
         Self {
             state_repository,
+            claude_affinity_writer: state_repository,
             weighted_selectors,
             account_holds,
             active_reservations,
@@ -1012,6 +1017,7 @@ where
     ) -> Self {
         Self {
             state_repository,
+            claude_affinity_writer: state_repository,
             weighted_selectors: runtime_state.weighted_selectors,
             account_holds: runtime_state.account_holds,
             active_reservations: runtime_state.active_reservations,
@@ -1041,6 +1047,16 @@ where
     #[must_use]
     pub fn with_session_affinity_writer(mut self, db_write_actor: DbWriteActor) -> Self {
         self.session_affinity_writer = Some(db_write_actor);
+        self
+    }
+
+    /// Routes Claude pin CAS through a writable repository while reads keep their owner.
+    #[must_use]
+    pub(crate) fn with_claude_affinity_writer(
+        mut self,
+        writer: &'a (dyn AsyncSessionAccountAffinityRepository + Sync),
+    ) -> Self {
+        self.claude_affinity_writer = writer;
         self
     }
 
@@ -1309,6 +1325,7 @@ where
                     session_id,
                     observation,
                     self.state_repository,
+                    self.claude_affinity_writer,
                     (self.clock)(),
                 )
                 .await

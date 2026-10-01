@@ -152,3 +152,56 @@ async fn claude_completion_dropped_body_is_not_success() {
         ClaudeResponseCompletion::Incomplete
     );
 }
+
+#[tokio::test]
+async fn claude_completion_fixed_length_body_finishes_on_final_frame_without_eof_poll() {
+    let original = AsyncStreamingHttpProxyResponse::new(
+        200,
+        HeaderCollection::new(vec![Header::new("content-length", "7")]),
+        Full::new(Bytes::from_static(b"message"))
+            .map_err(|never| -> AsyncHttpBodyError { match never {} })
+            .boxed(),
+    );
+    let (response, mut completion) = observe_completion(original);
+    let (_, headers, mut body) = response.into_parts();
+    let frame = body
+        .frame()
+        .await
+        .expect("final frame")
+        .expect("successful frame");
+    assert_eq!(frame.data_ref(), Some(&Bytes::from_static(b"message")));
+    assert_eq!(headers.value("content-length"), Some("7"));
+    assert_eq!(
+        completion.try_recv().expect("completion after final frame"),
+        ClaudeResponseCompletion::Success
+    );
+    drop(body);
+}
+
+#[tokio::test]
+async fn claude_completion_fixed_length_sse_finishes_on_message_stop_frame_without_eof_poll() {
+    let bytes = Bytes::from_static(b"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n");
+    let original = AsyncStreamingHttpProxyResponse::new(
+        200,
+        HeaderCollection::new(vec![
+            Header::new("content-type", "text/event-stream"),
+            Header::new("content-length", bytes.len().to_string()),
+        ]),
+        Full::new(bytes.clone())
+            .map_err(|never| -> AsyncHttpBodyError { match never {} })
+            .boxed(),
+    );
+    let (response, mut completion) = observe_completion(original);
+    let (_, _, mut body) = response.into_parts();
+    let frame = body
+        .frame()
+        .await
+        .expect("final frame")
+        .expect("successful frame");
+    assert_eq!(frame.data_ref(), Some(&bytes));
+    assert_eq!(
+        completion.try_recv().expect("completion after final frame"),
+        ClaudeResponseCompletion::Success
+    );
+    drop(body);
+}

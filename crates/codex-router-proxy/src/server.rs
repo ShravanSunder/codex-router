@@ -85,6 +85,7 @@ use crate::account_selection::SelectionReservationLock;
 use crate::account_selection::SqliteActiveClientLeaseReporter;
 use crate::account_selection::mark_runtime_quota_exhausted;
 use crate::account_selection::route_band_post_exhaustion_outcome;
+use crate::claude_edge::server_pipeline::ClaudeServerRuntime;
 use crate::credential_runtime::AsyncProxyCredentialResolverFactory;
 use crate::credential_runtime::ProxyRuntimeCredentialResources;
 use crate::credential_runtime::ProxyRuntimeCredentialResourcesOpenError;
@@ -1558,6 +1559,9 @@ impl LoopbackProtocolConnectionHandler {
         self: Arc<Self>,
         request: HttpRequest<Incoming>,
     ) -> HttpResponse<BoxBody<Bytes, AsyncHttpBodyError>> {
+        if is_claude_edge_path(request.uri().path()) {
+            return self.handle_claude_messages_request(request).await;
+        }
         let (request, body, full_replay_body) =
             match hyper_request_to_streaming_proxy_request(request).await {
                 Ok(request) => request,
@@ -1637,6 +1641,39 @@ impl LoopbackProtocolConnectionHandler {
         enabled_account_attempt_limit_from_accounts(
             self.selection_state_store.list_accounts().await,
         )
+    }
+
+    async fn handle_claude_messages_request(
+        &self,
+        request: HttpRequest<Incoming>,
+    ) -> HttpResponse<BoxBody<Bytes, AsyncHttpBodyError>> {
+        ClaudeServerRuntime {
+            auth_gate: self.claude_edge_auth_gate.clone(),
+            upstream: self.upstream.clone(),
+            selection_state_store: self.selection_state_store.clone(),
+            provider_error_state_store: self.provider_error_state_store.clone(),
+            credential_resolver: self
+                .credential_factory
+                .resolver_for_state(self.credential_state_store.clone()),
+            selector_runtime_state:
+                AsyncAccountSelectorRuntimeState::new_with_selection_lock_and_affinity_cache(
+                    Arc::clone(&self.weighted_selectors),
+                    Arc::clone(&self.account_holds),
+                    Arc::clone(&self.active_reservations),
+                    Arc::clone(&self.runtime_exhaustions),
+                    Arc::clone(&self.route_band_queue_health),
+                    Arc::clone(&self.selection_reservation_lock),
+                    Arc::clone(&self.session_affinity_cache),
+                ),
+            session_affinity_cache: Arc::clone(&self.session_affinity_cache),
+            claude_five_hour_reserve_percent: self.claude_five_hour_reserve_percent,
+            db_write_actor: self.db_write_actor.clone(),
+            clock: self.runtime_clock(),
+            affinity_record_tasks: self.affinity_record_tasks.clone(),
+            audit_sink: self.audit_sink.clone(),
+        }
+        .handle_request(request)
+        .await
     }
 }
 
@@ -2133,7 +2170,7 @@ fn precommit_probe_should_continue_for_success_status(buffered: &[u8]) -> bool {
     trimmed.starts_with(b"event: error") && !trimmed.windows(2).any(|window| window == b"\n\n")
 }
 
-fn box_body_from_bytes(bytes: Vec<u8>) -> BoxBody<Bytes, AsyncHttpBodyError> {
+pub(crate) fn box_body_from_bytes(bytes: Vec<u8>) -> BoxBody<Bytes, AsyncHttpBodyError> {
     Full::new(Bytes::from(bytes))
         .map_err(|never: Infallible| -> AsyncHttpBodyError { match never {} })
         .boxed()
@@ -2236,7 +2273,7 @@ fn prefix_frames_size_hint(
     size_hint
 }
 
-fn method_from_hyper(method: &HttpMethod) -> Method {
+pub(crate) fn method_from_hyper(method: &HttpMethod) -> Method {
     match *method {
         HttpMethod::GET => Method::Get,
         HttpMethod::POST => Method::Post,
@@ -2382,7 +2419,7 @@ fn trim_ascii_bytes(bytes: &[u8]) -> &[u8] {
     }
 }
 
-fn hold_active_reservation_until_body_drop(
+pub(crate) fn hold_active_reservation_until_body_drop(
     body: BoxBody<Bytes, AsyncHttpBodyError>,
     active_reservation_guard: Option<crate::account_selection::ActiveReservationGuard>,
 ) -> BoxBody<Bytes, AsyncHttpBodyError> {
@@ -2457,7 +2494,7 @@ fn spawn_async_provider_error_observation(
     });
 }
 
-fn incoming_body_error(error: hyper::Error) -> AsyncHttpBodyError {
+pub(crate) fn incoming_body_error(error: hyper::Error) -> AsyncHttpBodyError {
     Box::new(error)
 }
 
@@ -2503,7 +2540,9 @@ fn sanitize_error_for_log(error: &LoopbackRouterRuntimeError) -> String {
     }
 }
 
-fn http_error_response(error: HttpProxyError) -> HttpResponse<BoxBody<Bytes, AsyncHttpBodyError>> {
+pub(crate) fn http_error_response(
+    error: HttpProxyError,
+) -> HttpResponse<BoxBody<Bytes, AsyncHttpBodyError>> {
     match error {
         HttpProxyError::LocalAuth { .. } => empty_response(StatusCode::UNAUTHORIZED),
         HttpProxyError::Selection {
@@ -2517,7 +2556,9 @@ fn http_error_response(error: HttpProxyError) -> HttpResponse<BoxBody<Bytes, Asy
     }
 }
 
-fn empty_response(status: StatusCode) -> HttpResponse<BoxBody<Bytes, AsyncHttpBodyError>> {
+pub(crate) fn empty_response(
+    status: StatusCode,
+) -> HttpResponse<BoxBody<Bytes, AsyncHttpBodyError>> {
     HttpResponse::builder()
         .status(status)
         .body(empty_body())
@@ -4430,7 +4471,9 @@ impl LoopbackHttpServer {
 }
 
 #[cfg(test)]
-fn read_http_request(stream: &mut TcpStream) -> Result<HttpProxyRequest, ServerConnectionError> {
+pub(crate) fn read_http_request(
+    stream: &mut TcpStream,
+) -> Result<HttpProxyRequest, ServerConnectionError> {
     let mut request_bytes = Vec::new();
     let parsed_head = loop {
         if request_bytes.len() > MAX_HTTP_HEADER_BYTES {
