@@ -826,10 +826,50 @@ async fn unadvertised_load_settles_not_submitted_without_sending_load() {
 }
 
 #[tokio::test]
-async fn permanent_provider_load_rejections_are_typed_and_do_not_expose_acp_text() {
-    for (error_code, expected_reason) in [
-        (-32002, "providerSessionNotFound"),
-        (-32600, "providerRejected"),
+async fn coded_provider_load_errors_keep_correlations_and_do_not_expose_acp_text() {
+    for (error_code, expected_kind, expected_reason, expected_explanation, code_label) in [
+        (
+            -32002,
+            "rejected",
+            Some("providerSessionNotFound"),
+            "this session never started a turn and did not survive the provider restart; create a new conversation",
+            "provider code",
+        ),
+        (
+            -32600,
+            "rejected",
+            Some("providerRejected"),
+            "provider rejected the ACP operation",
+            "provider code",
+        ),
+        (
+            -32000,
+            "rejected",
+            Some("providerRejected"),
+            "provider rejected the ACP operation",
+            "provider code",
+        ),
+        (
+            -32601,
+            "notSubmitted",
+            None,
+            "provider ACP method is unsupported",
+            "ACP code",
+        ),
+        (
+            -32602,
+            "notSubmitted",
+            None,
+            "provider ACP parameters are invalid",
+            "ACP code",
+        ),
+        (
+            -32800,
+            "notSubmitted",
+            None,
+            "provider ACP request was cancelled",
+            "ACP code",
+        ),
     ] {
         let root = tempfile::tempdir().expect("provider root");
         let load_marker = root.path().join("load-method.txt");
@@ -886,20 +926,26 @@ async fn permanent_provider_load_rejections_are_typed_and_do_not_expose_acp_text
             .expect("load refusal");
         let outcome = serde_json::to_value(&receipt.outcome).expect("receipt encoding");
 
-        assert_eq!(outcome["kind"], "rejected");
-        assert_eq!(outcome["reason"], expected_reason);
-        assert_eq!(outcome["clientCode"], error_code);
-        assert!(
-            outcome["detail"]
-                .as_str()
-                .is_some_and(|detail| !detail.contains("must not escape")),
-            "ACP error data escaped: {outcome}"
-        );
-        if error_code == -32002 {
-            assert_eq!(
-                outcome["detail"],
-                "this session never started a turn and did not survive the provider restart; create a new conversation"
+        assert_eq!(outcome["kind"], expected_kind);
+        if let Some(expected_reason) = expected_reason {
+            assert_eq!(outcome["reason"], expected_reason);
+            assert_eq!(outcome["clientCode"], error_code);
+            let detail = outcome["detail"].as_str().expect("rejection detail");
+            assert!(detail.starts_with(expected_explanation), "{detail}");
+            assert!(
+                !detail.contains("provider fixture refusal") && !detail.contains("must not escape"),
+                "ACP error data escaped: {outcome}"
             );
+            assert_uuid_v7_provider_reference(detail, code_label, error_code);
+        } else {
+            assert_eq!(outcome["retryable"], true);
+            let reason = outcome["reason"].as_str().expect("not-submitted reason");
+            assert!(reason.starts_with(expected_explanation), "{reason}");
+            assert!(
+                !reason.contains("provider fixture refusal") && !reason.contains("must not escape"),
+                "ACP error data escaped: {outcome}"
+            );
+            assert_uuid_v7_provider_reference(reason, code_label, error_code);
         }
         assert_eq!(
             std::fs::read_to_string(&load_marker)
@@ -913,6 +959,20 @@ async fn permanent_provider_load_rejections_are_typed_and_do_not_expose_acp_text
         route.shutdown_queue().await;
         supervisor.shutdown().await.expect("shutdown");
     }
+}
+
+fn assert_uuid_v7_provider_reference(detail: &str, code_label: &str, provider_code: i32) {
+    assert!(
+        detail.contains(&format!("{code_label} {provider_code}; reference ")),
+        "provider code/reference missing: {detail}"
+    );
+    let correlation_reference = detail
+        .split_once("reference ")
+        .map(|(_, reference)| reference.trim_end_matches(')'))
+        .expect("provider correlation reference");
+    let correlation_uuid =
+        uuid::Uuid::parse_str(correlation_reference).expect("UUIDv7 correlation reference");
+    assert_eq!(correlation_uuid.get_version_num(), 7, "{detail}");
 }
 
 #[tokio::test]

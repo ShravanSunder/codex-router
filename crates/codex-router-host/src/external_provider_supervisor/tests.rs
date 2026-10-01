@@ -8,6 +8,45 @@ use collaboration_protocol::{
     ProviderRuntimeIdentity, ProviderTransport, ProviderWorkingDirectory, RouterAccess, SessionId,
     UuidIdentity,
 };
+use std::io::{self, Write};
+use std::sync::{Arc, Mutex as StdMutex};
+
+#[derive(Clone, Default)]
+struct CapturedProviderTrace(Arc<StdMutex<Vec<u8>>>);
+
+impl CapturedProviderTrace {
+    fn rendered(&self) -> String {
+        self.0
+            .lock()
+            .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+            .unwrap_or_default()
+    }
+}
+
+impl<'writer> tracing_subscriber::fmt::MakeWriter<'writer> for CapturedProviderTrace {
+    type Writer = CapturedProviderTraceBuffer;
+
+    fn make_writer(&'writer self) -> Self::Writer {
+        CapturedProviderTraceBuffer(Arc::clone(&self.0))
+    }
+}
+
+struct CapturedProviderTraceBuffer(Arc<StdMutex<Vec<u8>>>);
+
+impl Write for CapturedProviderTraceBuffer {
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        let mut bytes = self
+            .0
+            .lock()
+            .map_err(|_| io::Error::other("provider trace capture lock poisoned"))?;
+        bytes.extend_from_slice(buffer);
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
 
 fn create_fixture() -> ExternalProviderLaunch {
     ExternalProviderLaunch {
@@ -627,7 +666,10 @@ fn typed_runtime_failure_mapping_never_classifies_provider_text() {
         let failure = runtime_failure(
             operation_id.clone(),
             None,
-            ExternalProviderRuntimeError::ProviderRejected { code: -32603 },
+            ExternalProviderRuntimeError::ProviderRejected {
+                code: -32603,
+                correlation_id: acp_client_runtime::ProviderErrorCorrelationId::generate(),
+            },
         );
         assert_eq!(
             failure.kind,
@@ -640,7 +682,10 @@ fn typed_runtime_failure_mapping_never_classifies_provider_text() {
         ExternalProviderRuntimeError::LocalBusy,
         ExternalProviderRuntimeError::LocalNotFound,
         ExternalProviderRuntimeError::LocalCancelTargetMismatch,
-        ExternalProviderRuntimeError::AuthenticationRequired { code: -32000 },
+        ExternalProviderRuntimeError::AuthenticationRequired {
+            code: -32000,
+            correlation_id: acp_client_runtime::ProviderErrorCorrelationId::generate(),
+        },
     ] {
         let failure = runtime_failure(operation_id.clone(), None, error);
         assert_eq!(failure.effect, ProviderOperationEffect::None);
@@ -653,44 +698,81 @@ fn acp_error_codes_project_to_existing_public_failure_kinds() {
     // preserves the existing public failure-kind enum and providerCode.
     for (error, expected_kind, code) in [
         (
-            ExternalProviderRuntimeError::AuthenticationRequired { code: -32000 },
+            ExternalProviderRuntimeError::AuthenticationRequired {
+                code: -32000,
+                correlation_id: acp_client_runtime::ProviderErrorCorrelationId::generate(),
+            },
             ConversationOperationFailureKind::AuthenticationRequired,
             -32000,
         ),
         (
-            ExternalProviderRuntimeError::ProviderSessionNotFound { code: -32002 },
+            ExternalProviderRuntimeError::ProviderSessionNotFound {
+                code: -32002,
+                correlation_id: acp_client_runtime::ProviderErrorCorrelationId::generate(),
+            },
             ConversationOperationFailureKind::ProviderSessionNotFound,
             -32002,
         ),
         (
-            ExternalProviderRuntimeError::ResourceNotFound { code: -32002 },
+            ExternalProviderRuntimeError::ResourceNotFound {
+                code: -32002,
+                correlation_id: acp_client_runtime::ProviderErrorCorrelationId::generate(),
+            },
             ConversationOperationFailureKind::NotFound,
             -32002,
         ),
         (
-            ExternalProviderRuntimeError::UnsupportedMethod { code: -32601 },
+            ExternalProviderRuntimeError::UnsupportedMethod {
+                code: -32601,
+                correlation_id: acp_client_runtime::ProviderErrorCorrelationId::generate(),
+            },
             ConversationOperationFailureKind::UnsupportedCapability,
             -32601,
         ),
         (
-            ExternalProviderRuntimeError::InvalidParams { code: -32602 },
+            ExternalProviderRuntimeError::InvalidParams {
+                code: -32602,
+                correlation_id: acp_client_runtime::ProviderErrorCorrelationId::generate(),
+            },
             ConversationOperationFailureKind::InvalidRequest,
             -32602,
         ),
         (
-            ExternalProviderRuntimeError::RequestCancelled { code: -32800 },
+            ExternalProviderRuntimeError::RequestCancelled {
+                code: -32800,
+                correlation_id: acp_client_runtime::ProviderErrorCorrelationId::generate(),
+            },
             ConversationOperationFailureKind::ProviderRejected,
             -32800,
         ),
         (
-            ExternalProviderRuntimeError::ProviderRejected { code: -32603 },
+            ExternalProviderRuntimeError::ProviderRejected {
+                code: -32603,
+                correlation_id: acp_client_runtime::ProviderErrorCorrelationId::generate(),
+            },
             ConversationOperationFailureKind::ProviderRejected,
             -32603,
         ),
     ] {
+        let correlation_reference = match &error {
+            ExternalProviderRuntimeError::AuthenticationRequired { correlation_id, .. }
+            | ExternalProviderRuntimeError::ProviderSessionNotFound { correlation_id, .. }
+            | ExternalProviderRuntimeError::ResourceNotFound { correlation_id, .. }
+            | ExternalProviderRuntimeError::UnsupportedMethod { correlation_id, .. }
+            | ExternalProviderRuntimeError::InvalidParams { correlation_id, .. }
+            | ExternalProviderRuntimeError::RequestCancelled { correlation_id, .. }
+            | ExternalProviderRuntimeError::ProviderRejected { correlation_id, .. } => {
+                correlation_id.to_string()
+            }
+            _ => panic!("expected a coded ACP error, got {error:?}"),
+        };
         let failure = runtime_failure(OperationId::generate(), None, error);
         assert_eq!(failure.kind, expected_kind, "code {code}");
         assert_eq!(failure.provider_code, Some(code), "code {code}");
+        assert!(
+            String::from(failure.message).contains(&correlation_reference),
+            "code {code} lost correlation reference {correlation_reference}"
+        );
     }
 }
 
@@ -738,6 +820,96 @@ async fn provider_error_code_fixtures_project_without_agent_text() {
         assert!(!diagnostic.contains("private provider text"), "code {code}");
         assert!(!diagnostic.contains("secret sentinel"), "code {code}");
         runtime.shutdown().await;
+    }
+}
+
+#[test]
+fn coded_provider_error_trace_reference_matches_safe_host_failure() {
+    let raw_provider_text = "private provider rejection detail";
+    let provider_error_codes: [i32; 6] = [-32000, -32002, -32601, -32602, -32800, -32603];
+    for provider_code in provider_error_codes {
+        let mut acp_error = if provider_code == -32000 {
+            agent_client_protocol::Error::auth_required()
+        } else {
+            agent_client_protocol::Error::new(provider_code, raw_provider_text)
+        };
+        acp_error.message = raw_provider_text.to_owned();
+        acp_error.data = Some(serde_json::json!({"privateData":"provider data sentinel"}));
+
+        let captured_trace = CapturedProviderTrace::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .without_time()
+            .with_max_level(tracing::Level::TRACE)
+            .with_writer(captured_trace.clone())
+            .finish();
+        let provider_error = tracing::subscriber::with_default(subscriber, || {
+            acp_client_runtime::acp_operation_error_for_test(acp_error)
+        });
+        let trace_output = captured_trace.rendered();
+        let correlation_reference = match &provider_error {
+            ExternalProviderRuntimeError::AuthenticationRequired {
+                code,
+                correlation_id,
+            }
+            | ExternalProviderRuntimeError::ProviderSessionNotFound {
+                code,
+                correlation_id,
+            }
+            | ExternalProviderRuntimeError::ResourceNotFound {
+                code,
+                correlation_id,
+            }
+            | ExternalProviderRuntimeError::UnsupportedMethod {
+                code,
+                correlation_id,
+            }
+            | ExternalProviderRuntimeError::InvalidParams {
+                code,
+                correlation_id,
+            }
+            | ExternalProviderRuntimeError::RequestCancelled {
+                code,
+                correlation_id,
+            }
+            | ExternalProviderRuntimeError::ProviderRejected {
+                code,
+                correlation_id,
+            } => {
+                assert_eq!(*code, i64::from(provider_code));
+                correlation_id.to_string()
+            }
+            other => panic!("expected a typed ACP error, got {other:?}"),
+        };
+        let correlation_uuid =
+            uuid::Uuid::parse_str(&correlation_reference).expect("UUIDv7 correlation reference");
+        assert_eq!(correlation_uuid.get_version_num(), 7);
+        let provider_diagnostic = provider_error.to_string();
+        let failure = runtime_failure(OperationId::generate(), None, provider_error);
+        let safe_host_failure = String::from(failure.message);
+
+        assert_eq!(failure.provider_code, Some(i64::from(provider_code)));
+        assert!(
+            trace_output.contains(&format!("provider_code={provider_code}")),
+            "{trace_output}"
+        );
+        assert!(
+            trace_output.contains(&format!("correlation_id={correlation_reference}")),
+            "{trace_output}"
+        );
+        assert!(
+            trace_output.contains(&format!("raw_provider_text=\"{raw_provider_text}\"")),
+            "{trace_output}"
+        );
+        assert!(
+            safe_host_failure.contains(&format!("provider code {provider_code}")),
+            "{safe_host_failure}"
+        );
+        assert!(safe_host_failure.contains(&correlation_reference));
+        assert!(!provider_diagnostic.contains(raw_provider_text));
+        assert!(!provider_diagnostic.contains("provider data sentinel"));
+        assert!(!safe_host_failure.contains(raw_provider_text));
+        assert!(!safe_host_failure.contains("provider data sentinel"));
     }
 }
 
@@ -864,10 +1036,15 @@ async fn unknown_agent_stop_reason_settles_with_typed_value() {
 
 #[test]
 fn provider_session_not_found_failure_has_typed_guidance_and_code() {
+    let correlation_id = acp_client_runtime::ProviderErrorCorrelationId::generate();
+    let correlation_reference = correlation_id.to_string();
     let failure = runtime_failure(
         OperationId::generate(),
         None,
-        ExternalProviderRuntimeError::ProviderSessionNotFound { code: -32002 },
+        ExternalProviderRuntimeError::ProviderSessionNotFound {
+            code: -32002,
+            correlation_id,
+        },
     );
 
     assert_eq!(
@@ -877,6 +1054,8 @@ fn provider_session_not_found_failure_has_typed_guidance_and_code() {
     assert_eq!(failure.provider_code, Some(-32002));
     assert_eq!(
         String::from(failure.message),
-        "this session never started a turn and did not survive the provider restart; create a new conversation"
+        format!(
+            "this session never started a turn and did not survive the provider restart; create a new conversation (provider code -32002; reference {correlation_reference})"
+        )
     );
 }

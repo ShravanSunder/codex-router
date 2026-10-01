@@ -55,7 +55,7 @@ pub(crate) use provider_client_contract::sanitized_acp_error;
 pub use provider_client_contract::{
     ExternalProviderAdmission, ExternalProviderApprovalRefusalReason,
     ExternalProviderCreatedSession, ExternalProviderLaunch, ExternalProviderPromptOutcome,
-    ExternalProviderRuntimeError, ProviderSessionSummary,
+    ExternalProviderRuntimeError, ProviderErrorCorrelationId, ProviderSessionSummary,
 };
 #[cfg(any(test, feature = "test-observation"))]
 pub use provider_client_contract::{

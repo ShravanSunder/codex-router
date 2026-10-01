@@ -1480,7 +1480,8 @@ async fn authentication_required_is_no_effect_and_does_not_poison_fresh_create()
         classification,
         Err(
             codex_router_host::ExternalProviderRuntimeError::AuthenticationRequired {
-                code: -32000
+                code: -32000,
+                ..
             }
         )
     ) {
