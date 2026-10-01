@@ -243,29 +243,23 @@ fn run_serve_command_with_upkeep_start(
         validate_websocket_registry_report_file(&report_file)?;
         runtime_config = runtime_config.with_websocket_registry_report_file(report_file);
     }
-    let token_reload_watcher = if command.require_local_token {
-        let secret_store =
-            FileSecretStore::open(&secret_root).map_err(TokenCommandError::SecretStore)?;
-        let token_service = LocalRouterTokenService::new(secret_store.clone());
-        let local_token = token_service.load_current()?;
-        let initial_token_generation = local_token.generation();
+    let local_token_store =
+        FileSecretStore::open(&secret_root).map_err(TokenCommandError::SecretStore)?;
+    let token_service = LocalRouterTokenService::new(local_token_store.clone());
+    let local_token = token_service.ensure_local_token(&secret_root)?;
+    let initial_token_generation = local_token.generation();
+    if command.require_local_token {
         runtime_config = runtime_config.with_required_local_token(local_token);
-        Some((secret_store, initial_token_generation))
-    } else {
-        None
-    };
+    }
     if let Some(now_unix_seconds) = command.now_unix_seconds {
         runtime_config =
             runtime_config.with_quota_clock(now_unix_seconds, command.max_snapshot_age_seconds);
     }
     let runtime = LoopbackRouterRuntime::start(runtime_config, credential_store.clone())?;
+    let local_auth_reloader = runtime.local_auth_reloader();
     let _token_reload_watcher =
-        token_reload_watcher.map(|(secret_store, initial_token_generation)| {
-            LocalTokenReloadWatcher::start(
-                secret_store,
-                runtime.local_auth_reloader(),
-                initial_token_generation,
-            )
+        LocalTokenReloadWatcher::start(local_token_store, initial_token_generation, move |auth| {
+            local_auth_reloader.reload_auth(auth)
         });
 
     crate::presentation::host::render_progress_event(

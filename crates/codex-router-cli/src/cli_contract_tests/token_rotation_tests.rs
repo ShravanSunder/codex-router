@@ -1,6 +1,29 @@
 use super::*;
 
 #[test]
+fn local_token_reload_watcher_reports_generation_changes() {
+    let test_root = TestRoot::new("local-token-reload-watcher");
+    must_ok(fs::create_dir(test_root.path()));
+    let secret_root = test_root.path().join("secrets");
+    let secret_store = must_ok(FileSecretStore::open(&secret_root));
+    let token_service = LocalRouterTokenService::new(secret_store.clone());
+    let initial_token = must_ok(token_service.rotate_with_token("watch-token-a"));
+    let (reload_sender, reload_receiver) = std::sync::mpsc::channel();
+    let _watcher =
+        LocalTokenReloadWatcher::start(secret_store, initial_token.generation(), move |auth| {
+            let _send_result = reload_sender.send(auth.current_generation());
+        });
+
+    let rotated_token = must_ok(token_service.rotate_with_token("watch-token-b"));
+    let observed_generation = match reload_receiver.recv_timeout(Duration::from_secs(2)) {
+        Ok(generation) => generation,
+        Err(error) => panic!("watcher should report the new token generation: {error}"),
+    };
+
+    assert_eq!(observed_generation, rotated_token.generation());
+}
+
+#[test]
 #[allow(clippy::result_large_err)]
 fn serve_command_reloads_token_rotation_without_restart() {
     let test_root = TestRoot::new("serve-command-token-rotation");
