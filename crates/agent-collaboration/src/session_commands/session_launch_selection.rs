@@ -142,17 +142,28 @@ pub(super) fn sessions_launch_target(
     let codex_paths = codex_native_integration::CodexPaths::from_codex_home(codex_home(context)?);
     let _validated_backend = crate::app_server_socket_or_default(context, &codex_paths)
         .map_err(|message| SessionsCommandError::AppServerSocket(message.to_owned()))?;
-    let service_directory = collaboration_client::resolve_service_directory(
-        collaboration_client::ServiceDirectoryOptions {
-            explicit_directory: None,
-            debug_defaults: cfg!(all(debug_assertions, not(test))),
-            use_home_default: context.env_var("CODEX_ROUTER_USE_HOME_DEFAULT").is_some(),
-            debug_router_root: context
-                .env_var("CODEX_ROUTER_DEBUG_ROUTER_ROOT")
-                .map(Into::into),
-            home_directory: context.env_var("HOME").map(Into::into),
-        },
-    )
+    let service_directory = collaboration_service_directory(context)?;
+    let app_server_socket = service_directory.join("codex-native.sock");
+    Ok(SessionsLaunchTarget::Hosted {
+        app_server_socket,
+        service_directory,
+        invoking_cwd,
+        profile,
+    })
+}
+
+pub(super) fn collaboration_service_directory(
+    context: &CliContext,
+) -> Result<PathBuf, SessionsCommandError> {
+    collaboration_client::resolve_service_directory(collaboration_client::ServiceDirectoryOptions {
+        explicit_directory: None,
+        debug_defaults: cfg!(all(debug_assertions, not(test))),
+        use_home_default: context.env_var("CODEX_ROUTER_USE_HOME_DEFAULT").is_some(),
+        debug_router_root: context
+            .env_var("CODEX_ROUTER_DEBUG_ROUTER_ROOT")
+            .map(Into::into),
+        home_directory: context.env_var("HOME").map(Into::into),
+    })
     .map_err(|error| {
         let message = match error {
             collaboration_client::ServiceDirectoryError::AbsoluteHomeRequired
@@ -167,13 +178,6 @@ pub(super) fn sessions_launch_target(
             other => other.to_string(),
         };
         SessionsCommandError::AppServerSocket(message)
-    })?;
-    let app_server_socket = service_directory.join("codex-native.sock");
-    Ok(SessionsLaunchTarget::Hosted {
-        app_server_socket,
-        service_directory,
-        invoking_cwd,
-        profile,
     })
 }
 

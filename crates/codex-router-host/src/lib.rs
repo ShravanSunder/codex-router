@@ -7,7 +7,10 @@ pub use live_session_ownership_check::{LiveSessionOwnership, LiveSessionOwnershi
 mod app_server_shutdown;
 mod child_diagnostics;
 mod claude_code_peer_delivery_route;
+mod claude_provider_launch_environment;
 mod codex_conversation_recording_composition;
+#[cfg(test)]
+mod host_manifest_publication_tests;
 pub use claude_code_peer_delivery_route::ClaudeCodePeerDeliveryRoute;
 mod claude_code_peer_scheduled_runs;
 mod codex_update_preparation;
@@ -140,6 +143,7 @@ pub use router_executable_observation::{RouterExecutableObserver, RouterExecutab
 mod backend_publication;
 pub use backend_publication::BackendPublication;
 mod collaboration_runtime;
+pub(crate) use collaboration_runtime::HostCollaborationInputs;
 pub use collaboration_runtime::{
     BackendSchemaEvidence, CollaborationRuntime, CollaborationRuntimeInputs,
     ExternalProviderLaunchBinding,

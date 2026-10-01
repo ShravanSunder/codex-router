@@ -9,7 +9,7 @@ use collaboration_service::{
     LocalControlService, NativeRelayListener, ServiceIdentity, load_service_identity,
     new_service_uuid,
 };
-use std::{io, path::PathBuf};
+use std::{io, net::SocketAddr, path::PathBuf};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
@@ -25,6 +25,12 @@ pub struct CollaborationRuntimeInputs {
     pub peer_registry_directory: Option<PathBuf>,
     /// Remote Control machine name observed when this Host started.
     pub remote_control_server_name: Option<RemoteControlServerName>,
+}
+
+/// Host-owned startup facts that are not part of the public collaboration runtime inputs.
+pub(crate) struct HostCollaborationInputs {
+    pub collaboration_runtime: CollaborationRuntimeInputs,
+    pub router_proxy_endpoint: SocketAddr,
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExternalProviderLaunchBinding {
@@ -188,6 +194,35 @@ impl CollaborationRuntime {
         inputs: CollaborationRuntimeInputs,
         provider_launches: Vec<crate::ExternalProviderStartup>,
         relation_receiver: tokio::sync::watch::Receiver<RouterExecutableRelation>,
+    ) -> io::Result<Self> {
+        Self::start_with_optional_router_proxy_endpoint(
+            inputs,
+            provider_launches,
+            relation_receiver,
+            None,
+        )
+        .await
+    }
+
+    pub(crate) async fn start_for_host_with_router_proxy_endpoint(
+        host_inputs: HostCollaborationInputs,
+        provider_launches: Vec<crate::ExternalProviderStartup>,
+        relation_receiver: tokio::sync::watch::Receiver<RouterExecutableRelation>,
+    ) -> io::Result<Self> {
+        Self::start_with_optional_router_proxy_endpoint(
+            host_inputs.collaboration_runtime,
+            provider_launches,
+            relation_receiver,
+            Some(host_inputs.router_proxy_endpoint),
+        )
+        .await
+    }
+
+    async fn start_with_optional_router_proxy_endpoint(
+        inputs: CollaborationRuntimeInputs,
+        provider_launches: Vec<crate::ExternalProviderStartup>,
+        relation_receiver: tokio::sync::watch::Receiver<RouterExecutableRelation>,
+        router_proxy_endpoint: Option<SocketAddr>,
     ) -> io::Result<Self> {
         let mut owner_human_id = inputs.owner_human_id.clone();
         let service_id = load_service_identity(&inputs.directory)?;
@@ -591,6 +626,7 @@ impl CollaborationRuntime {
                     transport: collaboration_protocol::McpTransport::StreamableHttp,
                     url: mcp_url,
                 },
+                router_proxy_endpoint,
             },
         )?;
         let shutdown = CancellationToken::new();

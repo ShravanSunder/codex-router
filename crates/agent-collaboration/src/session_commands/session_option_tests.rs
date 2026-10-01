@@ -43,6 +43,44 @@ fn list_sessions_preserves_default_cwd_and_explicit_checkout() {
 }
 
 #[test]
+fn claude_provider_selects_list_new_and_resume_modes() {
+    let list = SessionsCommand::parse(vec![
+        "--provider".into(),
+        "claude".into(),
+        "--list".into(),
+        "--format".into(),
+        "json".into(),
+    ])
+    .expect("Claude list command");
+    assert_eq!(list.provider, SessionsProvider::ClaudeCode);
+    assert!(list.list);
+
+    let new = SessionsCommand::parse(vec!["--provider".into(), "claude".into(), "--new".into()])
+        .expect("Claude new command");
+    assert!(new.new);
+
+    let resume = SessionsCommand::parse(vec![
+        "--provider".into(),
+        "claude".into(),
+        "--id".into(),
+        "018f47d2-24d5-7a68-b9ec-6f759c39458f".into(),
+    ])
+    .expect("Claude resume command");
+    assert_eq!(
+        resume.id.as_deref(),
+        Some("018f47d2-24d5-7a68-b9ec-6f759c39458f")
+    );
+}
+
+#[test]
+fn claude_provider_requires_an_explicit_list_new_or_resume_mode() {
+    let error = SessionsCommand::parse(vec!["--provider".into(), "claude".into()])
+        .expect_err("Claude target needs an explicit action");
+
+    assert!(error.contains("--list, --new, or --id"), "{error}");
+}
+
+#[test]
 fn include_empty_sessions_is_an_explicit_picker_and_list_opt_in() {
     let command = SessionsCommand::parse(vec!["--include-empty-sessions".into()])
         .expect("empty sessions can be explicitly included in the picker");

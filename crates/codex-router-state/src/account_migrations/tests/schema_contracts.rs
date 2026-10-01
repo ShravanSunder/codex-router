@@ -26,6 +26,9 @@ async fn fresh_account_database_has_generation_scoped_credential_maintenance() {
             "next_attempt_unix_seconds",
             "claimed_successor_generation",
             "consecutive_failures",
+            "claim_purpose",
+            "claim_started_unix_seconds",
+            "claim_prior_state",
         ]
     );
 }
@@ -67,11 +70,31 @@ async fn populated_native_baseline_requires_writable_upgrade_and_preserves_accou
         .find(|migration| migration.version == 202609250001)
         .expect("credential maintenance migration")
         .version;
-    sqlx::query("DELETE FROM _sqlx_migrations WHERE version = ?1")
-        .bind(maintenance_version)
+    let claim_purpose_version = MIGRATOR
+        .iter()
+        .find(|migration| migration.version == 202609300001)
+        .expect("credential claim purpose migration")
+        .version;
+    let observation_fresh_until_version = MIGRATOR
+        .iter()
+        .find(|migration| migration.version == 202609300002)
+        .expect("window observation freshness migration")
+        .version;
+    sqlx::query("ALTER TABLE account_window_observations DROP COLUMN fresh_until_unix_seconds")
         .execute(&mut connection)
         .await
-        .expect("new history should be removed for baseline fixture");
+        .expect("freshness column should be removed for baseline fixture");
+    for migration_version in [
+        maintenance_version,
+        claim_purpose_version,
+        observation_fresh_until_version,
+    ] {
+        sqlx::query("DELETE FROM _sqlx_migrations WHERE version = ?1")
+            .bind(migration_version)
+            .execute(&mut connection)
+            .await
+            .expect("new migration history should be removed for baseline fixture");
+    }
     connection.close().await.expect("fixture should close");
 
     let before = std::fs::read(database_path).expect("database bytes should read");

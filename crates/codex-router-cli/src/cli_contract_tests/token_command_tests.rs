@@ -12,23 +12,6 @@ fn token_export_is_single_assignment_without_prose() {
 }
 
 #[test]
-fn token_service_rotates_through_real_secret_store() {
-    let test_root = TestRoot::new("service");
-    let store = must_ok(FileSecretStore::open(test_root.path()));
-    let service = LocalRouterTokenService::new(store);
-
-    let first = must_ok(service.rotate_with_token("first-token"));
-    let second = must_ok(service.rotate_with_token("second-token"));
-
-    assert_eq!(first.generation().as_u64(), 1);
-    assert_eq!(second.generation().as_u64(), 2);
-
-    let loaded = must_ok(service.load_current());
-    assert_eq!(loaded.token().expose_secret(), "second-token");
-    assert_eq!(loaded.generation().as_u64(), 2);
-}
-
-#[test]
 fn token_export_and_profile_doctor_redact_router_token_value() {
     let test_root = TestRoot::new("token-export-profile-doctor");
     let store = must_ok(FileSecretStore::open(test_root.path()));

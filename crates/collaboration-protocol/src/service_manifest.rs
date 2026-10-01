@@ -1,6 +1,7 @@
 //! Versioned owner-local service discovery contract.
 use crate::{MachineLabel, SchemaDigest, UuidIdentity};
 use serde::{Deserialize, Serialize};
+use std::net::SocketAddr;
 
 #[derive(schemars::JsonSchema, Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum ControlTransport {
@@ -41,6 +42,9 @@ pub struct ServiceManifest {
     pub control: ControlSelector,
     pub control_schema_digest: SchemaDigest,
     pub mcp: McpSelector,
+    /// Router model-proxy listener used for Claude Code routed launches.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub router_proxy_endpoint: Option<SocketAddr>,
 }
 fn read_version<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<u8, D::Error> {
     let version = u8::deserialize(deserializer)?;
@@ -55,8 +59,8 @@ mod tests {
     use super::ServiceManifest;
     use serde_json::json;
 
-    fn manifest(version: u8) -> serde_json::Value {
-        json!({
+    fn manifest(version: u8, router_proxy_endpoint: Option<&str>) -> serde_json::Value {
+        let mut value = json!({
             "version":version,
             "serviceId":"00000000-0000-4000-8000-000000000001",
             "machineLabel":"test-machine",
@@ -64,15 +68,48 @@ mod tests {
             "control":{"transport":"unixJsonLines","path":"control.sock"},
             "controlSchemaDigest":format!("sha256:{}", "a".repeat(64)),
             "mcp":{"transport":"streamableHttp","url":"http://127.0.0.1:8788/mcp"}
-        })
+        });
+        if let Some(endpoint) = router_proxy_endpoint {
+            value["routerProxyEndpoint"] = json!(endpoint);
+        }
+        value
     }
 
     #[test]
     fn strict_v2_manifest_rejects_version_skew() {
-        assert!(serde_json::from_value::<ServiceManifest>(manifest(2)).is_ok());
-        let error = serde_json::from_value::<ServiceManifest>(manifest(1))
+        assert!(serde_json::from_value::<ServiceManifest>(manifest(2, None)).is_ok());
+        let error = serde_json::from_value::<ServiceManifest>(manifest(1, None))
             .expect_err("version one must be rejected")
             .to_string();
         assert!(error.contains("unsupported manifest version"));
+    }
+
+    #[test]
+    fn optional_router_proxy_endpoint_round_trips_a_custom_port() {
+        let value = manifest(2, Some("127.0.0.1:18787"));
+        let parsed: ServiceManifest =
+            serde_json::from_value(value.clone()).expect("manifest with Router proxy endpoint");
+
+        assert_eq!(
+            parsed.router_proxy_endpoint,
+            Some("127.0.0.1:18787".parse().expect("socket address"))
+        );
+        assert_eq!(
+            serde_json::to_value(parsed).expect("serialize manifest"),
+            value
+        );
+    }
+
+    #[test]
+    fn omitted_router_proxy_endpoint_round_trips_as_absent() {
+        let value = manifest(2, None);
+        let parsed: ServiceManifest =
+            serde_json::from_value(value.clone()).expect("manifest without Router proxy endpoint");
+
+        assert_eq!(parsed.router_proxy_endpoint, None);
+        assert_eq!(
+            serde_json::to_value(parsed).expect("serialize manifest"),
+            value
+        );
     }
 }

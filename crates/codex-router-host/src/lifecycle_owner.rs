@@ -155,6 +155,9 @@ pub enum HostError {
     /// Router-root secret path could not be derived for the startup migration.
     #[error("router secret root is unavailable for the credential migration")]
     RouterSecretRootUnavailable,
+    /// Local Router token could not be created or loaded before owned Router startup.
+    #[error("the local Router token could not be ensured: {0}")]
+    LocalRouterToken(#[from] codex_router_secret_store::local_router_token::LocalRouterTokenError),
     /// An existing listener requires unsupported local authentication.
     #[error("the configured Codex router requires unsupported local authentication")]
     RouterAuthenticationRequired,

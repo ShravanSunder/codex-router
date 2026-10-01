@@ -1,6 +1,6 @@
 # Release Notes
 
-## Unreleased - 2026-09-24
+## Unreleased - 2026-09-30
 
 - Provider setting rejection errors now name the setting, requested value, and advertised choices; display truncation is marked with an ellipsis.
 - Hide empty sessions from the picker by default.
@@ -22,9 +22,6 @@
 - Use one CLI and MCP conversation surface for Codex, Claude, and Cursor, including create, prompt, load, and operation inspection. Claude and Cursor can cancel one exact operation; Codex directs callers to turn interrupt. Provider operations retain caller IDs and report completed or pending work.
 - Route messages, wakes, listen pushes, approvals, and scheduled runs through the selected Codex, provider ACP, or live Claude Code peer route. Delivery receipts expose the observed outcome and reachability; `peerMessageWritten` confirms a socket write, not a peer reply.
 - Preserve Codex create-then-message across frontend closure while the Host remains running. Provider schedules run on existing sessions and finish from provider settlement without a summary.
-
-## 0.1.57 - 2026-10-01
-
 - **Breaking:** remove CLI `board thread listen` and MCP `board_thread_listen` and its control tools; use per-thread subscriptions and poll-mode `board thread wait` instead.
 - Persist thread and topic subscription policies, lifecycle, per-root batching windows, and backfill eligible existing participants. Migration `202609170001` was rewritten in place: local or debug board databases that applied the earlier branch version fail with `InvalidSchema` and may need to be deleted; production databases are unaffected.
 - Subscribe participants when they join a watched thread, batch thread activity, and hold thread notices or DMs for targets that are not running. Store Router pushes as 30-day `router://` records and fetch them with `agent-collaboration show`.
@@ -35,6 +32,13 @@
 - Publish the generic `overloaded` admission error for message send/reply/inbox/history and `router/show`, matching rejection before route dispatch.
 - Watching or subscribing to a topic with no board activity yet now works and covers the first later thread; existing watch rows are preserved.
 - Retry known-rejected Provider ACP scheduled-run submissions with the same stored push id, leaving the run available for another attempt.
+
+## 0.1.57 - 2026-10-01
+
+- Add Claude account login with `codex-router account login --provider claude` and show five-hour and weekly usage in `codex-router quota status`.
+- Route new and resumed Claude Code sessions through Router's pooled accounts with `agent-sessions --provider claude`. Claude no-account responses explain unavailable credentials, accounts that need login, usage limits with reset hints, and accounts held by quota floors or stale weekly observations.
+- Bound OpenAI device login with a 5-second minimum poll interval, a 15-minute overall limit, and 30-second HTTP request timeouts.
+- Assess every account against one clock instant per selection to prevent account-order drift at second boundaries.
 
 ## 0.1.54 - 2026-09-30
 

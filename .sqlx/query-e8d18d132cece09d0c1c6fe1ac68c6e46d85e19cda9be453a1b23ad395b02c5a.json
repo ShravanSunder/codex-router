@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO session_account_affinities (\n                 provider, session_id, account_id, last_seen_unix_seconds, pin_version\n             )\n             SELECT ?1, ?2, ?3, ?4, ?5\n              WHERE (\n                    (?6 = 0 AND ?7 IS NULL\n                        AND NOT EXISTS (\n                            SELECT 1 FROM session_account_affinities\n                             WHERE provider = ?1 AND session_id = ?2\n                        ))\n                    OR EXISTS (\n                        SELECT 1 FROM session_account_affinities AS observed\n                         WHERE observed.provider = ?1 AND observed.session_id = ?2\n                           AND observed.pin_version = ?6\n                           AND (\n                               (?7 IS NULL AND (\n                                   observed.account_id IS NULL\n                                   OR (?4 >= ?8 AND observed.last_seen_unix_seconds <= ?4 - ?8)\n                               ))\n                               OR (?7 IS NOT NULL AND observed.account_id = ?7\n                                   AND (?4 < ?8 OR observed.last_seen_unix_seconds > ?4 - ?8))\n                           )\n                    )\n              )\n             ON CONFLICT(provider, session_id) DO UPDATE SET\n                 account_id = excluded.account_id,\n                 last_seen_unix_seconds = MAX(\n                     session_account_affinities.last_seen_unix_seconds,\n                     excluded.last_seen_unix_seconds\n                 ),\n                 pin_version = excluded.pin_version\n             WHERE session_account_affinities.pin_version = ?6\n               AND (\n                   (?7 IS NULL AND (\n                       session_account_affinities.account_id IS NULL\n                       OR (?4 >= ?8\n                           AND session_account_affinities.last_seen_unix_seconds <= ?4 - ?8)\n                   ))\n                   OR (?7 IS NOT NULL\n                       AND session_account_affinities.account_id = ?7\n                       AND (?4 < ?8\n                           OR session_account_affinities.last_seen_unix_seconds > ?4 - ?8))\n               )",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 8
+    },
+    "nullable": []
+  },
+  "hash": "e8d18d132cece09d0c1c6fe1ac68c6e46d85e19cda9be453a1b23ad395b02c5a"
+}

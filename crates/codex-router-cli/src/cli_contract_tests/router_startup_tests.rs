@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn serve_command_starts_runtime_and_forwards_one_loopback_request() {
+fn serve_provisions_local_token_and_keeps_codex_optional() {
     let test_root = TestRoot::new("serve-command");
     must_ok(fs::create_dir(test_root.path()));
     let state_path = test_root.path().join("state.sqlite");
@@ -94,6 +94,9 @@ fn serve_command_starts_runtime_and_forwards_one_loopback_request() {
             .contains(format!("listening: 127.0.0.1:{router_port}\n").as_str())
     );
     assert!(output.stderr.is_empty());
+    let token_store = must_ok(FileSecretStore::open(&secret_root));
+    let local_token = must_ok(LocalRouterTokenService::new(token_store).load_current());
+    assert_eq!(local_token.generation().as_u64(), 1);
     let client_response = match client_thread.join() {
         Ok(response) => response,
         Err(error) => panic!("client thread panicked: {error:?}"),

@@ -1,6 +1,6 @@
 //! Reloads local authentication when the stored token generation changes.
 use crate::token::LocalRouterTokenService;
-use codex_router_proxy::server::LocalAuthReloader;
+use codex_router_core::local_auth::LocalRouterAuth;
 use codex_router_secret_store::file_backend::FileSecretStore;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -15,8 +15,8 @@ pub(super) struct LocalTokenReloadWatcher {
 impl LocalTokenReloadWatcher {
     pub(super) fn start(
         secret_store: FileSecretStore,
-        reloader: LocalAuthReloader,
         initial_generation: codex_router_core::ids::TokenGeneration,
+        reload_auth: impl Fn(LocalRouterAuth) + Send + 'static,
     ) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let stop_for_thread = Arc::clone(&stop);
@@ -31,7 +31,7 @@ impl LocalTokenReloadWatcher {
                 };
                 let current_generation = auth.current_generation();
                 if current_generation != last_generation {
-                    reloader.reload_auth(auth);
+                    reload_auth(auth);
                     last_generation = current_generation;
                 }
             }
