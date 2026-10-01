@@ -35,6 +35,7 @@ async fn whoami_displays_service_id_and_machine_label_in_text_and_json() {
             transport: McpTransport::StreamableHttp,
             url: "http://127.0.0.1:8788/mcp".to_owned(),
         },
+        router_proxy_endpoint: None,
     };
     let publication =
         ManifestPublication::publish(root.path(), &manifest).expect("service manifest");

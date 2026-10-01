@@ -476,6 +476,7 @@ async fn active_inventory_uses_the_existing_claude_local_discovery() {
             mcp_bind: "127.0.0.1:0".parse().expect("MCP bind"),
             native_schema: None,
             peer_registry_directory: Some(peer_registry_directory),
+            remote_control_server_name: None,
             owner_human_id: None,
         },
         vec![claude_endpoint],
