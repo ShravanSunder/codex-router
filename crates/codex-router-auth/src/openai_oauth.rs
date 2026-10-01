@@ -18,6 +18,8 @@ const OPENAI_OAUTH_ISSUER: &str = "https://auth.openai.com";
 pub(crate) const OPENAI_OAUTH_TOKEN_ENDPOINT: &str = "https://auth.openai.com/oauth/token";
 pub(crate) const OPENAI_OAUTH_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 const OPENAI_DEVICE_CODE_MAX_WAIT: Duration = Duration::from_secs(15 * 60);
+const OPENAI_DEVICE_CODE_MIN_POLL_INTERVAL: Duration = Duration::from_secs(5);
+const OPENAI_OAUTH_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// A user-visible device code and the opaque issuer value required to poll it.
 pub struct OpenAiDeviceCode {
@@ -169,7 +171,7 @@ pub struct OpenAiOAuthDeviceLoginClient {
     token_endpoint: String,
     redirect_uri: String,
     verification_url: String,
-    http_client: reqwest::Client,
+    http_client: Option<reqwest::Client>,
     max_poll_duration: Duration,
 }
 
@@ -181,6 +183,7 @@ impl OpenAiOAuthDeviceLoginClient {
             OPENAI_OAUTH_ISSUER,
             OPENAI_OAUTH_TOKEN_ENDPOINT,
             OPENAI_DEVICE_CODE_MAX_WAIT,
+            OPENAI_OAUTH_REQUEST_TIMEOUT,
         )
     }
 
@@ -191,16 +194,35 @@ impl OpenAiOAuthDeviceLoginClient {
         issuer_base_url: impl Into<String>,
         max_poll_duration: Duration,
     ) -> Self {
+        Self::with_test_issuer_and_request_timeout(
+            issuer_base_url,
+            max_poll_duration,
+            OPENAI_OAUTH_REQUEST_TIMEOUT,
+        )
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    fn with_test_issuer_and_request_timeout(
+        issuer_base_url: impl Into<String>,
+        max_poll_duration: Duration,
+        request_timeout: Duration,
+    ) -> Self {
         let issuer_base_url = issuer_base_url.into();
         let issuer_base_url = issuer_base_url.trim_end_matches('/');
         let token_endpoint = format!("{issuer_base_url}/oauth/token");
-        Self::for_issuer(issuer_base_url, &token_endpoint, max_poll_duration)
+        Self::for_issuer(
+            issuer_base_url,
+            &token_endpoint,
+            max_poll_duration,
+            request_timeout,
+        )
     }
 
     fn for_issuer(
         issuer_base_url: &str,
         token_endpoint: &str,
         max_poll_duration: Duration,
+        request_timeout: Duration,
     ) -> Self {
         let issuer_base_url = issuer_base_url.trim_end_matches('/').to_owned();
         let accounts_base_url = format!("{issuer_base_url}/api/accounts");
@@ -212,7 +234,10 @@ impl OpenAiOAuthDeviceLoginClient {
             token_endpoint: token_endpoint.to_owned(),
             redirect_uri,
             verification_url,
-            http_client: reqwest::Client::new(),
+            http_client: reqwest::Client::builder()
+                .timeout(request_timeout)
+                .build()
+                .ok(),
             max_poll_duration,
         }
     }
@@ -227,11 +252,15 @@ impl OpenAiOAuthDeviceLoginClient {
         };
         let request_body = serde_json::to_vec(&request)
             .map_err(|_| OpenAiOAuthDeviceLoginError::InvalidUserCodeResponse)?;
+        let http_client = self
+            .http_client
+            .as_ref()
+            .ok_or(OpenAiOAuthDeviceLoginError::UserCodeTransportFailure)?;
         let response = tokio::select! {
             () = cancellation.cancelled() => {
                 return Err(OpenAiOAuthDeviceLoginError::Cancelled);
             }
-            response = self.http_client
+            response = http_client
                 .post(format!("{}/deviceauth/usercode", self.accounts_base_url))
                 .header(reqwest::header::CONTENT_TYPE, "application/json")
                 .body(request_body)
@@ -266,7 +295,8 @@ impl OpenAiOAuthDeviceLoginClient {
             verification_url: self.verification_url.clone(),
             user_code: response.user_code,
             device_auth_id: SecretString::new(response.device_auth_id),
-            poll_interval: Duration::from_secs(response.interval),
+            poll_interval: Duration::from_secs(response.interval)
+                .max(OPENAI_DEVICE_CODE_MIN_POLL_INTERVAL),
         })
     }
 
@@ -286,11 +316,15 @@ impl OpenAiOAuthDeviceLoginClient {
             client_id: OPENAI_OAUTH_CLIENT_ID,
             code_verifier: &authorization.code_verifier,
         };
+        let http_client = self
+            .http_client
+            .as_ref()
+            .ok_or(OpenAiOAuthDeviceLoginError::TokenExchangeTransportFailure)?;
         let response = tokio::select! {
             () = cancellation.cancelled() => {
                 return Err(OpenAiOAuthDeviceLoginError::Cancelled);
             }
-            response = self.http_client
+            response = http_client
                 .post(&self.token_endpoint)
                 .form(&request)
                 .send() => response.map_err(|_| OpenAiOAuthDeviceLoginError::TokenExchangeTransportFailure)?,
@@ -334,6 +368,10 @@ impl OpenAiOAuthDeviceLoginClient {
         cancellation: &CancellationToken,
     ) -> Result<AuthorizationCodeResponse, OpenAiOAuthDeviceLoginError> {
         let started_at = Instant::now();
+        let http_client = self
+            .http_client
+            .as_ref()
+            .ok_or(OpenAiOAuthDeviceLoginError::PollTransportFailure)?;
         loop {
             let request = TokenPollRequest {
                 device_auth_id: device_code.device_auth_id.expose_secret(),
@@ -345,7 +383,7 @@ impl OpenAiOAuthDeviceLoginClient {
                 () = cancellation.cancelled() => {
                     return Err(OpenAiOAuthDeviceLoginError::Cancelled);
                 }
-                response = self.http_client
+                response = http_client
                     .post(format!("{}/deviceauth/token", self.accounts_base_url))
                     .header(reqwest::header::CONTENT_TYPE, "application/json")
                     .body(request_body)

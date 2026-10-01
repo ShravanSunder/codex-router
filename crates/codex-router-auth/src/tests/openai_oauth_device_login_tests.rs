@@ -117,6 +117,119 @@ async fn device_login_matches_upstream_requests_and_exchanges_pkce_verifier() {
 }
 
 #[tokio::test]
+async fn device_code_poll_interval_defaults_to_five_seconds_and_honors_positive_values() {
+    for (response_body, expected_interval) in [
+        (
+            r#"{"device_auth_id":"device-auth-id","user_code":"ABCD-EFGH"}"#,
+            std::time::Duration::from_secs(5),
+        ),
+        (
+            r#"{"device_auth_id":"device-auth-id","user_code":"ABCD-EFGH","interval":"0"}"#,
+            std::time::Duration::from_secs(5),
+        ),
+        (
+            r#"{"device_auth_id":"device-auth-id","user_code":"ABCD-EFGH","interval":"7"}"#,
+            std::time::Duration::from_secs(7),
+        ),
+    ] {
+        let issuer = FakeDeviceIssuer::spawn(vec![FakeResponse::json(200, response_body)]).await;
+        let client = OpenAiOAuthDeviceLoginClient::with_test_issuer(
+            issuer.base_url(),
+            std::time::Duration::from_secs(60),
+        );
+        let cancellation = CancellationToken::new();
+
+        let device_code = client
+            .request_user_code(&cancellation)
+            .await
+            .expect("user-code response should succeed");
+
+        assert_eq!(device_code.poll_interval, expected_interval);
+        assert_eq!(issuer.finish().await.len(), 1);
+    }
+}
+
+#[tokio::test]
+async fn stalled_device_code_poll_maps_timeout_to_poll_transport_failure() {
+    let (poll_received_sender, poll_received) = oneshot::channel();
+    let issuer = FakeDeviceIssuer::spawn(vec![
+        FakeResponse::json(
+            200,
+            r#"{"device_auth_id":"device-auth-id","user_code":"ABCD-EFGH","interval":"1"}"#,
+        ),
+        FakeResponse::stall_and_notify(poll_received_sender),
+    ])
+    .await;
+    let client = OpenAiOAuthDeviceLoginClient::with_test_issuer_and_request_timeout(
+        issuer.base_url(),
+        std::time::Duration::from_secs(60),
+        std::time::Duration::from_millis(100),
+    );
+    let cancellation = CancellationToken::new();
+    let device_code = client
+        .request_user_code(&cancellation)
+        .await
+        .expect("user-code request should succeed");
+    let complete = client.complete_device_code_login(&device_code, &cancellation);
+    tokio::pin!(complete);
+    let error = tokio::select! {
+        result = &mut complete => panic!("stalled poll completed before its timeout: {result:?}"),
+        result = poll_received => {
+            result.expect("fake issuer should receive the stalled poll");
+            tokio::time::timeout(std::time::Duration::from_secs(2), &mut complete)
+                .await
+                .expect("the HTTP client should time out a stalled request")
+                .expect_err("a timed-out poll should fail login")
+        }
+    };
+
+    assert!(matches!(
+        error,
+        OpenAiOAuthDeviceLoginError::PollTransportFailure
+    ));
+    assert_eq!(issuer.finish().await.len(), 2);
+}
+
+#[tokio::test]
+async fn cancellation_interrupts_a_stalled_device_code_poll_before_request_timeout() {
+    let (poll_received_sender, poll_received) = oneshot::channel();
+    let issuer = FakeDeviceIssuer::spawn(vec![
+        FakeResponse::json(
+            200,
+            r#"{"device_auth_id":"device-auth-id","user_code":"ABCD-EFGH","interval":"60"}"#,
+        ),
+        FakeResponse::stall_and_notify(poll_received_sender),
+    ])
+    .await;
+    let client = OpenAiOAuthDeviceLoginClient::with_test_issuer(
+        issuer.base_url(),
+        std::time::Duration::from_secs(900),
+    );
+    let cancellation = CancellationToken::new();
+    let device_code = client
+        .request_user_code(&cancellation)
+        .await
+        .expect("user-code request should succeed");
+    let complete = client.complete_device_code_login(&device_code, &cancellation);
+    tokio::pin!(complete);
+
+    let error = tokio::select! {
+        result = &mut complete => panic!("stalled poll completed before cancellation: {result:?}"),
+        result = poll_received => {
+            result.expect("fake issuer should receive the stalled poll");
+            cancellation.cancel();
+            tokio::time::timeout(std::time::Duration::from_millis(250), &mut complete)
+                .await
+                .expect("cancellation should interrupt the request before its timeout")
+                .expect_err("cancelled poll should stop login")
+        }
+    };
+
+    assert!(matches!(error, OpenAiOAuthDeviceLoginError::Cancelled));
+    assert_eq!(issuer.finish().await.len(), 2);
+}
+
+#[tokio::test]
 async fn device_login_preserves_issuer_codes_and_trims_exchanged_tokens() {
     let issuer = FakeDeviceIssuer::spawn(vec![
         FakeResponse::json(
@@ -421,6 +534,14 @@ impl FakeDeviceIssuer {
                     .lock()
                     .expect("request recording lock")
                     .push(request);
+                if response.stall_after_request {
+                    if let Some(notification) = response.notification {
+                        let _ = notification.send(());
+                    }
+                    let mut client_close = [0_u8; 1];
+                    let _ = stream.read(&mut client_close).await;
+                    continue;
+                }
                 let response_bytes = format!(
                     "HTTP/1.1 {} {}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
                     response.status,
@@ -466,6 +587,7 @@ struct FakeResponse {
     reason: &'static str,
     body: String,
     notification: Option<oneshot::Sender<()>>,
+    stall_after_request: bool,
 }
 
 impl FakeResponse {
@@ -482,6 +604,17 @@ impl FakeResponse {
             reason,
             body: body.into(),
             notification: None,
+            stall_after_request: false,
+        }
+    }
+
+    fn stall_and_notify(notification: oneshot::Sender<()>) -> Self {
+        Self {
+            status: 200,
+            reason: "OK",
+            body: String::new(),
+            notification: Some(notification),
+            stall_after_request: true,
         }
     }
 
