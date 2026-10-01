@@ -97,6 +97,19 @@ async fn run_acceptance(root: &IsolatedAcceptanceRoot) -> Result<(), Box<dyn std
         "new session response",
     )?;
     let new_requests = take_phase_requests(&upstream, |request| request.contains_new_prompt)?;
+    let accept_encoding_values = new_requests
+        .iter()
+        .map(|request| {
+            if request.accept_encoding.is_empty() {
+                "<absent>".to_owned()
+            } else {
+                request.accept_encoding.join(" | ")
+            }
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    eprintln!(
+        "Real Claude Code Accept-Encoding observed by the fake upstream: {accept_encoding_values:?}"
+    );
     ensure(
         new_requests
             .iter()
@@ -113,24 +126,25 @@ async fn run_acceptance(root: &IsolatedAcceptanceRoot) -> Result<(), Box<dyn std
     .await?;
     assert_client_success(&list_output, "agent-sessions stored-session listing")?;
     let session_id = first_session_id(&list_output.stdout)?;
-
-    let resume_output = run_agent_sessions(
-        &agent_sessions,
-        root,
-        [
-            "--provider",
-            "claude",
-            "--id",
-            &session_id,
-            "--",
-            "--print",
-            "--output-format",
-            "json",
-            RESUME_PROMPT_MARKER,
-        ],
-        None,
-    )
-    .await?;
+    let resume_arguments = [
+        "--provider",
+        "claude",
+        "--id",
+        &session_id,
+        "--",
+        "--print",
+        "--output-format",
+        "json",
+        RESUME_PROMPT_MARKER,
+    ];
+    let resume_output = if listed_session_has_working_directory(&list_output.stdout, &session_id)? {
+        run_agent_sessions_from(&agent_sessions, root, &root.home, resume_arguments, None).await?
+    } else {
+        eprintln!(
+            "Claude session listing omitted workingDirectory; resume acceptance keeps the invoking project directory"
+        );
+        run_agent_sessions(&agent_sessions, root, resume_arguments, None).await?
+    };
     assert_client_success(&resume_output, "real Claude Code resume")?;
     assert_output_contains(
         &resume_output,
@@ -338,10 +352,20 @@ async fn run_agent_sessions<const N: usize>(
     arguments: [&str; N],
     path_override: Option<&Path>,
 ) -> Result<Output, Box<dyn std::error::Error>> {
+    run_agent_sessions_from(binary, root, &root.workspace, arguments, path_override).await
+}
+
+async fn run_agent_sessions_from<const N: usize>(
+    binary: &Path,
+    root: &IsolatedAcceptanceRoot,
+    working_directory: &Path,
+    arguments: [&str; N],
+    path_override: Option<&Path>,
+) -> Result<Output, Box<dyn std::error::Error>> {
     let mut command = Command::new(binary);
     command
         .args(arguments)
-        .current_dir(&root.workspace)
+        .current_dir(working_directory)
         .envs(root.isolated_client_environment())
         .env(
             "PATH",
@@ -397,6 +421,20 @@ fn first_session_id(output: &[u8]) -> Result<String, Box<dyn std::error::Error>>
         .and_then(Value::as_str)
         .map(str::to_owned)
         .ok_or_else(|| "agent-sessions did not list the stored Claude session".into())
+}
+
+fn listed_session_has_working_directory(
+    output: &[u8],
+    session_id: &str,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    let records: Value = serde_json::from_slice(output)?;
+    Ok(records
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|record| record.get("sessionId").and_then(Value::as_str) == Some(session_id))
+        .filter_map(|record| record.get("workingDirectory").and_then(Value::as_str))
+        .any(|working_directory| Path::new(working_directory).is_absolute()))
 }
 
 fn take_phase_requests(

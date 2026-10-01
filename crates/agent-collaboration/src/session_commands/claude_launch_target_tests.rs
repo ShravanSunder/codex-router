@@ -242,12 +242,19 @@ async fn new_and_resume_commands_set_routed_environment_on_child_command_only() 
     let new_command = launch_target.command(
         None,
         &[OsString::from("--verbose")],
+        None,
         RoutedClaudeEnvironment {
             base_url: routed_environment.base_url.clone(),
             auth_token: routed_environment.auth_token.clone(),
         },
     );
-    let resume_command = launch_target.command(Some(SESSION_ID), &[], routed_environment);
+    let recorded_working_directory = PathBuf::from("/repo/project");
+    let resume_command = launch_target.command(
+        Some(SESSION_ID),
+        &[],
+        Some(&recorded_working_directory),
+        routed_environment,
+    );
 
     assert_eq!(
         new_command
@@ -262,6 +269,11 @@ async fn new_and_resume_commands_set_routed_environment_on_child_command_only() 
             .map(|argument| argument.to_string_lossy().into_owned())
             .collect::<Vec<_>>(),
         vec!["--resume", SESSION_ID]
+    );
+    assert_eq!(new_command.get_current_dir(), None);
+    assert_eq!(
+        resume_command.get_current_dir(),
+        Some(recorded_working_directory.as_path())
     );
     let mut resume_environment = resume_command
         .get_envs()
@@ -316,6 +328,81 @@ fn stored_transcript_inventory_reads_project_metadata_without_printing_content()
             .find("owner transcript content")
             .is_none()
     );
+}
+
+#[test]
+fn claude_resume_uses_working_directory_present_in_the_existing_listing() {
+    let records = vec![
+        serde_json::json!({
+            "source": "storedTranscript",
+            "sessionId": SESSION_ID,
+            "project": "project-encoded"
+        }),
+        serde_json::json!({
+            "source": "active",
+            "sessionId": SESSION_ID,
+            "workingDirectory": "/repo/original-project"
+        }),
+    ];
+
+    let working_directory = recorded_working_directory(&records, SESSION_ID)
+        .expect("resume uses the recorded listing directory");
+
+    assert_eq!(working_directory, PathBuf::from("/repo/original-project"));
+}
+
+#[test]
+fn claude_resume_without_listed_working_directory_inherits_invoking_directory() {
+    let records = vec![serde_json::json!({
+        "source": "storedTranscript",
+        "sessionId": SESSION_ID,
+        "project": "project-encoded"
+    })];
+
+    assert_eq!(recorded_working_directory(&records, SESSION_ID), None);
+
+    let launch_target = ClaudeLaunchTarget {
+        service_directory: PathBuf::new(),
+        secret_root: PathBuf::new(),
+        claude_projects_directory: None,
+    };
+    let command = launch_target.command(
+        Some(SESSION_ID),
+        &[],
+        recorded_working_directory(&records, SESSION_ID).as_deref(),
+        RoutedClaudeEnvironment {
+            base_url: "http://127.0.0.1:18787/anthropic".to_owned(),
+            auth_token: "router-token-canary".to_owned(),
+        },
+    );
+
+    assert_eq!(command.get_current_dir(), None);
+}
+
+#[tokio::test]
+async fn unreadable_claude_session_listing_keeps_resume_on_invoking_directory() {
+    let home = tempfile::tempdir().expect("Claude home");
+    let projects_path = home.path().join("projects-is-a-file");
+    fs::write(&projects_path, b"not a directory").expect("invalid project inventory path");
+    let launch_target = ClaudeLaunchTarget {
+        service_directory: PathBuf::new(),
+        secret_root: PathBuf::new(),
+        claude_projects_directory: Some(projects_path),
+    };
+
+    let working_directory = launch_target.resume_working_directory(SESSION_ID).await;
+    let command = launch_target.command(
+        Some(SESSION_ID),
+        &[],
+        working_directory.as_deref(),
+        RoutedClaudeEnvironment {
+            base_url: "http://127.0.0.1:18787/anthropic".to_owned(),
+            auth_token: "router-token-canary".to_owned(),
+        },
+    );
+
+    assert_eq!(working_directory, None);
+    assert_eq!(command.get_current_dir(), None);
 }
 
 #[test]

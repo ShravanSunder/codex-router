@@ -119,10 +119,18 @@ impl ClaudeLaunchTarget {
         Ok((records, active_error))
     }
 
+    pub(super) async fn resume_working_directory(&self, session_id: &str) -> Option<PathBuf> {
+        let Ok((records, _active_error)) = self.session_records(usize::MAX).await else {
+            return None;
+        };
+        recorded_working_directory(&records, session_id)
+    }
+
     pub(super) fn command(
         &self,
         session_id: Option<&str>,
         passthrough_arguments: &[OsString],
+        working_directory: Option<&Path>,
         environment: RoutedClaudeEnvironment,
     ) -> Command {
         let mut command = Command::new("claude");
@@ -130,6 +138,9 @@ impl ClaudeLaunchTarget {
             .args(self.launch_arguments(session_id, passthrough_arguments))
             .env(ANTHROPIC_BASE_URL_ENV, environment.base_url)
             .env(ANTHROPIC_AUTH_TOKEN_ENV, environment.auth_token);
+        if let Some(working_directory) = working_directory {
+            command.current_dir(working_directory);
+        }
         command
     }
 
@@ -406,6 +417,21 @@ fn list_stored_transcript_records(
         }
     }
     Ok(records)
+}
+
+fn recorded_working_directory(records: &[serde_json::Value], session_id: &str) -> Option<PathBuf> {
+    records
+        .iter()
+        .filter(|record| {
+            record.get("sessionId").and_then(serde_json::Value::as_str) == Some(session_id)
+        })
+        .find_map(|record| {
+            record
+                .get("workingDirectory")
+                .and_then(serde_json::Value::as_str)
+                .map(PathBuf::from)
+                .filter(|working_directory| working_directory.is_absolute())
+        })
 }
 
 fn is_canonical_session_uuid(session_id: &str) -> bool {

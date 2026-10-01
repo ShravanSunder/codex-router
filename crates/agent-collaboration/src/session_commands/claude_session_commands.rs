@@ -24,9 +24,17 @@ pub(super) fn run_claude_sessions_command<W: Write>(
         .enable_all()
         .build()
         .map_err(SessionsCommandError::Runtime)?;
+    let working_directory = session_id.and_then(|session_id| {
+        runtime.block_on(launch_target.resume_working_directory(session_id))
+    });
     let environment = runtime.block_on(launch_target.routed_environment())?;
     let status = launch_target
-        .command(session_id, &command.codex_args, environment)
+        .command(
+            session_id,
+            &command.codex_args,
+            working_directory.as_deref(),
+            environment,
+        )
         .status()
         .map_err(|error| {
             SessionsCommandError::ClaudeLaunch(format!("failed to launch Claude Code: {error}"))

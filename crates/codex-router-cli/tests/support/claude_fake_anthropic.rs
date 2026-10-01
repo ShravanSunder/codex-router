@@ -20,6 +20,7 @@ pub(super) struct FakeAnthropicServer {
 
 pub(super) struct ObservedRequest {
     pub(super) path: String,
+    pub(super) accept_encoding: Vec<String>,
     pub(super) has_synthetic_account_token: bool,
     pub(super) contains_new_prompt: bool,
     pub(super) contains_resume_prompt: bool,
@@ -119,6 +120,7 @@ fn run_fake_anthropic_server(
             && request.body.contains(USAGE_LIMIT_PROMPT_MARKER);
         let observation = ObservedRequest {
             path: request.path.clone(),
+            accept_encoding: request.accept_encoding.clone(),
             has_synthetic_account_token: request.authorization.as_deref().is_some_and(|value| {
                 value
                     .strip_prefix("Bearer ")
@@ -165,6 +167,7 @@ fn run_fake_anthropic_server(
 
 struct ParsedRequest {
     path: String,
+    accept_encoding: Vec<String>,
     authorization: Option<String>,
     body: String,
 }
@@ -215,6 +218,7 @@ fn read_request(stream: &mut TcpStream) -> io::Result<ParsedRequest> {
 
     let mut content_length = 0_usize;
     let mut authorization = None;
+    let mut accept_encoding = Vec::new();
     for header in lines {
         let Some((name, value)) = header.split_once(':') else {
             continue;
@@ -225,6 +229,8 @@ fn read_request(stream: &mut TcpStream) -> io::Result<ParsedRequest> {
             })?;
         } else if name.eq_ignore_ascii_case("authorization") {
             authorization = Some(value.trim().to_owned());
+        } else if name.eq_ignore_ascii_case("accept-encoding") {
+            accept_encoding.push(value.trim().to_owned());
         } else if name.eq_ignore_ascii_case("transfer-encoding")
             && value.trim().eq_ignore_ascii_case("chunked")
         {
@@ -262,6 +268,7 @@ fn read_request(stream: &mut TcpStream) -> io::Result<ParsedRequest> {
 
     Ok(ParsedRequest {
         path,
+        accept_encoding,
         authorization,
         body,
     })
