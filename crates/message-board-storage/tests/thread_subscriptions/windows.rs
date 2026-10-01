@@ -1,5 +1,7 @@
 use super::*;
 use sqlx::{Connection, SqliteConnection};
+#[path = "release_tests.rs"]
+mod release_tests;
 
 fn policy_patch(
     mode: Option<SubscriptionMode>,

@@ -8,6 +8,10 @@ mod automation_retention_worker;
 mod control_service_context;
 pub use automation_retention_worker::AutomationRetentionWorker;
 pub use control_service_context::ServiceIdentity;
+pub use control_service_context::subscription_delivery::{
+    SubscriptionClock, SubscriptionDeliveryService, SubscriptionDeliveryServiceProps,
+    SubscriptionWaitFilter, SubscriptionWaitResult, SystemSubscriptionClock,
+};
 mod endpoint_directory;
 pub use endpoint_directory::{
     EndpointDirectory, EndpointSnapshot, EndpointSubscription, EndpointUpdate,

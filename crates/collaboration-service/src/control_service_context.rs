@@ -1,6 +1,8 @@
 //! Shared service identity and composed dependencies, separate from connection admission.
 use crate::EndpointDirectory;
 use collaboration_protocol::{EndpointAvailability, EndpointDescription, UuidIdentity};
+#[path = "subscription_delivery/mod.rs"]
+pub mod subscription_delivery;
 
 #[derive(Clone)]
 pub struct ServiceIdentity {
