@@ -962,6 +962,7 @@ name = "collaboration-mcp"
 version = "0.1.54"
 dependencies = [
  "agent-collaboration",
+ "automation-storage",
  "bytes",
  "codex-acp-adapter",
  "codex-native-integration",
@@ -976,6 +977,7 @@ dependencies = [
  "hyper-util",
  "jsonschema",
  "message-board",
+ "message-board-storage",
  "reqwest",
  "rmcp",
  "schemars 1.2.2",

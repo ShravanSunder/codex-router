@@ -767,20 +767,23 @@ fn catalog_has_complete_unique_tools_with_resolvable_schemas() {
     let temporary = tempfile::tempdir().expect("temporary directory");
     let server = CollaborationMcpServer::new(temporary.path().to_owned());
     let tools = server.resolved_tools();
-    assert_eq!(tools.len(), 107);
+    assert_eq!(tools.len(), 110);
     let mut names = tools
         .iter()
         .map(|tool| tool.name.as_ref())
         .collect::<Vec<_>>();
     names.sort_unstable();
     names.dedup();
-    assert_eq!(names.len(), 107);
+    assert_eq!(names.len(), 110);
     assert!(names.contains(&"conversation_resume"));
     assert!(names.contains(&"conversation_close"));
     assert!(names.contains(&"provider_sessions_list"));
     assert!(names.contains(&"provider_session_inspect"));
     assert!(names.contains(&"question_list"));
     assert!(names.contains(&"question_answer"));
+    assert!(names.contains(&"board_thread_subscribe"));
+    assert!(names.contains(&"board_thread_unsubscribe"));
+    assert!(names.contains(&"board_thread_subscriptions"));
     for tool in tools {
         let input = serde_json::to_value(&tool.input_schema).expect("input schema JSON");
         jsonschema::validator_for(&input)
@@ -1027,7 +1030,8 @@ fn tool_schemas_match_known_runtime_defaults_and_conditional_requirements() {
     let join_description = descriptions
         .get("board_thread_join")
         .expect("join description");
-    assert!(join_description.contains("--role participant"));
+    assert!(join_description.contains("watch to true"));
+    assert!(join_description.contains("mode and whenIdle"));
 
     for tool in ["conversation_create", "conversation_create_and_prompt"] {
         let description = descriptions
@@ -1043,6 +1047,93 @@ fn tool_schemas_match_known_runtime_defaults_and_conditional_requirements() {
         );
         assert!(description.contains("rootMessageId"), "{description}");
         assert!(description.contains("fork"), "{description}");
+    }
+}
+
+#[test]
+fn thread_subscription_tools_expose_subscription_policy_and_join_options() {
+    let temporary = tempfile::tempdir().expect("temporary directory");
+    let server = CollaborationMcpServer::new(temporary.path().to_owned());
+    let tools = server.resolved_tools();
+    let schema_for = |name: &str| {
+        tools
+            .iter()
+            .find(|tool| tool.name == name)
+            .unwrap_or_else(|| panic!("missing tool {name}"))
+    };
+    let required_fields = |schema: &Value| -> Vec<Value> {
+        schema["required"]
+            .as_array()
+            .unwrap_or_else(|| panic!("schema has no required array: {schema}"))
+            .clone()
+    };
+
+    let subscribe = schema_for("board_thread_subscribe");
+    let subscribe_schema = Value::Object((*subscribe.input_schema).clone());
+    for field in ["actor", "scope", "policy"] {
+        assert!(
+            required_fields(&subscribe_schema).contains(&serde_json::json!(field)),
+            "subscribe requires {field}"
+        );
+    }
+    let policy_property = &subscribe_schema["properties"]["policy"];
+    let policy = match policy_property["$ref"].as_str() {
+        Some(policy_reference) => {
+            let policy_path = policy_reference
+                .strip_prefix('#')
+                .expect("local subscription policy reference");
+            subscribe_schema
+                .pointer(policy_path)
+                .expect("subscription policy schema")
+        }
+        None => policy_property,
+    };
+    for field in [
+        "mode",
+        "whenIdle",
+        "quietSeconds",
+        "capSeconds",
+        "lifetimeSeconds",
+    ] {
+        assert!(
+            policy["properties"].get(field).is_some(),
+            "policy exposes {field}"
+        );
+    }
+
+    let unsubscribe = schema_for("board_thread_unsubscribe");
+    let unsubscribe_schema = Value::Object((*unsubscribe.input_schema).clone());
+    for field in ["actor", "scope"] {
+        assert!(required_fields(&unsubscribe_schema).contains(&serde_json::json!(field)));
+    }
+
+    let subscriptions = schema_for("board_thread_subscriptions");
+    let subscriptions_schema = Value::Object((*subscriptions.input_schema).clone());
+    assert!(required_fields(&subscriptions_schema).contains(&serde_json::json!("actor")));
+
+    let join = schema_for("board_thread_join");
+    let join_schema = Value::Object((*join.input_schema).clone());
+    for field in ["mode", "whenIdle"] {
+        assert!(
+            join_schema["properties"].get(field).is_some(),
+            "join exposes {field}"
+        );
+        assert!(
+            !required_fields(&join_schema).contains(&serde_json::json!(field)),
+            "join option {field} remains optional"
+        );
+    }
+
+    for name in [
+        "board_thread_subscribe",
+        "board_thread_unsubscribe",
+        "board_thread_subscriptions",
+    ] {
+        let tool = schema_for(name);
+        assert!(
+            tool.output_schema.is_some(),
+            "{name} exposes its output wrapper"
+        );
     }
 }
 
@@ -1232,6 +1323,26 @@ fn representative_catalog_descriptions_explain_operation_specific_behavior() {
         (
             "board_thread_listen",
             &["Listener readiness", "model activation"][..],
+        ),
+        (
+            "board_thread_subscribe",
+            &[
+                "creates, updates or reactivates",
+                "thread or topic",
+                "policy",
+            ][..],
+        ),
+        (
+            "board_thread_unsubscribe",
+            &["cancelled", "watch remains active", "inbox"][..],
+        ),
+        (
+            "board_thread_subscriptions",
+            &[
+                "active or draining",
+                "pending counts",
+                "does not acknowledge",
+            ][..],
         ),
         ("operation_reconcile", &["never replays"][..]),
     ] {
@@ -1533,7 +1644,7 @@ fn advertised_tool_schemas_validate_available_success_and_every_error_sample() {
         .into_iter()
         .filter_map(|tool| tool.output_schema.map(|schema| (tool.name, schema)))
         .collect::<std::collections::BTreeMap<_, _>>();
-    assert_eq!(advertised.len(), 107);
+    assert_eq!(advertised.len(), 110);
 
     let message = serde_json::json!({
         "messageId":"019f0000-0000-7000-8000-000000000001",
@@ -1590,9 +1701,30 @@ fn advertised_tool_schemas_validate_available_success_and_every_error_sample() {
     });
     let mut close_operation = provider_operation.clone();
     close_operation["operation"] = serde_json::json!("conversationClose");
+    let active_subscription = serde_json::json!({
+        "scope":{"kind":"thread","rootMessageId":"019f0000-0000-7000-8000-000000000005"},
+        "policy":{"mode":"deliver","whenIdle":"hold",
+            "timing":{"quietSeconds":120,"capSeconds":600},"lifetime":86400},
+        "state":"active","expiresAt":"2026-09-28T00:00:00Z","pendingCount":0,
+        "presence":{"kind":"running"}
+    });
+    let ended_subscription = serde_json::json!({
+        "scope":{"kind":"thread","rootMessageId":"019f0000-0000-7000-8000-000000000005"},
+        "policy":{"mode":"deliver","whenIdle":"hold",
+            "timing":{"quietSeconds":120,"capSeconds":600},"lifetime":86400},
+        "state":"ended","endReason":{"kind":"cancelled"},
+        "expiresAt":"2026-09-28T00:00:00Z","pendingCount":0,
+        "presence":{"kind":"running"}
+    });
     let valid_instances = std::collections::BTreeMap::from([
         ("approval_list", serde_json::json!({"approvals":[]})),
         ("board_message_show", message),
+        ("board_thread_subscribe", active_subscription.clone()),
+        ("board_thread_unsubscribe", ended_subscription),
+        (
+            "board_thread_subscriptions",
+            serde_json::json!({"subscriptions":[active_subscription]}),
+        ),
         ("board_thread_listen_cancel", listen.clone()),
         ("board_thread_listen_show", listen),
         (
@@ -1977,7 +2109,7 @@ fn expected_tool_name(method: &str) -> String {
 }
 #[test]
 fn success_schema_branches_match_main_golden_snapshot() {
-    // Router push tools expose the typed record and reply-by-reference contracts.
+    // Set UPDATE_MAIN_SUCCESS_SCHEMA_SNAPSHOT=1 to refresh from the resolved tool catalog.
     let expected: std::collections::BTreeMap<String, Value> =
         serde_json::from_str(include_str!("snapshots/main_success_schemas.json"))
             .expect("main success schema snapshot");
@@ -2023,8 +2155,29 @@ fn success_schema_branches_match_main_golden_snapshot() {
             })
         })
         .collect::<std::collections::BTreeMap<_, _>>();
-    assert_eq!(actual.len(), 107);
-    assert_eq!(expected.len(), 107);
+    if std::env::var_os("UPDATE_MAIN_SUCCESS_SCHEMA_SNAPSHOT").is_some() {
+        let entries = actual
+            .iter()
+            .enumerate()
+            .map(|(index, (name, schema))| {
+                let comma = if index + 1 < actual.len() { "," } else { "" };
+                format!(
+                    "{}:{}{}",
+                    serde_json::to_string(name).expect("tool name JSON"),
+                    serde_json::to_string(schema).expect("tool schema JSON"),
+                    comma
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let snapshot = format!("{{\n{entries}\n}}\n");
+        let snapshot_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src/mcp_server/snapshots/main_success_schemas.json");
+        std::fs::write(snapshot_path, snapshot).expect("write resolved MCP success schemas");
+        return;
+    }
+    assert_eq!(actual.len(), 110);
+    assert_eq!(expected.len(), 110);
     for (name, success) in actual {
         assert_eq!(success, expected[&name], "{name} success schema drifted");
     }

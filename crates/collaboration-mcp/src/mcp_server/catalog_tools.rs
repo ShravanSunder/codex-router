@@ -1,4 +1,8 @@
 use super::*;
+use collaboration_protocol::{
+    ThreadSubscribeRequest, ThreadSubscriptionView, ThreadSubscriptionsRequest,
+    ThreadSubscriptionsResult, ThreadUnsubscribeRequest,
+};
 
 macro_rules! typed_domain_tool {
     ($router:expr, $name:literal, $request:ty, $result:ty, $method:ident, $mutation:literal, $convert:ident) => {
@@ -673,6 +677,30 @@ pub(super) fn register_board_tools(router: &mut ToolRouter<CollaborationMcpServe
         ThreadParticipantListRequest,
         ThreadParticipantListResult,
         board_thread_participant_list,
+        false
+    );
+    board_tool!(
+        router,
+        "board_thread_subscribe",
+        ThreadSubscribeRequest,
+        ThreadSubscriptionView,
+        board_thread_subscribe,
+        true
+    );
+    board_tool!(
+        router,
+        "board_thread_unsubscribe",
+        ThreadUnsubscribeRequest,
+        ThreadSubscriptionView,
+        board_thread_unsubscribe,
+        true
+    );
+    board_tool!(
+        router,
+        "board_thread_subscriptions",
+        ThreadSubscriptionsRequest,
+        ThreadSubscriptionsResult,
+        board_thread_subscriptions,
         false
     );
     board_tool!(
