@@ -28,6 +28,7 @@ use std::time::UNIX_EPOCH;
 
 use bytes::Bytes;
 use futures_util::future::BoxFuture;
+use futures_util::stream;
 use http::HeaderMap;
 use http::Method as HttpMethod;
 use http::Request as HttpRequest;
@@ -37,6 +38,7 @@ use http::Uri;
 use http_body_util::BodyExt;
 use http_body_util::Empty;
 use http_body_util::Full;
+use http_body_util::StreamBody;
 use http_body_util::combinators::BoxBody;
 use hyper::body::Body as HyperBody;
 use hyper::body::Frame;
@@ -50,20 +52,28 @@ use tokio::task::JoinError;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
+use tracing::instrument::WithSubscriber;
 
 use codex_router_core::affinity::hash_previous_response_id;
 use codex_router_core::audit::AuditFileSink;
 use codex_router_core::audit::RouteKind as AuditRouteKind;
 use codex_router_core::audit::TransportKind;
+use codex_router_core::ids::AccountId;
 use codex_router_core::local_auth::LocalAuthError;
 use codex_router_core::local_auth::LocalRouterAuth;
 use codex_router_core::local_auth::LocalRouterTokenRecord;
+use codex_router_core::redaction::safe_account_label;
 use codex_router_core::route_profile::ClaudeFiveHourReservePercent;
 use codex_router_core::route_profile::DEFAULT_CLAUDE_FIVE_HOUR_RESERVE_PERCENT;
 use codex_router_core::route_profile::RouteProfile;
 use codex_router_core::router_compatibility::RouterCompatibility;
 use codex_router_core::routes::RouteBand;
 use codex_router_secret_store::encrypted_credential_store::EncryptedCredentialStore;
+use codex_router_secret_store::encrypted_credential_store::EncryptedCredentialStoreStatus;
+use codex_router_selection::selection_outcome::CredentialStoreAvailability;
+use codex_router_selection::selection_outcome::HeadroomTimestamp;
+use codex_router_selection::selection_outcome::SelectionHoldReason;
+use codex_router_selection::selection_outcome::UnavailableReason;
 use codex_router_state::account::AccountRecord;
 use codex_router_state::account::AccountStatus;
 use codex_router_state::affinity_owner::AffinitySourceTransport;
@@ -545,10 +555,12 @@ impl LoopbackRouterRuntimeConfig {
 /// Assembled loopback router runtime for HTTP/SSE forwarding.
 pub struct LoopbackRouterRuntime {
     runtime: Option<tokio::runtime::Runtime>,
+    caller_dispatcher: tracing::dispatcher::Dispatch,
     server: AsyncLoopbackServerRuntime,
     credential_state_store: AsyncSqliteStateStore,
     provider_error_state_store: AsyncSqliteStateStore,
     selection_state_store: AsyncSqliteStateStore,
+    credential_store_availability: CredentialStoreAvailability,
     credential_factory: AsyncProxyCredentialResolverFactory,
     affinity_secret_provider: RuntimeAffinitySecretProvider,
     affinity_owner_recorder: Arc<dyn AsyncHttpAffinityOwnerRecorder>,
@@ -590,7 +602,13 @@ impl LoopbackRouterRuntime {
         config: LoopbackRouterRuntimeConfig,
         credential_store: EncryptedCredentialStore,
     ) -> Result<Self, LoopbackRouterRuntimeError> {
-        Self::start_with_test_maintenance_completion_sender(config, credential_store, None)
+        let caller_dispatcher = tracing::dispatcher::get_default(|dispatcher| dispatcher.clone());
+        Self::start_with_test_maintenance_completion_sender(
+            config,
+            credential_store,
+            None,
+            caller_dispatcher,
+        )
     }
 
     #[cfg(test)]
@@ -616,10 +634,12 @@ impl LoopbackRouterRuntime {
         credential_store: EncryptedCredentialStore,
         completion_sender: std::sync::mpsc::Sender<crate::maintenance_actor::MaintenanceCompletion>,
     ) -> Result<Self, LoopbackRouterRuntimeError> {
+        let caller_dispatcher = tracing::dispatcher::get_default(|dispatcher| dispatcher.clone());
         Self::start_with_test_maintenance_completion_sender(
             config,
             credential_store,
             Some(completion_sender),
+            caller_dispatcher,
         )
     }
 
@@ -630,6 +650,7 @@ impl LoopbackRouterRuntime {
             std::sync::mpsc::Sender<crate::maintenance_actor::MaintenanceCompletion>,
         >,
         #[cfg(not(test))] _completion_sender: Option<()>,
+        caller_dispatcher: tracing::dispatcher::Dispatch,
     ) -> Result<Self, LoopbackRouterRuntimeError> {
         let session_affinity_cache = config.session_account_affinity_cache();
         let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -638,6 +659,15 @@ impl LoopbackRouterRuntime {
             .map_err(LoopbackRouterRuntimeError::TokioRuntime)?;
         let fixed_now_unix_seconds = config.fixed_now_unix_seconds;
         let claude_edge_runtime_config = config.claude_edge_runtime_config.clone();
+        let credential_store_availability = match credential_store.status() {
+            EncryptedCredentialStoreStatus::Ready => CredentialStoreAvailability::Available,
+            EncryptedCredentialStoreStatus::KeyUnavailable => {
+                CredentialStoreAvailability::KeyUnreadable
+            }
+            EncryptedCredentialStoreStatus::MigrationIncomplete { .. } => {
+                CredentialStoreAvailability::MigrationIncomplete
+            }
+        };
         let credential_resources =
             ProxyRuntimeCredentialResources::open(credential_store, fixed_now_unix_seconds)?;
         let affinity_secret_provider = credential_resources.affinity_secret_provider();
@@ -698,10 +728,12 @@ impl LoopbackRouterRuntime {
 
         let loopback_runtime = Self {
             runtime: Some(runtime),
+            caller_dispatcher,
             server,
             credential_state_store: writable_state_stores.credential_state_store,
             provider_error_state_store: writable_state_stores.db_write_state_store,
             selection_state_store,
+            credential_store_availability,
             affinity_secret_provider,
             affinity_owner_recorder,
             auth_gate,
@@ -794,7 +826,10 @@ impl LoopbackRouterRuntime {
                     "router runtime unavailable",
                 ))
             })?
-            .block_on(self.serve_protocol_connections_async(max_connections, None))
+            .block_on(
+                self.serve_protocol_connections_async(max_connections, None)
+                    .with_subscriber(self.caller_dispatcher.clone()),
+            )
     }
 
     /// Serves HTTP/SSE or WebSocket connections until the bound or cancellation.
@@ -810,7 +845,10 @@ impl LoopbackRouterRuntime {
                     "router runtime unavailable",
                 ))
             })?
-            .block_on(self.serve_protocol_connections_async(max_connections, Some(shutdown)))
+            .block_on(
+                self.serve_protocol_connections_async(max_connections, Some(shutdown))
+                    .with_subscriber(self.caller_dispatcher.clone()),
+            )
     }
 
     #[cfg(test)]
@@ -827,6 +865,17 @@ impl LoopbackRouterRuntime {
     #[must_use]
     pub(crate) fn with_credential_refresh_shutdown_drain(mut self, limit: Duration) -> Self {
         self.credential_refresh_shutdown_drain = limit;
+        self
+    }
+
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn with_test_claude_refresh_client<C>(mut self, refresh_client: C) -> Self
+    where
+        C: codex_router_auth::resolver::CredentialRefreshClient + Clone + Send + Sync + 'static,
+    {
+        self.credential_factory
+            .set_test_claude_refresh_client(refresh_client);
         self
     }
 
@@ -898,8 +947,10 @@ impl LoopbackRouterRuntime {
                 break;
             };
             let handler_context = Arc::clone(&connection_handler);
-            let handler =
-                tokio::spawn(async move { handler_context.handle_hyper_connection(stream).await });
+            let handler = tokio::spawn(
+                async move { handler_context.handle_hyper_connection(stream).await }
+                    .with_subscriber(self.caller_dispatcher.clone()),
+            );
             if max_connections == usize::MAX && shutdown.is_none() {
                 supervise_detached_connection_handler(
                     handler,
@@ -957,6 +1008,7 @@ impl LoopbackRouterRuntime {
             credential_state_store: self.credential_state_store.clone(),
             provider_error_state_store: self.provider_error_state_store.clone(),
             selection_state_store: self.selection_state_store.clone(),
+            credential_store_availability: self.credential_store_availability,
             credential_factory: self.credential_factory.clone(),
             affinity_secret_provider: self.affinity_secret_provider.clone(),
             affinity_owner_recorder: Arc::clone(&self.affinity_owner_recorder),
@@ -1252,6 +1304,7 @@ struct LoopbackProtocolConnectionHandler {
     credential_state_store: AsyncSqliteStateStore,
     provider_error_state_store: AsyncSqliteStateStore,
     selection_state_store: AsyncSqliteStateStore,
+    credential_store_availability: CredentialStoreAvailability,
     credential_factory: AsyncProxyCredentialResolverFactory,
     affinity_secret_provider: RuntimeAffinitySecretProvider,
     affinity_owner_recorder: Arc<dyn AsyncHttpAffinityOwnerRecorder>,
@@ -1679,6 +1732,7 @@ impl LoopbackProtocolConnectionHandler {
             credential_resolver: self
                 .credential_factory
                 .resolver_for_state(self.credential_state_store.clone()),
+            credential_store_availability: self.credential_store_availability,
             selector_runtime_state:
                 AsyncAccountSelectorRuntimeState::new_with_selection_lock_and_affinity_cache(
                     Arc::clone(&self.weighted_selectors),
@@ -2579,6 +2633,183 @@ pub(crate) fn http_error_response(
         }
         HttpProxyError::Rejected { .. } => empty_response(StatusCode::NOT_FOUND),
     }
+}
+
+/// A complete, bounded provider rejection retained only when Claude cannot select attempt two.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct CapturedClaudeProviderErrorResponse {
+    pub(crate) status: u16,
+    pub(crate) headers: HeaderCollection,
+    pub(crate) body: Vec<Bytes>,
+    pub(crate) evidence_prefix: Bytes,
+    pub(crate) evidence_complete: bool,
+}
+
+/// Renders Claude's ordered no-account result without changing the shared Codex mapping.
+pub(crate) fn claude_selection_unavailable_response(
+    reason: UnavailableReason,
+    account_labels: &[(AccountId, String)],
+    now_unix_seconds: u64,
+    provider_usage_limit_response: Option<CapturedClaudeProviderErrorResponse>,
+) -> HttpResponse<BoxBody<Bytes, AsyncHttpBodyError>> {
+    if let (UnavailableReason::AllExhausted { .. }, Some(response)) =
+        (&reason, provider_usage_limit_response)
+    {
+        return captured_claude_provider_response(response);
+    }
+
+    match reason {
+        UnavailableReason::NoneConfiguredOrEnabled => claude_api_error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "api_error",
+            "No Claude account is configured or enabled in Router.".to_owned(),
+            None,
+            None,
+        ),
+        UnavailableReason::KeyUnreadable => claude_api_error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "api_error",
+            "Router cannot unlock its Claude credentials because the Keychain key is unreadable."
+                .to_owned(),
+            None,
+            None,
+        ),
+        UnavailableReason::MigrationIncomplete => claude_api_error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "api_error",
+            "Router cannot unlock its Claude credentials because pooled-credential migration is incomplete."
+                .to_owned(),
+            None,
+            None,
+        ),
+        UnavailableReason::AllNeedLogin { accounts } => {
+            let account_names = accounts
+                .iter()
+                .map(|account_id| claude_account_name(account_id, account_labels))
+                .collect::<Vec<_>>();
+            claude_api_error_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "api_error",
+                format!(
+                    "These Claude accounts need account login before Router can use them: {}.",
+                    account_names.join(", ")
+                ),
+                None,
+                None,
+            )
+        }
+        UnavailableReason::AllExhausted { earliest_headroom } => {
+            let retry_after_seconds = earliest_headroom
+                .map(HeadroomTimestamp::unix_seconds)
+                .map(|headroom| headroom.saturating_sub(now_unix_seconds));
+            let message = match retry_after_seconds {
+                Some(seconds) => format!(
+                    "Claude usage limit reached. Router expects quota headroom in {seconds} seconds."
+                ),
+                None => "Claude usage limit reached.".to_owned(),
+            };
+            claude_api_error_response(
+                StatusCode::TOO_MANY_REQUESTS,
+                "rate_limit_error",
+                message,
+                Some("usage_limit_reached"),
+                retry_after_seconds,
+            )
+        }
+        UnavailableReason::HeldByFloors { accounts } => {
+            let held_accounts = accounts
+                .iter()
+                .map(|account| {
+                    let reason = match account.reason() {
+                        SelectionHoldReason::HardFloor => "at the configured hard quota floor",
+                        SelectionHoldReason::WaitingForFreshWeeklyObservation => {
+                            "waiting for a fresh weekly quota observation under its configured floor"
+                        }
+                    };
+                    format!(
+                        "{} ({reason})",
+                        claude_account_name(account.account_id(), account_labels)
+                    )
+                })
+                .collect::<Vec<_>>();
+            claude_api_error_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "api_error",
+                format!(
+                    "These Claude accounts are held by quota floors: {}.",
+                    held_accounts.join(", ")
+                ),
+                None,
+                None,
+            )
+        }
+    }
+}
+
+fn claude_account_name(account_id: &AccountId, account_labels: &[(AccountId, String)]) -> String {
+    account_labels
+        .iter()
+        .find(|(candidate_id, _label)| candidate_id == account_id)
+        .map(|(_account_id, label)| safe_account_label(label, account_id).to_string())
+        .unwrap_or_else(|| safe_account_label("account", account_id).to_string())
+}
+
+fn claude_api_error_response(
+    status: StatusCode,
+    error_type: &'static str,
+    message: String,
+    error_code: Option<&'static str>,
+    retry_after_seconds: Option<u64>,
+) -> HttpResponse<BoxBody<Bytes, AsyncHttpBodyError>> {
+    let error = match error_code {
+        Some(error_code) => serde_json::json!({
+            "type": error_type,
+            "message": message,
+            "code": error_code,
+        }),
+        None => serde_json::json!({
+            "type": error_type,
+            "message": message,
+        }),
+    };
+    let body = serde_json::to_vec(&serde_json::json!({
+        "type": "error",
+        "error": error,
+    }))
+    .unwrap_or_else(|_error| {
+        br#"{"type":"error","error":{"type":"api_error","message":"Claude request unavailable."}}"#
+            .to_vec()
+    });
+    let mut builder = HttpResponse::builder()
+        .status(status)
+        .header(http::header::CONTENT_TYPE, "application/json");
+    if let Some(retry_after_seconds) = retry_after_seconds {
+        builder = builder.header(http::header::RETRY_AFTER, retry_after_seconds.to_string());
+    }
+    builder
+        .body(box_body_from_bytes(body))
+        .unwrap_or_else(|_error| empty_response(StatusCode::BAD_GATEWAY))
+}
+
+fn captured_claude_provider_response(
+    response: CapturedClaudeProviderErrorResponse,
+) -> HttpResponse<BoxBody<Bytes, AsyncHttpBodyError>> {
+    let mut builder = HttpResponse::builder()
+        .status(StatusCode::from_u16(response.status).unwrap_or(StatusCode::BAD_GATEWAY));
+    for header in response.headers.as_slice() {
+        builder = builder.header(header.name(), header.value());
+    }
+    let body = StreamBody::new(stream::iter(
+        response
+            .body
+            .into_iter()
+            .map(|chunk| Ok::<_, Infallible>(Frame::data(chunk))),
+    ))
+    .map_err(|never: Infallible| -> AsyncHttpBodyError { match never {} })
+    .boxed();
+    builder
+        .body(body)
+        .unwrap_or_else(|_error| empty_response(StatusCode::BAD_GATEWAY))
 }
 
 pub(crate) fn empty_response(

@@ -2,6 +2,8 @@
 
 #[cfg(test)]
 use std::path::Path;
+#[cfg(test)]
+use std::sync::Arc;
 
 use codex_router_auth::resolver::AsyncRefreshLeaseRegistry;
 #[cfg(test)]
@@ -10,9 +12,12 @@ use codex_router_auth::resolver::AsyncRouterCredentialResolver;
 use codex_router_auth::resolver::CredentialRefreshClient;
 use codex_router_auth::resolver::CredentialRefreshTaskSupervisor;
 use codex_router_auth::resolver::CredentialResolverError;
+#[cfg(not(test))]
 use codex_router_auth::resolver::DefaultAsyncRouterCredentialResolver;
 #[cfg(test)]
 use codex_router_auth::resolver::OpenAiOAuthRefreshClient;
+#[cfg(test)]
+use codex_router_auth::resolver::ProviderCredentialRefreshClients;
 #[cfg(test)]
 use codex_router_auth::resolver::ProviderCredentialResolver;
 #[cfg(test)]
@@ -159,6 +164,8 @@ pub(crate) struct AsyncProxyCredentialResolverFactory {
     refresh_leases: AsyncRefreshLeaseRegistry,
     refresh_tasks: CredentialRefreshTaskSupervisor,
     fixed_now_unix_seconds: Option<u64>,
+    #[cfg(test)]
+    test_credential_refresh_client: Option<TestCredentialRefreshClient>,
 }
 
 impl AsyncProxyCredentialResolverFactory {
@@ -168,9 +175,35 @@ impl AsyncProxyCredentialResolverFactory {
             refresh_leases: AsyncRefreshLeaseRegistry::new(),
             refresh_tasks: CredentialRefreshTaskSupervisor::new(),
             fixed_now_unix_seconds,
+            #[cfg(test)]
+            test_credential_refresh_client: None,
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn set_test_claude_refresh_client<C>(&mut self, refresh_client: C)
+    where
+        C: CredentialRefreshClient + Clone + Send + Sync + 'static,
+    {
+        self.test_credential_refresh_client = Some(
+            TestCredentialRefreshClient::with_claude_client(refresh_client),
+        );
+    }
+
+    #[cfg(test)]
+    pub(crate) fn resolver_for_state(
+        &self,
+        state_store: AsyncSqliteStateStore,
+    ) -> AsyncProxyCredentialResolver {
+        self.resolver_for_state_with_refresh_client(
+            state_store,
+            self.test_credential_refresh_client
+                .clone()
+                .unwrap_or_default(),
+        )
+    }
+
+    #[cfg(not(test))]
     pub(crate) fn resolver_for_state(
         &self,
         state_store: AsyncSqliteStateStore,
@@ -226,9 +259,93 @@ impl AsyncProxyCredentialResolverFactory {
     }
 }
 
+#[cfg(test)]
+#[derive(Clone)]
+pub(crate) struct TestCredentialRefreshClient {
+    default_clients: ProviderCredentialRefreshClients,
+    claude_refresh_client: Option<Arc<dyn CredentialRefreshClient + Send + Sync>>,
+}
+
+#[cfg(test)]
+impl TestCredentialRefreshClient {
+    fn with_claude_client<C>(refresh_client: C) -> Self
+    where
+        C: CredentialRefreshClient + Clone + Send + Sync + 'static,
+    {
+        Self {
+            default_clients: ProviderCredentialRefreshClients::new(),
+            claude_refresh_client: Some(Arc::new(refresh_client)),
+        }
+    }
+}
+
+#[cfg(test)]
+impl Default for TestCredentialRefreshClient {
+    fn default() -> Self {
+        Self {
+            default_clients: ProviderCredentialRefreshClients::new(),
+            claude_refresh_client: None,
+        }
+    }
+}
+
+#[cfg(test)]
+impl std::fmt::Debug for TestCredentialRefreshClient {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("TestCredentialRefreshClient")
+            .field(
+                "has_claude_refresh_client_override",
+                &self.claude_refresh_client.is_some(),
+            )
+            .finish()
+    }
+}
+
+#[cfg(test)]
+impl CredentialRefreshClient for TestCredentialRefreshClient {
+    fn refresh_credentials(
+        &self,
+        account_id: &AccountId,
+        refresh_token: &codex_router_core::redaction::SecretString,
+    ) -> Result<
+        codex_router_secret_store::account_tokens::AccountCredentialBundle,
+        codex_router_auth::resolver::CredentialRefreshFailure,
+    > {
+        self.default_clients
+            .refresh_credentials(account_id, refresh_token)
+    }
+
+    fn refresh_provider_credentials(
+        &self,
+        provider: codex_router_core::provider::Provider,
+        account_id: &AccountId,
+        refresh_token: &codex_router_core::redaction::SecretString,
+    ) -> Result<
+        codex_router_secret_store::credential_bundle::CredentialBundle,
+        codex_router_auth::resolver::CredentialRefreshFailure,
+    > {
+        if provider == codex_router_core::provider::Provider::Claude
+            && let Some(refresh_client) = &self.claude_refresh_client
+        {
+            return refresh_client.refresh_provider_credentials(
+                provider,
+                account_id,
+                refresh_token,
+            );
+        }
+        self.default_clients
+            .refresh_provider_credentials(provider, account_id, refresh_token)
+    }
+}
+
 /// Async credential resolver used by release `serve` request paths.
+#[cfg(not(test))]
 pub(crate) type AsyncProxyCredentialResolver =
     DefaultAsyncRouterCredentialResolver<ProxyRuntimeSecretStore>;
+#[cfg(test)]
+pub(crate) type AsyncProxyCredentialResolver =
+    AsyncRouterCredentialResolver<ProxyRuntimeSecretStore, TestCredentialRefreshClient>;
 
 impl AsyncProviderCredentialResolver for AsyncProxyCredentialResolver {
     fn resolve_provider_credentials<'a>(
