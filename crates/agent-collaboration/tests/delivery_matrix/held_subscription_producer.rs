@@ -1,35 +1,20 @@
-//! Subscription producer and recipient-observed stored-range proof for the delivery matrix.
-use super::{ProofContext, ProofResult, SUBSCRIPTION_NOTICE_LABEL};
+//! Two-root producer for the held-subscription acceptance cell.
+use super::{ProofContext, ProofResult};
 use collaboration_client::board::{
     BoardCreateRequest, BoardId, Description, Identity, MessageId, MessagePostRequest,
     MessageReferences, ParticipantRole, Placement, ProjectCreateRequest, ProjectId, ResourceName,
     SubscriptionMode, SubscriptionPolicyPatch, SubscriptionScope, SubscriptionTimingPatch,
-    ThreadCreateRequest, ThreadJoinRequest, TopicCreateRequest, TopicId,
+    ThreadCreateRequest, ThreadJoinRequest, TopicCreateRequest, TopicId, WhenIdle,
 };
 use collaboration_client::protocol::{SessionRef, ThreadSubscribeRequest};
 use serde_json::json;
 
-#[path = "subscription_notice_observer.rs"]
-mod notice_observer;
-pub(super) use notice_observer::verify_subscription_notice;
-
-pub(super) async fn board_subscription_push(
+pub(super) async fn board_two_thread_subscription_push(
     proof: &mut ProofContext,
     sender: &SessionRef,
-    codex: &SessionRef,
-    peer: &SessionRef,
-    codex_marker: &str,
-    peer_marker: &str,
-) -> ProofResult<()> {
-    board_subscription_push_targets(proof, sender, &[(codex, codex_marker), (peer, peer_marker)])
-        .await
-}
-
-pub(super) async fn board_subscription_push_targets(
-    proof: &mut ProofContext,
-    sender: &SessionRef,
-    targets: &[(&SessionRef, &str)],
-) -> ProofResult<()> {
+    target: &SessionRef,
+    markers: [&str; 2],
+) -> ProofResult<Vec<MessageId>> {
     let actor: Identity = serde_json::from_value(json!({"kind":"session","session":sender}))?;
     let project_id = ProjectId::generate();
     let board_id = BoardId::generate();
@@ -38,8 +23,8 @@ pub(super) async fn board_subscription_push_targets(
         .client
         .board_project_create(ProjectCreateRequest {
             project_id: project_id.clone(),
-            name: ResourceName::try_from(format!("Delivery matrix {}", project_id.as_str()))?,
-            description: Description::try_from("Disposable recipient delivery proof".to_owned())?,
+            name: ResourceName::try_from(format!("Held matrix {}", project_id.as_str()))?,
+            description: Description::try_from("Two-root held subscription proof".to_owned())?,
             actor: actor.clone(),
             acting_for: None,
         })
@@ -49,8 +34,8 @@ pub(super) async fn board_subscription_push_targets(
         .board_create(BoardCreateRequest {
             board_id: board_id.clone(),
             project_id,
-            name: ResourceName::try_from(format!("Delivery board {}", board_id.as_str()))?,
-            description: Description::try_from("Thread subscription recipient proof".to_owned())?,
+            name: ResourceName::try_from(format!("Held board {}", board_id.as_str()))?,
+            description: Description::try_from("Held batch recipient proof".to_owned())?,
             actor: actor.clone(),
             acting_for: None,
         })
@@ -60,30 +45,32 @@ pub(super) async fn board_subscription_push_targets(
         .board_topic_create(TopicCreateRequest {
             topic_id: topic_id.clone(),
             board_id,
-            name: ResourceName::try_from("Delivery".to_owned())?,
-            description: Description::try_from("One marker burst".to_owned())?,
+            name: ResourceName::try_from("Held batches".to_owned())?,
+            description: Description::try_from("Two subscribed roots".to_owned())?,
             actor: actor.clone(),
             acting_for: None,
         })
         .await?;
-    let root_id = MessageId::generate();
-    proof
-        .client
-        .board_thread_create(ThreadCreateRequest {
-            message_id: root_id.clone(),
-            topic_id,
-            actor: actor.clone(),
-            acting_for: None,
-            text: collaboration_client::board::MessageText::try_from(
-                "Delivery matrix root".to_owned(),
-            )?,
-            references: MessageReferences::try_from(Vec::new())?,
-            role: Some(ParticipantRole::Orchestrator),
-            watch: true,
-        })
-        .await?;
-    for (target, _) in targets {
-        let reader: Identity = serde_json::from_value(json!({"kind":"session","session":target}))?;
+
+    let reader: Identity = serde_json::from_value(json!({"kind":"session","session":target}))?;
+    let mut roots = Vec::with_capacity(markers.len());
+    for (index, _) in markers.iter().enumerate() {
+        let root_id = MessageId::generate();
+        proof
+            .client
+            .board_thread_create(ThreadCreateRequest {
+                message_id: root_id.clone(),
+                topic_id: topic_id.clone(),
+                actor: actor.clone(),
+                acting_for: None,
+                text: collaboration_client::board::MessageText::try_from(format!(
+                    "Held matrix root {index}"
+                ))?,
+                references: MessageReferences::try_from(Vec::new())?,
+                role: Some(ParticipantRole::Orchestrator),
+                watch: true,
+            })
+            .await?;
         proof
             .client
             .board_thread_join(ThreadJoinRequest {
@@ -100,10 +87,11 @@ pub(super) async fn board_subscription_push_targets(
         proof
             .client
             .board_thread_subscribe(ThreadSubscribeRequest {
-                actor: reader,
+                actor: reader.clone(),
                 scope: SubscriptionScope::thread(root_id.clone()),
                 policy: SubscriptionPolicyPatch {
                     mode: Some(SubscriptionMode::Deliver),
+                    when_idle: Some(WhenIdle::Hold),
                     timing: SubscriptionTimingPatch {
                         quiet_seconds: Some(1),
                         cap_seconds: Some(10),
@@ -112,21 +100,20 @@ pub(super) async fn board_subscription_push_targets(
                 },
             })
             .await?;
+        roots.push(root_id);
     }
-    for (_, marker) in targets {
+    for (root_message_id, marker) in roots.iter().cloned().zip(markers) {
         proof
             .client
             .board_message_post(MessagePostRequest {
                 message_id: MessageId::generate(),
-                placement: Placement::Thread {
-                    root_message_id: root_id.clone(),
-                },
+                placement: Placement::Thread { root_message_id },
                 actor: actor.clone(),
                 acting_for: None,
-                text: collaboration_client::board::MessageText::try_from((*marker).to_owned())?,
+                text: collaboration_client::board::MessageText::try_from(marker.to_owned())?,
                 references: MessageReferences::try_from(Vec::new())?,
             })
             .await?;
     }
-    Ok(())
+    Ok(roots)
 }

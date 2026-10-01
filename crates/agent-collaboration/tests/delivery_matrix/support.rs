@@ -248,11 +248,22 @@ impl ConfigHashGuard {
         );
         let marker: Value =
             serde_json::from_slice(&std::fs::read(root.join("debug-host-context.json"))?)?;
-        let owner_home = PathBuf::from(
-            marker["ownerHome"]
-                .as_str()
-                .ok_or("Matrix marker omitted owner home")?,
-        );
+        let owner_home = match marker.get("kind").and_then(Value::as_str) {
+            Some("isolatedDeliveryMatrix") => PathBuf::from(
+                marker
+                    .get("ownerHome")
+                    .and_then(Value::as_str)
+                    .ok_or("Isolated matrix marker omitted owner home")?,
+            ),
+            Some("debugHostPrepared") => PathBuf::from(
+                std::env::var_os("HOME")
+                    .ok_or("Normal HOME missing for the documented debug Host context")?,
+            ),
+            _ => return Err(
+                "Config hash capture requires a supported isolated matrix or debug Host context"
+                    .into(),
+            ),
+        };
         let files = [
             owner_home.join(".codex/config.toml"),
             owner_home.join(".claude/settings.json"),
