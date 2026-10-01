@@ -107,7 +107,9 @@ mod push_line_tests;
 mod push_record;
 mod router_origin_ref;
 mod session_delivery_outcome;
-pub use delivery_rejection::{DeliveryNextAction, DeliveryRejection, DeliveryRejectionReason};
+pub use delivery_rejection::{
+    DeliveryNextAction, DeliveryPeerClaim, DeliveryRejection, DeliveryRejectionReason,
+};
 mod session_delivery_receipt;
 mod session_message_send;
 pub use delivery_route_evidence::DeliveryRouteEvidence;

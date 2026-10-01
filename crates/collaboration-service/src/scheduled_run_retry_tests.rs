@@ -110,6 +110,7 @@ async fn fake_provider_submission_and_settlement_variants_preserve_run_state() -
                     next_action: DeliveryNextAction::RetryLater,
                     client_code: None,
                     detail: Some("fixture rejection".into()),
+                    claims: None,
                 })),
             ),
             FakeSubmissionPlan::Unknown => (

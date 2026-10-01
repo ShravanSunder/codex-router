@@ -210,6 +210,49 @@ async fn rejected_message_send_prints_one_actionable_line_and_exit_four() {
 }
 
 #[tokio::test]
+async fn ambiguous_peer_rejection_lists_claims_and_the_branch_next_step() {
+    let target = session_ref(TARGET_SESSION_ID, "claude-local");
+    let mut result = send_result(target.clone());
+    result["deliveryState"] = json!("rejected");
+    result["receipt"]["outcome"] = json!({
+        "kind":"rejected",
+        "reason":"liveElsewhere",
+        "nextAction":"inspectTarget",
+        "clientCode":null,
+        "detail":"this Claude session is claimed by 2 live terminals",
+        "claims":[
+            {"pid":52304,"name":"terminal-one","cwd":"/workspace/one"},
+            {"pid":68833,"name":null,"cwd":"/Users/example/fallback-terminal"}
+        ]
+    });
+    result["receipt"]["client"] = Value::Null;
+    let (output, _) = invoke_with_reply(
+        vec![
+            "message".into(),
+            "send".into(),
+            "--to".into(),
+            serde_json::to_string(&target)
+                .expect("serialize target SessionRef")
+                .into(),
+            "--text".into(),
+            "hello recipient".into(),
+        ],
+        MockReply::Result(result),
+    )
+    .await
+    .expect("message send completes against the Control fixture");
+
+    assert_eq!(output.status.code(), Some(4));
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8(output.stderr).expect("CLI stderr is UTF-8");
+    assert_eq!(
+        stderr,
+        "error: Claude target is open in 2 terminals (pid 52304 terminal-one, pid 68833 fallback-terminal) — close one of these terminals, or run `/branch` in one of them\n"
+    );
+    assert!(!stderr.contains("/Users/example"));
+}
+
+#[tokio::test]
 async fn unknown_message_send_points_to_show_before_retrying_and_exits_five() {
     let target = session_ref(TARGET_SESSION_ID, "claude-local");
     let mut result = send_result(target.clone());

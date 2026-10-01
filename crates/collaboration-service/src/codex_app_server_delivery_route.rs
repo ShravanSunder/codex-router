@@ -527,6 +527,7 @@ fn interpret_native_response(
                                     .to_owned()
                             },
                         ),
+                        claims: None,
                     }),
                     None,
                 )

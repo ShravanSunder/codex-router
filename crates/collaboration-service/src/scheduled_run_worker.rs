@@ -495,6 +495,7 @@ impl ScheduledRunWorker {
                             "Scheduled start was known rejected before its receipt was persisted."
                                 .into(),
                         ),
+                        claims: None,
 
                         }),
                     Some((
@@ -511,6 +512,7 @@ impl ScheduledRunWorker {
                                         "Scheduled start was known rejected before its receipt was persisted."
                                             .into(),
                                     ),
+                                    claims: None,
 
                                     }),
                                 reachability: None,

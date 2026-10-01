@@ -50,6 +50,7 @@ pub(crate) async fn dispatch(
             next_action: DeliveryNextAction::InspectTarget,
             client_code: None,
             detail: Some("Scheduled target generation changed before submission".into()),
+            claims: None,
         }));
     }
     let schemas = admission
@@ -221,6 +222,7 @@ pub(crate) async fn dispatch(
                 next_action: DeliveryNextAction::InspectTarget,
                 client_code: None,
                 detail: Some("Native scheduled start was rejected.".into()),
+                claims: None,
             })
         }
         Err(NativeConnectionError::InvalidInput | NativeConnectionError::Unavailable) => {
@@ -230,6 +232,7 @@ pub(crate) async fn dispatch(
                 next_action: DeliveryNextAction::RetryLater,
                 client_code: None,
                 detail: Some("Native scheduled start was not dispatched.".into()),
+                claims: None,
             })
         }
         Err(_) => {

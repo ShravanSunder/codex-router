@@ -293,6 +293,7 @@ impl ScheduledRunExecution for FakeScheduledExecution {
                         next_action: DeliveryNextAction::RetryLater,
                         client_code: None,
                         detail: Some("fixture rejection".into()),
+                        claims: None,
                     }));
                 }
                 (FakeSubmissionPlan::Unknown, _) => {

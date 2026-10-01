@@ -46,6 +46,24 @@ impl SessionDeliveryRouter {
             .await
             .into_iter()
             .collect::<Result<Vec<_>, _>>()?;
+        if let Some((index, rejection)) =
+            claims
+                .iter()
+                .enumerate()
+                .find_map(|(index, claim)| match claim {
+                    RouteClaim::Rejected { rejection } => Some((index, rejection)),
+                    _ => None,
+                })
+        {
+            let Some(route) = self.routes.get(index) else {
+                return Err(DeliveryContractError::InvalidEvidence);
+            };
+            return Ok(RouteDecision::Complete(Box::new(DeliveryReceipt {
+                outcome: DeliveryOutcome::Rejected(rejection.clone()),
+                reachability: Some(route.reachability()),
+                client: None,
+            })));
+        }
         if let Some(index) = claims
             .iter()
             .position(|claim| matches!(claim, RouteClaim::Holds))
@@ -62,6 +80,7 @@ impl SessionDeliveryRouter {
                     next_action: DeliveryNextAction::InspectTarget,
                     client_code: None,
                     detail: Some(detail.to_owned()),
+                    claims: None,
                 }),
                 reachability: None,
                 client: None,
@@ -79,6 +98,7 @@ impl SessionDeliveryRouter {
                     detail: Some(
                         "session is live in a Claude Code process Router cannot message".into(),
                     ),
+                    claims: None,
                 }),
                 reachability: None,
                 client: None,
@@ -133,6 +153,7 @@ impl SessionDeliveryRouter {
                 } else {
                     reasons.join("; ")
                 }),
+                claims: None,
             }),
             reachability: None,
             client: None,
@@ -249,7 +270,7 @@ fn aggregate_presence(presences: &[RoutePresence]) -> TargetPresence {
 
 #[cfg(test)]
 mod tests {
-    use super::SessionDeliveryRouter;
+    use super::{RouteDecision, SessionDeliveryRouter};
     use crate::{
         AttemptEvidenceSink, AttemptReconciliation, AttemptReconciliationContext, DeliveryFuture,
         DeliveryPrecondition, DeliveryReceipt, LoadPolicy, RouteClaim, RoutePresence,
@@ -257,7 +278,8 @@ mod tests {
     };
     use agent_automation::AttemptId;
     use collaboration_protocol::{
-        DeliveryCorrelationId, DeliveryOutcome, MessageDelivery, MessageText, PushId,
+        DeliveryCorrelationId, DeliveryNextAction, DeliveryOutcome, DeliveryPeerClaim,
+        DeliveryRejection, DeliveryRejectionReason, MessageDelivery, MessageText, PushId,
         SessionReachability, SessionRef,
     };
     use std::sync::{Arc, Mutex};
@@ -265,6 +287,7 @@ mod tests {
     #[derive(Default)]
     struct CapturingRoute {
         requests: Mutex<Vec<crate::layer_zero::DeliveryRequest>>,
+        claim: Option<RouteClaim>,
     }
 
     impl SessionDeliveryRoute for CapturingRoute {
@@ -273,7 +296,8 @@ mod tests {
         }
 
         fn claim(&self, _: &SessionRef) -> DeliveryFuture<'_, RouteClaim> {
-            Box::pin(async { Ok(RouteClaim::Holds) })
+            let claim = self.claim.clone().unwrap_or(RouteClaim::Holds);
+            Box::pin(async move { Ok(claim) })
         }
 
         fn presence(&self, _: &SessionRef) -> DeliveryFuture<'_, RoutePresence> {
@@ -304,6 +328,52 @@ mod tests {
         ) -> DeliveryFuture<'_, AttemptReconciliation> {
             Box::pin(async { Ok(AttemptReconciliation::StillUnknown) })
         }
+    }
+
+    #[tokio::test]
+    async fn typed_route_rejection_precedes_another_routes_holds_claim()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let rejection = DeliveryRejection {
+            reason: DeliveryRejectionReason::LiveElsewhere,
+            next_action: DeliveryNextAction::InspectTarget,
+            client_code: None,
+            detail: Some("two live terminals claim this session".to_owned()),
+            claims: Some(vec![DeliveryPeerClaim {
+                pid: 52304,
+                name: Some("terminal-one".to_owned()),
+                cwd: Some("/workspace/one".to_owned()),
+            }]),
+        };
+        let holds = Arc::new(CapturingRoute {
+            claim: Some(RouteClaim::Holds),
+            ..CapturingRoute::default()
+        });
+        let rejected = Arc::new(CapturingRoute {
+            claim: Some(RouteClaim::Rejected { rejection }),
+            ..CapturingRoute::default()
+        });
+        let router = SessionDeliveryRouter::new(vec![holds, rejected]);
+        let target: SessionRef = serde_json::from_value(serde_json::json!({
+            "endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"claude-local"},
+            "sessionId":"target"
+        }))
+        .expect("target session");
+
+        let decision = router.select_route(&target).await.expect("route selection");
+
+        let RouteDecision::Complete(receipt) = decision else {
+            return Err("typed rejection did not stop route selection".into());
+        };
+        if receipt.reachability != Some(SessionReachability::ClaudeCodePeer)
+            || !matches!(
+            receipt.outcome,
+            DeliveryOutcome::Rejected(rejection)
+                if rejection.claims.as_ref().is_some_and(|claims| claims.len() == 1)
+            )
+        {
+            return Err("typed rejection lost route reachability or claims".into());
+        }
+        Ok(())
     }
 
     #[tokio::test]

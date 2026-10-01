@@ -1,5 +1,5 @@
 use collaboration_client::protocol::{
-    DeliveryNextAction, DeliveryRejection, DeliveryRejectionReason,
+    DeliveryNextAction, DeliveryPeerClaim, DeliveryRejection, DeliveryRejectionReason,
 };
 
 const MAX_FAILURE_LINE_SCALARS: usize = 240;
@@ -25,6 +25,14 @@ pub(crate) fn render_rejection_line(
     target: &str,
     push_link: &str,
 ) -> String {
+    if rejection.reason == DeliveryRejectionReason::LiveElsewhere
+        && let Some(claims) = rejection
+            .claims
+            .as_deref()
+            .filter(|claims| !claims.is_empty())
+    {
+        return render_peer_claim_failure_line(target, claims);
+    }
     let detail = rejection
         .detail
         .as_deref()
@@ -32,6 +40,77 @@ pub(crate) fn render_rejection_line(
     let explanation = format!("Delivery to {target} was rejected: {detail}");
     let next_step = rejection_next_step(rejection.reason, rejection.next_action, push_link);
     render_failure_line(&explanation, &next_step)
+}
+
+fn render_peer_claim_failure_line(target: &str, claims: &[DeliveryPeerClaim]) -> String {
+    let next_step = collaboration_client::protocol::escape_push_line_field(
+        "close one of these terminals, or run `/branch` in one of them",
+    );
+    let footer = format!(" — {next_step}");
+    let claim_count = claims.len();
+    let terminal_label = if claim_count == 1 {
+        "terminal"
+    } else {
+        "terminals"
+    };
+    let prefix_without_target = format!("error:  is open in {claim_count} {terminal_label}");
+    let max_remainder = format!(" (+{claim_count} more)");
+    let target_budget = MAX_FAILURE_LINE_SCALARS
+        .saturating_sub(prefix_without_target.chars().count())
+        .saturating_sub(max_remainder.chars().count())
+        .saturating_sub(footer.chars().count());
+    let target = escaped_prefix(target, target_budget);
+    let prefix = format!("error: {target} is open in {claim_count} {terminal_label}");
+    let rows = claims
+        .iter()
+        .map(|claim| {
+            let display_name = peer_claim_display_name(claim);
+            let display_name =
+                collaboration_client::protocol::escape_push_line_field(&display_name);
+            format!("pid {} {display_name}", claim.pid)
+        })
+        .collect::<Vec<_>>();
+
+    for visible_count in (0..=rows.len()).rev() {
+        let omitted_count = rows.len().saturating_sub(visible_count);
+        let mut visible_rows = rows.iter().take(visible_count).cloned().collect::<Vec<_>>();
+        if omitted_count > 0 {
+            visible_rows.push(format!("+{omitted_count} more"));
+        }
+        let detail = visible_rows.join(", ");
+        let explanation = if detail.is_empty() {
+            prefix.clone()
+        } else {
+            format!("{prefix} ({detail})")
+        };
+        let line = format!("{explanation}{footer}");
+        if line.chars().count() <= MAX_FAILURE_LINE_SCALARS {
+            return line;
+        }
+    }
+
+    format!("{prefix}{footer}")
+}
+
+fn peer_claim_display_name(claim: &DeliveryPeerClaim) -> String {
+    let name = claim
+        .name
+        .as_deref()
+        .filter(|name| !name.trim().is_empty())
+        .or_else(|| {
+            claim.cwd.as_deref().and_then(|cwd| {
+                std::path::Path::new(cwd)
+                    .file_name()
+                    .and_then(|basename| basename.to_str())
+            })
+        })
+        .unwrap_or("unnamed terminal");
+    let mut shortened = name.chars().take(24).collect::<String>();
+    if name.chars().count() > 24 {
+        shortened.pop();
+        shortened.push('…');
+    }
+    shortened
 }
 
 pub(crate) fn render_unknown_line(target: &str, push_link: &str) -> String {
@@ -127,7 +206,11 @@ fn rejection_next_step(
 #[cfg(test)]
 mod tests {
     use super::{
-        MAX_FAILURE_LINE_SCALARS, render_failure_line, render_held_line, render_unknown_line,
+        MAX_FAILURE_LINE_SCALARS, render_failure_line, render_held_line, render_rejection_line,
+        render_unknown_line,
+    };
+    use collaboration_client::protocol::{
+        DeliveryNextAction, DeliveryPeerClaim, DeliveryRejection, DeliveryRejectionReason,
     };
 
     #[test]
@@ -164,5 +247,73 @@ mod tests {
             render_unknown_line("Claude target", "router://host/push/abc"),
             "error: Delivery outcome for Claude target is unknown — run agent-collaboration show router://host/push/abc before retrying"
         );
+    }
+
+    #[test]
+    fn ambiguous_peer_claims_render_in_order_with_cwd_fallback() {
+        let rejection = DeliveryRejection {
+            reason: DeliveryRejectionReason::LiveElsewhere,
+            next_action: DeliveryNextAction::InspectTarget,
+            client_code: None,
+            detail: Some("this Claude session is claimed by 3 live terminals".to_owned()),
+            claims: Some(vec![
+                DeliveryPeerClaim {
+                    pid: 52304,
+                    name: Some("agent-studio-pane-fixes-b4".to_owned()),
+                    cwd: Some("/workspace/ignored-for-display".to_owned()),
+                },
+                DeliveryPeerClaim {
+                    pid: 68833,
+                    name: None,
+                    cwd: Some("/workspace/ipc-remote-zmx".to_owned()),
+                },
+                DeliveryPeerClaim {
+                    pid: 70001,
+                    name: None,
+                    cwd: None,
+                },
+            ]),
+        };
+
+        let line = render_rejection_line(&rejection, "fixture-session", "router://host/push/id");
+
+        assert_eq!(
+            line,
+            "error: fixture-session is open in 3 terminals (pid 52304 agent-studio-pane-fixes…, pid 68833 ipc-remote-zmx, pid 70001 unnamed terminal) — close one of these terminals, or run `/branch` in one of them"
+        );
+        assert!(!line.contains("/workspace/"));
+        assert!(line.chars().count() <= MAX_FAILURE_LINE_SCALARS);
+    }
+
+    #[test]
+    fn five_long_peer_claims_keep_full_structured_data_and_fit_the_line_budget() {
+        let claims = (600..605)
+            .map(|pid| DeliveryPeerClaim {
+                pid,
+                name: Some(format!(
+                    "long-terminal-name-for-peer-claim-{pid}-with-a-full-workspace-label"
+                )),
+                cwd: Some(format!("/workspace/terminal-{pid}")),
+            })
+            .collect::<Vec<_>>();
+        let rejection = DeliveryRejection {
+            reason: DeliveryRejectionReason::LiveElsewhere,
+            next_action: DeliveryNextAction::InspectTarget,
+            client_code: None,
+            detail: Some("this Claude session is claimed by 5 live terminals".to_owned()),
+            claims: Some(claims.clone()),
+        };
+
+        let line = render_rejection_line(&rejection, "fixture-session", "router://host/push/id");
+
+        assert!(line.chars().count() <= MAX_FAILURE_LINE_SCALARS);
+        assert!(line.contains(" more) — close one of these terminals"));
+        let omitted_claims = line
+            .split('+')
+            .nth(1)
+            .and_then(|rest| rest.split_whitespace().next())
+            .and_then(|count| count.parse::<usize>().ok());
+        assert!(omitted_claims.is_some_and(|count| count > 0));
+        assert_eq!(rejection.claims.as_ref(), Some(&claims));
     }
 }

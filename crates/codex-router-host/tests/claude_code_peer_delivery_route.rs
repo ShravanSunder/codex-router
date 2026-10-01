@@ -74,6 +74,22 @@ fn publish_peer(root: &Path, status: Option<&str>) -> std::path::PathBuf {
     socket_path
 }
 
+fn publish_peer_claim(root: &Path, process_id: u32, name: Option<&str>, cwd: Option<&str>) {
+    let mut record = json!({
+        "pid": process_id,
+        "sessionId": "fixture-session",
+        "peerProtocol": 99,
+    });
+    if let Some(name) = name {
+        record["name"] = json!(name);
+    }
+    if let Some(cwd) = cwd {
+        record["cwd"] = json!(cwd);
+    }
+    std::fs::write(root.join(format!("{process_id}.json")), record.to_string())
+        .expect("registry claim fixture");
+}
+
 fn delivery(mode: MessageDelivery) -> PreparedDeliveryRequest {
     let target = target();
     let push_id =
@@ -251,6 +267,63 @@ async fn live_unknown_peer_protocol_reports_live_elsewhere() {
         matches!(receipt.outcome, DeliveryOutcome::Rejected(rejection)
         if rejection.reason == DeliveryRejectionReason::LiveElsewhere)
     );
+    assert!(evidence.0.lock().await.is_empty());
+}
+
+#[tokio::test]
+async fn ambiguous_live_peer_claims_are_preserved_in_the_rejection() {
+    let root = tempfile::tempdir().expect("registry root");
+    let first_process_id = std::process::id();
+    let second_process_id = std::os::unix::process::parent_id();
+    assert_ne!(first_process_id, second_process_id);
+    publish_peer_claim(
+        root.path(),
+        first_process_id,
+        Some("first-live-terminal"),
+        Some("/workspace/first"),
+    );
+    publish_peer_claim(root.path(), second_process_id, None, None);
+
+    let route = Arc::new(ClaudeCodePeerDeliveryRoute::new(
+        target().endpoint,
+        Arc::new(ClaudeCodeSessionRegistry::new(root.path().to_owned())),
+        Arc::new(ClaudeCodePeerSocket::new(root.path().to_owned())),
+    ));
+    let router = SessionDeliveryRouter::new(vec![route]);
+    let evidence = RecordedPeerEvidence(tokio::sync::Mutex::new(Vec::new()));
+    let receipt = router
+        .deliver(delivery(MessageDelivery::Auto), &evidence)
+        .await
+        .expect("ambiguous route rejection");
+
+    let DeliveryOutcome::Rejected(rejection) = receipt.outcome else {
+        panic!(
+            "ambiguous live records must be rejected: {:?}",
+            receipt.outcome
+        );
+    };
+    assert_eq!(
+        receipt.reachability,
+        Some(SessionReachability::ClaudeCodePeer)
+    );
+    assert_eq!(rejection.reason, DeliveryRejectionReason::LiveElsewhere);
+    let claims = serde_json::to_value(&rejection)
+        .expect("rejection encodes")
+        .get("claims")
+        .cloned()
+        .expect("structured peer claims");
+    let claims = claims.as_array().expect("claims array");
+    assert_eq!(claims.len(), 2);
+    assert!(claims.contains(&json!({
+        "pid": first_process_id,
+        "name": "first-live-terminal",
+        "cwd": "/workspace/first"
+    })));
+    assert!(claims.contains(&json!({
+        "pid": second_process_id,
+        "name": null,
+        "cwd": null
+    })));
     assert!(evidence.0.lock().await.is_empty());
 }
 

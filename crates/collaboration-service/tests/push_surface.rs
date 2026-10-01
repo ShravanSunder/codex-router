@@ -331,18 +331,34 @@ async fn message_send_persists_before_delivery_and_submits_one_linked_line() {
 
 #[tokio::test]
 async fn show_returns_stored_rejected_and_unknown_delivery_outcomes() {
-    for (outcome, expected_state, expected_kind) in [
+    for (outcome, expected_state, expected_kind, expected_claims) in [
         (
             DeliveryOutcome::Rejected(collaboration_protocol::DeliveryRejection {
-                reason: collaboration_protocol::DeliveryRejectionReason::Busy,
-                next_action: collaboration_protocol::DeliveryNextAction::RetryLater,
+                reason: collaboration_protocol::DeliveryRejectionReason::LiveElsewhere,
+                next_action: collaboration_protocol::DeliveryNextAction::InspectTarget,
                 client_code: None,
-                detail: Some("target is busy".to_owned()),
+                detail: Some("two terminals claim this session".to_owned()),
+                claims: Some(vec![
+                    collaboration_protocol::DeliveryPeerClaim {
+                        pid: 52304,
+                        name: Some("terminal-one".to_owned()),
+                        cwd: Some("/workspace/one".to_owned()),
+                    },
+                    collaboration_protocol::DeliveryPeerClaim {
+                        pid: 68833,
+                        name: None,
+                        cwd: None,
+                    },
+                ]),
             }),
             "rejected",
             "rejected",
+            Some(json!([
+                {"pid":52304,"name":"terminal-one","cwd":"/workspace/one"},
+                {"pid":68833,"name":null,"cwd":null}
+            ])),
         ),
-        (DeliveryOutcome::Unknown, "outcome-unknown", "unknown"),
+        (DeliveryOutcome::Unknown, "outcome-unknown", "unknown", None),
     ] {
         let (_directory, _store, delivery, mut control) = setup().await;
         delivery.set_outcome(outcome);
@@ -363,6 +379,12 @@ async fn show_returns_stored_rejected_and_unknown_delivery_outcomes() {
                 .and_then(Value::as_str),
             Some(expected_kind)
         );
+        if let Some(expected_claims) = expected_claims.as_ref() {
+            assert_eq!(
+                result.pointer("/receipt/outcome/claims"),
+                Some(expected_claims)
+            );
+        }
 
         let shown = control
             .call("router/show", json!({"caller":target,"reference":link}))
@@ -384,7 +406,11 @@ async fn show_returns_stored_rejected_and_unknown_delivery_outcomes() {
                 shown
                     .pointer("/result/record/lastOutcome/outcome/detail")
                     .and_then(Value::as_str),
-                Some("target is busy")
+                Some("two terminals claim this session")
+            );
+            assert_eq!(
+                shown.pointer("/result/record/lastOutcome/outcome/claims"),
+                expected_claims.as_ref()
             );
         }
         control.close().await;

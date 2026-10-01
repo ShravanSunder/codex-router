@@ -8,9 +8,9 @@ use claude_code_peer_messaging::{
     PeerSocketWriteOutcome,
 };
 use collaboration_protocol::{
-    CodexGeneration, DeliveryClientReceipt, DeliveryNextAction, DeliveryOutcome, DeliveryReceipt,
-    DeliveryRejection, DeliveryRejectionReason, EndpointRef, MessageDelivery, SessionReachability,
-    SessionRef,
+    CodexGeneration, DeliveryClientReceipt, DeliveryNextAction, DeliveryOutcome, DeliveryPeerClaim,
+    DeliveryReceipt, DeliveryRejection, DeliveryRejectionReason, EndpointRef, MessageDelivery,
+    SessionReachability, SessionRef,
 };
 use collaboration_service::{
     AttemptEvidenceSink, AttemptReconciliation, AttemptReconciliationContext,
@@ -127,10 +127,10 @@ impl ClaudeCodePeerDeliveryRoute {
             PeerSessionLookup::LiveUnsupported { reason } => PeerDeliveryPreparation::Finished(
                 peer_rejection(DeliveryRejectionReason::LiveElsewhere, &reason),
             ),
-            PeerSessionLookup::Ambiguous { .. } => {
-                PeerDeliveryPreparation::Finished(peer_rejection(
-                    DeliveryRejectionReason::LiveElsewhere,
-                    AMBIGUOUS_PEER_CLAIM_REASON,
+            PeerSessionLookup::Ambiguous { claims } => {
+                PeerDeliveryPreparation::Finished(peer_receipt(
+                    DeliveryOutcome::Rejected(peer_claim_rejection(claims)),
+                    None,
                 ))
             }
             PeerSessionLookup::Writable(peer) => PeerDeliveryPreparation::Ready(peer),
@@ -212,9 +212,31 @@ fn peer_rejection(reason: DeliveryRejectionReason, detail: &str) -> DeliveryRece
             next_action,
             client_code: None,
             detail: Some(detail.to_owned()),
+            claims: None,
         }),
         None,
     )
+}
+
+fn peer_claim_rejection(claims: Vec<claude_code_peer_messaging::PeerClaim>) -> DeliveryRejection {
+    let claim_count = claims.len();
+    let claims = claims
+        .into_iter()
+        .map(|claim| DeliveryPeerClaim {
+            pid: claim.pid,
+            name: claim.name,
+            cwd: claim.cwd.map(|cwd| cwd.to_string_lossy().into_owned()),
+        })
+        .collect();
+    DeliveryRejection {
+        reason: DeliveryRejectionReason::LiveElsewhere,
+        next_action: DeliveryNextAction::InspectTarget,
+        client_code: None,
+        detail: Some(format!(
+            "this Claude session is claimed by {claim_count} live terminals"
+        )),
+        claims: Some(claims),
+    }
 }
 
 impl LiveSessionOwnershipCheck for ClaudeCodePeerDeliveryRoute {
@@ -255,9 +277,8 @@ impl SessionDeliveryRoute for ClaudeCodePeerDeliveryRoute {
                     writable: false,
                     detail: Some(reason),
                 },
-                PeerSessionLookup::Ambiguous { .. } => RouteClaim::LiveElsewhere {
-                    writable: false,
-                    detail: Some(AMBIGUOUS_PEER_CLAIM_REASON.to_owned()),
+                PeerSessionLookup::Ambiguous { claims } => RouteClaim::Rejected {
+                    rejection: peer_claim_rejection(claims),
                 },
             })
         })

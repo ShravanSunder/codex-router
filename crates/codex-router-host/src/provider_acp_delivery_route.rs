@@ -140,6 +140,7 @@ impl ProviderAcpDeliveryRoute {
                 next_action,
                 client_code: None,
                 detail: Some(detail.to_owned()),
+                claims: None,
             }),
             None,
         )
@@ -210,7 +211,7 @@ impl ProviderAcpDeliveryRoute {
             RouteClaim::Unavailable { reason, retryable } => {
                 return Ok(Self::not_submitted(reason.reason, retryable));
             }
-            RouteClaim::LiveElsewhere { .. } => {
+            RouteClaim::Rejected { .. } | RouteClaim::LiveElsewhere { .. } => {
                 return Ok(Self::not_submitted("session is live elsewhere", true));
             }
             RouteClaim::NotMine => {
@@ -505,6 +506,7 @@ impl ProviderAcpDeliveryRoute {
                 next_action,
                 client_code,
                 detail,
+                claims: None,
             }),
             None,
         ))

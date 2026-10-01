@@ -117,6 +117,9 @@ fn fake_with_outcome(
         RouteClaim::NotMine => RoutePresence::NotMine,
         RouteClaim::Holds => RoutePresence::Running,
         RouteClaim::CanLoad => RoutePresence::Wakeable,
+        RouteClaim::Rejected { rejection } => RoutePresence::LiveElsewhere {
+            detail: rejection.detail.clone(),
+        },
         RouteClaim::LiveElsewhere { detail, .. } => RoutePresence::LiveElsewhere {
             detail: detail.clone(),
         },

@@ -539,6 +539,7 @@ async fn approval_notice_uses_selected_delivery_outcome() {
                 next_action: collaboration_protocol::DeliveryNextAction::InspectTarget,
                 client_code: None,
                 detail: None,
+                claims: None,
             }),
             false,
         ),

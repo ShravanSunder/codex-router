@@ -1,7 +1,8 @@
 //! The feature-facing delivery seam and the route-facing client contract.
 use agent_automation::RouteEffectEvidence;
 use collaboration_protocol::{
-    CodexGeneration, DeliveryReceipt, MessageDelivery, PushId, SessionReachability, SessionRef,
+    CodexGeneration, DeliveryReceipt, DeliveryRejection, MessageDelivery, PushId,
+    SessionReachability, SessionRef,
 };
 use serde::{Deserialize, Serialize};
 use std::{future::Future, pin::Pin, sync::Arc};
@@ -106,6 +107,10 @@ pub enum RouteClaim {
     NotMine,
     Holds,
     CanLoad,
+    /// The route selected this target but has a typed terminal rejection before dispatch.
+    Rejected {
+        rejection: DeliveryRejection,
+    },
     LiveElsewhere {
         writable: bool,
         detail: Option<String>,

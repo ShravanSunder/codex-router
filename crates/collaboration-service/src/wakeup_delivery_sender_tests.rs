@@ -31,6 +31,7 @@ impl SessionMessageDelivery for ProviderSessionNotFound {
                     next_action: DeliveryNextAction::CorrectRequest,
                     client_code: Some(-32002),
                     detail: Some("this session never started a turn and did not survive the provider restart; create a new conversation".to_owned()),
+                    claims: None,
 
                     }),
                 reachability: Some(SessionReachability::ProviderAcp),

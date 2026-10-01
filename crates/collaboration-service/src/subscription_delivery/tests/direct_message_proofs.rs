@@ -320,6 +320,7 @@ async fn restored_guarded_generation_mismatch_is_terminal_without_any_broadened_
                 next_action: collaboration_protocol::DeliveryNextAction::InspectTarget,
                 client_code: None,
                 detail: Some("pinned generation no longer exists".to_owned()),
+                claims: None,
             },
         ))
         .unwrap();

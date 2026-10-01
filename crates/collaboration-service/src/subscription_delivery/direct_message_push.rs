@@ -90,6 +90,7 @@ impl SubscriptionPushStore {
                 next_action: collaboration_protocol::DeliveryNextAction::InspectTarget,
                 client_code: None,
                 detail: Some(detail.to_owned()),
+                claims: None,
             }),
             reachability: None,
             client: None,

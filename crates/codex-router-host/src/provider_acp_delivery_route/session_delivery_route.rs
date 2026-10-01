@@ -43,6 +43,9 @@ impl SessionDeliveryRoute for ProviderAcpDeliveryRoute {
             let presence = match self.claim.claim(&target).await {
                 RouteClaim::NotMine => RoutePresence::NotMine,
                 RouteClaim::Holds => RoutePresence::Running,
+                RouteClaim::Rejected { rejection } => RoutePresence::LiveElsewhere {
+                    detail: rejection.detail,
+                },
                 RouteClaim::LiveElsewhere { detail, .. } => RoutePresence::LiveElsewhere { detail },
                 RouteClaim::Unavailable { reason, .. } => RoutePresence::Unreachable {
                     reason: reason.reason,

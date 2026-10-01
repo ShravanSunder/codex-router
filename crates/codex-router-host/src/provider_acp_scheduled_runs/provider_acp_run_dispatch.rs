@@ -319,5 +319,6 @@ fn rejected(
         next_action,
         client_code: None,
         detail: Some(detail.to_owned()),
+        claims: None,
     })
 }
