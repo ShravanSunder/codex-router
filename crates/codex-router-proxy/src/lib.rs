@@ -2464,7 +2464,7 @@ mod tests {
             AccountStatus::Enabled,
         );
         let secrets = codex_router_secret_store::test_support::open_encrypted_credential_store(
-            &temp_dir.path().join("secrets"),
+            temp_dir.path().join("secrets"),
         )
         .expect("affinity credential store should open");
         let now_unix_seconds = test_unix_seconds();
@@ -6475,7 +6475,7 @@ mod tests {
             ),
         )
         .with_quota_clock(1_030, 60);
-        let runtime = LoopbackRouterRuntime::start(config, secrets.clone())
+        let runtime = LoopbackRouterRuntime::start(config, secrets)
             .unwrap_or_else(|error| panic!("credit proxy runtime should start: {error}"));
         let router_address = runtime.local_addr();
         let client_thread = thread::spawn(move || {
