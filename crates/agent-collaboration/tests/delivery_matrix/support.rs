@@ -361,13 +361,21 @@ impl PeerFixture {
         marker: &str,
         timeout: Duration,
     ) -> ProofResult<()> {
+        self.expect_text_with_timeout(marker, timeout).await?;
+        Ok(())
+    }
+    pub(super) async fn expect_text_with_timeout(
+        &mut self,
+        marker: &str,
+        timeout: Duration,
+    ) -> ProofResult<String> {
         let deadline = tokio::time::Instant::now() + timeout;
         loop {
             let received = tokio::time::timeout_at(deadline, self.received.recv())
                 .await?
                 .ok_or("peer fixture stopped before message")?;
             if super::user_text_contains_marker(&received, marker) {
-                return Ok(());
+                return Ok(received);
             }
         }
     }
