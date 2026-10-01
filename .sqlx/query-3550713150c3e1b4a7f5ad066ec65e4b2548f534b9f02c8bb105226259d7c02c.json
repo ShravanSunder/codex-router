@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT starts_after_activity FROM topic_watches WHERE reader_key=? AND topic_id=?",
+  "describe": {
+    "columns": [
+      {
+        "name": "starts_after_activity",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "topic_watches",
+            "name": "starts_after_activity"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "3550713150c3e1b4a7f5ad066ec65e4b2548f534b9f02c8bb105226259d7c02c"
+}

@@ -6,7 +6,8 @@ use crate::participant_records::advance_participant_last_seen;
 use crate::participant_row_decoding::load_participant;
 use crate::storage_support::{
     current_activity_sequence, ensure_identity, invalid_record, storage_error,
-    validate_stored_boundary,
+    validate_existing_topic_watch_boundary, validate_stored_boundary,
+    validate_topic_watch_boundary,
 };
 use crate::thread_batch_selection::{
     ThreadBatchSelectionRoot, load_thread_batch_boundary, select_thread_batches,
@@ -190,16 +191,26 @@ impl BoardStore {
                 selected_topic_ids.push(topic_id.clone());
                 let topic = require_topic(&mut transaction, topic_id).await?;
                 let board = require_board(&mut transaction, &topic.board_id).await?;
-                sqlx::query!(
+                validate_topic_watch_boundary(latest, latest, topic_id)?;
+                validate_existing_topic_watch_boundary(
+                    &mut transaction,
+                    &reader_key,
+                    topic_id,
+                    latest,
+                )
+                .await?;
+                let starts_after = sqlx::query_scalar!(
                     "INSERT INTO topic_watches(reader_key,topic_id,starts_after_activity,active) VALUES(?,?,?,1) \
-                     ON CONFLICT(reader_key,topic_id) DO UPDATE SET starts_after_activity=CASE WHEN topic_watches.active=0 THEN excluded.starts_after_activity ELSE topic_watches.starts_after_activity END,active=1",
+                     ON CONFLICT(reader_key,topic_id) DO UPDATE SET starts_after_activity=CASE WHEN topic_watches.active=0 THEN excluded.starts_after_activity ELSE topic_watches.starts_after_activity END,active=1 \
+                     RETURNING starts_after_activity",
                     reader_key,
                     topic_id.as_str(),
                     latest,
                 )
-                .execute(&mut *transaction)
+                .fetch_one(&mut *transaction)
                 .await
                 .map_err(storage_error)?;
+                validate_topic_watch_boundary(starts_after, latest, topic_id)?;
                 let _project_id = board.project_id;
                 sqlx::query_scalar!(
                     "SELECT threads.root_id FROM board_messages roots JOIN board_threads threads ON threads.root_id=roots.message_id WHERE roots.topic_id=? AND roots.root_id IS NULL ORDER BY threads.root_id",

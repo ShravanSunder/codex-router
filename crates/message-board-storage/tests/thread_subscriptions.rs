@@ -7,6 +7,8 @@ mod migration;
 mod review_minor_regressions;
 #[path = "thread_subscriptions/review_regressions.rs"]
 mod review_regressions;
+#[path = "thread_subscriptions/topic_watch_boundary.rs"]
+mod topic_watch_boundary;
 #[path = "thread_subscriptions/windows.rs"]
 mod windows;
 

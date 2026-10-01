@@ -3,6 +3,7 @@ use crate::board_topic_records::{require_board, require_topic};
 use crate::message_records::{activate_watch, require_thread};
 use crate::storage_support::{
     BoardTransaction, invalid_record, recompute_project_unread, storage_error,
+    validate_existing_topic_watch_boundary, validate_topic_watch_boundary,
 };
 use crate::thread_subscription_records::{
     SubscriptionWrite, delete_scope_windows, encode_end_reason, encode_scope, expiry_at,
@@ -210,19 +211,23 @@ pub(crate) async fn activate_topic_watch_scope(
         board.project_id.as_str(),
     )
     .await?;
-    sqlx::query!(
+    validate_topic_watch_boundary(boundary, boundary, topic_id)?;
+    validate_existing_topic_watch_boundary(transaction, reader_key, topic_id, boundary).await?;
+    let starts_after = sqlx::query_scalar!(
         "INSERT INTO topic_watches(reader_key,topic_id,starts_after_activity,active) \
          VALUES(?,?,?,1) ON CONFLICT(reader_key,topic_id) DO UPDATE SET \
            starts_after_activity=CASE WHEN topic_watches.active=1 \
              THEN topic_watches.starts_after_activity ELSE excluded.starts_after_activity END, \
-           active=1",
+           active=1 \
+         RETURNING starts_after_activity",
         reader_key,
         topic_id.as_str(),
         boundary,
     )
-    .execute(&mut **transaction)
+    .fetch_one(&mut **transaction)
     .await
     .map_err(storage_error)?;
+    validate_topic_watch_boundary(starts_after, boundary, topic_id)?;
     for root_id in sqlx::query_scalar!(
         "SELECT root.message_id FROM board_messages root \
          WHERE root.topic_id=? AND root.root_id IS NULL ORDER BY root.message_id",
@@ -362,20 +367,29 @@ pub(crate) async fn upsert_join_subscription(
     reader_key: &str,
     reader: &Identity,
     root_message_id: &MessageId,
+    policy_patch: &SubscriptionPolicyPatch,
     now: DateTime<Utc>,
 ) -> Result<bool, BoardError> {
     let scope = SubscriptionScope::thread(root_message_id.clone());
     let existing = load_subscription_record(transaction, reader_key, &scope).await?;
-    let policy = existing
+    let current_policy = existing
         .as_ref()
         .map(|record| record.policy().clone())
         .unwrap_or_else(|| SubscriptionPolicy::defaults_for(reader));
+    let policy = current_policy
+        .apply_patch(reader, policy_patch)
+        .map_err(policy_error)?;
     let subscription_started = existing
         .as_ref()
         .is_none_or(|record| !matches!(record.state(), SubscriptionState::Active));
+    let policy_changed = existing
+        .as_ref()
+        .is_some_and(|record| record.policy() != &policy);
     let generation = match existing.as_ref() {
         None => SubscriptionGeneration::new(1).map_err(policy_error)?,
-        Some(record) if subscription_started => record.generation().next().map_err(policy_error)?,
+        Some(record) if subscription_started || policy_changed => {
+            record.generation().next().map_err(policy_error)?
+        }
         Some(record) => record.generation(),
     };
     let previous_outcome = existing

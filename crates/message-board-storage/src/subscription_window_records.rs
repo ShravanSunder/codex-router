@@ -2,6 +2,7 @@
 use crate::BoardStore;
 use crate::storage_support::{
     BoardTransaction, current_activity_sequence, identity_key, invalid_record, storage_error,
+    validate_topic_watch_boundary,
 };
 use crate::thread_batch_selection::{
     ThreadBatchSelectionRoot, pending_message_count, select_pending_root_notices,
@@ -166,6 +167,7 @@ pub(crate) async fn rescan_missing_windows_in_transaction(
                 .await
                 .map_err(storage_error)?
                 .ok_or_else(|| corrupt_subscription("topicWatch"))?;
+                validate_topic_watch_boundary(topic_watch_start, latest, &topic_id)?;
                 let topic =
                     crate::board_topic_records::require_topic(transaction, &topic_id).await?;
                 let board =
