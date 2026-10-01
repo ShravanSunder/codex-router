@@ -373,7 +373,7 @@ pub fn control_schema_document(
     )?;
     assembly.add_method::<SessionMessageSendParams, PushMessageSendResult>(
         "message/send",
-        &["wrongService", "unavailable", "invalidField"],
+        &["wrongService", "unavailable", "invalidField", "overloaded"],
     )?;
     assembly.add_method::<SessionMessageReplyParams, SessionMessageReplyResult>(
         "message/reply",
@@ -387,6 +387,7 @@ pub fn control_schema_document(
             "notDirectMessage",
             "ownerReplyUnsupported",
             "outcomeUnknown",
+            "overloaded",
         ],
     )?;
     assembly.add_method::<PushRecordShowParams, PushRecordShowResult>(
@@ -398,15 +399,16 @@ pub fn control_schema_document(
             "notFound",
             "notPermitted",
             "foreignMachine",
+            "overloaded",
         ],
     )?;
     assembly.add_method::<PushRecordListParams, PushRecordListResult>(
         "message/inbox",
-        &["wrongService", "unavailable", "invalidField"],
+        &["wrongService", "unavailable", "invalidField", "overloaded"],
     )?;
     assembly.add_method::<PushRecordHistoryParams, PushRecordListResult>(
         "message/history",
-        &["wrongService", "unavailable", "invalidField"],
+        &["wrongService", "unavailable", "invalidField", "overloaded"],
     )?;
     assembly.add_method::<NativeInterruptParams, NativeInterruptResult>(
         "codex/turnInterrupt",

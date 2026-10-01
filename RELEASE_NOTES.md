@@ -32,6 +32,7 @@
 - Remove `message reply --expect-sender` and implicit reply-to-latest-sender behavior; a DM reply now requires its push id or `router://` link.
 - Reject `steer` and generation-guarded DMs when the target is not running; these sends are not held for later delivery.
 - If a wait response is lost after activity may have been handed off, report an unknown outcome and inspect `board thread subscriptions` and `board inbox fetch` before waiting again.
+- Publish the generic `overloaded` admission error for message send/reply/inbox/history and `router/show`, matching rejection before route dispatch.
 - Watching or subscribing to a topic with no board activity yet now works and covers the first later thread; existing watch rows are preserved.
 - Retry known-rejected Provider ACP scheduled-run submissions with the same stored push id, leaving the run available for another attempt.
 
