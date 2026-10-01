@@ -1,8 +1,10 @@
 use collaboration_client::{ClientError, ControlClient, MessageSendRequest, PublicMessageContent};
 use collaboration_protocol::{CodexGeneration, EndpointDescription, SessionRef};
 use collaboration_service::{
-    CodexAppServerDeliveryRoute, NativeControlBackend, NativeGenerationGate, ServiceIdentity,
-    SessionDeliveryRoute, SessionDeliveryRouter, SessionMessageDelivery, serve_control_connection,
+    BoardAvailability, CodexAppServerDeliveryRoute, MachineIdentity, NativeControlBackend,
+    NativeGenerationGate, ServiceIdentity, SessionDeliveryRoute, SessionDeliveryRouter,
+    SessionMessageDelivery, SubscriptionDeliveryService, SubscriptionDeliveryServiceProps,
+    SystemSubscriptionClock, TargetPresenceProbe, serve_control_connection,
 };
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
@@ -125,8 +127,7 @@ async fn sdk_inspection_and_exact_interrupt_use_native_backend_with_generation_g
         .with_endpoints(vec![description.clone()])
         .unwrap_or_else(|error| panic!("endpoints: {error}"))
         .with_native_backend(native_backend.clone())
-        .unwrap_or_else(|error| panic!("binding: {error}"))
-        .with_approval_broker(broker);
+        .unwrap_or_else(|error| panic!("binding: {error}"));
     let route: Arc<dyn SessionDeliveryRoute> = Arc::new(CodexAppServerDeliveryRoute::new(
         service_id
             .to_owned()
@@ -136,9 +137,37 @@ async fn sdk_inspection_and_exact_interrupt_use_native_backend_with_generation_g
         native_backend,
         Arc::new(collaboration_service::UnmaterializedThreadHolder::new()),
     ));
-    let delivery: Arc<dyn SessionMessageDelivery> =
-        Arc::new(SessionDeliveryRouter::new(vec![route]));
-    let identity = identity.with_session_delivery(delivery);
+    let delivery_router = Arc::new(SessionDeliveryRouter::new(vec![route]));
+    let delivery: Arc<dyn SessionMessageDelivery> = delivery_router.clone();
+    let presence: Arc<dyn TargetPresenceProbe> = delivery_router;
+    let machine_identity = MachineIdentity::new(
+        service_id
+            .to_owned()
+            .try_into()
+            .unwrap_or_else(|error| panic!("machine service id: {error}")),
+        None,
+    )
+    .unwrap_or_else(|error| panic!("machine identity: {error}"));
+    let subscription_delivery =
+        SubscriptionDeliveryService::new(SubscriptionDeliveryServiceProps {
+            board_availability: BoardAvailability::Unavailable,
+            push_store: Arc::clone(&automation_store),
+            delivery: Arc::clone(&delivery),
+            presence: Arc::clone(&presence),
+            machine_identity,
+            clock: Arc::new(SystemSubscriptionClock),
+        });
+    subscription_delivery
+        .start()
+        .await
+        .unwrap_or_else(|error| panic!("subscription delivery start: {error}"));
+    broker
+        .install_session_delivery(Arc::clone(&delivery))
+        .unwrap_or_else(|error| panic!("broker delivery: {error}"));
+    let identity = identity
+        .with_session_delivery(delivery)
+        .with_subscription_delivery_service(subscription_delivery.clone(), presence)
+        .with_approval_broker(broker);
     let (client, server) =
         tokio::net::UnixStream::pair().unwrap_or_else(|error| panic!("pair: {error}"));
     let service = tokio::spawn(serve_control_connection(server, identity.clone()));
@@ -197,6 +226,67 @@ async fn sdk_inspection_and_exact_interrupt_use_native_backend_with_generation_g
                 json!({}),
             ),
         ] {
+            if matches!(method, "turn/start" | "thread/queue/add") {
+                let (presence_stream, _) = listener
+                    .accept()
+                    .await
+                    .unwrap_or_else(|error| panic!("presence accept: {error}"));
+                let mut presence_socket = tokio_tungstenite::accept_async(presence_stream)
+                    .await
+                    .unwrap_or_else(|error| panic!("presence upgrade: {error}"));
+                let initialize = presence_socket
+                    .next()
+                    .await
+                    .unwrap_or_else(|| panic!("presence initialize frame"))
+                    .unwrap_or_else(|error| panic!("presence initialize receive: {error}"));
+                let initialize_request: Value = serde_json::from_str(
+                    initialize
+                        .to_text()
+                        .unwrap_or_else(|error| panic!("presence initialize text: {error}")),
+                )
+                .unwrap_or_else(|error| panic!("presence initialize JSON: {error}"));
+                assert_eq!(initialize_request["method"], "initialize");
+                presence_socket
+                    .send(Message::Text(
+                        json!({"id":initialize_request["id"],"result":{}})
+                            .to_string()
+                            .into(),
+                    ))
+                    .await
+                    .unwrap_or_else(|error| panic!("presence initialize response: {error}"));
+                let initialized = presence_socket
+                    .next()
+                    .await
+                    .unwrap_or_else(|| panic!("presence initialized frame"))
+                    .unwrap_or_else(|error| panic!("presence initialized receive: {error}"));
+                let initialized_request: Value = serde_json::from_str(
+                    initialized
+                        .to_text()
+                        .unwrap_or_else(|error| panic!("presence initialized text: {error}")),
+                )
+                .unwrap_or_else(|error| panic!("presence initialized JSON: {error}"));
+                assert_eq!(initialized_request["method"], "initialized");
+                let read = presence_socket
+                    .next()
+                    .await
+                    .unwrap_or_else(|| panic!("presence thread/read frame"))
+                    .unwrap_or_else(|error| panic!("presence thread/read receive: {error}"));
+                let read_request: Value = serde_json::from_str(
+                    read.to_text()
+                        .unwrap_or_else(|error| panic!("presence thread/read text: {error}")),
+                )
+                .unwrap_or_else(|error| panic!("presence thread/read JSON: {error}"));
+                assert_eq!(read_request["method"], "thread/read");
+                presence_socket
+                    .send(Message::Text(
+                        json!({"id":read_request["id"],"result":{"thread":{"id":"proof-thread","status":{"type":"idle"}}}})
+                            .to_string()
+                            .into(),
+                    ))
+                    .await
+                    .unwrap_or_else(|error| panic!("presence thread/read response: {error}"));
+                drop(presence_socket);
+            }
             let (stream, _) = listener
                 .accept()
                 .await
@@ -265,10 +355,14 @@ async fn sdk_inspection_and_exact_interrupt_use_native_backend_with_generation_g
                             .unwrap_or_else(|error| panic!("observed push ids: {error}"))
                             .push(push_id.to_owned());
                         let text = request["params"]["input"][0]["text"].as_str().unwrap();
-                        assert!(text.contains("\nRouter delivery\n"));
+                        assert!(
+                            text.starts_with("✉️ 🤖 codex-local/proof-th @"),
+                            "stored direct-message header uses the endpoint/session fallback: {text:?}"
+                        );
+                        assert!(text.contains(" → you · \"A checked finding\" · "));
+                        assert!(!text.contains(valid_short_title));
                         assert!(!text.contains("Self-declared sender:"));
-                        assert!(text.contains("A checked finding"));
-                        assert!(text.contains("router://"));
+                        assert!(text.ends_with(&format!("router://{service_id}/push/{push_id}")));
                     } else {
                         assert_eq!(request["params"], expected);
                     }
@@ -349,21 +443,26 @@ async fn sdk_inspection_and_exact_interrupt_use_native_backend_with_generation_g
         })
         .await
         .unwrap();
-    assert!(matches!(
-        message.receipt.client,
-        Some(
-            collaboration_protocol::DeliveryClientReceipt::CodexAppServer(
-                collaboration_protocol::NativeSendReceipt {
-                    acceptance: collaboration_protocol::NativeSendAcceptance::NativeInputAccepted {
-                        disposition:
-                            collaboration_protocol::NativeInputDisposition::StartedOrSteered,
+    assert!(
+        matches!(
+            message.receipt.client,
+            Some(
+                collaboration_protocol::DeliveryClientReceipt::CodexAppServer(
+                    collaboration_protocol::NativeSendReceipt {
+                        acceptance:
+                            collaboration_protocol::NativeSendAcceptance::NativeInputAccepted {
+                                disposition:
+                                    collaboration_protocol::NativeInputDisposition::StartedOrSteered,
+                                ..
+                            },
                         ..
-                    },
-                    ..
-                }
+                    }
+                )
             )
-        )
-    ));
+        ),
+        "receipt: {:?}",
+        message.receipt
+    );
     let queued = client
         .send_message(MessageSendRequest {
             target: target.clone(),
@@ -482,6 +581,8 @@ async fn sdk_inspection_and_exact_interrupt_use_native_backend_with_generation_g
     backend
         .await
         .unwrap_or_else(|error| panic!("backend: {error}"));
+    subscription_delivery.shutdown().await;
+    drop(subscription_delivery);
     if let Some(collaboration_protocol::ChannelDescription::NativeCodex { schema_digest, .. }) =
         description.channels.first_mut()
     {
