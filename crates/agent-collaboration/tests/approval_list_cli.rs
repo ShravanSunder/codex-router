@@ -57,6 +57,15 @@ async fn provider_pending_approval_uses_legacy_cli_shape_and_safe_decision() {
     broker
         .install_session_delivery(Arc::new(AcceptedNoticeDelivery))
         .expect("notice route");
+    let automation_store = Arc::new(tokio::sync::Mutex::new(
+        automation_storage::AutomationStore::open(&directory.path().join("automation.sqlite"))
+            .await
+            .expect("automation store"),
+    ));
+    let identity = collaboration_service::ServiceIdentity::new(service_id, epoch, &digest)
+        .expect("service identity")
+        .with_automation_store(Arc::clone(&automation_store))
+        .with_approval_broker(Arc::clone(&broker));
     let requester: message_board::SessionRef = serde_json::from_value(json!({
         "endpoint":endpoint,"sessionId":"provider-session"
     }))
@@ -98,9 +107,6 @@ async fn provider_pending_approval_uses_legacy_cli_shape_and_safe_decision() {
         )
         .await
         .expect("pending provider approval");
-    let identity = collaboration_service::ServiceIdentity::new(service_id, epoch, &digest)
-        .expect("service identity")
-        .with_approval_broker(Arc::clone(&broker));
     let control = collaboration_service::LocalControlService::bind(
         &directory.path().join("control.sock"),
         identity,
