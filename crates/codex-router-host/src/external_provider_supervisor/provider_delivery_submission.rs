@@ -69,6 +69,7 @@ impl ExternalProviderSupervisor {
         .await
     }
 
+    /// Submits caller-projected content blocks without passing through message rendering.
     pub(crate) async fn submit_delivery_prompt_contents(
         &self,
         request: ProviderPromptContentsRequest,

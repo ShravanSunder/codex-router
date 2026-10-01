@@ -10,11 +10,13 @@ use codex_router_host::ClaudeCodePeerDeliveryRoute;
 use collaboration_protocol::{
     AttemptId, CodexGeneration, DeliveryClientReceipt, DeliveryCorrelationId, DeliveryOutcome,
     DeliveryRejectionReason, EndpointId, EndpointRef, MessageContent, MessageDelivery, MessageText,
-    SessionId, SessionRef, UuidIdentity,
+    PushId, SessionId, SessionReachability, SessionRef, UuidIdentity,
 };
 use collaboration_service::{
     AttemptEvidenceSink, AttemptReconciliationContext, DeliveryFuture, DeliveryPrecondition,
-    DeliveryRequest, RouteClaim, RoutePresence, SessionDeliveryRoute,
+    DeliveryRequest, RouteClaim, RoutePresence, SessionDeliveryRoute, SessionDeliveryRouter,
+    SessionMessageDelivery,
+    layer_zero::{DeliveryRequest as PreparedDeliveryRequest, PreparedPush},
 };
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
@@ -149,6 +151,74 @@ async fn peer_route_writes_origin_and_reply_line_without_claiming_acceptance() {
     );
     assert!(
         matches!(&records[1], RouteEffectEvidence::ClaudeCodePeer(peer) if peer.write == PeerWriteEffect::Written)
+    );
+}
+
+#[tokio::test]
+async fn prepared_push_reaches_peer_route_as_the_exact_router_line() {
+    let root = tempfile::tempdir().expect("registry root");
+    let socket_path = publish_peer(root.path(), Some("busy"));
+    let listener = tokio::net::UnixListener::bind(&socket_path).expect("peer listener");
+    let receiver = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.expect("accepted peer");
+        let mut lines = BufReader::new(stream).lines();
+        let _auth: Value =
+            serde_json::from_str(&lines.next_line().await.expect("auth line").expect("auth"))
+                .expect("auth JSON");
+        serde_json::from_str::<Value>(&lines.next_line().await.expect("user line").expect("user"))
+            .expect("user JSON")
+    });
+    let route = Arc::new(ClaudeCodePeerDeliveryRoute::new(
+        target().endpoint,
+        Arc::new(ClaudeCodeSessionRegistry::new(root.path().to_owned())),
+        Arc::new(ClaudeCodePeerSocket::new(root.path().to_owned())),
+    ));
+    let router = SessionDeliveryRouter::new(vec![route]);
+    let evidence = RecordedPeerEvidence(tokio::sync::Mutex::new(Vec::new()));
+    let push_id = PushId::try_from("018f47d2-24d5-7a68-b9ec-6f759c39458f".to_owned())
+        .expect("UUIDv7 push id");
+    let line = MessageText::try_from(format!(
+        "✉️ Main · \"S1 is green\" · router://00000000-0000-4000-8000-000000000001/push/{}",
+        push_id.as_str()
+    ))
+    .expect("push line");
+    let correlation =
+        DeliveryCorrelationId::try_from(push_id.as_str().to_owned()).expect("push id correlation");
+    assert_eq!(correlation.as_str(), push_id.as_str());
+    let request = PreparedDeliveryRequest {
+        payload: PreparedPush {
+            push_id,
+            line: line.clone(),
+            load_policy: collaboration_service::LoadPolicy::LoadedOnly,
+        },
+        target: target(),
+        mode: MessageDelivery::Auto,
+        precondition: DeliveryPrecondition::Unpinned,
+        correlation,
+        attempt: AttemptId::generate(),
+    };
+
+    let receipt = router
+        .deliver_prepared(request, &evidence)
+        .await
+        .expect("prepared push delivery");
+
+    assert_eq!(receipt.outcome, DeliveryOutcome::PeerMessageWritten);
+    assert_eq!(
+        receipt.reachability,
+        Some(SessionReachability::ClaudeCodePeer)
+    );
+    assert!(matches!(
+        receipt.client,
+        Some(DeliveryClientReceipt::ClaudeCodePeer)
+    ));
+    let user = receiver.await.expect("receiver");
+    assert_eq!(user["message"]["content"], line.as_str());
+    assert!(
+        !user["message"]["content"]
+            .as_str()
+            .expect("peer message content")
+            .contains("For follow-up messages")
     );
 }
 

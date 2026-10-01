@@ -65,7 +65,6 @@ pub(super) fn message(target: SessionRef) -> MessageSendRequest {
         },
         delivery: MessageDelivery::Auto,
         generation_guard: None,
-        correlation: None,
     }
 }
 

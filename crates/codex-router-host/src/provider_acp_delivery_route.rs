@@ -1,12 +1,14 @@
 //! ACP provider message delivery, evidence, and reconciliation.
 mod provider_active_turn_cancel;
 mod provider_content_commands;
+mod provider_delivery_request;
 mod provider_queue_submission;
 mod session_delivery_route;
 pub use provider_active_turn_cancel::ProviderCancelActiveTurnError;
 pub use provider_content_commands::{
     ProviderPromptContentsError, ProviderQueueAdmissionError, ProviderSteerContentsError,
 };
+use provider_delivery_request::{ProviderDeliveryContent, ProviderDeliveryRequest};
 
 use crate::external_provider_supervisor::{ProviderPromptContentsRequest, ProviderPromptDispatch};
 use crate::provider_acp_message_fifo::{ProviderAcpMessageFifo, ProviderQueuedPrompt};
@@ -29,9 +31,8 @@ use collaboration_protocol::{
     SessionRef, UuidIdentity,
 };
 use collaboration_service::{
-    AttemptEvidenceSink, DeliveryContractError, DeliveryPrecondition, DeliveryRequest,
-    EndpointDirectory, LoadPolicy, NOT_LOADED_REASON, ProviderConversationBackend,
-    ProviderOperationStore, RouteClaim,
+    AttemptEvidenceSink, DeliveryContractError, DeliveryPrecondition, EndpointDirectory,
+    LoadPolicy, NOT_LOADED_REASON, ProviderConversationBackend, ProviderOperationStore, RouteClaim,
 };
 use std::{
     collections::{HashMap, HashSet},
@@ -156,7 +157,7 @@ impl ProviderAcpDeliveryRoute {
     }
 
     fn effect(
-        request: &DeliveryRequest,
+        request: &ProviderDeliveryRequest,
         binding: &collaboration_protocol::ProviderBindingIdentity,
         submission: SubmissionEffect,
     ) -> Result<RouteEffectEvidence<SessionRef, CodexGeneration>, DeliveryContractError> {
@@ -177,9 +178,10 @@ impl ProviderAcpDeliveryRoute {
 
     async fn deliver_provider<'a>(
         &'a self,
-        request: DeliveryRequest,
+        request: ProviderDeliveryRequest,
         sink: &'a dyn AttemptEvidenceSink,
     ) -> Result<DeliveryReceipt, DeliveryContractError> {
+        let input_id = request.input_id()?;
         if !self.serves(&request.target) {
             return Ok(Self::rejected(
                 DeliveryRejectionReason::NoRoute,
@@ -221,7 +223,6 @@ impl ProviderAcpDeliveryRoute {
         }
         let operation_id = OperationId::try_from(request.attempt.as_str().to_owned())
             .map_err(|_| DeliveryContractError::InvalidEvidence)?;
-        let input_id = session_event_model::InputId::generate();
         let Some(runtime) = self.supervisor.runtime_for(&request.target.endpoint) else {
             return Ok(Self::not_submitted("provider runtime is unavailable", true));
         };
@@ -332,29 +333,35 @@ impl ProviderAcpDeliveryRoute {
                 .await;
         }
         if capabilities.supports_steering {
-            let prompt = match collaboration_protocol::render_message_with_context(
-                &request.target,
-                &request.message,
-                &request.header_context,
-            ) {
-                Ok(prompt) => prompt,
-                Err(_) => {
-                    return self
-                        .finish_known_none(
-                            &request,
-                            sink,
-                            &mut effect,
-                            "provider prompt exceeds the frame limit",
-                            false,
-                        )
-                        .await;
-                }
+            let prompt_text = match &request.content {
+                ProviderDeliveryContent::Message {
+                    message,
+                    header_context,
+                } => match collaboration_protocol::render_message_with_context(
+                    &request.target,
+                    message,
+                    header_context,
+                ) {
+                    Ok(prompt) => prompt.text,
+                    Err(_) => {
+                        return self
+                            .finish_known_none(
+                                &request,
+                                sink,
+                                &mut effect,
+                                "provider prompt exceeds the frame limit",
+                                false,
+                            )
+                            .await;
+                    }
+                },
+                ProviderDeliveryContent::PreparedPush { line, .. } => line.as_str().to_owned(),
             };
             match runtime
                 .steer_session_with_input(
                     String::from(request.target.session_id.clone()),
                     input_id.clone(),
-                    prompt.text,
+                    prompt_text,
                 )
                 .await
             {
@@ -424,25 +431,48 @@ impl ProviderAcpDeliveryRoute {
             }
             Err(_) => return self.finish_unknown(sink, &mut effect).await,
         };
-        let requested_by = match &request.message {
-            MessageContent::Agent { sender, .. } => sender.clone().into(),
-            MessageContent::HumanUser { .. } | MessageContent::Router { .. } => record.created_by,
+        let requested_by = match &request.content {
+            ProviderDeliveryContent::Message {
+                message: MessageContent::Agent { sender, .. },
+                ..
+            } => sender.clone().into(),
+            ProviderDeliveryContent::Message { .. }
+            | ProviderDeliveryContent::PreparedPush { .. } => record.created_by.clone(),
         };
-        let dispatch = self
-            .supervisor
-            .submit_delivery_prompt_with_header_context(
-                ConversationPromptRequest {
-                    operation_id: operation_id.clone(),
-                    input_id: Some(input_id),
-                    target: request.target.clone(),
-                    generation: Some(binding.generation),
+        let dispatch = match &request.content {
+            ProviderDeliveryContent::Message {
+                message,
+                header_context,
+            } => {
+                self.supervisor
+                    .submit_delivery_prompt_with_header_context(
+                        ConversationPromptRequest {
+                            operation_id: operation_id.clone(),
+                            input_id: Some(input_id),
+                            target: request.target.clone(),
+                            generation: Some(binding.generation.clone()),
+                            requested_by,
+                            approver: record.approver,
+                            prompt: message.clone(),
+                        },
+                        header_context,
+                    )
+                    .await
+            }
+            ProviderDeliveryContent::PreparedPush { line, .. } => {
+                let contents_request = ProviderPromptContentsRequest::from_prepared_push(
+                    operation_id.clone(),
+                    input_id,
+                    request.target.clone(),
                     requested_by,
-                    approver: record.approver,
-                    prompt: request.message.clone(),
-                },
-                &request.header_context,
-            )
-            .await;
+                    record.approver,
+                    line,
+                )?;
+                self.supervisor
+                    .submit_delivery_prompt_contents(contents_request)
+                    .await
+            }
+        };
         match dispatch {
             Ok(ProviderPromptDispatch::Submitted) => {
                 update_submission(&mut effect, SubmissionEffect::Accepted);
@@ -480,7 +510,7 @@ impl ProviderAcpDeliveryRoute {
 
     async fn finish_known_none(
         &self,
-        _request: &DeliveryRequest,
+        _request: &ProviderDeliveryRequest,
         sink: &dyn AttemptEvidenceSink,
         effect: &mut RouteEffectEvidence<SessionRef, CodexGeneration>,
         reason: impl Into<String>,

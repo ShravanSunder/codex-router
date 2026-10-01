@@ -88,7 +88,15 @@ impl SessionDeliveryRoute for ProviderAcpDeliveryRoute {
         request: DeliveryRequest,
         sink: &'a dyn AttemptEvidenceSink,
     ) -> DeliveryFuture<'a, DeliveryReceipt> {
-        Box::pin(async move { self.deliver_provider(request, sink).await })
+        Box::pin(async move { self.deliver_provider(request.into(), sink).await })
+    }
+
+    fn deliver_prepared<'a>(
+        &'a self,
+        request: collaboration_service::layer_zero::DeliveryRequest,
+        sink: &'a dyn AttemptEvidenceSink,
+    ) -> DeliveryFuture<'a, DeliveryReceipt> {
+        Box::pin(async move { self.deliver_provider(request.into(), sink).await })
     }
 
     fn reconcile_attempt(

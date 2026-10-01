@@ -121,7 +121,7 @@ async fn host_router_selects_peer_and_provider_without_cross_loading() {
         .send_message(message(unloaded.clone()))
         .await
         .expect("unsupported peer receipt");
-    assert!(matches!(unsupported.outcome,
+    assert!(matches!(unsupported.receipt.outcome,
         DeliveryOutcome::Rejected(rejection) if rejection.reason == DeliveryRejectionReason::LiveElsewhere));
     assert!(
         !claude_loads.exists(),
@@ -145,9 +145,9 @@ async fn host_router_selects_peer_and_provider_without_cross_loading() {
         .send_message(message(unloaded))
         .await
         .expect("peer receipt");
-    assert_eq!(peer.outcome, DeliveryOutcome::PeerMessageWritten);
+    assert_eq!(peer.receipt.outcome, DeliveryOutcome::PeerMessageWritten);
     assert_eq!(
-        peer.reachability,
+        peer.receipt.reachability,
         Some(collaboration_protocol::SessionReachability::ClaudeCodePeer)
     );
     assert!(
@@ -170,9 +170,9 @@ async fn host_router_selects_peer_and_provider_without_cross_loading() {
         }))
         .await
         .expect("provider load receipt");
-    assert_eq!(loaded.outcome, DeliveryOutcome::Started);
+    assert_eq!(loaded.receipt.outcome, DeliveryOutcome::Started);
     assert_eq!(
-        loaded.reachability,
+        loaded.receipt.reachability,
         Some(collaboration_protocol::SessionReachability::ProviderAcp)
     );
     assert_eq!(
@@ -194,18 +194,18 @@ async fn host_router_selects_peer_and_provider_without_cross_loading() {
         .send_message(message(held_claude.clone()))
         .await
         .expect("held Claude receipt");
-    assert_eq!(claude.outcome, DeliveryOutcome::Started);
+    assert_eq!(claude.receipt.outcome, DeliveryOutcome::Started);
     assert_eq!(
-        claude.reachability,
+        claude.receipt.reachability,
         Some(collaboration_protocol::SessionReachability::ProviderAcp)
     );
     let cursor = client
         .send_message(message(held_cursor.clone()))
         .await
         .expect("held Cursor receipt");
-    assert_eq!(cursor.outcome, DeliveryOutcome::Started);
+    assert_eq!(cursor.receipt.outcome, DeliveryOutcome::Started);
     assert_eq!(
-        cursor.reachability,
+        cursor.receipt.reachability,
         Some(collaboration_protocol::SessionReachability::ProviderAcp)
     );
     assert_eq!(

@@ -165,12 +165,11 @@ sys.stdin.read()
             },
             delivery: collaboration_protocol::MessageDelivery::Auto,
             generation_guard: None,
-            correlation: None,
         })
         .await
         .expect("message receipt");
     assert!(
-        matches!(receipt.outcome, DeliveryOutcome::Started),
+        matches!(receipt.receipt.outcome, DeliveryOutcome::Started),
         "{receipt:?}"
     );
 

@@ -27,6 +27,11 @@ pub struct ClaudeCodePeerDeliveryRoute {
     display_names: collaboration_service::SessionDisplayNameCache,
 }
 
+enum PeerDeliveryPreparation {
+    Ready(PeerSessionRecord),
+    Finished(DeliveryReceipt),
+}
+
 impl ClaudeCodePeerDeliveryRoute {
     #[must_use]
     pub fn new(
@@ -140,6 +145,100 @@ impl ClaudeCodePeerDeliveryRoute {
     ) -> PeerSocketWriteOutcome {
         self.socket.write_user_message(peer, message).await
     }
+
+    async fn prepare_peer_delivery(
+        &self,
+        target: &SessionRef,
+        precondition: &DeliveryPrecondition,
+        mode: MessageDelivery,
+    ) -> Result<PeerDeliveryPreparation, DeliveryContractError> {
+        if !self.serves(target) {
+            return Ok(PeerDeliveryPreparation::Finished(peer_rejection(
+                DeliveryRejectionReason::NoRoute,
+                "Claude Code peer route does not serve this endpoint",
+            )));
+        }
+        if matches!(
+            precondition,
+            DeliveryPrecondition::EndpointGeneration { .. }
+        ) {
+            return Ok(PeerDeliveryPreparation::Finished(peer_rejection(
+                DeliveryRejectionReason::StaleGeneration,
+                "Claude Code peer sessions have no endpoint generation",
+            )));
+        }
+        if mode == MessageDelivery::Queue {
+            return Ok(PeerDeliveryPreparation::Finished(peer_rejection(
+                DeliveryRejectionReason::QueueUnsupported,
+                "queue unsupported for Claude Code sessions",
+            )));
+        }
+        Ok(match self.lookup(target).await {
+            PeerSessionLookup::Absent => PeerDeliveryPreparation::Finished(peer_receipt(
+                DeliveryOutcome::NotSubmitted {
+                    retryable: true,
+                    reason: "Claude Code session is no longer live".to_owned(),
+                },
+                None,
+            )),
+            PeerSessionLookup::LiveUnsupported { reason } => PeerDeliveryPreparation::Finished(
+                peer_rejection(DeliveryRejectionReason::LiveElsewhere, &reason),
+            ),
+            PeerSessionLookup::Writable(peer) => PeerDeliveryPreparation::Ready(peer),
+        })
+    }
+
+    async fn write_peer_delivery(
+        &self,
+        peer: &PeerSessionRecord,
+        text: &str,
+        evidence: &dyn AttemptEvidenceSink,
+    ) -> Result<DeliveryReceipt, DeliveryContractError> {
+        evidence
+            .record(Self::evidence(peer, PeerWriteEffect::Dispatching)?)
+            .await?;
+        match self.write_peer_message(peer, text).await {
+            PeerSocketWriteOutcome::Written => {
+                if evidence
+                    .record(Self::evidence(peer, PeerWriteEffect::Written)?)
+                    .await
+                    .is_err()
+                {
+                    return Ok(peer_receipt(DeliveryOutcome::Unknown, None));
+                }
+                Ok(peer_receipt(
+                    DeliveryOutcome::PeerMessageWritten,
+                    Some(DeliveryClientReceipt::ClaudeCodePeer),
+                ))
+            }
+            PeerSocketWriteOutcome::NotSubmitted { reason } => {
+                if evidence
+                    .record(Self::evidence(peer, PeerWriteEffect::NotDispatched)?)
+                    .await
+                    .is_err()
+                {
+                    return Ok(peer_receipt(DeliveryOutcome::Unknown, None));
+                }
+                Ok(peer_receipt(
+                    DeliveryOutcome::NotSubmitted {
+                        retryable: true,
+                        reason: reason.to_owned(),
+                    },
+                    None,
+                ))
+            }
+            PeerSocketWriteOutcome::Unknown { .. } => {
+                if evidence
+                    .record(Self::evidence(peer, PeerWriteEffect::Unknown)?)
+                    .await
+                    .is_err()
+                {
+                    return Ok(peer_receipt(DeliveryOutcome::Unknown, None));
+                }
+                Ok(peer_receipt(DeliveryOutcome::Unknown, None))
+            }
+        }
+    }
 }
 
 fn peer_receipt(
@@ -231,44 +330,12 @@ impl SessionDeliveryRoute for ClaudeCodePeerDeliveryRoute {
         evidence: &'a dyn AttemptEvidenceSink,
     ) -> DeliveryFuture<'a, DeliveryReceipt> {
         Box::pin(async move {
-            if !self.serves(&request.target) {
-                return Ok(peer_rejection(
-                    DeliveryRejectionReason::NoRoute,
-                    "Claude Code peer route does not serve this endpoint",
-                ));
-            }
-            if matches!(
-                request.precondition,
-                DeliveryPrecondition::EndpointGeneration { .. }
-            ) {
-                return Ok(peer_rejection(
-                    DeliveryRejectionReason::StaleGeneration,
-                    "Claude Code peer sessions have no endpoint generation",
-                ));
-            }
-            if request.mode == MessageDelivery::Queue {
-                return Ok(peer_rejection(
-                    DeliveryRejectionReason::QueueUnsupported,
-                    "queue unsupported for Claude Code sessions",
-                ));
-            }
-            let peer = match self.lookup(&request.target).await {
-                PeerSessionLookup::Absent => {
-                    return Ok(peer_receipt(
-                        DeliveryOutcome::NotSubmitted {
-                            retryable: true,
-                            reason: "Claude Code session is no longer live".to_owned(),
-                        },
-                        None,
-                    ));
-                }
-                PeerSessionLookup::LiveUnsupported { reason } => {
-                    return Ok(peer_rejection(
-                        DeliveryRejectionReason::LiveElsewhere,
-                        &reason,
-                    ));
-                }
-                PeerSessionLookup::Writable(peer) => peer,
+            let peer = match self
+                .prepare_peer_delivery(&request.target, &request.precondition, request.mode)
+                .await?
+            {
+                PeerDeliveryPreparation::Ready(peer) => peer,
+                PeerDeliveryPreparation::Finished(receipt) => return Ok(receipt),
             };
             let header_context = self.header_context_for_delivery(
                 &request.target,
@@ -277,51 +344,28 @@ impl SessionDeliveryRoute for ClaudeCodePeerDeliveryRoute {
             );
             let text =
                 Self::render_peer_message(&request.target, &request.message, &header_context)?;
-            evidence
-                .record(Self::evidence(&peer, PeerWriteEffect::Dispatching)?)
-                .await?;
-            let outcome = self.socket.write_user_message(&peer, &text).await;
-            match outcome {
-                PeerSocketWriteOutcome::Written => {
-                    if evidence
-                        .record(Self::evidence(&peer, PeerWriteEffect::Written)?)
-                        .await
-                        .is_err()
-                    {
-                        return Ok(peer_receipt(DeliveryOutcome::Unknown, None));
-                    }
-                    Ok(peer_receipt(
-                        DeliveryOutcome::PeerMessageWritten,
-                        Some(DeliveryClientReceipt::ClaudeCodePeer),
-                    ))
-                }
-                PeerSocketWriteOutcome::NotSubmitted { reason } => {
-                    if evidence
-                        .record(Self::evidence(&peer, PeerWriteEffect::NotDispatched)?)
-                        .await
-                        .is_err()
-                    {
-                        return Ok(peer_receipt(DeliveryOutcome::Unknown, None));
-                    }
-                    Ok(peer_receipt(
-                        DeliveryOutcome::NotSubmitted {
-                            retryable: true,
-                            reason: reason.to_owned(),
-                        },
-                        None,
-                    ))
-                }
-                PeerSocketWriteOutcome::Unknown { .. } => {
-                    if evidence
-                        .record(Self::evidence(&peer, PeerWriteEffect::Unknown)?)
-                        .await
-                        .is_err()
-                    {
-                        return Ok(peer_receipt(DeliveryOutcome::Unknown, None));
-                    }
-                    Ok(peer_receipt(DeliveryOutcome::Unknown, None))
-                }
+            self.write_peer_delivery(&peer, &text, evidence).await
+        })
+    }
+
+    fn deliver_prepared<'a>(
+        &'a self,
+        request: collaboration_service::layer_zero::DeliveryRequest,
+        evidence: &'a dyn AttemptEvidenceSink,
+    ) -> DeliveryFuture<'a, DeliveryReceipt> {
+        Box::pin(async move {
+            if request.correlation.as_str() != request.payload.push_id.as_str() {
+                return Err(DeliveryContractError::InvalidEvidence);
             }
+            let peer = match self
+                .prepare_peer_delivery(&request.target, &request.precondition, request.mode)
+                .await?
+            {
+                PeerDeliveryPreparation::Ready(peer) => peer,
+                PeerDeliveryPreparation::Finished(receipt) => return Ok(receipt),
+            };
+            self.write_peer_delivery(&peer, request.payload.line.as_str(), evidence)
+                .await
         })
     }
 

@@ -15,6 +15,26 @@ pub struct ProviderPromptContentsRequest {
 }
 
 impl ProviderPromptContentsRequest {
+    pub(crate) fn from_prepared_push(
+        operation_id: OperationId,
+        input_id: session_event_model::InputId,
+        target: SessionRef,
+        requested_by: ProviderIdentity,
+        approver: ProviderIdentity,
+        line: &collaboration_protocol::MessageText,
+    ) -> Result<Self, collaboration_service::DeliveryContractError> {
+        let content = session_event_model::PromptContent::text(line.as_str().to_owned())
+            .map_err(|_| collaboration_service::DeliveryContractError::ClientOperation)?;
+        Ok(Self {
+            operation_id,
+            input_id,
+            target,
+            requested_by,
+            approver,
+            contents: vec![content],
+        })
+    }
+
     pub(super) fn from_control(
         request: ConversationPromptRequest,
         display_names: &collaboration_service::SessionDisplayNameCache,
