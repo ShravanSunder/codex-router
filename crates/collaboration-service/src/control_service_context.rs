@@ -84,6 +84,7 @@ impl ServiceIdentity {
                     self.native_backend.clone(),
                     self.configuration.clone(),
                     self.display_names.clone(),
+                    self.machine_identity.clone(),
                 )
             })
     }
@@ -199,6 +200,10 @@ impl ServiceIdentity {
         broker: std::sync::Arc<crate::ServiceInteractionBroker>,
     ) -> Self {
         broker.install_display_names(self.display_names.clone());
+        if let Some(store) = self.automation.as_ref() {
+            broker
+                .install_push_context(std::sync::Arc::clone(store), self.machine_identity.clone());
+        }
         self.approval_broker = Some(broker);
         self
     }
