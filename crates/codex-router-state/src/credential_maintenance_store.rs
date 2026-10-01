@@ -444,9 +444,28 @@ impl AsyncSqliteStateStore {
                FROM accounts
               WHERE account_id = ?1 AND active_credential_generation = ?2
              ON CONFLICT(account_id) DO UPDATE SET
+                credential_generation = excluded.credential_generation,
                 state = 'reauth_required',
                 failure_class = 'provider_rejected',
-                next_attempt_unix_seconds = NULL
+                last_success_unix_seconds = CASE
+                    WHEN credential_maintenance.credential_generation < excluded.credential_generation
+                    THEN NULL ELSE credential_maintenance.last_success_unix_seconds END,
+                next_attempt_unix_seconds = NULL,
+                claimed_successor_generation = CASE
+                    WHEN credential_maintenance.credential_generation < excluded.credential_generation
+                    THEN NULL ELSE credential_maintenance.claimed_successor_generation END,
+                claim_purpose = CASE
+                    WHEN credential_maintenance.credential_generation < excluded.credential_generation
+                    THEN NULL ELSE credential_maintenance.claim_purpose END,
+                claim_started_unix_seconds = CASE
+                    WHEN credential_maintenance.credential_generation < excluded.credential_generation
+                    THEN NULL ELSE credential_maintenance.claim_started_unix_seconds END,
+                claim_prior_state = CASE
+                    WHEN credential_maintenance.credential_generation < excluded.credential_generation
+                    THEN NULL ELSE credential_maintenance.claim_prior_state END,
+                consecutive_failures = CASE
+                    WHEN credential_maintenance.credential_generation < excluded.credential_generation
+                    THEN 0 ELSE credential_maintenance.consecutive_failures END
               WHERE credential_maintenance.credential_generation <= excluded.credential_generation
                 AND credential_maintenance.state != 'in_progress'
                 AND credential_maintenance.claimed_successor_generation IS NULL",

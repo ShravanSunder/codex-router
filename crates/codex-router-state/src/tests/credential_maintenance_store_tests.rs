@@ -45,6 +45,115 @@ async fn rejected_active_generation_becomes_reauth_required() {
 }
 
 #[tokio::test]
+async fn rejected_new_generation_resets_older_generation_maintenance() {
+    let temp_dir = TestTempDir::new("rejected_new_generation_resets_maintenance");
+    let state = AsyncSqliteStateStore::open(&temp_dir.path().join("state.sqlite"))
+        .await
+        .expect("state should open");
+    let account_id = account_id("rejected-new-generation-resets-maintenance");
+    state
+        .upsert_account(
+            &AccountRecord::new(
+                Provider::Claude,
+                account_id.clone(),
+                "rejected newer generation",
+                AccountStatus::Enabled,
+            )
+            .with_active_credential_generation(1),
+        )
+        .await
+        .expect("account should save");
+
+    assert!(
+        state
+            .claim_credential_refresh(
+                &account_id,
+                Provider::Claude,
+                ClaimPurpose::Refresh,
+                1,
+                2,
+                900,
+            )
+            .await
+            .expect("generation 2 refresh claim should persist")
+    );
+    assert!(
+        state
+            .activate_claimed_credential_generation(
+                &account_id,
+                Provider::Claude,
+                ClaimPurpose::Refresh,
+                1,
+                2,
+                1_000,
+            )
+            .await
+            .expect("generation 2 refresh should activate")
+    );
+    assert!(
+        state
+            .record_pre_provider_local_failure(&account_id, 2, 1_200)
+            .await
+            .expect("generation 2 local failure should persist")
+    );
+    let older_maintenance = state
+        .load_credential_maintenance(&account_id)
+        .await
+        .expect("older maintenance should load")
+        .expect("generation 2 maintenance should be present");
+    assert_eq!(older_maintenance.credential_generation, 2);
+    assert_eq!(older_maintenance.last_success_unix_seconds, Some(1_000));
+    assert_eq!(
+        older_maintenance.failure_class,
+        Some(CredentialFailureClass::LocalPersistence)
+    );
+    assert_eq!(older_maintenance.next_attempt_unix_seconds, Some(1_260));
+    assert_eq!(older_maintenance.consecutive_failures, 1);
+
+    state
+        .upsert_account(
+            &AccountRecord::new(
+                Provider::Claude,
+                account_id.clone(),
+                "rejected newer generation",
+                AccountStatus::Enabled,
+            )
+            .with_active_credential_generation(3),
+        )
+        .await
+        .expect("account should advance to generation 3");
+
+    assert!(
+        state
+            .mark_generation_reauth_required(&account_id, 3)
+            .await
+            .expect("active rejected generation should replace older maintenance")
+    );
+    let maintenance = state
+        .load_credential_maintenance(&account_id)
+        .await
+        .expect("reauth maintenance should load")
+        .expect("reauth maintenance should be present");
+
+    assert_eq!(maintenance.credential_generation, 3);
+    assert_eq!(
+        maintenance.state,
+        CredentialMaintenanceState::ReauthRequired
+    );
+    assert_eq!(
+        maintenance.failure_class,
+        Some(CredentialFailureClass::ProviderRejected)
+    );
+    assert_eq!(maintenance.last_success_unix_seconds, None);
+    assert_eq!(maintenance.next_attempt_unix_seconds, None);
+    assert_eq!(maintenance.claimed_successor_generation, None);
+    assert_eq!(maintenance.claim_purpose, None);
+    assert_eq!(maintenance.claim_started_unix_seconds, None);
+    assert_eq!(maintenance.claim_prior_state, None);
+    assert_eq!(maintenance.consecutive_failures, 0);
+}
+
+#[tokio::test]
 async fn rejected_older_generation_does_not_change_newer_active_generation_maintenance() {
     let temp_dir = TestTempDir::new("rejected_older_generation_reauth");
     let state = AsyncSqliteStateStore::open(&temp_dir.path().join("state.sqlite"))
