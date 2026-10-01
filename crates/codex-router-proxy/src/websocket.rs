@@ -32,8 +32,8 @@ use codex_router_core::audit::TransportKind;
 use codex_router_core::ids::AccountId;
 use codex_router_core::ids::RequestId;
 use codex_router_core::ids::TokenGeneration;
-use codex_router_core::provider::Provider;
 use codex_router_core::redaction::SecretString;
+use codex_router_core::route_profile::RESPONSES_WEBSOCKET;
 use codex_router_core::routes::RouteBand;
 use codex_router_state::affinity_owner::AffinitySourceTransport;
 use codex_router_state::affinity_owner::PreviousResponseAffinityOwnerRecord;
@@ -481,7 +481,7 @@ where
             let account_hash = redacted_account_hash(selected.account_id());
             let resolved = match self
                 .credential_resolver
-                .resolve_provider_credentials(selected.account_id(), Provider::Openai)
+                .resolve_provider_credentials(selected.account_id(), RESPONSES_WEBSOCKET.provider)
             {
                 Ok(resolved) => resolved,
                 Err(_reason) => {
@@ -692,7 +692,7 @@ where
             let account_hash = redacted_account_hash(selected.account_id());
             let resolved = match self
                 .credential_resolver
-                .resolve_provider_credentials(selected.account_id(), Provider::Openai)
+                .resolve_provider_credentials(selected.account_id(), RESPONSES_WEBSOCKET.provider)
                 .await
             {
                 Ok(resolved) => resolved,
@@ -1427,6 +1427,7 @@ mod async_forwarding_tests {
     use super::UpstreamToLocalPumpContext;
     use super::WebSocketAffinityOwnerContext;
     use super::WebSocketForwardingContext;
+    use super::WebSocketFrame;
     use super::WebSocketHandshakeRequest;
     use super::WebSocketProtocolRouter;
     use super::WebSocketQuotaFloorNotifier;
@@ -1453,6 +1454,7 @@ mod async_forwarding_tests {
     use codex_router_core::ids::TokenGeneration as LocalTokenGeneration;
     use codex_router_core::provider::Provider;
     use codex_router_core::redaction::SecretString;
+    use codex_router_core::route_profile::RESPONSES_WEBSOCKET;
     use futures_util::SinkExt;
     use futures_util::StreamExt;
     use futures_util::future::BoxFuture;
@@ -2362,6 +2364,34 @@ mod async_forwarding_tests {
     }
 
     #[derive(Clone, Debug)]
+    struct RecordingAsyncCredentialResolver {
+        account_id: AccountId,
+        requested_providers: Arc<Mutex<Vec<Provider>>>,
+    }
+
+    impl AsyncProviderCredentialResolver for RecordingAsyncCredentialResolver {
+        fn resolve_provider_credentials<'a>(
+            &'a self,
+            _account_id: &'a AccountId,
+            expected_provider: Provider,
+        ) -> BoxFuture<'a, Result<ResolvedProviderCredential, CredentialResolverError>> {
+            let account_id = self.account_id.clone();
+            let requested_providers = Arc::clone(&self.requested_providers);
+            Box::pin(async move {
+                requested_providers
+                    .lock()
+                    .unwrap_or_else(|_error| panic!("provider request lock should be available"))
+                    .push(expected_provider);
+                Ok(ResolvedProviderCredential::new(
+                    account_id,
+                    SecretString::new("test-access-token"),
+                    1,
+                ))
+            })
+        }
+    }
+
+    #[derive(Clone, Debug)]
     struct FixedAffinitySecretProvider {
         secret: RouterAffinityHashSecret,
     }
@@ -2383,6 +2413,44 @@ mod async_forwarding_tests {
         ) -> Result<RouterAffinityHashSecret, HttpProxyError> {
             Ok(self.secret.clone())
         }
+    }
+
+    #[tokio::test]
+    async fn websocket_credential_resolution_uses_websocket_profile_provider() {
+        let account_id = AccountId::new("acct_ws_provider_test")
+            .unwrap_or_else(|error| panic!("account id should be valid: {error}"));
+        let requested_providers = Arc::new(Mutex::new(Vec::new()));
+        let selector = FixedAsyncSelector {
+            account_id: account_id.clone(),
+        };
+        let resolver = RecordingAsyncCredentialResolver {
+            account_id,
+            requested_providers: Arc::clone(&requested_providers),
+        };
+        let auth_gate = ProxyLocalAuthGate::disabled();
+        let affinity_secret_provider = FixedAffinitySecretProvider::new();
+        let protocol_router = WebSocketProtocolRouter::new();
+        let tunnel = AsyncWebSocketTunnel::new(&auth_gate, &selector, &resolver, &protocol_router)
+            .with_affinity_secret_provider(&affinity_secret_provider);
+
+        let decision = tunnel
+            .router
+            .route_first_frame(
+                WebSocketHandshakeRequest::new(),
+                WebSocketFrame::Text(br#"{"type":"response.create"}"#.to_vec()),
+            )
+            .await;
+
+        assert!(
+            decision.is_ok(),
+            "Responses WebSocket should resolve credentials"
+        );
+        assert_eq!(
+            *requested_providers
+                .lock()
+                .unwrap_or_else(|_error| panic!("provider request lock should be available")),
+            vec![RESPONSES_WEBSOCKET.provider]
+        );
     }
 
     #[tokio::test]

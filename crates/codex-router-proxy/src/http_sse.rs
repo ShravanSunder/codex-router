@@ -21,9 +21,19 @@ use codex_router_core::ids::RequestId;
 use codex_router_core::local_auth::LocalAuthError;
 use codex_router_core::provider::Provider;
 use codex_router_core::redaction::SecretString;
+use codex_router_core::route_profile::CLAUDE_MESSAGES;
+use codex_router_core::route_profile::RESPONSES_HTTP;
+use codex_router_core::route_profile::RESPONSES_WEBSOCKET;
+use codex_router_core::route_profile::RouteProfile;
+use codex_router_core::route_profile::WindowKind;
 use codex_router_core::routes::RouteBand;
 use codex_router_state::affinity_owner::AffinitySourceTransport;
 use codex_router_state::affinity_owner::PreviousResponseAffinityOwnerRecord;
+use codex_router_state::sqlite::StateStoreError;
+use codex_router_state::window_observation::WindowObservation;
+use codex_router_state::window_observation::WindowObservationFreshnessError;
+use codex_router_state::window_observation::WindowObservationProps;
+use codex_router_state::window_observation::calculate_window_observation_fresh_until_unix_seconds;
 use futures_util::future::BoxFuture;
 use http_body_util::combinators::BoxBody;
 use std::collections::hash_map::DefaultHasher;
@@ -34,6 +44,7 @@ use std::io;
 use std::io::Cursor;
 use std::io::Read;
 use std::sync::Arc;
+use std::time::Duration;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 use thiserror::Error;
@@ -104,6 +115,111 @@ pub trait AsyncProviderCredentialResolver {
         account_id: &'a AccountId,
         expected_provider: Provider,
     ) -> BoxFuture<'a, Result<ResolvedProviderCredential, CredentialResolverError>>;
+}
+
+/// Writes one passive Claude quota window through the state-owned observation API.
+pub(crate) trait AsyncClaudeQuotaObservationWriter: Send + Sync {
+    /// Persists one observation and returns the state write result.
+    fn record_window_observation<'a>(
+        &'a self,
+        observation: WindowObservation,
+    ) -> BoxFuture<'a, Result<(), StateStoreError>>;
+}
+
+/// Failure while deriving or persisting one passive Claude quota observation.
+#[derive(Debug, Error)]
+pub(crate) enum PassiveClaudeQuotaObservationError {
+    /// The configured interval cannot be represented by the state helper's second precision.
+    #[error("quota refresh interval must use whole-second precision")]
+    SubsecondRefreshInterval,
+    /// The shared state freshness helper rejected the deadline arithmetic.
+    #[error(transparent)]
+    Freshness(#[from] WindowObservationFreshnessError),
+    /// The state layer rejected the observation or could not persist it.
+    #[error(transparent)]
+    State(#[from] StateStoreError),
+}
+
+/// Builds and writes account-wide Claude observations from one response's unified headers.
+///
+/// The caller supplies the route profile, request-start timestamp, and configured refresh
+/// interval. OpenAI profiles and absent or malformed window header pairs produce no write.
+/// Returns the number of complete per-window observations submitted to the writer.
+pub(crate) async fn record_passive_claude_quota_observations(
+    route_profile: &RouteProfile,
+    account_id: &AccountId,
+    response_headers: &HeaderCollection,
+    observation_started_at_unix_seconds: u64,
+    refresh_interval: Duration,
+    writer: &dyn AsyncClaudeQuotaObservationWriter,
+) -> Result<usize, PassiveClaudeQuotaObservationError> {
+    let observations = passive_claude_quota_observations(
+        route_profile,
+        account_id,
+        response_headers,
+        observation_started_at_unix_seconds,
+        refresh_interval,
+    )?;
+    let observation_count = observations.len();
+    for observation in observations {
+        writer.record_window_observation(observation).await?;
+    }
+    Ok(observation_count)
+}
+
+fn passive_claude_quota_observations(
+    route_profile: &RouteProfile,
+    account_id: &AccountId,
+    response_headers: &HeaderCollection,
+    observation_started_at_unix_seconds: u64,
+    refresh_interval: Duration,
+) -> Result<Vec<WindowObservation>, PassiveClaudeQuotaObservationError> {
+    if route_profile.provider != Provider::Claude {
+        return Ok(Vec::new());
+    }
+    if refresh_interval.subsec_nanos() != 0 {
+        return Err(PassiveClaudeQuotaObservationError::SubsecondRefreshInterval);
+    }
+
+    let fresh_until_unix_seconds = calculate_window_observation_fresh_until_unix_seconds(
+        observation_started_at_unix_seconds,
+        refresh_interval.as_secs(),
+    )?;
+    let mut observations = Vec::with_capacity(2);
+    for (window_kind, header_name) in [(WindowKind::FiveHour, "5h"), (WindowKind::Weekly, "7d")] {
+        let utilization_header_name =
+            format!("anthropic-ratelimit-unified-{header_name}-utilization");
+        let reset_header_name = format!("anthropic-ratelimit-unified-{header_name}-reset");
+        let (Some(utilization_header), Some(reset_header)) = (
+            response_headers.value(&utilization_header_name),
+            response_headers.value(&reset_header_name),
+        ) else {
+            continue;
+        };
+        let Ok(utilization) = utilization_header.trim().parse::<f64>() else {
+            continue;
+        };
+        let Ok(reset_unix_seconds) = reset_header.trim().parse::<u64>() else {
+            continue;
+        };
+        if !utilization.is_finite() || utilization < 0.0 {
+            continue;
+        }
+
+        let remaining_basis_points = ((1.0 - utilization).max(0.0) * 10_000.0).round() as u32;
+        let observation = WindowObservation::new(
+            WindowObservationProps::new(
+                account_id.clone(),
+                window_kind,
+                remaining_basis_points,
+                observation_started_at_unix_seconds,
+            )
+            .with_reset_unix_seconds(reset_unix_seconds)
+            .with_fresh_until_unix_seconds(fresh_until_unix_seconds),
+        )?;
+        observations.push(observation);
+    }
+    Ok(observations)
 }
 
 /// Appends one audit event and reports a redacted local diagnostic on failure.
@@ -636,6 +752,8 @@ impl PreparedAsyncStreamingHttpProxyRequest {
 pub struct StreamingHttpProxyCompletion {
     affinity_secret: Option<RouterAffinityHashSecret>,
     account_id: AccountId,
+    route_profile: RouteProfile,
+    observation_started_at_unix_seconds: u64,
     route_band: RouteBand,
     credential_generation: u64,
     allowed_audit_event: AuditEvent,
@@ -647,7 +765,7 @@ impl StreamingHttpProxyCompletion {
     /// Creates completion metadata for internal runtime tests.
     #[cfg(test)]
     #[must_use]
-    pub(crate) const fn new_for_test(
+    pub(crate) fn new_for_test(
         affinity_secret: Option<RouterAffinityHashSecret>,
         account_id: AccountId,
         credential_generation: u64,
@@ -656,6 +774,8 @@ impl StreamingHttpProxyCompletion {
         Self {
             affinity_secret,
             account_id,
+            route_profile: RESPONSES_HTTP.clone(),
+            observation_started_at_unix_seconds: 0,
             route_band: RouteBand::Responses,
             credential_generation,
             allowed_audit_event,
@@ -682,6 +802,24 @@ impl StreamingHttpProxyCompletion {
     #[must_use]
     pub const fn account_id(&self) -> &AccountId {
         &self.account_id
+    }
+
+    /// Writes passive Claude quota observations for this completed response's headers.
+    pub(crate) async fn record_passive_claude_quota_observations(
+        &self,
+        response_headers: &HeaderCollection,
+        refresh_interval: Duration,
+        writer: &dyn AsyncClaudeQuotaObservationWriter,
+    ) -> Result<usize, PassiveClaudeQuotaObservationError> {
+        record_passive_claude_quota_observations(
+            &self.route_profile,
+            &self.account_id,
+            response_headers,
+            self.observation_started_at_unix_seconds,
+            refresh_interval,
+            writer,
+        )
+        .await
     }
 
     /// Returns selected route band.
@@ -924,6 +1062,7 @@ where
         &self,
         request: HttpProxyRequest,
     ) -> Result<PreparedStreamingHttpProxyRequest, HttpProxyError> {
+        let observation_started_at_unix_seconds = current_unix_seconds();
         let audit_route_kind = audit_route_kind_for_request(&request);
         let presented_token = match extract_presented_local_token_from_request(
             request.header_value("x-codex-router-token"),
@@ -955,6 +1094,7 @@ where
             }
         };
         let route_kind = request_route_kind(&request)?;
+        let route_profile = http_route_profile_for_kind(route_kind);
         let route_band = route_kind.route_band();
         let affinity_secret = self.load_affinity_secret_for_request(&request)?;
         let mut selection_request = request;
@@ -985,7 +1125,7 @@ where
             let account_hash = redacted_account_hash(selected.account_id());
             let resolved = match self
                 .credential_resolver
-                .resolve_provider_credentials(selected.account_id(), Provider::Openai)
+                .resolve_provider_credentials(selected.account_id(), route_profile.provider)
             {
                 Ok(resolved) => resolved,
                 Err(reason) => {
@@ -1017,6 +1157,8 @@ where
             let completion = StreamingHttpProxyCompletion {
                 affinity_secret,
                 account_id: selected.account_id().clone(),
+                route_profile,
+                observation_started_at_unix_seconds,
                 route_band,
                 credential_generation: resolved.credential_generation(),
                 allowed_audit_event: allowed_audit_event(
@@ -1047,6 +1189,7 @@ where
         &self,
         request: HttpProxyRequest,
     ) -> Result<PreparedStreamingHttpProxyRequest, HttpProxyError> {
+        let observation_started_at_unix_seconds = current_unix_seconds();
         let audit_route_kind = audit_route_kind_for_request(&request);
         let presented_token = match extract_presented_local_token_from_request(
             request.header_value("x-codex-router-token"),
@@ -1078,6 +1221,7 @@ where
             }
         };
         let route_kind = request_route_kind(&request)?;
+        let route_profile = http_route_profile_for_kind(route_kind);
         let route_band = route_kind.route_band();
         let affinity_secret = self.load_affinity_secret_for_request(&request)?;
         let mut selection_request = request;
@@ -1112,7 +1256,7 @@ where
             let account_hash = redacted_account_hash(selected.account_id());
             let resolved = match self
                 .credential_resolver
-                .resolve_provider_credentials(selected.account_id(), Provider::Openai)
+                .resolve_provider_credentials(selected.account_id(), route_profile.provider)
                 .await
             {
                 Ok(resolved) => resolved,
@@ -1145,6 +1289,8 @@ where
             let completion = StreamingHttpProxyCompletion {
                 affinity_secret,
                 account_id: selected.account_id().clone(),
+                route_profile,
+                observation_started_at_unix_seconds,
                 route_band,
                 credential_generation: resolved.credential_generation(),
                 allowed_audit_event: allowed_audit_event(
@@ -1220,6 +1366,7 @@ where
                 return Err(HttpProxyError::LocalAuth { reason });
             }
         };
+        let route_profile = http_route_profile_for_kind(request_route_kind(&request)?);
         let affinity_secret = self.load_affinity_secret_for_request(&request)?;
         let mut selection_request = request;
         let mut attempted_accounts = Vec::new();
@@ -1249,7 +1396,7 @@ where
             let account_hash = redacted_account_hash(selected.account_id());
             let resolved = match self
                 .credential_resolver
-                .resolve_provider_credentials(selected.account_id(), Provider::Openai)
+                .resolve_provider_credentials(selected.account_id(), route_profile.provider)
             {
                 Ok(resolved) => resolved,
                 Err(reason) => {
@@ -1662,6 +1809,21 @@ fn request_route_kind(request: &HttpProxyRequest) -> Result<RouteKind, HttpProxy
     }
 }
 
+/// Resolves the provider profile needed by HTTP credential resolution.
+/// Keep this mapping aligned with the selector's private route-profile mapping.
+fn http_route_profile_for_kind(route_kind: RouteKind) -> RouteProfile {
+    match route_kind {
+        RouteKind::ResponsesWebSocket => RESPONSES_WEBSOCKET.clone(),
+        RouteKind::ClaudeMessages => CLAUDE_MESSAGES.clone(),
+        RouteKind::Responses
+        | RouteKind::Models
+        | RouteKind::MemoriesTraceSummarize
+        | RouteKind::ResponsesCompact
+        | RouteKind::ImageGenerations
+        | RouteKind::ImageEdits => RESPONSES_HTTP.clone(),
+    }
+}
+
 fn path_without_query(path: &str) -> &str {
     path.split_once('?')
         .map_or(path, |(path_component, _query)| path_component)
@@ -1669,9 +1831,45 @@ fn path_without_query(path: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
+    use super::AsyncClaudeQuotaObservationWriter;
+    use super::AsyncProviderCredentialResolver;
+    use super::AuthenticatedHttpProxyService;
+    use super::HttpAffinitySecretProvider;
+    use super::HttpProxyError;
+    use super::HttpProxyRequest;
+    use super::StreamingHttpProxyCompletion;
     use super::audit_route_kind_for_route_kind;
+    use codex_router_auth::resolver::CredentialResolverError;
+    use codex_router_auth::resolver::ResolvedProviderCredential;
+    use codex_router_core::affinity::RouterAffinityHashSecret;
     use codex_router_core::audit::RouteKind as AuditRouteKind;
+    use codex_router_core::audit::TransportKind;
+    use codex_router_core::ids::AccountId;
+    use codex_router_core::ids::TokenGeneration;
+    use codex_router_core::provider::Provider;
+    use codex_router_core::redaction::SecretString;
+    use codex_router_core::route_profile::CLAUDE_MESSAGES;
+    use codex_router_core::route_profile::WindowKind;
+    use codex_router_core::routes::RouteBand;
+    use codex_router_state::account::AccountRecord;
+    use codex_router_state::account::AccountStatus;
+    use codex_router_state::sqlite::AsyncSqliteStateStore;
+    use codex_router_state::sqlite::StateStoreError;
+    use codex_router_state::window_observation::WindowObservation;
+    use codex_router_state::window_observation::calculate_window_observation_fresh_until_unix_seconds;
+    use futures_util::future::BoxFuture;
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use std::sync::Mutex;
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::Ordering;
 
+    use crate::account_selection::AsyncAccountDecisionSelector;
+    use crate::account_selection::SelectedAccountDecision;
+    use crate::headers::Header;
+    use crate::headers::HeaderCollection;
+    use crate::local_auth::ProxyLocalAuthGate;
+    use crate::routes::Method;
     use crate::routes::RouteKind;
 
     #[test]
@@ -1691,6 +1889,258 @@ mod tests {
         assert_eq!(
             audit_route_kind_for_route_kind(RouteKind::ClaudeMessages),
             AuditRouteKind::ClaudeMessages
+        );
+    }
+
+    struct PassiveObservationTempDir {
+        path: PathBuf,
+    }
+
+    impl PassiveObservationTempDir {
+        fn new() -> Self {
+            static NEXT_DIRECTORY: AtomicUsize = AtomicUsize::new(0);
+            let unique = NEXT_DIRECTORY.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!(
+                "codex-router-proxy-passive-observation-{}-{unique}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&path).unwrap_or_else(|error| {
+                panic!("passive observation test directory should be created: {error}")
+            });
+            Self { path }
+        }
+
+        fn database_path(&self) -> PathBuf {
+            self.path.join("state.sqlite")
+        }
+    }
+
+    impl Drop for PassiveObservationTempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
+
+    struct SqlitePassiveObservationWriter {
+        state: Arc<AsyncSqliteStateStore>,
+        application_unix_seconds: u64,
+    }
+
+    impl AsyncClaudeQuotaObservationWriter for SqlitePassiveObservationWriter {
+        fn record_window_observation<'a>(
+            &'a self,
+            observation: WindowObservation,
+        ) -> BoxFuture<'a, Result<(), StateStoreError>> {
+            let state = Arc::clone(&self.state);
+            let application_unix_seconds = self.application_unix_seconds;
+            Box::pin(async move {
+                state
+                    .record_window_observation(&observation, || application_unix_seconds)
+                    .await
+                    .map(|_observation_was_newest| ())
+            })
+        }
+    }
+
+    #[derive(Clone)]
+    struct FixedAsyncSelector {
+        account_id: AccountId,
+    }
+
+    impl AsyncAccountDecisionSelector for FixedAsyncSelector {
+        fn select_upstream_account<'a>(
+            &'a self,
+            _request: &'a HttpProxyRequest,
+            _token_generation: TokenGeneration,
+            _affinity_secret: Option<&'a codex_router_core::affinity::RouterAffinityHashSecret>,
+        ) -> BoxFuture<'a, Result<SelectedAccountDecision, HttpProxyError>> {
+            let account_id = self.account_id.clone();
+            Box::pin(async move { Ok(SelectedAccountDecision::new(account_id, "test-fixed")) })
+        }
+    }
+
+    struct FixedAffinitySecretProvider;
+
+    impl HttpAffinitySecretProvider for FixedAffinitySecretProvider {
+        fn load_or_create_affinity_secret(
+            &self,
+        ) -> Result<RouterAffinityHashSecret, HttpProxyError> {
+            Ok(RouterAffinityHashSecret::new(
+                "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            )
+            .unwrap_or_else(|error| panic!("test affinity secret should be valid: {error}")))
+        }
+    }
+
+    #[derive(Clone)]
+    struct ProviderCheckingAsyncCredentialResolver {
+        account_id: AccountId,
+        accepted_provider: Provider,
+        requested_providers: Arc<Mutex<Vec<Provider>>>,
+    }
+
+    impl AsyncProviderCredentialResolver for ProviderCheckingAsyncCredentialResolver {
+        fn resolve_provider_credentials<'a>(
+            &'a self,
+            _account_id: &'a AccountId,
+            expected_provider: Provider,
+        ) -> BoxFuture<'a, Result<ResolvedProviderCredential, CredentialResolverError>> {
+            let account_id = self.account_id.clone();
+            let accepted_provider = self.accepted_provider;
+            let requested_providers = Arc::clone(&self.requested_providers);
+            Box::pin(async move {
+                requested_providers
+                    .lock()
+                    .unwrap_or_else(|_error| panic!("provider request lock should be available"))
+                    .push(expected_provider);
+                if expected_provider != accepted_provider {
+                    return Err(CredentialResolverError::AccountProviderMismatch);
+                }
+                Ok(ResolvedProviderCredential::new(
+                    account_id,
+                    SecretString::new("test-access-token"),
+                    1,
+                ))
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn credential_resolution_uses_each_route_profile_provider() {
+        for (path, expected_provider) in [
+            ("/anthropic/v1/messages", Provider::Claude),
+            ("/v1/responses", Provider::Openai),
+        ] {
+            let account_id = AccountId::new("acct_provider_test")
+                .unwrap_or_else(|error| panic!("account id should be valid: {error}"));
+            let requested_providers = Arc::new(Mutex::new(Vec::new()));
+            let resolver = ProviderCheckingAsyncCredentialResolver {
+                account_id: account_id.clone(),
+                accepted_provider: expected_provider,
+                requested_providers: Arc::clone(&requested_providers),
+            };
+            let selector = FixedAsyncSelector { account_id };
+            let auth_gate = ProxyLocalAuthGate::disabled();
+            let upstream = ();
+            let affinity_secret_provider = FixedAffinitySecretProvider;
+            let service =
+                AuthenticatedHttpProxyService::new(&auth_gate, &selector, &resolver, &upstream)
+                    .with_affinity_secret_provider(&affinity_secret_provider);
+
+            let request_started_at_lower_bound = super::current_unix_seconds();
+            let prepared = service
+                .prepare_streaming_request_async(HttpProxyRequest::new(Method::Post, path))
+                .await;
+            let prepared = prepared.unwrap_or_else(|_error| {
+                panic!("route {path} should resolve a {expected_provider:?} credential")
+            });
+            assert_eq!(
+                *requested_providers
+                    .lock()
+                    .unwrap_or_else(|_error| panic!("provider request lock should be available")),
+                vec![expected_provider],
+                "route {path} should pass its profile provider to credential resolution"
+            );
+            let (_upstream_request, completion) = prepared.into_parts();
+            assert!(
+                completion.observation_started_at_unix_seconds >= request_started_at_lower_bound
+                    && completion.observation_started_at_unix_seconds
+                        <= super::current_unix_seconds(),
+                "route {path} should retain the proxy request-start timestamp"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn passive_claude_headers_persist_active_equivalent_freshness_for_non_default_interval() {
+        let temp_dir = PassiveObservationTempDir::new();
+        let state = Arc::new(
+            AsyncSqliteStateStore::open(&temp_dir.database_path())
+                .await
+                .unwrap_or_else(|error| panic!("state database should open: {error}")),
+        );
+        let account_id = AccountId::new("acct_passive_freshness_test")
+            .unwrap_or_else(|error| panic!("account id should be valid: {error}"));
+        state
+            .upsert_account(
+                &AccountRecord::new(
+                    Provider::Claude,
+                    account_id.clone(),
+                    "passive-freshness-test",
+                    AccountStatus::Enabled,
+                )
+                .with_active_credential_generation(1),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("Claude account should persist: {error}"));
+        let writer = SqlitePassiveObservationWriter {
+            state: Arc::clone(&state),
+            application_unix_seconds: 100,
+        };
+        let headers = HeaderCollection::new(vec![
+            Header::new("anthropic-ratelimit-unified-5h-utilization", "0.25"),
+            Header::new("anthropic-ratelimit-unified-5h-reset", "500"),
+            Header::new("anthropic-ratelimit-unified-7d-utilization", "0.8"),
+            Header::new("anthropic-ratelimit-unified-7d-reset", "900"),
+        ]);
+        let request_started_at = 100;
+        let refresh_interval = std::time::Duration::from_secs(400);
+        let completion = StreamingHttpProxyCompletion {
+            affinity_secret: None,
+            account_id: account_id.clone(),
+            route_profile: CLAUDE_MESSAGES.clone(),
+            observation_started_at_unix_seconds: request_started_at,
+            route_band: RouteBand::ClaudeMessages,
+            credential_generation: 1,
+            allowed_audit_event: super::allowed_audit_event(
+                TransportKind::Http,
+                AuditRouteKind::ClaudeMessages,
+                "test-account-hash".to_owned(),
+            ),
+            active_reservation_guard: None,
+            provider_error_observer: None,
+        };
+
+        completion
+            .record_passive_claude_quota_observations(&headers, refresh_interval, &writer)
+            .await
+            .unwrap_or_else(|error| panic!("passive observations should persist: {error}"));
+        let active_fresh_until = calculate_window_observation_fresh_until_unix_seconds(
+            request_started_at,
+            refresh_interval.as_secs(),
+        )
+        .unwrap_or_else(|error| panic!("active freshness should be valid: {error}"));
+
+        assert_eq!(
+            std::time::Duration::from_secs(active_fresh_until - request_started_at),
+            std::time::Duration::from_secs(520)
+        );
+        assert_eq!(active_fresh_until, request_started_at + 520);
+        let observations = state
+            .window_observations_for_account(&account_id)
+            .await
+            .unwrap_or_else(|error| panic!("persisted passive observations should load: {error}"));
+        assert_eq!(observations.len(), 2);
+        for observation in &observations {
+            assert_eq!(observation.observation_started_at(), request_started_at);
+            assert_eq!(
+                observation.fresh_until_unix_seconds(),
+                Some(active_fresh_until)
+            );
+        }
+        assert_eq!(
+            observations
+                .iter()
+                .find(|observation| observation.window_kind() == WindowKind::FiveHour)
+                .map(|observation| observation.remaining_basis_points()),
+            Some(7_500)
+        );
+        assert_eq!(
+            observations
+                .iter()
+                .find(|observation| observation.window_kind() == WindowKind::Weekly)
+                .map(|observation| observation.remaining_basis_points()),
+            Some(2_000)
         );
     }
 }
