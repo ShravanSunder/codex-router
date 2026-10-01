@@ -117,7 +117,12 @@ async fn restart_before_notice_settlement_reselects_the_same_range() {
         .unwrap();
     let (notice_before_restart, _) = fixture
         .store
-        .select_subscription_notice(&fixture.reader, &due_before_restart, selection_time)
+        .select_subscription_notice(
+            &fixture.reader,
+            &due_before_restart,
+            selection_time,
+            usize::MAX,
+        )
         .await
         .unwrap();
     assert_eq!(notice_before_restart.roots.len(), 1);
@@ -154,6 +159,7 @@ async fn restart_before_notice_settlement_reselects_the_same_range() {
             &fixture.reader,
             &due_after_restart,
             selection_time + chrono::Duration::seconds(1),
+            usize::MAX,
         )
         .await
         .unwrap();

@@ -2,7 +2,7 @@ use super::*;
 use sqlx::{Connection, SqliteConnection};
 
 #[tokio::test]
-async fn empty_topic_subscription_covers_its_first_later_root() {
+async fn empty_topic_subscription_covers_its_first_later_root_with_a_pending_window() {
     let path = std::env::temp_dir().join(format!(
         "thread-subscriptions-empty-topic-{}.sqlite",
         uuid::Uuid::now_v7()
@@ -51,7 +51,14 @@ async fn empty_topic_subscription_covers_its_first_later_root() {
             ThreadSubscriptionSubscribeRequest {
                 reader: reader.clone(),
                 scope: SubscriptionScope::topic(topic_id.clone()),
-                policy: SubscriptionPolicyPatch::default(),
+                policy: SubscriptionPolicyPatch {
+                    mode: Some(SubscriptionMode::Poll),
+                    timing: SubscriptionTimingPatch {
+                        quiet_seconds: Some(0),
+                        cap_seconds: Some(0),
+                    },
+                    ..SubscriptionPolicyPatch::default()
+                },
             },
             now,
         )
@@ -74,7 +81,9 @@ async fn empty_topic_subscription_covers_its_first_later_root() {
 
     let root = post(
         &mut store,
-        Placement::Topic { topic_id },
+        Placement::Topic {
+            topic_id: topic_id.clone(),
+        },
         human("first-root-author"),
         "first root after subscription",
         now,
@@ -83,7 +92,7 @@ async fn empty_topic_subscription_covers_its_first_later_root() {
     let watch_status = store
         .show_thread(ThreadShowRequest {
             root_message_id: root.message.message_id.clone(),
-            reader: Some(reader),
+            reader: Some(reader.clone()),
         })
         .await
         .unwrap()
@@ -95,6 +104,31 @@ async fn empty_topic_subscription_covers_its_first_later_root() {
             .starts_after_activity_sequence
             .map(|sequence| sequence.get()),
         Some(0)
+    );
+
+    let subscription = store
+        .get_thread_subscription_record(&reader, &SubscriptionScope::topic(topic_id.clone()))
+        .await
+        .unwrap()
+        .unwrap();
+    let pending_window = subscription
+        .roots()
+        .iter()
+        .find(|window| window.root_message_id() == &root.message.message_id);
+    assert_eq!(pending_window.map(|window| window.pending_count()), Some(1));
+
+    let due_roots = store.due_subscription_roots(&reader, now).await.unwrap();
+    assert_eq!(due_roots, vec![root.message.message_id.clone()]);
+    let (notice, _) = store
+        .select_subscription_notice(&reader, &due_roots, now, usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(
+        notice
+            .roots
+            .first()
+            .map(|root_notice| root_notice.root_id.clone()),
+        Some(root.message.message_id.clone())
     );
 
     store.close().await.unwrap();

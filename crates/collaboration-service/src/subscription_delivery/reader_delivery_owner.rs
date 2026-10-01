@@ -44,6 +44,7 @@ pub(super) enum ReaderDeliveryCommand {
     Wait {
         filter: SubscriptionWaitFilter,
         deadline: Instant,
+        maximum_root_notice_bytes: usize,
         reply: oneshot::Sender<Result<Option<SubscriptionWaitResult>, BoardError>>,
     },
 }
@@ -381,12 +382,14 @@ impl ReaderDeliveryOwner {
             ReaderDeliveryCommand::Wait {
                 filter,
                 deadline,
+                maximum_root_notice_bytes,
                 reply,
             } => match self.renew_wait(&filter).await {
                 Ok(()) => {
                     self.waiters.push_back(PollWaiter {
                         filter,
                         deadline,
+                        maximum_root_notice_bytes,
                         reply,
                     });
                     #[cfg(test)]

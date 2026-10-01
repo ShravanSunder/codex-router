@@ -70,7 +70,7 @@ async fn p2_topic_root_notice_settlement_keeps_inbox_fetch_and_ack_valid() {
     assert!(due.contains(&new_root));
     let (batch, settlement) = fixture
         .store
-        .select_subscription_notice(&fixture.reader, &due, due_at)
+        .select_subscription_notice(&fixture.reader, &due, due_at, usize::MAX)
         .await
         .unwrap();
     assert!(batch.roots.iter().any(|root| root.root_id == new_root));
@@ -136,7 +136,7 @@ async fn p3_late_settlement_after_rejoin_cannot_cross_the_new_watch_boundary() {
         .unwrap();
     let (_, old_settlement) = fixture
         .store
-        .select_subscription_notice(&fixture.reader, &due, first_due_at)
+        .select_subscription_notice(&fixture.reader, &due, first_due_at, usize::MAX)
         .await
         .unwrap();
 
@@ -194,7 +194,7 @@ async fn p3_late_settlement_after_rejoin_cannot_cross_the_new_watch_boundary() {
     assert_eq!(due, vec![fixture.root_message_id.clone()]);
     let (notice, _) = fixture
         .store
-        .select_subscription_notice(&fixture.reader, &due, due_at)
+        .select_subscription_notice(&fixture.reader, &due, due_at, usize::MAX)
         .await
         .unwrap();
     assert_eq!(
@@ -236,7 +236,7 @@ async fn p4_policy_patch_during_flight_clears_the_matching_window() {
         .unwrap();
     let (_, settlement) = fixture
         .store
-        .select_subscription_notice(&fixture.reader, &due, selected_at)
+        .select_subscription_notice(&fixture.reader, &due, selected_at, usize::MAX)
         .await
         .unwrap();
     fixture
@@ -286,7 +286,7 @@ async fn p4_policy_patch_during_flight_clears_the_matching_window() {
         .unwrap();
     let (next, _) = fixture
         .store
-        .select_subscription_notice(&fixture.reader, &due, later)
+        .select_subscription_notice(&fixture.reader, &due, later, usize::MAX)
         .await
         .unwrap();
     assert_eq!(next.roots.len(), 1);
@@ -305,7 +305,7 @@ async fn p5_resolve_during_flight_retry_clears_in_flight_and_allows_selection() 
         .unwrap();
     let (_, settlement) = fixture
         .store
-        .select_subscription_notice(&fixture.reader, &due, selected_at)
+        .select_subscription_notice(&fixture.reader, &due, selected_at, usize::MAX)
         .await
         .unwrap();
     fixture
@@ -345,7 +345,7 @@ async fn p5_resolve_during_flight_retry_clears_in_flight_and_allows_selection() 
         .unwrap();
     let (retry, _) = fixture
         .store
-        .select_subscription_notice(&fixture.reader, &due, later)
+        .select_subscription_notice(&fixture.reader, &due, later, usize::MAX)
         .await
         .unwrap();
     assert_eq!(retry.roots.len(), 1);

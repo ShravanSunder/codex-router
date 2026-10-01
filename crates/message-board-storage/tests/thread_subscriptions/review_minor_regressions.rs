@@ -118,7 +118,7 @@ async fn m6_draining_thread_subscription_completes_as_resolved_after_settlement(
         .unwrap();
     let (_, settlement) = fixture
         .store
-        .select_subscription_notice(&fixture.reader, &due, due_at)
+        .select_subscription_notice(&fixture.reader, &due, due_at, usize::MAX)
         .await
         .unwrap();
     fixture

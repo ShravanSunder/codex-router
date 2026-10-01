@@ -155,7 +155,11 @@ fn require_json(enabled: bool, command: &str) -> Result<(), String> {
     }
 }
 
-fn parse_subscription_duration(value: &str, flag: &str, allow_zero: bool) -> Result<u64, String> {
+pub(super) fn parse_subscription_duration(
+    value: &str,
+    flag: &str,
+    allow_zero: bool,
+) -> Result<u64, String> {
     let example = match flag {
         "--quiet" => "--quiet 2m",
         "--cap" => "--cap 10m",

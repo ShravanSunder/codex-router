@@ -6,7 +6,7 @@ use crate::storage_support::{
     BoardTransaction, current_activity_sequence, ensure_identity, identity_key, invalid_record,
     storage_error,
 };
-use crate::thread_batch_selection::pending_message_count;
+use crate::subscription_window_records::pending_message_count;
 use crate::thread_subscription_lifecycle_records::{
     activate_scope_watch, end_expired_rows, end_subscription,
 };

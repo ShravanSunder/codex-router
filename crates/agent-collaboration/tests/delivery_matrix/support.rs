@@ -111,13 +111,11 @@ fn prepare_fixture(mode: ProviderFixtureMode) -> ProofResult<()> {
             json!({"action":"expect_request","requestName":"create-target","method":"session/new","params":{}}),
             json!({"action":"respond","requestName":"create-target","result":{"sessionId":"matrix-acp-target"}}),
         ];
-        // Board Listen emits a batch and then a separate listenEnd notice.
-        const LISTEN_END_PROMPT_INDEX: usize = 5;
-        const HELD_PROMPT_INDEX: usize = 7;
+        // Board subscriptions emit one neutral notice, with no lifecycle heartbeat.
+        const HELD_PROMPT_INDEX: usize = 6;
         for index in 0..super::ACP_TARGET_EXPECTED_PROMPTS {
             let request_name = format!("target-prompt-{index}");
-            let expected_lifecycle = (index == LISTEN_END_PROMPT_INDEX).then_some("listenEnd");
-            target_steps.push(json!({"action":"expect_request","requestName":request_name,"method":"session/prompt","params":{"sessionId":"matrix-acp-target"},"recordPath":receipt_path,"promptTextContains":expected_lifecycle}));
+            target_steps.push(json!({"action":"expect_request","requestName":request_name,"method":"session/prompt","params":{"sessionId":"matrix-acp-target"},"recordPath":receipt_path}));
             if index == HELD_PROMPT_INDEX {
                 target_steps
                     .push(json!({"action":"wait_for_socket_signal","socketPath":gate_path}));

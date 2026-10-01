@@ -343,7 +343,12 @@ async fn p1_backfill_delivered_stays_at_message_activity_when_join_is_latest() {
     assert_eq!(due, vec![fixture.root_message_id.clone()]);
     let (notice, _) = fixture
         .store
-        .select_subscription_notice(&reader, &due, fixture.now + chrono::Duration::seconds(200))
+        .select_subscription_notice(
+            &reader,
+            &due,
+            fixture.now + chrono::Duration::seconds(200),
+            usize::MAX,
+        )
         .await
         .unwrap();
     assert_eq!(notice.roots[0].message_count, 1);

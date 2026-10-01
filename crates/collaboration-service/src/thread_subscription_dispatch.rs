@@ -1,8 +1,10 @@
 //! Control handlers for durable Thread and Topic subscriptions.
 use crate::ServiceIdentity;
 use collaboration_protocol::{
-    ThreadSubscribeRequest, ThreadSubscriptionPresence, ThreadSubscriptionState,
-    ThreadSubscriptionView, ThreadSubscriptionsRequest, ThreadSubscriptionsResult,
+    MAX_CONTROL_FRAME_BYTES, MAX_PUSH_LINE_BYTES, SubscriptionWaitBatch, ThreadSubscribeRequest,
+    ThreadSubscriptionPresence, ThreadSubscriptionState, ThreadSubscriptionView,
+    ThreadSubscriptionWaitFilter as ControlWaitFilter, ThreadSubscriptionWaitRequest,
+    ThreadSubscriptionWaitResult, ThreadSubscriptionsRequest, ThreadSubscriptionsResult,
     ThreadUnsubscribeRequest,
 };
 use message_board::{
@@ -143,11 +145,134 @@ pub(crate) async fn dispatch(
                 "result":ThreadSubscriptionsResult { subscriptions },
             })
         }
+        "board/threadWait" => {
+            let request =
+                match serde_json::from_value::<ThreadSubscriptionWaitRequest>(params.clone()) {
+                    Ok(request) => request,
+                    Err(_) => {
+                        return crate::board_request_dispatch::failure(
+                            id,
+                            crate::board_request_validation::classify(method, &params),
+                        );
+                    }
+                };
+            let maximum_root_notice_bytes = match maximum_root_notice_bytes(&id) {
+                Ok(maximum) => maximum,
+                Err(error) => return crate::board_request_dispatch::failure(id, error),
+            };
+            let filter = match request.filter {
+                ControlWaitFilter::All {} => crate::SubscriptionWaitFilter::All,
+                ControlWaitFilter::Roots { root_message_ids } => {
+                    crate::SubscriptionWaitFilter::Roots(root_message_ids)
+                }
+                ControlWaitFilter::Topic { topic_id } => {
+                    crate::SubscriptionWaitFilter::Topic(topic_id)
+                }
+            };
+            match service
+                .wait(
+                    request.actor,
+                    filter,
+                    request.max_wait_seconds,
+                    maximum_root_notice_bytes,
+                )
+                .await
+            {
+                Ok(result) => json!({
+                    "jsonrpc":"2.0",
+                    "id":id,
+                    "result":subscription_wait_result(result),
+                }),
+                Err(error) => crate::board_request_dispatch::failure(id, error),
+            }
+        }
         _ => {
             json!({"jsonrpc":"2.0","id":id,"error":{"code":-32601,"message":"Unknown thread subscription operation"}})
         }
     }
 }
+
+fn subscription_wait_result(
+    result: Option<crate::SubscriptionWaitResult>,
+) -> ThreadSubscriptionWaitResult {
+    let batch = result.map(|result| match result {
+        crate::SubscriptionWaitResult::Notice {
+            push_id,
+            line,
+            batch,
+        } => SubscriptionWaitBatch::Notice {
+            push_id,
+            line,
+            held: batch.held,
+            held_since: batch.held_since,
+            draining: batch.draining,
+            roots: batch.roots,
+        },
+        crate::SubscriptionWaitResult::Ranges { batch } => SubscriptionWaitBatch::Ranges {
+            held: batch.held,
+            held_since: batch.held_since,
+            draining: batch.draining,
+            roots: batch.roots,
+        },
+    });
+    ThreadSubscriptionWaitResult { batch }
+}
+
+fn maximum_root_notice_bytes(id: &Value) -> Result<usize, BoardError> {
+    const MAX_HELD_SINCE_WIRE_BYTES: usize = 64;
+    let empty_roots = json!([]);
+    let empty_roots_bytes =
+        serde_json::to_vec(&empty_roots).map_err(|_| BoardError::board_unavailable())?;
+    let notice_response = json!({
+        "jsonrpc":"2.0",
+        "id":id,
+        "result":{
+            "batch":{
+                "kind":"notice",
+                "pushId":"01890f2e-7b4c-7cc0-98c4-000000000002",
+                "line":"\\".repeat(MAX_PUSH_LINE_BYTES),
+                "held":true,
+                "heldSince":"x".repeat(MAX_HELD_SINCE_WIRE_BYTES),
+                "draining":true,
+                "roots":empty_roots,
+            }
+        }
+    });
+    let fixed_response_bytes = serde_json::to_vec(&notice_response)
+        .map_err(|_| BoardError::board_unavailable())?
+        .len()
+        .checked_sub(empty_roots_bytes.len())
+        .ok_or_else(BoardError::board_unavailable)?;
+    let maximum_root_notice_bytes = MAX_CONTROL_FRAME_BYTES
+        .checked_sub(fixed_response_bytes)
+        .ok_or_else(|| {
+            BoardError::invalid_field(
+                "id",
+                "leaves no room for a subscription wait response in a Control frame",
+            )
+        })?;
+    let largest_root = json!([{
+        "rootId":"01890f2e-7b4c-7cc0-98c4-000000000002",
+        "topicId":"01890f2e-7b4c-7cc0-98c4-000000000003",
+        "fromSequence":i64::MAX,
+        "throughSequence":i64::MAX,
+        "messageCount":u64::MAX,
+    }]);
+    let minimum_root_notice_bytes = serde_json::to_vec(&largest_root)
+        .map_err(|_| BoardError::board_unavailable())?
+        .len();
+    if maximum_root_notice_bytes < minimum_root_notice_bytes {
+        return Err(BoardError::invalid_field(
+            "id",
+            "leaves no room for one subscription root in a Control frame",
+        ));
+    }
+    Ok(maximum_root_notice_bytes)
+}
+
+#[cfg(test)]
+#[path = "thread_subscription_dispatch_tests.rs"]
+mod tests;
 
 fn subscription_view(
     record: ThreadSubscriptionRecord,

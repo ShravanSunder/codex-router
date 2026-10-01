@@ -13,7 +13,7 @@ use collaboration_protocol::{
 };
 use collaboration_service::{ProviderOperationStore, ProviderSessionRecord};
 use route_fixture::{
-    create_provider_target, message, post_thread_activity_for_sessions,
+    create_provider_target, load_provider_target, message, post_thread_activity_for_sessions,
     prompt_and_approve_from_peer_provider, provider_fixture, publish_peer, send_and_wait_wake,
     wait_for_completed_provider_prompts, wait_for_prompt_text,
 };
@@ -163,13 +163,24 @@ async fn host_router_selects_peer_and_provider_without_cross_loading() {
 
     std::fs::remove_file(registry.join(format!("{}.json", std::process::id())))
         .expect("remove peer registry record");
+    // DM sends use LoadedOnly; loading is an explicit conversation operation.
+    load_provider_target(
+        &mut client,
+        SessionRef {
+            endpoint: claude_endpoint.clone(),
+            session_id: SessionId::try_from("recorded-unloaded".to_owned()).expect("session"),
+        },
+        actor.clone(),
+        root.path(),
+    )
+    .await;
     let loaded = client
         .send_message(message(SessionRef {
             endpoint: claude_endpoint.clone(),
             session_id: SessionId::try_from("recorded-unloaded".to_owned()).expect("session"),
         }))
         .await
-        .expect("provider load receipt");
+        .expect("loaded provider delivery receipt");
     assert_eq!(loaded.receipt.outcome, DeliveryOutcome::Started);
     assert_eq!(
         loaded.receipt.reachability,
@@ -231,15 +242,13 @@ async fn host_router_selects_peer_and_provider_without_cross_loading() {
         &claude_prompts,
     )
     .await;
-    std::fs::write(&claude_prompts, "").expect("clear Claude prompt log before listen proof");
-    std::fs::write(&cursor_prompts, "").expect("clear Cursor prompt log before listen proof");
+    std::fs::write(&claude_prompts, "").expect("clear Claude prompt log before subscription proof");
+    std::fs::write(&cursor_prompts, "").expect("clear Cursor prompt log before subscription proof");
     post_thread_activity_for_sessions(&mut client, [held_claude, held_cursor]).await;
-    wait_for_prompt_text(&claude_prompts, "Thread activity").await;
-    wait_for_prompt_text(&cursor_prompts, "Thread activity").await;
-    wait_for_prompt_text(&claude_prompts, "batchesDelivered").await;
-    wait_for_prompt_text(&cursor_prompts, "batchesDelivered").await;
-    wait_for_completed_provider_prompts(&claude_prompts, 2).await;
-    wait_for_completed_provider_prompts(&cursor_prompts, 2).await;
+    wait_for_prompt_text(&claude_prompts, "🧵 Router: new thread activity").await;
+    wait_for_prompt_text(&cursor_prompts, "🧵 Router: new thread activity").await;
+    wait_for_completed_provider_prompts(&claude_prompts, 1).await;
+    wait_for_completed_provider_prompts(&cursor_prompts, 1).await;
 
     runtime.shutdown().await.expect("Host shutdown");
 }

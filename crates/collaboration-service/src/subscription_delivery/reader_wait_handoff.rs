@@ -12,6 +12,7 @@ impl ReaderDeliveryOwner {
                 continue;
             };
             let filter = waiter.filter.clone();
+            let maximum_root_notice_bytes = waiter.maximum_root_notice_bytes;
             let mut roots = Vec::new();
             for root in due.iter().filter(|root| {
                 facts
@@ -25,7 +26,7 @@ impl ReaderDeliveryOwner {
             if roots.is_empty() {
                 continue;
             }
-            let (batch, settlement) = self.select(&roots).await?;
+            let (batch, settlement) = self.select(&roots, maximum_root_notice_bytes).await?;
             let Some(waiter) = self.waiters.remove(index) else {
                 self.release(&settlement).await;
                 return Ok(false);

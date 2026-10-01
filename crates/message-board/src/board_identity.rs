@@ -50,7 +50,7 @@ macro_rules! uuid_v7_identity {
     )+};
 }
 
-uuid_v7_identity!(ProjectId, BoardId, TopicId, MessageId, ListenId);
+uuid_v7_identity!(ProjectId, BoardId, TopicId, MessageId);
 
 macro_rules! validated_identity_string {
     ($name:ident, $field:literal, $min:expr, $max:expr, $validator:expr, $requirement:literal) => {

@@ -194,6 +194,7 @@ impl SubscriptionDeliveryService {
         reader: Identity,
         filter: SubscriptionWaitFilter,
         max_wait_seconds: u64,
+        maximum_root_notice_bytes: usize,
     ) -> Result<Option<super::SubscriptionWaitResult>, BoardError> {
         self.inner.board_availability.require_store()?;
         self.require_started().await?;
@@ -217,6 +218,7 @@ impl SubscriptionDeliveryService {
                 .send(ReaderDeliveryCommand::Wait {
                     filter: filter.clone(),
                     deadline,
+                    maximum_root_notice_bytes,
                     reply,
                 })
                 .await

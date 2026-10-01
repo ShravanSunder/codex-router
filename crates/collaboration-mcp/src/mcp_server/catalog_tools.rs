@@ -705,30 +705,6 @@ pub(super) fn register_board_tools(router: &mut ToolRouter<CollaborationMcpServe
     );
     board_tool!(
         router,
-        "board_thread_listen",
-        ThreadListenRequest,
-        ThreadListenResult,
-        board_thread_listen,
-        false
-    );
-    board_tool!(
-        router,
-        "board_thread_listen_show",
-        ThreadListenShowRequest,
-        ThreadListenShowResult,
-        board_thread_listen_show,
-        false
-    );
-    board_tool!(
-        router,
-        "board_thread_listen_cancel",
-        ThreadListenCancelRequest,
-        ThreadListenCancelResult,
-        board_thread_listen_cancel,
-        true
-    );
-    board_tool!(
-        router,
         "board_inbox_fetch",
         InboxFetchRequest,
         InboxFetchResult,
@@ -756,11 +732,3 @@ pub(super) fn register_board_tools(router: &mut ToolRouter<CollaborationMcpServe
 #[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(super) struct EmptyToolInput {}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub(super) struct ThreadWaitToolInput {
-    pub(super) request: collaboration_client::board::ThreadWaitRequest,
-    #[schemars(range(min = 1, max = 1500))]
-    pub(super) timeout_seconds: u64,
-}

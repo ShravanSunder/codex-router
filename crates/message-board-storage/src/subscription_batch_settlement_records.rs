@@ -6,7 +6,7 @@ use crate::storage_support::{
     BoardTransaction, current_activity_sequence, identity_key, invalid_record, storage_error,
 };
 use crate::subscription_window_records::load_window;
-use crate::thread_batch_selection::pending_message_count;
+use crate::subscription_window_records::pending_message_count;
 use crate::thread_delivery_position_writer::write_delivered_position_if_valid;
 use crate::thread_subscription_lifecycle_records::get_covering_subscription;
 use crate::thread_subscription_row_decoding::encode_utc_timestamp;

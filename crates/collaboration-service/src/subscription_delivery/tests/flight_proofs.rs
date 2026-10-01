@@ -21,7 +21,12 @@ async fn one_owner_serializes_push_and_wait_and_does_not_hold_the_board_lock() {
     let reader = fixture.reader.clone();
     let mut wait = tokio::spawn(async move {
         service
-            .wait(reader, SubscriptionWaitFilter::Roots(vec![poll_root]), 60)
+            .wait(
+                reader,
+                SubscriptionWaitFilter::Roots(vec![poll_root]),
+                60,
+                usize::MAX,
+            )
             .await
             .unwrap()
     });

@@ -124,7 +124,7 @@ impl ReaderDeliveryOwner {
                 .await?;
         }
         if !held.is_empty() {
-            let (_, settlement) = self.select(&held).await?;
+            let (_, settlement) = self.select(&held, usize::MAX).await?;
             self.hold(
                 &settlement,
                 if held.iter().any(|root| {
@@ -140,7 +140,7 @@ impl ReaderDeliveryOwner {
             .await?;
         }
         if !delivered.is_empty() {
-            let (batch, settlement) = self.select(&delivered).await?;
+            let (batch, settlement) = self.select(&delivered, usize::MAX).await?;
             if batch.roots.is_empty() {
                 return Ok(true);
             }
@@ -166,12 +166,18 @@ impl ReaderDeliveryOwner {
     pub(super) async fn select(
         &self,
         roots: &[MessageId],
+        maximum_root_notice_bytes: usize,
     ) -> Result<(SubscriptionBatch, SubscriptionBatchSettlement), BoardError> {
         let selected = self
             .board_store()?
             .lock()
             .await
-            .select_subscription_notice(&self.reader, roots, self.clock.now())
+            .select_subscription_notice(
+                &self.reader,
+                roots,
+                self.clock.now(),
+                maximum_root_notice_bytes,
+            )
             .await?;
         #[cfg(test)]
         self.observe(OwnerObservation::Selected);

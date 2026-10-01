@@ -62,6 +62,7 @@ fn validate_required_identities(
         "board/threadSubscribe",
         "board/threadUnsubscribe",
         "board/threadSubscriptions",
+        "board/threadWait",
     ];
     const READER_METHODS: &[&str] = &[
         "board/threadList",

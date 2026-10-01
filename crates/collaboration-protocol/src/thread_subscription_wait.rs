@@ -1,4 +1,4 @@
-//! Subscription wait contract staged separately from the legacy listen RPC binding.
+//! Typed Control wire contract for bounded thread subscription waits.
 use crate::{MessageText, PushId};
 use chrono::{DateTime, Utc};
 use message_board::{Identity, MessageId, PendingRootNotice, TopicId};

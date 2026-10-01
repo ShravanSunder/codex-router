@@ -122,5 +122,6 @@ impl SubscriptionWaitFilter {
 pub(super) struct PollWaiter {
     pub filter: SubscriptionWaitFilter,
     pub deadline: Instant,
+    pub maximum_root_notice_bytes: usize,
     pub reply: oneshot::Sender<Result<Option<SubscriptionWaitResult>, BoardError>>,
 }

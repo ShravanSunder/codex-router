@@ -141,18 +141,8 @@ pub(super) enum ThreadCommand {
         long_about = "List project threads and reader watch status. With neither --project-id nor --repository-path, use the current Git repository when available. Example outside a repository: agent-collaboration board thread list --repository-path '<path-in-repository>' (or --project-id <project-id>). --watched-only requires --project-id."
     )]
     List(ThreadListArguments),
-    /// Wait for Thread Activity. Delivery marks it seen; acknowledgement remains separate.
-    Listen(ThreadListenArguments),
-    /// Wait once for watched or named Thread Activity and then exit.
+    /// Wait for due poll-mode subscription activity; no scope flag selects all subscriptions.
     Wait(ThreadWaitArguments),
-}
-
-#[derive(Subcommand)]
-pub(super) enum ThreadListenControlCommand {
-    /// Show any active Listen.
-    Show(ThreadListenControlArguments),
-    /// Cancel any active Listen.
-    Cancel(ThreadListenControlArguments),
 }
 
 #[derive(Subcommand)]
@@ -586,15 +576,6 @@ pub(super) struct ThreadJoinArguments {
     /// Behaviour when the target session is idle.
     #[arg(long, value_enum)]
     pub when_idle: Option<WhenIdleKind>,
-    /// Start an existing process-owned Listen: once, short, or long.
-    #[arg(long, num_args = 1, value_name = "MODE")]
-    pub listen: Option<Vec<String>>,
-    #[arg(long)]
-    pub max_wait: Option<String>,
-    #[arg(long, conflicts_with = "no_acknowledge")]
-    pub acknowledge: bool,
-    #[arg(long, conflicts_with = "acknowledge")]
-    pub no_acknowledge: bool,
     #[command(flatten)]
     pub common: CommonArguments,
 }
@@ -652,93 +633,19 @@ pub(super) struct ThreadListArguments {
 }
 
 #[derive(Args)]
-#[command(args_conflicts_with_subcommands = true, subcommand_negates_reqs = true)]
-pub(super) struct ThreadListenArguments {
-    #[command(subcommand)]
-    pub control: Option<ThreadListenControlCommand>,
-    /// Select every Thread with an active Watch for this Reader.
-    #[arg(long, conflicts_with_all = ["root_message_id", "topic_id"])]
-    pub watched: bool,
-    /// Select a named Thread. May be repeated.
+pub(super) struct ThreadWaitArguments {
+    /// Filter to one or more Thread subscription roots.
     #[arg(long, conflicts_with = "topic_id")]
     pub root_message_id: Vec<String>,
-    /// Select every current and future Thread under one Topic.
-    #[arg(long)]
-    pub topic_id: Option<String>,
-    /// Wait for the first Batch set and exit.
-    #[arg(long, conflicts_with = "lifetime")]
-    pub once: bool,
-    /// Fixed repeating lifetime. Session delivery accepts `short` (25 minutes) or `long` (75 minutes).
-    #[arg(long, value_enum)]
-    pub lifetime: Option<ThreadListenLifetimeKind>,
-    /// Shorten a stdout repeating listen without extending its fixed lifetime.
-    #[arg(long = "for", value_name = "DURATION")]
-    pub shorten_for: Option<String>,
-    /// Once maximum wait: integer followed by s, m, h, or d.
-    #[arg(long, requires = "once")]
-    pub max_wait: Option<String>,
-    /// Deliver batches to stdout or arm delivery into the calling session. Session delivery requires an existing thread participant and --lifetime short|long (or --once).
-    #[arg(long, value_enum, default_value = "stdout")]
-    pub deliver: ThreadListenDeliveryKind,
-    /// Initialize the Delivered position for a first Listen from this Activity sequence.
-    #[arg(long = "from")]
-    pub from_activity_sequence: Option<u64>,
-    /// Advance each Thread's Acknowledged position after its Batch is written to stdout.
-    #[arg(long)]
-    pub acknowledge: bool,
-    /// Leave each emitted Batch's Acknowledged position unchanged.
-    #[arg(long, conflicts_with = "acknowledge")]
-    pub no_acknowledge: bool,
-    /// Typed Reader Identity JSON.
-    #[arg(long)]
-    pub actor: Option<String>,
-    #[command(flatten)]
-    pub common: CommonArguments,
-}
-
-#[derive(Clone, Copy, ValueEnum)]
-pub(super) enum ThreadListenLifetimeKind {
-    Short,
-    Long,
-}
-
-#[derive(Clone, Copy, ValueEnum)]
-pub(super) enum ThreadListenDeliveryKind {
-    Stdout,
-    Session,
-}
-
-#[derive(Args)]
-pub(super) struct ThreadWaitArguments {
-    /// Select every Thread with an active Watch for this Reader.
+    /// Filter to one Topic subscription.
     #[arg(long, conflicts_with = "root_message_id")]
-    pub watched: bool,
-    /// Select a named Thread. May be repeated.
+    pub topic_id: Option<String>,
+    /// Maximum wait: integer followed by s, m, h, or d, at most 25 minutes.
     #[arg(long)]
-    pub root_message_id: Vec<String>,
-    /// Maximum wait: integer followed by s, m, h, or d.
+    pub max_wait: String,
+    /// Typed Reader Identity JSON, or self for the current session.
     #[arg(long)]
-    pub max_wait: Option<String>,
-    /// Initialize the Delivered position for a first Wait from this Activity sequence.
-    #[arg(long = "from")]
-    pub from_activity_sequence: Option<u64>,
-    /// Advance each Thread's Acknowledged position after its Batch is written to stdout.
-    #[arg(long)]
-    pub acknowledge: bool,
-    /// Leave each emitted Batch's Acknowledged position unchanged.
-    #[arg(long, conflicts_with = "acknowledge")]
-    pub no_acknowledge: bool,
-    /// Typed Reader Identity JSON, or self for the current Codex or Claude Code session.
-    #[arg(long)]
-    pub actor: Option<String>,
-    #[command(flatten)]
-    pub common: CommonArguments,
-}
-
-#[derive(Args)]
-pub(super) struct ThreadListenControlArguments {
-    #[arg(long)]
-    pub listen_id: String,
+    pub actor: String,
     #[command(flatten)]
     pub common: CommonArguments,
 }
