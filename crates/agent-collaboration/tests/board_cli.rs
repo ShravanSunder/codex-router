@@ -184,8 +184,10 @@ fn participant_commands_expose_explicit_create_join_leave_and_list_choices() {
                 "--role",
                 "--watch",
                 "--no-watch",
+                "--mode",
+                "--when-idle",
                 "--listen",
-                "--acknowledge",
+                "watching is the default",
             ],
         ),
         (
@@ -239,21 +241,6 @@ fn participant_commands_refuse_omitted_semantic_choices_before_connection() {
             vec![
                 "board",
                 "thread",
-                "join",
-                "--root-message-id",
-                root,
-                "--actor",
-                HUMAN_ACTOR,
-                "--role",
-                "advisor",
-                "--json",
-            ],
-            "--watch or --no-watch",
-        ),
-        (
-            vec![
-                "board",
-                "thread",
                 "participant",
                 "list",
                 "--root-message-id",
@@ -273,6 +260,88 @@ fn participant_commands_refuse_omitted_semantic_choices_before_connection() {
             String::from_utf8_lossy(&output.stderr),
         );
         assert!(rendered.contains(expected));
+    }
+}
+
+#[test]
+fn thread_subscription_help_exposes_scope_policy_and_reader_commands() {
+    for (arguments, required) in [
+        (
+            vec!["board", "thread", "subscribe", "--help"],
+            vec![
+                "--root-message-id",
+                "--topic-id",
+                "--actor",
+                "--mode",
+                "--when-idle",
+                "--quiet",
+                "--cap",
+                "--for",
+            ],
+        ),
+        (
+            vec!["board", "thread", "unsubscribe", "--help"],
+            vec!["--root-message-id", "--topic-id", "--actor"],
+        ),
+        (
+            vec!["board", "thread", "subscriptions", "--help"],
+            vec!["--actor"],
+        ),
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_agent-collaboration"))
+            .args(arguments)
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let help = String::from_utf8_lossy(&output.stdout);
+        for flag in required {
+            assert!(help.contains(flag), "missing {flag}: {help}");
+        }
+    }
+}
+
+#[test]
+fn subscription_policy_durations_enforce_the_contract_bounds_before_connection() {
+    let root = "018f6f67-64d2-7a21-bf9a-8f193f987001";
+    for (options, expected) in [
+        (
+            vec!["--quiet", "31m"],
+            "--quiet must be between 0 seconds and 30 minutes",
+        ),
+        (
+            vec!["--quiet", "2m", "--cap", "1m"],
+            "invalid subscription capSeconds: must be at least quietSeconds",
+        ),
+        (vec!["--cap", "61m"], "--cap must be at most 60 minutes"),
+        (
+            vec!["--for", "9m"],
+            "invalid subscription forSeconds: must be between 600 seconds and 604800 seconds",
+        ),
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_agent-collaboration"))
+            .args([
+                "board",
+                "thread",
+                "subscribe",
+                "--root-message-id",
+                root,
+                "--actor",
+                HUMAN_ACTOR,
+            ])
+            .args(options)
+            .arg("--json")
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(2));
+        let rendered = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+        assert!(
+            rendered.contains(expected),
+            "missing {expected}: {rendered}"
+        );
     }
 }
 

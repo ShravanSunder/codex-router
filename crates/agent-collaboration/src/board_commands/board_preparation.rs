@@ -1,8 +1,12 @@
 use super::board_arguments::*;
+use super::board_thread_subscription_preparation::PendingSubscriptionActor;
 use super::board_value_parsing::*;
 use collaboration_client::BoardRepositoryLocation;
 use collaboration_client::ControlClient;
 use collaboration_client::board::*;
+use collaboration_client::protocol::{
+    ThreadSubscribeRequest, ThreadSubscriptionsRequest, ThreadUnsubscribeRequest,
+};
 use std::path::PathBuf;
 
 pub(super) struct CommandContext {
@@ -60,6 +64,9 @@ pub(super) enum PreparedBoardCommand {
     },
     ThreadCreate(Box<PendingThreadCreate>),
     ThreadJoin(Box<PendingThreadJoin>),
+    ThreadSubscribe(PendingSubscriptionActor<ThreadSubscribeRequest>),
+    ThreadUnsubscribe(PendingSubscriptionActor<ThreadUnsubscribeRequest>),
+    ThreadSubscriptions(PendingSubscriptionActor<ThreadSubscriptionsRequest>),
     ThreadLeave(PendingThreadLeave),
     ThreadParticipantList(ThreadParticipantListRequest),
     ThreadListen(PendingThreadListen),
@@ -231,6 +238,15 @@ pub(super) fn finalize_command(
             if let Some(replace) = &mut pending.request.replace {
                 finalize_identity(replace, client)?;
             }
+        }
+        PreparedBoardCommand::ThreadSubscribe(pending) => {
+            pending.request.actor = finalize_actor(&pending.actor, client)?;
+        }
+        PreparedBoardCommand::ThreadUnsubscribe(pending) => {
+            pending.request.actor = finalize_actor(&pending.actor, client)?;
+        }
+        PreparedBoardCommand::ThreadSubscriptions(pending) => {
+            pending.request.actor = finalize_actor(&pending.actor, client)?;
         }
         PreparedBoardCommand::ThreadLeave(pending) => {
             pending.request.actor = finalize_actor(&pending.actor, client)?;
@@ -558,6 +574,15 @@ fn prepare_thread(
     match command {
         ThreadCommand::Create(arguments) => prepare_thread_create(arguments),
         ThreadCommand::Join(arguments) => prepare_thread_join(arguments),
+        ThreadCommand::Subscribe(arguments) => {
+            super::board_thread_subscription_preparation::prepare_subscribe(arguments)
+        }
+        ThreadCommand::Unsubscribe(arguments) => {
+            super::board_thread_subscription_preparation::prepare_unsubscribe(arguments)
+        }
+        ThreadCommand::Subscriptions(arguments) => {
+            super::board_thread_subscription_preparation::prepare_subscriptions(arguments)
+        }
         ThreadCommand::Leave(arguments) => prepare_thread_leave(arguments),
         ThreadCommand::Participant { command } => prepare_thread_participant(command),
         ThreadCommand::Show(arguments) => Ok((
@@ -647,7 +672,7 @@ fn prepare_thread_participant(
     }
 }
 
-fn parse_actor_input(value: &str) -> Result<ActorInput, String> {
+pub(super) fn parse_actor_input(value: &str) -> Result<ActorInput, String> {
     if value == "self" {
         Ok(ActorInput::Self_)
     } else {
@@ -655,7 +680,7 @@ fn parse_actor_input(value: &str) -> Result<ActorInput, String> {
     }
 }
 
-fn placeholder_identity() -> Result<Identity, String> {
+pub(super) fn placeholder_identity() -> Result<Identity, String> {
     Ok(Identity::Human {
         human_id: HumanId::try_from("pending-actor-finalization".to_owned())
             .map_err(|_| "could not prepare actor identity".to_owned())?,
@@ -748,15 +773,19 @@ fn prepare_thread_join(
         return Err("--replace requires --role orchestrator".into());
     }
     let request = ThreadJoinRequest {
-        mode: None,
-        when_idle: None,
+        mode: arguments
+            .mode
+            .map(super::board_thread_subscription_preparation::subscription_mode),
+        when_idle: arguments
+            .when_idle
+            .map(super::board_thread_subscription_preparation::when_idle),
         root_message_id: parse_uuid_v7(arguments.root_message_id, "--root-message-id")?,
         actor: match &actor {
             ActorInput::Explicit(identity) => identity.clone(),
             ActorInput::Self_ => placeholder_identity()?,
         },
         role,
-        watch: watch_choice(arguments.watch, arguments.no_watch)?,
+        watch: !arguments.no_watch,
         replace,
         note: arguments
             .note

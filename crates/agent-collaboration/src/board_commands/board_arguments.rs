@@ -1,4 +1,8 @@
 use super::board_search_commands::{DiscoverySearchArguments, MessageSearchArguments};
+use super::board_subscription_arguments::{
+    SubscriptionModeKind, ThreadSubscribeArguments, ThreadSubscriptionsArguments,
+    ThreadUnsubscribeArguments, WhenIdleKind,
+};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 
@@ -107,8 +111,14 @@ pub(super) enum MessageCommand {
 pub(super) enum ThreadCommand {
     /// Create a root Thread and optionally join it with an explicit Role.
     Create(ThreadCreateArguments),
-    /// Join a Thread with an explicit Role and Watch choice.
+    /// Join a Thread with an explicit Role; watching is the default.
     Join(ThreadJoinArguments),
+    /// Subscribe to activity in one Thread or Topic with an optional delivery policy.
+    Subscribe(ThreadSubscribeArguments),
+    /// Cancel the subscription for one Thread or Topic.
+    Unsubscribe(ThreadUnsubscribeArguments),
+    /// List active and draining subscriptions for one Reader.
+    Subscriptions(ThreadSubscriptionsArguments),
     /// Leave a Thread, handing over or resolving when required by the current Role.
     Leave(ThreadLeaveArguments),
     /// List open and closed Participants for one Thread.
@@ -559,8 +569,10 @@ pub(super) struct ThreadJoinArguments {
     pub actor: String,
     #[arg(long, value_enum)]
     pub role: ParticipantRoleKind,
+    /// Watch the Thread after joining; this is the default.
     #[arg(long, conflicts_with = "no_watch")]
     pub watch: bool,
+    /// Join without watching the Thread.
     #[arg(long, conflicts_with = "watch")]
     pub no_watch: bool,
     /// Current Orchestrator identity to replace. Only valid with --role orchestrator.
@@ -568,6 +580,12 @@ pub(super) struct ThreadJoinArguments {
     pub replace: Option<String>,
     #[arg(long)]
     pub note: Option<String>,
+    /// Delivery mode for the subscription created or renewed by joining.
+    #[arg(long, value_enum)]
+    pub mode: Option<SubscriptionModeKind>,
+    /// Behaviour when the target session is idle.
+    #[arg(long, value_enum)]
+    pub when_idle: Option<WhenIdleKind>,
     /// Start an existing process-owned Listen: once, short, or long.
     #[arg(long, num_args = 1, value_name = "MODE")]
     pub listen: Option<Vec<String>>,

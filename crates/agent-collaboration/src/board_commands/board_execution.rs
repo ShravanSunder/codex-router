@@ -260,6 +260,15 @@ async fn dispatch(
             debug_assert!(pending.listen.is_none());
             serialize_result(client.board_thread_join(pending.request).await?)
         }
+        PreparedBoardCommand::ThreadSubscribe(pending) => {
+            serialize_result(client.board_thread_subscribe(pending.request).await?)
+        }
+        PreparedBoardCommand::ThreadUnsubscribe(pending) => {
+            serialize_result(client.board_thread_unsubscribe(pending.request).await?)
+        }
+        PreparedBoardCommand::ThreadSubscriptions(pending) => {
+            serialize_result(client.board_thread_subscriptions(pending.request).await?)
+        }
         PreparedBoardCommand::ThreadLeave(pending) => {
             serialize_result(client.board_thread_leave(pending.request).await?)
         }
@@ -526,7 +535,7 @@ fn refusal_command(
         }
         (BoardNextAction::JoinThread, BoardErrorDetails::ParticipantRefusal { refusal }) => {
             format!(
-                "agent-collaboration board thread join --root-message-id {} --actor {} --role participant --no-watch --json",
+                "agent-collaboration board thread join --root-message-id {} --actor {} --role participant --json",
                 refusal.root_message_id.as_str(),
                 actor(&refusal.actor)
             )
@@ -535,7 +544,7 @@ fn refusal_command(
             BoardNextAction::ReplaceOrchestrator,
             BoardErrorDetails::ParticipantRefusal { refusal },
         ) => format!(
-            "agent-collaboration board thread join --root-message-id {} --actor {} --role orchestrator --replace {} (--watch | --no-watch) --json",
+            "agent-collaboration board thread join --root-message-id {} --actor {} --role orchestrator --replace {} --json",
             refusal.root_message_id.as_str(),
             actor(&refusal.actor),
             refusal
@@ -548,7 +557,7 @@ fn refusal_command(
             BoardNextAction::ReplaceImplementer,
             BoardErrorDetails::ParticipantRefusal { refusal },
         ) => format!(
-            "agent-collaboration board thread join --root-message-id {} --actor {} --role implementer --replace {} (--watch | --no-watch) --json",
+            "agent-collaboration board thread join --root-message-id {} --actor {} --role implementer --replace {} --json",
             refusal.root_message_id.as_str(),
             actor(&refusal.actor),
             refusal
@@ -569,7 +578,7 @@ fn refusal_command(
             BoardNextAction::JoinHandoverTarget,
             BoardErrorDetails::ParticipantRefusal { refusal },
         ) => format!(
-            "agent-collaboration board thread join --root-message-id {} --actor {} --role <role> (--watch | --no-watch) --json",
+            "agent-collaboration board thread join --root-message-id {} --actor {} --role <role> --json",
             refusal.root_message_id.as_str(),
             refusal
                 .target
@@ -588,7 +597,7 @@ fn refusal_command(
             BoardNextAction::RepeatJoinWithoutReplace,
             BoardErrorDetails::ParticipantRefusal { refusal },
         ) => format!(
-            "agent-collaboration board thread join --root-message-id {} --actor {} --role orchestrator (--watch | --no-watch) --json",
+            "agent-collaboration board thread join --root-message-id {} --actor {} --role orchestrator --json",
             refusal.root_message_id.as_str(),
             actor(&refusal.actor)
         ),
@@ -813,7 +822,7 @@ mod tests {
 
         assert_eq!(
             command,
-            "agent-collaboration board thread join --root-message-id 019f0000-0000-7000-8000-000000000104 --actor '{\"kind\":\"human\",\"humanId\":\"owner\"}' --role participant --no-watch --json"
+            "agent-collaboration board thread join --root-message-id 019f0000-0000-7000-8000-000000000104 --actor '{\"kind\":\"human\",\"humanId\":\"owner\"}' --role participant --json"
         );
     }
 }
