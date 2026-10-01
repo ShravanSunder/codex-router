@@ -1,12 +1,11 @@
 use super::{
-    SubscriptionClock,
+    BoardAvailability, SubscriptionClock,
     reader_delivery_owner::{ReaderDeliveryCommand, ReaderDeliveryOwner, ReaderDeliveryOwnerProps},
     subscription_push::{SubscriptionPushStore, SubscriptionPushStoreProps},
     subscription_wait::SubscriptionWaitFilter,
 };
 use crate::{MachineIdentity, SessionMessageDelivery, TargetPresenceProbe};
 use message_board::{BoardError, Identity};
-use message_board_storage::BoardStore;
 use std::{
     collections::{HashMap, HashSet},
     sync::Arc,
@@ -15,7 +14,7 @@ use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 pub struct SubscriptionDeliveryServiceProps {
-    pub store: Arc<Mutex<BoardStore>>,
+    pub board_availability: BoardAvailability,
     pub push_store: Arc<Mutex<automation_storage::AutomationStore>>,
     pub delivery: Arc<dyn SessionMessageDelivery>,
     pub presence: Arc<dyn TargetPresenceProbe>,
@@ -42,7 +41,7 @@ pub(super) enum OwnerObservation {
 }
 
 struct ServiceInner {
-    store: Arc<Mutex<BoardStore>>,
+    board_availability: BoardAvailability,
     push: Arc<SubscriptionPushStore>,
     presence: Arc<dyn TargetPresenceProbe>,
     clock: Arc<dyn SubscriptionClock>,
@@ -61,6 +60,11 @@ pub struct SubscriptionDeliveryService {
 }
 
 impl SubscriptionDeliveryService {
+    #[must_use]
+    pub fn subscription_clock(&self) -> Arc<dyn SubscriptionClock> {
+        Arc::clone(&self.inner.clock)
+    }
+
     pub fn new(props: SubscriptionDeliveryServiceProps) -> Self {
         #[cfg(test)]
         let (observations, _) = tokio::sync::broadcast::channel(1024);
@@ -77,7 +81,7 @@ impl SubscriptionDeliveryService {
         Self {
             lifetime: Arc::new(()),
             inner: Arc::new(ServiceInner {
-                store: props.store,
+                board_availability: props.board_availability,
                 push,
                 presence: props.presence,
                 clock: props.clock,
@@ -99,13 +103,16 @@ impl SubscriptionDeliveryService {
         if *started {
             return Ok(());
         }
-        let records = self
-            .inner
-            .store
-            .lock()
-            .await
-            .restore_active_and_draining(self.inner.clock.now())
-            .await?;
+        let records = match &self.inner.board_availability {
+            BoardAvailability::Available(store) => {
+                store
+                    .lock()
+                    .await
+                    .restore_active_and_draining(self.inner.clock.now())
+                    .await?
+            }
+            BoardAvailability::Unavailable => Vec::new(),
+        };
         *started = true;
         let readers = records
             .iter()
@@ -118,6 +125,7 @@ impl SubscriptionDeliveryService {
     }
 
     pub async fn reconcile_reader(&self, reader: Identity) -> Result<(), BoardError> {
+        self.inner.board_availability.require_store()?;
         self.require_started().await?;
         self.ensure_owner(reader)
             .await?
@@ -133,6 +141,7 @@ impl SubscriptionDeliveryService {
         filter: SubscriptionWaitFilter,
         max_wait_seconds: u64,
     ) -> Result<Option<super::SubscriptionWaitResult>, BoardError> {
+        self.inner.board_availability.require_store()?;
         self.require_started().await?;
         if max_wait_seconds > 1500 {
             return Err(BoardError::invalid_field(
@@ -192,11 +201,14 @@ impl SubscriptionDeliveryService {
         if let Some(sender) = owners.get(&reader).filter(|sender| !sender.is_closed()) {
             return Ok(sender.clone());
         }
-        let activity = self.inner.store.lock().await.subscribe_activity();
+        let activity = match &self.inner.board_availability {
+            BoardAvailability::Available(store) => Some(store.lock().await.subscribe_activity()),
+            BoardAvailability::Unavailable => None,
+        };
         let (sender, commands) = mpsc::channel(64);
         let owner = ReaderDeliveryOwner::new(ReaderDeliveryOwnerProps {
             reader: reader.clone(),
-            store: self.inner.store.clone(),
+            board_availability: self.inner.board_availability.clone(),
             push: self.inner.push.clone(),
             presence: self.inner.presence.clone(),
             clock: self.inner.clock.clone(),

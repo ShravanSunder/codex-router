@@ -5,7 +5,7 @@ mod reader_wait_handoff;
 #[cfg(test)]
 use super::subscription_service::OwnerObservation;
 use super::{
-    SubscriptionClock,
+    BoardAvailability, SubscriptionClock,
     subscription_facts::{
         PRESENCE_INTERVAL, RootSubscriptionFacts, delivery_retry_delay, root_facts, wall_deadline,
     },
@@ -42,26 +42,26 @@ pub(super) enum ReaderDeliveryCommand {
 
 pub(super) struct ReaderDeliveryOwnerProps {
     pub reader: Identity,
-    pub store: Arc<Mutex<BoardStore>>,
+    pub board_availability: BoardAvailability,
     pub push: Arc<SubscriptionPushStore>,
     pub presence: Arc<dyn TargetPresenceProbe>,
     pub clock: Arc<dyn SubscriptionClock>,
     pub shutdown: CancellationToken,
     pub commands: mpsc::Receiver<ReaderDeliveryCommand>,
-    pub activity: broadcast::Receiver<()>,
+    pub activity: Option<broadcast::Receiver<()>>,
     #[cfg(test)]
     pub observations: broadcast::Sender<OwnerObservation>,
 }
 
 pub(super) struct ReaderDeliveryOwner {
     reader: Identity,
-    store: Arc<Mutex<BoardStore>>,
+    board_availability: BoardAvailability,
     push: Arc<SubscriptionPushStore>,
     presence: Arc<dyn TargetPresenceProbe>,
     clock: Arc<dyn SubscriptionClock>,
     shutdown: CancellationToken,
     commands: mpsc::Receiver<ReaderDeliveryCommand>,
-    activity: broadcast::Receiver<()>,
+    activity: Option<broadcast::Receiver<()>>,
     waiters: VecDeque<PollWaiter>,
     checked_presence: HashMap<MessageId, Instant>,
     prior_records: Vec<ThreadSubscriptionRecord>,
@@ -76,7 +76,7 @@ impl ReaderDeliveryOwner {
     pub(super) fn new(props: ReaderDeliveryOwnerProps) -> Self {
         let ReaderDeliveryOwnerProps {
             reader,
-            store,
+            board_availability,
             push,
             presence,
             clock,
@@ -88,7 +88,7 @@ impl ReaderDeliveryOwner {
         } = props;
         Self {
             reader,
-            store,
+            board_availability,
             push,
             presence,
             clock,
@@ -112,12 +112,16 @@ impl ReaderDeliveryOwner {
         while !self.shutdown.is_cancelled() {
             self.expire_waiters();
             if self.rescan {
-                let result = self
-                    .store
-                    .lock()
-                    .await
-                    .rescan_missing_subscription_windows(&self.reader, self.clock.now())
-                    .await;
+                let result = match &self.board_availability {
+                    BoardAvailability::Available(store) => {
+                        store
+                            .lock()
+                            .await
+                            .rescan_missing_subscription_windows(&self.reader, self.clock.now())
+                            .await
+                    }
+                    BoardAvailability::Unavailable => Ok(0),
+                };
                 if result.is_err() {
                     if !self.wait_for_input(Some(self.retry_deadline())).await {
                         break;
@@ -127,12 +131,16 @@ impl ReaderDeliveryOwner {
                 self.rescan = false;
             }
             let now = self.clock.now();
-            let result = self
-                .store
-                .lock()
-                .await
-                .list_reader_subscriptions(&self.reader, now)
-                .await;
+            let result = match &self.board_availability {
+                BoardAvailability::Available(store) => {
+                    store
+                        .lock()
+                        .await
+                        .list_reader_subscriptions(&self.reader, now)
+                        .await
+                }
+                BoardAvailability::Unavailable => Ok(Vec::new()),
+            };
             let records = match result {
                 Ok(records) => records,
                 Err(error) => {
@@ -156,13 +164,17 @@ impl ReaderDeliveryOwner {
             let facts = root_facts(&records);
             #[cfg(test)]
             self.observe(OwnerObservation::SelectingDueRoots);
-            let due = match self
-                .store
-                .lock()
-                .await
-                .due_subscription_roots(&self.reader, now)
-                .await
-            {
+            let due_result = match &self.board_availability {
+                BoardAvailability::Available(store) => {
+                    store
+                        .lock()
+                        .await
+                        .due_subscription_roots(&self.reader, now)
+                        .await
+                }
+                BoardAvailability::Unavailable => Ok(Vec::new()),
+            };
+            let due = match due_result {
                 Ok(roots) => roots,
                 Err(error) => {
                     tracing::warn!(%error, "subscription due selection failed");
@@ -249,7 +261,7 @@ impl ReaderDeliveryOwner {
                 for waiter in &self.waiters {
                     covered |= waiter
                         .filter
-                        .matches(root, &self.store)
+                        .matches(root, self.board_store().ok()?)
                         .await
                         .unwrap_or(false);
                 }
@@ -316,27 +328,36 @@ impl ReaderDeliveryOwner {
                     None => false,
                 }
             },
-            activity = self.activity.recv() => { if matches!(activity, Err(broadcast::error::RecvError::Lagged(_))) { self.rescan = true; } !matches!(activity, Err(broadcast::error::RecvError::Closed)) },
+            activity = async { match self.activity.as_mut() {
+                Some(activity) => activity.recv().await,
+                None => std::future::pending().await,
+            } } => { if matches!(activity, Err(broadcast::error::RecvError::Lagged(_))) { self.rescan = true; } !matches!(activity, Err(broadcast::error::RecvError::Closed)) },
             () = timer => true,
         }
     }
 
     async fn renew_wait(&self, filter: &SubscriptionWaitFilter) -> Result<(), BoardError> {
         let records = self
-            .store
+            .board_store()?
             .lock()
             .await
             .list_reader_subscriptions(&self.reader, self.clock.now())
             .await?;
-        let scopes = filter.covered_poll_scopes(&records, &self.store).await?;
+        let scopes = filter
+            .covered_poll_scopes(&records, self.board_store()?)
+            .await?;
         for scope in scopes {
-            self.store
+            self.board_store()?
                 .lock()
                 .await
                 .renew_thread_subscription(&self.reader, &scope, self.clock.now())
                 .await?;
         }
         Ok(())
+    }
+
+    fn board_store(&self) -> Result<&Arc<Mutex<BoardStore>>, BoardError> {
+        self.board_availability.require_store()
     }
 
     fn retry_deadline(&self) -> Instant {

@@ -3,12 +3,14 @@ use super::*;
 
 impl ReaderDeliveryOwner {
     pub(super) async fn expiry_notices(&self, records: &[ThreadSubscriptionRecord]) {
+        let Ok(store) = self.board_store() else {
+            return;
+        };
         for prior in &self.prior_records {
             if records.iter().any(|record| record.scope() == prior.scope()) {
                 continue;
             }
-            let expired = self
-                .store
+            let expired = store
                 .lock()
                 .await
                 .get_thread_subscription_record(&self.reader, prior.scope())
@@ -41,6 +43,9 @@ impl ReaderDeliveryOwner {
     }
 
     pub(super) async fn complete_drains(&self, records: &[ThreadSubscriptionRecord]) -> bool {
+        let Ok(store) = self.board_store() else {
+            return false;
+        };
         for record in records
             .iter()
             .filter(|record| record.state() == SubscriptionState::Draining)
@@ -48,8 +53,7 @@ impl ReaderDeliveryOwner {
             let SubscriptionScope::Thread { root_message_id } = record.scope() else {
                 continue;
             };
-            if self
-                .store
+            if store
                 .lock()
                 .await
                 .complete_thread_subscription_drain(&self.reader, root_message_id, self.clock.now())
@@ -113,7 +117,7 @@ impl ReaderDeliveryOwner {
             }
         }
         if !dropped.is_empty() {
-            self.store
+            self.board_store()?
                 .lock()
                 .await
                 .drop_subscription_roots(&self.reader, &dropped, self.clock.now())
@@ -164,7 +168,7 @@ impl ReaderDeliveryOwner {
         roots: &[MessageId],
     ) -> Result<(SubscriptionBatch, SubscriptionBatchSettlement), BoardError> {
         let selected = self
-            .store
+            .board_store()?
             .lock()
             .await
             .select_subscription_notice(&self.reader, roots, self.clock.now())
@@ -224,7 +228,7 @@ impl ReaderDeliveryOwner {
                     }
                     _ => SubscriptionDeliveryOutcome::Rejected { evidence },
                 };
-                self.store
+                self.board_store()?
                     .lock()
                     .await
                     .mark_subscription_batch_retry(&self.reader, settlement, now, retry_at, outcome)
@@ -244,7 +248,7 @@ impl ReaderDeliveryOwner {
         let mut delay = Duration::from_secs(1);
         loop {
             if self
-                .store
+                .board_store()?
                 .lock()
                 .await
                 .settle_subscription_batch(&self.reader, settlement, outcome.clone())
@@ -272,7 +276,7 @@ impl ReaderDeliveryOwner {
         settlement: &SubscriptionBatchSettlement,
         reason: &str,
     ) -> Result<(), BoardError> {
-        self.store
+        self.board_store()?
             .lock()
             .await
             .mark_subscription_batch_held(
@@ -291,8 +295,10 @@ impl ReaderDeliveryOwner {
     }
 
     pub(super) async fn release(&self, settlement: &SubscriptionBatchSettlement) {
-        if let Err(error) = self
-            .store
+        let Ok(store) = self.board_store() else {
+            return;
+        };
+        if let Err(error) = store
             .lock()
             .await
             .release_subscription_batch(&self.reader, settlement)

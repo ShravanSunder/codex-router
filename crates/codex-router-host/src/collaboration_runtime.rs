@@ -95,6 +95,7 @@ pub struct BackendSchemaEvidence<'a> {
 pub struct CollaborationRuntime {
     owner_human_id: Option<message_board::HumanId>,
     board_store: Option<std::sync::Arc<tokio::sync::Mutex<message_board_storage::BoardStore>>>,
+    subscription_delivery: Option<collaboration_service::SubscriptionDeliveryService>,
     provider_store:
         Option<std::sync::Arc<tokio::sync::Mutex<collaboration_service::ProviderOperationStore>>>,
     external_provider_supervisor: Option<std::sync::Arc<crate::ExternalProviderSupervisor>>,
@@ -270,12 +271,14 @@ impl CollaborationRuntime {
                 );
             }
         }
+        let mut automation_store = None;
         let mut settings_backend = None;
         match automation_storage::AutomationStore::open(&inputs.directory.join("automation.sqlite"))
             .await
         {
             Ok(store) => {
                 let store = std::sync::Arc::new(tokio::sync::Mutex::new(store));
+                automation_store = Some(std::sync::Arc::clone(&store));
                 let handle = collaboration_service::AutomationConfigurationHandle::default();
                 handle.suspend().await;
                 let backend = std::sync::Arc::new(crate::AutomationSettingsFile::new(
@@ -401,10 +404,32 @@ impl CollaborationRuntime {
             )?;
         let session_delivery: std::sync::Arc<dyn collaboration_service::SessionMessageDelivery> =
             message_routes.router.clone();
+        let subscription_presence: std::sync::Arc<dyn collaboration_service::TargetPresenceProbe> =
+            message_routes.router.clone();
         let scheduled_run_execution: std::sync::Arc<
             dyn collaboration_service::ScheduledRunExecution,
-        > = message_routes.router;
+        > = message_routes.router.clone();
         let provider_delivery_route = message_routes.provider_route;
+        let subscription_clock: std::sync::Arc<dyn collaboration_service::SubscriptionClock> =
+            std::sync::Arc::new(collaboration_service::SystemSubscriptionClock);
+        let subscription_delivery = automation_store.as_ref().map(|push_store| {
+            let board_availability = match board_store.as_ref() {
+                Some(store) => collaboration_service::BoardAvailability::Available(
+                    std::sync::Arc::clone(store),
+                ),
+                None => collaboration_service::BoardAvailability::Unavailable,
+            };
+            collaboration_service::SubscriptionDeliveryService::new(
+                collaboration_service::SubscriptionDeliveryServiceProps {
+                    board_availability,
+                    push_store: std::sync::Arc::clone(push_store),
+                    delivery: std::sync::Arc::clone(&session_delivery),
+                    presence: std::sync::Arc::clone(&subscription_presence),
+                    machine_identity: machine_identity.clone(),
+                    clock: std::sync::Arc::clone(&subscription_clock),
+                },
+            )
+        });
         if let Some(supervisor) = &external_provider_supervisor {
             supervisor.install_display_names(identity.session_display_name_cache());
             supervisor
@@ -416,6 +441,14 @@ impl CollaborationRuntime {
             .with_scheduled_run_execution(scheduled_run_execution)
             .with_native_backend(native_backend)
             .map_err(io::Error::other)?;
+        let identity = if let Some(service) = &subscription_delivery {
+            identity.with_subscription_delivery_service(
+                service.clone(),
+                std::sync::Arc::clone(&subscription_presence),
+            )
+        } else {
+            identity
+        };
         let delivery_for_approvals = identity
             .session_message_delivery()
             .ok_or_else(|| io::Error::other("session delivery unavailable"))?;
@@ -563,6 +596,13 @@ impl CollaborationRuntime {
             },
         )?;
         let shutdown = CancellationToken::new();
+        if let Some(service) = &subscription_delivery
+            && let Err(error) = service.start().await
+        {
+            service.shutdown().await;
+            drop(manifest);
+            return Err(io::Error::other(error));
+        }
         // Binding above establishes this runtime owns the listeners before recovery can mutate state.
         let automation_task = wake_worker.map(|worker| tokio::spawn(worker.run(shutdown.clone())));
         let schedule_task =
@@ -603,6 +643,7 @@ impl CollaborationRuntime {
         Ok(Self {
             owner_human_id,
             board_store,
+            subscription_delivery,
             provider_store,
             external_provider_supervisor,
             provider_delivery_route,
@@ -862,6 +903,9 @@ impl CollaborationRuntime {
             };
             self.manifest.take();
             self.shutdown.cancel();
+            if let Some(service) = &self.subscription_delivery {
+                service.cancel();
+            }
             let _retire = self.publication.admission_gate().retire();
             return failure;
         }
@@ -869,6 +913,9 @@ impl CollaborationRuntime {
     pub async fn shutdown(mut self) -> io::Result<()> {
         self.manifest.take();
         self.shutdown.cancel();
+        if let Some(service) = self.subscription_delivery.take() {
+            service.shutdown().await;
+        }
         let mut failure = None;
         if let Some(mcp) = self.mcp.take()
             && let Err(error) = mcp.shutdown().await
@@ -979,6 +1026,9 @@ impl Drop for CollaborationRuntime {
     fn drop(&mut self) {
         self.manifest.take();
         self.shutdown.cancel();
+        if let Some(service) = &self.subscription_delivery {
+            service.cancel();
+        }
         let _retire = self.publication.admission_gate().retire();
     }
 }

@@ -18,7 +18,7 @@ impl ReaderDeliveryOwner {
                     .get(*root)
                     .is_some_and(|facts| facts.mode == SubscriptionMode::Poll)
             }) {
-                if filter.matches(root, &self.store).await? {
+                if filter.matches(root, self.board_store()?).await? {
                     roots.push(root.clone());
                 }
             }

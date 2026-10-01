@@ -251,7 +251,7 @@ impl OwnerFixture {
         });
         let router = Arc::new(crate::SessionDeliveryRouter::new(vec![route]));
         let service = SubscriptionDeliveryService::new(SubscriptionDeliveryServiceProps {
-            store: Arc::clone(&self.store),
+            board_availability: BoardAvailability::Available(Arc::clone(&self.store)),
             push_store: Arc::clone(&self.push_store),
             delivery: router,
             presence: self.presence.clone(),

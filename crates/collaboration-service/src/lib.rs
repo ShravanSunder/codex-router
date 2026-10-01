@@ -9,8 +9,9 @@ mod control_service_context;
 pub use automation_retention_worker::AutomationRetentionWorker;
 pub use control_service_context::ServiceIdentity;
 pub use control_service_context::subscription_delivery::{
-    SubscriptionClock, SubscriptionDeliveryService, SubscriptionDeliveryServiceProps,
-    SubscriptionWaitFilter, SubscriptionWaitResult, SystemSubscriptionClock,
+    BoardAvailability, SubscriptionClock, SubscriptionDeliveryService,
+    SubscriptionDeliveryServiceProps, SubscriptionWaitFilter, SubscriptionWaitResult,
+    SystemSubscriptionClock,
 };
 mod endpoint_directory;
 pub use endpoint_directory::{
@@ -222,3 +223,4 @@ mod board_request_dispatch;
 mod board_request_validation;
 mod thread_listen_dispatch;
 mod thread_listen_registry;
+mod thread_subscription_dispatch;

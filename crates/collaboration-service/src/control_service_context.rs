@@ -8,6 +8,9 @@ pub mod subscription_delivery;
 pub struct ServiceIdentity {
     pub(crate) board: Option<std::sync::Arc<tokio::sync::Mutex<message_board_storage::BoardStore>>>,
     pub(crate) thread_listens: crate::thread_listen_registry::ThreadListenRegistry,
+    pub(crate) subscription_delivery: Option<crate::SubscriptionDeliveryService>,
+    pub(crate) subscription_presence: Option<std::sync::Arc<dyn crate::TargetPresenceProbe>>,
+    pub(crate) subscription_clock: std::sync::Arc<dyn crate::SubscriptionClock>,
     pub(crate) service_id: UuidIdentity,
     pub(crate) machine_identity: crate::MachineIdentity,
     pub(crate) configuration: crate::AutomationConfigurationHandle,
@@ -52,6 +55,16 @@ impl ServiceIdentity {
         store: std::sync::Arc<tokio::sync::Mutex<message_board_storage::BoardStore>>,
     ) -> Self {
         self.board = Some(store);
+        self
+    }
+    pub fn with_subscription_delivery_service(
+        mut self,
+        service: crate::SubscriptionDeliveryService,
+        presence: std::sync::Arc<dyn crate::TargetPresenceProbe>,
+    ) -> Self {
+        self.subscription_clock = service.subscription_clock();
+        self.subscription_delivery = Some(service);
+        self.subscription_presence = Some(presence);
         self
     }
     pub fn automation_retention_worker(&self) -> Option<crate::AutomationRetentionWorker> {
@@ -280,6 +293,9 @@ impl ServiceIdentity {
             provider_conversations: None,
             board: None,
             thread_listens: crate::thread_listen_registry::ThreadListenRegistry::new(),
+            subscription_delivery: None,
+            subscription_presence: None,
+            subscription_clock: std::sync::Arc::new(crate::SystemSubscriptionClock),
             directory: EndpointDirectory::new(service_id),
         })
     }
