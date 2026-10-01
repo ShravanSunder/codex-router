@@ -169,22 +169,10 @@ pub fn control_schema_document(
         "board/threadSubscriptions",
         &[],
     )?;
-    assembly.add_method::<message_board::ThreadListenRequest, message_board::ThreadListenResult>(
-        "board/threadListen",
-        &[],
-    )?;
-    assembly.add_method::<message_board::ThreadWaitRequest, message_board::ThreadWaitResult>(
+    assembly.add_method::<ThreadSubscriptionWaitRequest, ThreadSubscriptionWaitResult>(
         "board/threadWait",
         &[],
     )?;
-    assembly.add_method::<
-        message_board::ThreadListenShowRequest,
-        message_board::ThreadListenShowResult,
-    >("board/threadListenShow", &[])?;
-    assembly.add_method::<
-        message_board::ThreadListenCancelRequest,
-        message_board::ThreadListenCancelResult,
-    >("board/threadListenCancel", &[])?;
     assembly.add_method::<message_board::InboxFetchRequest, message_board::InboxFetchResult>(
         "board/inboxFetch",
         &[],

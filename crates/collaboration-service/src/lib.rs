@@ -143,10 +143,9 @@ mod codex_queue_reconciliation;
 mod interaction_broker;
 mod message_effect_state;
 mod native_message_dispatch;
+pub use codex_acp_adapter::BrokeredApprovalOutcome;
 pub use codex_app_server_delivery_route::CodexAppServerDeliveryRoute;
 pub use codex_app_server_scheduled_runs::CodexAppServerScheduledRuns;
-mod session_delivery_sink;
-pub use codex_acp_adapter::BrokeredApprovalOutcome;
 pub use interaction_broker::{
     ApprovalDecisionError, InteractionHistoryError, InteractionHistoryRecord,
     InteractionHistoryState, QuestionHistoryState, QuestionResponse, RefusedApprovalOption,
@@ -221,6 +220,4 @@ mod run_reconciliation;
 
 mod board_request_dispatch;
 mod board_request_validation;
-mod thread_listen_dispatch;
-mod thread_listen_registry;
 mod thread_subscription_dispatch;

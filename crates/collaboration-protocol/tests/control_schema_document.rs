@@ -7,7 +7,7 @@ fn complete_schema_pairs_all_methods_and_preserves_protocol_boundaries() {
     let methods = schema["x-methods"]
         .as_object()
         .unwrap_or_else(|| panic!("method map"));
-    assert_eq!(methods.len(), 111);
+    assert_eq!(methods.len(), 108);
     for method in [
         "conversation/create",
         "conversation/load",
@@ -60,10 +60,7 @@ fn complete_schema_pairs_all_methods_and_preserves_protocol_boundaries() {
         "instruction/create",
         "instruction/update",
         "instruction/show",
-        "board/threadListen",
         "board/threadWait",
-        "board/threadListenShow",
-        "board/threadListenCancel",
         "board/threadCreate",
         "board/threadJoin",
         "board/threadSubscribe",
@@ -101,6 +98,39 @@ fn complete_schema_pairs_all_methods_and_preserves_protocol_boundaries() {
             );
         }
     }
+    for removed in [
+        "board/threadListen",
+        "board/threadListenShow",
+        "board/threadListenCancel",
+    ] {
+        assert!(
+            !methods.contains_key(removed),
+            "legacy method remains: {removed}"
+        );
+    }
+    let wait_method = &methods["board/threadWait"];
+    let wait_request = wait_method["params"]["$ref"]
+        .as_str()
+        .unwrap_or_else(|| panic!("wait request reference"));
+    let wait_result = wait_method["result"]["$ref"]
+        .as_str()
+        .unwrap_or_else(|| panic!("wait result reference"));
+    assert_eq!(
+        schema
+            .pointer(&wait_request.replace('#', ""))
+            .and_then(|definition| definition.get("title"))
+            .and_then(Value::as_str),
+        Some("ThreadSubscriptionWaitRequest"),
+        "board/threadWait request must use the subscription DTO"
+    );
+    assert_eq!(
+        schema
+            .pointer(&wait_result.replace('#', ""))
+            .and_then(|definition| definition.get("title"))
+            .and_then(Value::as_str),
+        Some("ThreadSubscriptionWaitResult"),
+        "board/threadWait result must use the subscription DTO"
+    );
     let validator =
         jsonschema::validator_for(&schema).unwrap_or_else(|error| panic!("compile: {error}"));
     assert!(

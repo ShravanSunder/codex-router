@@ -149,7 +149,11 @@ fn require_json(enabled: bool, command: &str) -> Result<(), String> {
     }
 }
 
-fn parse_subscription_duration(value: &str, flag: &str, allow_zero: bool) -> Result<u64, String> {
+pub(super) fn parse_subscription_duration(
+    value: &str,
+    flag: &str,
+    allow_zero: bool,
+) -> Result<u64, String> {
     let error = || format!("{flag} requires an integer followed by s, m, h, or d");
     let (number, multiplier) = if let Some(number) = value.strip_suffix('s') {
         (number, 1_u64)

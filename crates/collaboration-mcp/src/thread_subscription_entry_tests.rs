@@ -164,7 +164,7 @@ async fn subscription_tools_roundtrip_through_mcp_control_and_sqlite() {
         .board_thread_create(ThreadCreateRequest {
             message_id: MessageId::generate(),
             topic_id,
-            actor: setup_actor,
+            actor: setup_actor.clone(),
             acting_for: None,
             text: MessageText::try_from("MCP subscription entry path".to_owned())
                 .expect("thread title"),
@@ -239,6 +239,124 @@ async fn subscription_tools_roundtrip_through_mcp_control_and_sqlite() {
         json!({
             "actor":actor,
             "scope":{"kind":"thread","rootMessageId":root_message_id},
+            "policy":{"mode":"poll","whenIdle":"hold","quietSeconds":0,"capSeconds":0,"lifetimeSeconds":600}
+        }),
+    )
+    .await;
+    assert_ne!(updated.is_error, Some(true));
+    assert_eq!(
+        updated
+            .structured_content
+            .expect("zero-timing poll subscription")["policy"]["mode"],
+        "poll"
+    );
+
+    let empty_wait = call_registered_tool(
+        &handler,
+        context_for(4),
+        "board_thread_wait",
+        json!({
+            "actor":actor,
+            "filter":{"kind":"roots","rootMessageIds":[root_message_id]},
+            "maxWaitSeconds":0
+        }),
+    )
+    .await;
+    assert_ne!(empty_wait.is_error, Some(true));
+    assert_eq!(
+        empty_wait
+            .structured_content
+            .expect("empty wait structured result")["batch"],
+        Value::Null
+    );
+
+    let posted = call_registered_tool(
+        &handler,
+        context_for(5),
+        "board_message_post",
+        json!({
+            "messageId":MessageId::generate(),
+            "placement":{"kind":"thread","rootMessageId":root_message_id},
+            "actor":setup_actor,
+            "actingFor":null,
+            "text":"thread reply body must stay private",
+            "references":[]
+        }),
+    )
+    .await;
+    assert_ne!(posted.is_error, Some(true));
+    let posted_message = posted
+        .structured_content
+        .expect("posted thread reply structured result");
+    assert_eq!(
+        posted_message["message"]["text"],
+        "thread reply body must stay private"
+    );
+
+    let wait_arguments = || {
+        json!({
+            "actor":actor,
+            "filter":{"kind":"roots","rootMessageIds":[root_message_id]},
+            "maxWaitSeconds":1
+        })
+    };
+    let (first_wait, second_wait) = tokio::join!(
+        call_registered_tool(
+            &handler,
+            context_for(6),
+            "board_thread_wait",
+            wait_arguments()
+        ),
+        call_registered_tool(
+            &handler,
+            context_for(7),
+            "board_thread_wait",
+            wait_arguments()
+        ),
+    );
+    assert_ne!(first_wait.is_error, Some(true));
+    assert_ne!(second_wait.is_error, Some(true));
+    let first_batch = first_wait
+        .structured_content
+        .expect("first concurrent wait result")["batch"]
+        .clone();
+    let second_batch = second_wait
+        .structured_content
+        .expect("second concurrent wait result")["batch"]
+        .clone();
+    assert_ne!(
+        first_batch.is_null(),
+        second_batch.is_null(),
+        "exactly one concurrent wait claims the due batch"
+    );
+    let notice = if first_batch.is_null() {
+        second_batch
+    } else {
+        first_batch
+    };
+    assert_eq!(notice["kind"], "notice");
+    assert_eq!(notice["roots"].as_array().map(Vec::len), Some(1));
+    assert_eq!(
+        notice["roots"][0]["rootId"].as_str(),
+        Some(root_message_id.as_str())
+    );
+    assert_eq!(notice["roots"][0]["messageCount"], 1);
+    assert!(notice.get("body").is_none());
+    assert!(notice["roots"][0].get("body").is_none());
+    assert!(
+        !notice["line"]
+            .as_str()
+            .expect("notice line")
+            .contains("thread reply body must stay private")
+    );
+
+    let updated = call_registered_tool(
+        &handler,
+        context_for(8),
+        "board_thread_subscribe",
+        json!({
+            "actor":actor,
+            "scope":{"kind":"thread","rootMessageId":root_message_id},
             "policy":{"mode":"off","quietSeconds":0,"capSeconds":60,"lifetimeSeconds":600}
         }),
     )
@@ -251,9 +369,34 @@ async fn subscription_tools_roundtrip_through_mcp_control_and_sqlite() {
         "off"
     );
 
+    let off_mode_wait = call_registered_tool(
+        &handler,
+        context_for(9),
+        "board_thread_wait",
+        json!({
+            "actor":actor,
+            "filter":{"kind":"roots","rootMessageIds":[root_message_id]},
+            "maxWaitSeconds":0
+        }),
+    )
+    .await;
+    assert_eq!(off_mode_wait.is_error, Some(true));
+    let off_mode_refusal = off_mode_wait
+        .structured_content
+        .expect("typed off-mode wait refusal");
+    assert_eq!(off_mode_refusal["mcpResult"], "error");
+    assert_eq!(off_mode_refusal["kind"], "invalidField");
+    assert_eq!(off_mode_refusal["stage"], "validation");
+    assert_eq!(off_mode_refusal["details"]["kind"], "fieldConstraint");
+    assert_eq!(off_mode_refusal["details"]["field"], "filter");
+    assert_eq!(
+        off_mode_refusal["details"]["requirement"],
+        "wait requires a poll subscription; use board thread subscribe --mode poll"
+    );
+
     let unsubscribed = call_registered_tool(
         &handler,
-        context_for(4),
+        context_for(10),
         "board_thread_unsubscribe",
         json!({
             "actor":actor,
@@ -270,7 +413,7 @@ async fn subscription_tools_roundtrip_through_mcp_control_and_sqlite() {
 
     let remaining = call_registered_tool(
         &handler,
-        context_for(5),
+        context_for(11),
         "board_thread_subscriptions",
         json!({"actor":actor}),
     )
@@ -285,7 +428,7 @@ async fn subscription_tools_roundtrip_through_mcp_control_and_sqlite() {
 
     let thread = call_registered_tool(
         &handler,
-        context_for(6),
+        context_for(12),
         "board_thread_show",
         json!({"rootMessageId":root_message_id,"reader":actor}),
     )

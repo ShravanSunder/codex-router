@@ -178,6 +178,7 @@ async fn successive_selected_activity_batches_store_distinct_canonical_origin_re
                 &fixture.reader,
                 std::slice::from_ref(&fixture.root),
                 fixture.clock.now(),
+                usize::MAX,
             )
             .await
             .unwrap();
@@ -448,6 +449,7 @@ async fn failed_wait_attempt_mark_releases_selection_and_returns_explicit_error(
             fixture.reader.clone(),
             super::super::SubscriptionWaitFilter::All,
             60,
+            usize::MAX,
         )
         .await;
     assert!(
@@ -490,7 +492,8 @@ async fn failed_wait_attempt_mark_releases_selection_and_returns_explicit_error(
             .wait(
                 fixture.reader.clone(),
                 super::super::SubscriptionWaitFilter::All,
-                60
+                60,
+                usize::MAX
             )
             .await
             .unwrap(),

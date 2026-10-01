@@ -611,6 +611,70 @@ fn message_send_unknown_delivery_retains_outcome_in_typed_error() {
 }
 
 #[test]
+fn thread_wait_unknown_outcome_retains_inspection_identity_and_guidance() {
+    let actor: message_board::Identity = serde_json::from_value(serde_json::json!({
+        "kind":"session",
+        "session":fixture_session("codex-local", "wait-reader")
+    }))
+    .expect("wait Reader identity");
+    let filter: collaboration_protocol::ThreadSubscriptionWaitFilter =
+        serde_json::from_value(serde_json::json!({
+            "kind":"roots",
+            "rootMessageIds":["019f0000-0000-7000-8000-000000000005"]
+        }))
+        .expect("thread-root wait filter");
+    let result: Result<
+        collaboration_protocol::ThreadSubscriptionWaitResult,
+        collaboration_client::BoardClientError,
+    > = Err(collaboration_client::BoardClientError::WaitOutcomeUnknown {
+        actor: actor.clone(),
+        filter: filter.clone(),
+    });
+    let tool_result = super::board_result(result, true);
+    assert_eq!(tool_result.is_error, Some(true));
+    let structured = tool_result
+        .structured_content
+        .expect("typed wait outcome error");
+    assert_eq!(structured["mcpResult"], "error");
+    assert_eq!(structured["kind"], "outcomeUnknown");
+    assert_eq!(structured["stage"], "response");
+    assert_eq!(structured["effect"], "unknown");
+    assert_eq!(
+        structured["actor"],
+        serde_json::to_value(actor).expect("actor JSON")
+    );
+    assert_eq!(
+        structured["filter"],
+        serde_json::to_value(filter).expect("filter JSON")
+    );
+    assert!(structured.get("resource").is_none());
+    let message = structured["message"].as_str().expect("recovery guidance");
+    for phrase in [
+        "activity may have been handed off",
+        "subscriptions",
+        "unread inbox",
+        "board thread subscriptions",
+        "board inbox fetch",
+    ] {
+        assert!(message.contains(phrase), "{message}");
+    }
+
+    let temporary = tempfile::tempdir().expect("temporary directory");
+    let server = CollaborationMcpServer::new(temporary.path().to_owned());
+    let schema = server
+        .resolved_tools()
+        .into_iter()
+        .find(|tool| tool.name == "board_thread_wait")
+        .and_then(|tool| tool.output_schema)
+        .expect("advertised board_thread_wait output schema");
+    let schema = Value::Object((*schema).clone());
+    jsonschema::validator_for(&schema)
+        .expect("board_thread_wait output schema")
+        .validate(&structured)
+        .expect("typed wait outcome matches advertised MCP output schema");
+}
+
+#[test]
 fn message_send_foreign_writer_rejection_has_typed_action_in_mcp_error() {
     let temporary = tempfile::tempdir().expect("temporary directory");
     let server = CollaborationMcpServer::new(temporary.path().to_owned());
@@ -767,14 +831,14 @@ fn catalog_has_complete_unique_tools_with_resolvable_schemas() {
     let temporary = tempfile::tempdir().expect("temporary directory");
     let server = CollaborationMcpServer::new(temporary.path().to_owned());
     let tools = server.resolved_tools();
-    assert_eq!(tools.len(), 110);
+    assert_eq!(tools.len(), 107);
     let mut names = tools
         .iter()
         .map(|tool| tool.name.as_ref())
         .collect::<Vec<_>>();
     names.sort_unstable();
     names.dedup();
-    assert_eq!(names.len(), 110);
+    assert_eq!(names.len(), 107);
     assert!(names.contains(&"conversation_resume"));
     assert!(names.contains(&"conversation_close"));
     assert!(names.contains(&"provider_sessions_list"));
@@ -1011,8 +1075,13 @@ fn tool_schemas_match_known_runtime_defaults_and_conditional_requirements() {
     let run_schema = schema_for("run_list");
     assert!(!required_for(&run_schema).contains(&serde_json::json!("cursor")));
 
-    let listen = schema_for("board_thread_listen");
-    assert!(listen["required"].is_array());
+    let wait = schema_for("board_thread_wait");
+    let wait_required = required_for(&wait);
+    for field in ["actor", "filter", "maxWaitSeconds"] {
+        assert!(wait_required.contains(&serde_json::json!(field)));
+    }
+    assert!(wait["properties"].get("request").is_none());
+    assert!(wait["properties"].get("timeoutSeconds").is_none());
     let descriptions = tools
         .iter()
         .map(|tool| {
@@ -1022,11 +1091,12 @@ fn tool_schemas_match_known_runtime_defaults_and_conditional_requirements() {
             )
         })
         .collect::<std::collections::BTreeMap<_, _>>();
-    let listen_description = descriptions
-        .get("board_thread_listen")
-        .expect("listen description");
-    assert!(listen_description.contains("--lifetime short"));
-    assert!(listen_description.contains("board_thread_join"));
+    let wait_description = descriptions
+        .get("board_thread_wait")
+        .expect("wait description");
+    for phrase in ["poll-mode", "empty batch", "acknowledges"] {
+        assert!(wait_description.contains(phrase), "{wait_description}");
+    }
     let join_description = descriptions
         .get("board_thread_join")
         .expect("join description");
@@ -1321,8 +1391,8 @@ fn representative_catalog_descriptions_explain_operation_specific_behavior() {
             &["Saving the message", "reply", "assignment success"][..],
         ),
         (
-            "board_thread_listen",
-            &["Listener readiness", "model activation"][..],
+            "board_thread_wait",
+            &["poll-mode", "empty batch", "acknowledges"][..],
         ),
         (
             "board_thread_subscribe",
@@ -1499,12 +1569,7 @@ fn advertised_tool_output_schemas_have_object_roots() {
 fn described_success_types_keep_their_output_root_description() {
     let temporary = tempfile::tempdir().expect("temporary directory");
     let server = CollaborationMcpServer::new(temporary.path().to_owned());
-    for name in [
-        "board_message_show",
-        "board_thread_show",
-        "board_thread_listen_show",
-        "board_thread_listen_cancel",
-    ] {
+    for name in ["board_message_show", "board_thread_show"] {
         let schema = server
             .resolved_tools()
             .into_iter()
@@ -1644,7 +1709,7 @@ fn advertised_tool_schemas_validate_available_success_and_every_error_sample() {
         .into_iter()
         .filter_map(|tool| tool.output_schema.map(|schema| (tool.name, schema)))
         .collect::<std::collections::BTreeMap<_, _>>();
-    assert_eq!(advertised.len(), 110);
+    assert_eq!(advertised.len(), 107);
 
     let message = serde_json::json!({
         "messageId":"019f0000-0000-7000-8000-000000000001",
@@ -1657,25 +1722,23 @@ fn advertised_tool_schemas_validate_available_success_and_every_error_sample() {
         "references":[],
         "activitySequence":1
     });
-    let listen = serde_json::json!({
-        "listenId":"019f0000-0000-7000-8000-000000000004",
-        "context":{
-            "reader":{"kind":"human","humanId":"schema-test"},
-            "threads":[],
-            "topicIds":[],
-            "armedAfterSequence":0
-        },
-        "mode":{"kind":"once","maxWaitSeconds":1},
-        "acknowledge":false,
-        "active":false,
-        "delivery":"stdout",
-        "batchesDelivered":0,
-        "firstSequence":null,
-        "lastSequence":null,
-        "catchUp":false,
-        "acknowledged":false,
-        "consecutiveRejections":0,
-        "lastRejection":null
+    let pending_root = serde_json::json!({
+        "rootId":"019f0000-0000-7000-8000-000000000006",
+        "topicId":"019f0000-0000-7000-8000-000000000007",
+        "fromSequence":1,"throughSequence":1,"messageCount":1
+    });
+    let wait_notice = serde_json::json!({
+        "batch":{
+            "kind":"notice","pushId":"019f0000-0000-7000-8000-000000000004",
+            "line":"🧵 Router: new thread activity @fixture · 1 thread · 1 message · router://fixture/push/019f0000-0000-7000-8000-000000000004",
+            "held":false,"draining":false,"roots":[pending_root]
+        }
+    });
+    let wait_ranges = serde_json::json!({
+        "batch":{
+            "kind":"ranges","held":true,"heldSince":"2026-10-01T00:00:00Z",
+            "draining":false,"roots":[pending_root]
+        }
     });
     let provider_endpoint = serde_json::json!({
         "serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"claude-local"
@@ -1725,8 +1788,7 @@ fn advertised_tool_schemas_validate_available_success_and_every_error_sample() {
             "board_thread_subscriptions",
             serde_json::json!({"subscriptions":[active_subscription]}),
         ),
-        ("board_thread_listen_cancel", listen.clone()),
-        ("board_thread_listen_show", listen),
+        ("board_thread_wait", serde_json::json!({"batch":null})),
         (
             "conversation_create",
             serde_json::json!({"kind":"pending","operationId":OperationId::generate()}),
@@ -1832,6 +1894,13 @@ fn advertised_tool_schemas_validate_available_success_and_every_error_sample() {
                 .unwrap_or_else(|error| {
                     panic!("success result narrowed for {name}: {error}; {valid}")
                 });
+        }
+        if name.as_ref() == "board_thread_wait" {
+            for valid in [&wait_notice, &wait_ranges] {
+                advertised_validator
+                    .validate(valid)
+                    .unwrap_or_else(|error| panic!("wait batch result narrowed: {error}; {valid}"));
+            }
         }
         if name.as_ref() == "approval_list" {
             let requester = serde_json::json!({
@@ -2176,8 +2245,8 @@ fn success_schema_branches_match_main_golden_snapshot() {
         std::fs::write(snapshot_path, snapshot).expect("write resolved MCP success schemas");
         return;
     }
-    assert_eq!(actual.len(), 110);
-    assert_eq!(expected.len(), 110);
+    assert_eq!(actual.len(), 107);
+    assert_eq!(expected.len(), 107);
     for (name, success) in actual {
         assert_eq!(success, expected[&name], "{name} success schema drifted");
     }

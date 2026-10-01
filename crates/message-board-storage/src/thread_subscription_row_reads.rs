@@ -78,7 +78,7 @@ async fn load_subscription_windows(
     for mut row in rows {
         let root_message_id =
             MessageId::try_from(row.root_id.clone()).map_err(|_| corrupt_subscription("rootId"))?;
-        let pending_count = crate::thread_batch_selection::pending_message_count(
+        let pending_count = crate::subscription_window_records::pending_message_count(
             transaction,
             reader_key,
             &root_message_id,

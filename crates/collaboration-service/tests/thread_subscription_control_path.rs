@@ -1,6 +1,7 @@
 use collaboration_client::ControlClient;
 use collaboration_protocol::{
-    ThreadSubscribeRequest, ThreadSubscriptionPresence, ThreadSubscriptionState,
+    SubscriptionWaitBatch, ThreadSubscribeRequest, ThreadSubscriptionPresence,
+    ThreadSubscriptionState, ThreadSubscriptionWaitFilter, ThreadSubscriptionWaitRequest,
     ThreadSubscriptionsRequest, ThreadUnsubscribeRequest,
 };
 use collaboration_service::{
@@ -10,14 +11,14 @@ use collaboration_service::{
 };
 use collaboration_service::{ServiceIdentity, serve_control_connection};
 use message_board::{
-    BoardCreateRequest, BoardId, Description, EndpointId, Identity, MessageId, MessageReferences,
-    MessageText, ParticipantRole, ProjectCreateRequest, ProjectId, ResourceName, ServiceId,
-    SessionEndpointRef, SessionId, SessionRef, SubscriptionMode, SubscriptionPolicyPatch,
-    SubscriptionScope, ThreadCreateRequest, ThreadJoinRequest, TopicCreateRequest, TopicId,
-    WhenIdle,
+    BoardCreateRequest, BoardId, Description, EndpointId, Identity, MessageId, MessagePostRequest,
+    MessageReferences, MessageText, ParticipantRole, Placement, ProjectCreateRequest, ProjectId,
+    ResourceName, ServiceId, SessionEndpointRef, SessionId, SessionRef, SubscriptionMode,
+    SubscriptionPolicyPatch, SubscriptionScope, SubscriptionTimingPatch, ThreadCreateRequest,
+    ThreadJoinRequest, TopicCreateRequest, TopicId, WhenIdle,
 };
 use message_board_storage::BoardStore;
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 use tokio::sync::Mutex;
 
 fn ensure_subscription_condition(
@@ -70,6 +71,7 @@ async fn subscription_control_methods_roundtrip_through_control_and_sqlite()
     .with_board_store(Arc::clone(&store))
     .with_subscription_delivery_service(subscription_delivery.clone(), presence);
     let (socket, server) = tokio::net::UnixStream::pair()?;
+    let rejection_identity = identity.clone();
     let server_task = tokio::spawn(serve_control_connection(server, identity));
     let mut client = ControlClient::initialize(socket, "subscription-control-test", "1").await?;
 
@@ -150,11 +152,57 @@ async fn subscription_control_methods_roundtrip_through_control_and_sqlite()
         "list did not return the persisted subscription view",
     )?;
 
+    let (rejection_socket, rejection_server) = tokio::net::UnixStream::pair()?;
+    let rejection_server_task = tokio::spawn(serve_control_connection(
+        rejection_server,
+        rejection_identity,
+    ));
+    let mut rejection_client =
+        ControlClient::initialize(rejection_socket, "subscription-rejection-test", "1").await?;
+    let non_poll_wait = rejection_client
+        .board_thread_wait(
+            ThreadSubscriptionWaitRequest {
+                actor: reader.clone(),
+                filter: ThreadSubscriptionWaitFilter::Topic {
+                    topic_id: topic_id.clone(),
+                },
+                max_wait_seconds: 0,
+            },
+            Duration::from_secs(5),
+        )
+        .await;
+    ensure_subscription_condition(
+        matches!(
+            non_poll_wait,
+            Err(collaboration_client::BoardClientError::Rejected(_))
+        ),
+        "Control wait did not refuse a subscription whose mode is off",
+    )?;
+    drop(rejection_client);
+    rejection_server_task.await??;
+
+    client
+        .board_thread_subscribe(ThreadSubscribeRequest {
+            actor: reader.clone(),
+            scope: SubscriptionScope::topic(topic_id.clone()),
+            policy: SubscriptionPolicyPatch {
+                mode: Some(SubscriptionMode::Poll),
+                timing: SubscriptionTimingPatch {
+                    quiet_seconds: Some(0),
+                    cap_seconds: Some(0),
+                },
+                ..SubscriptionPolicyPatch::default()
+            },
+        })
+        .await?;
+
     let created_thread = client
         .board_thread_create(ThreadCreateRequest {
             message_id: MessageId::generate(),
             topic_id: topic_id.clone(),
-            actor: reader.clone(),
+            actor: Identity::Human {
+                human_id: "root-author".to_owned().try_into()?,
+            },
             acting_for: None,
             text: MessageText::try_from("Join policy".to_owned())?,
             references: MessageReferences::try_from(Vec::new())?,
@@ -179,6 +227,50 @@ async fn subscription_control_methods_roundtrip_through_control_and_sqlite()
                 .map(|sequence| sequence.get())
                 == Some(0),
         "empty-topic subscription did not cover its first later root from boundary zero",
+    )?;
+    let topic_subscription = store
+        .lock()
+        .await
+        .get_thread_subscription_record(&reader, &SubscriptionScope::topic(topic_id.clone()))
+        .await?
+        .ok_or("empty-topic subscription record disappeared")?;
+    let first_root_window = topic_subscription
+        .roots()
+        .iter()
+        .find(|root| root.root_message_id() == &created_thread.message.message_id)
+        .ok_or("empty-topic subscription did not open a first-root window")?;
+    ensure_subscription_condition(
+        first_root_window.pending_count() > 0,
+        "first root window did not retain pending activity",
+    )?;
+    let first_root_wait = client
+        .board_thread_wait(
+            ThreadSubscriptionWaitRequest {
+                actor: reader.clone(),
+                filter: ThreadSubscriptionWaitFilter::Roots {
+                    root_message_ids: vec![created_thread.message.message_id.clone()],
+                },
+                max_wait_seconds: 1,
+            },
+            Duration::from_secs(5),
+        )
+        .await?;
+    let first_root_ranges = match first_root_wait.batch {
+        Some(SubscriptionWaitBatch::Ranges { roots, .. }) => roots,
+        Some(SubscriptionWaitBatch::Notice { .. }) => {
+            return Err("human Reader received a session Notice".into());
+        }
+        None => return Err("due first-root activity returned an empty wait".into()),
+    };
+    ensure_subscription_condition(
+        first_root_ranges
+            .iter()
+            .any(|root| root.root_id == created_thread.message.message_id),
+        "Control wait did not return the first root range",
+    )?;
+    ensure_subscription_condition(
+        !serde_json::to_string(&first_root_ranges)?.contains("Join policy"),
+        "bodyless first-root ranges included the root message body",
     )?;
 
     let cancelled = client
@@ -216,7 +308,7 @@ async fn subscription_control_methods_roundtrip_through_control_and_sqlite()
     };
     client
         .board_thread_join(ThreadJoinRequest {
-            root_message_id: created_thread.message.message_id,
+            root_message_id: created_thread.message.message_id.clone(),
             actor: session_reader.clone(),
             role: ParticipantRole::Participant,
             watch: true,
@@ -240,6 +332,109 @@ async fn subscription_control_methods_roundtrip_through_control_and_sqlite()
         joined_subscription.policy.mode() == SubscriptionMode::Poll
             && joined_subscription.policy.when_idle() == WhenIdle::Hold,
         "thread join did not apply its optional mode and idle policy",
+    )?;
+    client
+        .board_thread_subscribe(ThreadSubscribeRequest {
+            actor: session_reader.clone(),
+            scope: SubscriptionScope::thread(created_thread.message.message_id.clone()),
+            policy: SubscriptionPolicyPatch {
+                mode: Some(SubscriptionMode::Poll),
+                when_idle: Some(WhenIdle::Hold),
+                timing: SubscriptionTimingPatch {
+                    quiet_seconds: Some(0),
+                    cap_seconds: Some(0),
+                },
+                ..SubscriptionPolicyPatch::default()
+            },
+        })
+        .await?;
+    let empty_session_wait = client
+        .board_thread_wait(
+            ThreadSubscriptionWaitRequest {
+                actor: session_reader.clone(),
+                filter: ThreadSubscriptionWaitFilter::Roots {
+                    root_message_ids: vec![created_thread.message.message_id.clone()],
+                },
+                max_wait_seconds: 0,
+            },
+            Duration::from_secs(5),
+        )
+        .await?;
+    ensure_subscription_condition(
+        empty_session_wait.batch.is_none(),
+        "wait without due poll activity did not return batch null",
+    )?;
+    let writer = Identity::Human {
+        human_id: "thread-writer".to_owned().try_into()?,
+    };
+    client
+        .board_thread_join(ThreadJoinRequest {
+            root_message_id: created_thread.message.message_id.clone(),
+            actor: writer.clone(),
+            role: ParticipantRole::Participant,
+            watch: false,
+            mode: None,
+            when_idle: None,
+            replace: None,
+            note: None,
+        })
+        .await?;
+    client
+        .board_message_post(MessagePostRequest {
+            message_id: MessageId::generate(),
+            placement: Placement::Thread {
+                root_message_id: created_thread.message.message_id.clone(),
+            },
+            actor: writer,
+            acting_for: None,
+            text: MessageText::try_from("private reply body".to_owned())?,
+            references: MessageReferences::try_from(Vec::new())?,
+        })
+        .await?;
+    let session_wait = client
+        .board_thread_wait(
+            ThreadSubscriptionWaitRequest {
+                actor: session_reader.clone(),
+                filter: ThreadSubscriptionWaitFilter::Roots {
+                    root_message_ids: vec![created_thread.message.message_id.clone()],
+                },
+                max_wait_seconds: 1,
+            },
+            Duration::from_secs(5),
+        )
+        .await?;
+    let session_notice_roots = match session_wait.batch {
+        Some(SubscriptionWaitBatch::Notice { roots, .. }) => roots,
+        Some(SubscriptionWaitBatch::Ranges { .. }) => {
+            return Err("session Reader received human ranges instead of a Notice".into());
+        }
+        None => return Err("due session activity returned an empty wait".into()),
+    };
+    ensure_subscription_condition(
+        session_notice_roots
+            .iter()
+            .any(|root| root.root_id == created_thread.message.message_id),
+        "Control wait did not return the session's due root",
+    )?;
+    ensure_subscription_condition(
+        !serde_json::to_string(&session_notice_roots)?.contains("private reply body"),
+        "session Notice included the message body",
+    )?;
+    let settled_session_wait = client
+        .board_thread_wait(
+            ThreadSubscriptionWaitRequest {
+                actor: session_reader.clone(),
+                filter: ThreadSubscriptionWaitFilter::Roots {
+                    root_message_ids: vec![created_thread.message.message_id.clone()],
+                },
+                max_wait_seconds: 0,
+            },
+            Duration::from_secs(5),
+        )
+        .await?;
+    ensure_subscription_condition(
+        settled_session_wait.batch.is_none(),
+        "Control wait handed off the same subscription activity twice",
     )?;
     client
         .board_thread_unsubscribe(ThreadUnsubscribeRequest {

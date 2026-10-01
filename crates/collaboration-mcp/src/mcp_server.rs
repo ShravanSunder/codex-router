@@ -17,7 +17,7 @@ use collaboration_protocol::{
     ProviderSettingsResult, ProviderSettingsSetRequest, PushMessageSendResult,
     PushRecordHistoryParams, PushRecordListParams, PushRecordListResult, PushRecordShowParams,
     PushRecordShowResult, RouterExecutableRelation, SessionMessageReplyResult,
-    router_build_warning,
+    ThreadSubscriptionWaitRequest, ThreadSubscriptionWaitResult, router_build_warning,
 };
 use rmcp::{
     ServerHandler,
@@ -48,8 +48,8 @@ mod schema_binding;
 mod tool_output_contract;
 use catalog_descriptions::operation_description;
 use catalog_tools::{
-    EmptyToolInput, ThreadWaitToolInput, register_automation_inspection_tools,
-    register_automation_mutation_tools, register_board_tools,
+    EmptyToolInput, register_automation_inspection_tools, register_automation_mutation_tools,
+    register_board_tools,
 };
 use conversation_operation_tools::register_conversation_operation_tools;
 use conversation_tool_requests::{
@@ -640,20 +640,26 @@ impl CollaborationMcpServer {
         configuration_result(result, false)
     }
 
-    #[tool(name = "board_thread_wait", description = "Waits once for activity on an existing board listener. This observes board activity and does not prove agent completion.", output_schema = rmcp::handler::server::tool::schema_for_type::<McpToolOutput<collaboration_client::board::ThreadWaitResult>>())]
+    #[tool(
+        name = "board_thread_wait",
+        description = "Waits for one due batch from the supplied reader's poll-mode subscriptions, filtered to all scopes, selected roots or one topic. Returns an empty batch at maxWaitSeconds when nothing is due. A handed batch remains unread until the reader acknowledges it.",
+        output_schema = rmcp::handler::server::tool::schema_for_type::<
+            McpToolOutput<ThreadSubscriptionWaitResult>,
+        >()
+    )]
     async fn board_thread_wait(
         &self,
-        Parameters(input): Parameters<ThreadWaitToolInput>,
+        Parameters(request): Parameters<ThreadSubscriptionWaitRequest>,
     ) -> CallToolResult {
         let mut client = match self.connect().await {
             Ok(value) => value,
             Err(error) => return failure(error, OperationEffect::None),
         };
-        let result = client
-            .board_thread_wait(input.request, Duration::from_secs(input.timeout_seconds))
-            .await;
+        let timeout =
+            Duration::from_secs(request.max_wait_seconds).saturating_add(Duration::from_secs(5));
+        let result = client.board_thread_wait(request, timeout).await;
         let _closed = client.close().await;
-        board_result(result, false)
+        board_result(result, true)
     }
 
     #[tool(name = "wake_wait_until_first_fire", description = "Subscribes on one call-local Control connection and waits for the selected wake-up's first fire. Cancellation closes only this wait; it never recreates or replays the wake-up.", output_schema = rmcp::handler::server::tool::schema_for_type::<McpToolOutput<collaboration_protocol::FireReceipt>>())]
@@ -1072,6 +1078,16 @@ fn board_result<TValue: serde::Serialize>(
         Err(collaboration_client::BoardClientError::Rejected(error)) => serde_json::to_value(error)
             .map(structured_tool_error)
             .unwrap_or_else(|_| validation_failure("board rejection encoding failed")),
+        Err(collaboration_client::BoardClientError::WaitOutcomeUnknown { actor, filter }) => {
+            structured_tool_error(serde_json::json!({
+                "kind": "outcomeUnknown",
+                "stage": "response",
+                "effect": "unknown",
+                "message": "The wait result was lost; activity may have been handed off. Inspect the Reader's subscriptions and unread inbox (run board thread subscriptions, then board inbox fetch) before waiting again.",
+                "actor": actor,
+                "filter": filter,
+            }))
+        }
         Err(collaboration_client::BoardClientError::OutcomeUnknown {
             resource,
             message,

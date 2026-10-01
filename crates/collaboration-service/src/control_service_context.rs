@@ -7,7 +7,6 @@ pub mod subscription_delivery;
 #[derive(Clone)]
 pub struct ServiceIdentity {
     pub(crate) board: Option<std::sync::Arc<tokio::sync::Mutex<message_board_storage::BoardStore>>>,
-    pub(crate) thread_listens: crate::thread_listen_registry::ThreadListenRegistry,
     pub(crate) subscription_delivery: Option<crate::SubscriptionDeliveryService>,
     pub(crate) subscription_presence: Option<std::sync::Arc<dyn crate::TargetPresenceProbe>>,
     pub(crate) subscription_clock: std::sync::Arc<dyn crate::SubscriptionClock>,
@@ -292,7 +291,6 @@ impl ServiceIdentity {
             codex_conversation_recorder: None,
             provider_conversations: None,
             board: None,
-            thread_listens: crate::thread_listen_registry::ThreadListenRegistry::new(),
             subscription_delivery: None,
             subscription_presence: None,
             subscription_clock: std::sync::Arc::new(crate::SystemSubscriptionClock),

@@ -8,7 +8,7 @@ async fn release_subscription_restores_due_without_advancing_delivered() {
     let roots = vec![fixture.root_message_id.clone()];
     let (_, settlement) = fixture
         .store
-        .select_subscription_notice(&fixture.reader, &roots, due_at)
+        .select_subscription_notice(&fixture.reader, &roots, due_at, usize::MAX)
         .await
         .unwrap();
     assert!(
@@ -58,7 +58,12 @@ async fn release_subscription_stale_window_or_through_fence_is_a_noop() {
     let due_at = fixture.now + chrono::Duration::seconds(120);
     let (_, settlement) = fixture
         .store
-        .select_subscription_notice(&fixture.reader, &[fixture.root_message_id.clone()], due_at)
+        .select_subscription_notice(
+            &fixture.reader,
+            &[fixture.root_message_id.clone()],
+            due_at,
+            usize::MAX,
+        )
         .await
         .unwrap();
     let mut stale = settlement.clone();
@@ -109,7 +114,7 @@ async fn release_subscription_preserves_opened_held_and_retry_facts() {
         let roots = vec![fixture.root_message_id.clone()];
         let (_, selection) = fixture
             .store
-            .select_subscription_notice(&fixture.reader, &roots, selected_at)
+            .select_subscription_notice(&fixture.reader, &roots, selected_at, usize::MAX)
             .await
             .unwrap();
         let outcome = SubscriptionDeliveryOutcome::NotSubmitted {
@@ -143,6 +148,7 @@ async fn release_subscription_preserves_opened_held_and_retry_facts() {
                 &fixture.reader,
                 &roots,
                 selected_at + chrono::Duration::seconds(30),
+                usize::MAX,
             )
             .await
             .unwrap();

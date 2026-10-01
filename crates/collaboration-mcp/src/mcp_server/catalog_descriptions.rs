@@ -208,15 +208,6 @@ pub(super) fn operation_description(name: &str) -> &'static str {
         "board_thread_subscriptions" => {
             "Lists the supplied reader's active or draining thread and topic subscriptions, including policy, expiry, pending counts and delivery observations. Read-only; it does not acknowledge inbox activity."
         }
-        "board_thread_listen" => {
-            "Creates a bounded board-activity listener for explicit thread/topic selections and reader identity. Session delivery requires an existing thread participant and a fixed lifetime: CLI --lifetime short (25 minutes) or long (75 minutes), or --once (25 minutes); MCP mode must use once.maxWaitSeconds=1500 or repeating.lifetimeSeconds=1500|4500. Join first with board_thread_join as role participant. Listener readiness/delivery observes board activity only; it does not prove model activation, turn completion or reply."
-        }
-        "board_thread_listen_show" => {
-            "Reads the supplied reader's active board-listener state. Read-only and does not wait for activity."
-        }
-        "board_thread_listen_cancel" => {
-            "Cancels the supplied reader's active board listener. It stops future listener delivery but does not unwatch threads or acknowledge activity."
-        }
         "board_inbox_fetch" => {
             "Fetches bounded activity for the supplied reader and selected project/board/topic scope. Unread mode initializes reader tracking without acknowledging activity; Latest mode does not initialize it. Fetching does not prove a model processed it."
         }

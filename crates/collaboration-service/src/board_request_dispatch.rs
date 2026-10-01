@@ -88,7 +88,10 @@ pub(crate) async fn dispatch(
  }};
  }
     match method {
-        "board/threadSubscribe" | "board/threadUnsubscribe" | "board/threadSubscriptions" => {
+        "board/threadSubscribe"
+        | "board/threadUnsubscribe"
+        | "board/threadSubscriptions"
+        | "board/threadWait" => {
             crate::thread_subscription_dispatch::dispatch(id, method, params, identity).await
         }
         "board/discoverySearch" => call!(DiscoverySearchRequest, search_discovery),

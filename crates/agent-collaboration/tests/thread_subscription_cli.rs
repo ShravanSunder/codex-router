@@ -13,6 +13,9 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
+#[path = "thread_subscription_cli/wait_uncertainty.rs"]
+mod wait_uncertainty;
+
 const SERVICE_ID: &str = "00000000-0000-4000-8000-000000000101";
 const SERVICE_EPOCH: &str = "00000000-0000-4000-8000-000000000102";
 const SESSION_ID: &str = "thread-subscription-cli";
@@ -21,7 +24,7 @@ type TestError = Box<dyn std::error::Error + Send + Sync>;
 type TestResult = Result<(), TestError>;
 
 #[tokio::test]
-async fn subscribe_join_and_cancel_use_real_control_and_sqlite_paths() -> TestResult {
+async fn subscribe_join_wait_and_cancel_use_real_control_and_sqlite_paths() -> TestResult {
     let directory = tempfile::tempdir_in("/tmp")?;
     std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700))?;
     let service_directory = directory.path();
@@ -309,6 +312,140 @@ async fn subscribe_join_and_cancel_use_real_control_and_sqlite_paths() -> TestRe
                 && subscription["scope"]["topicId"] == topic_id.as_str()
         }),
         "subscriptions command omitted the Topic scope",
+    )?;
+
+    let non_poll_wait = run_cli(
+        service_directory,
+        &[
+            "board",
+            "thread",
+            "wait",
+            "--root-message-id",
+            first_root.as_str(),
+            "--actor",
+            "self",
+            "--max-wait",
+            "1s",
+        ],
+    )
+    .await?;
+    ensure(
+        non_poll_wait.status.code() == Some(4),
+        "wait against a deliver-mode subscription did not return a refusal",
+    )?;
+    let non_poll_error: Value = serde_json::from_slice(&non_poll_wait.stdout)?;
+    let non_poll_message = non_poll_error["error"]["message"]
+        .as_str()
+        .ok_or("non-poll wait refusal omitted its message")?;
+    ensure(
+        non_poll_message.contains("wait requires a poll subscription")
+            && non_poll_message.contains("board thread subscribe --mode poll"),
+        "non-poll wait refusal omitted the poll-mode correction",
+    )?;
+
+    let poll_subscription = run_cli(
+        service_directory,
+        &[
+            "board",
+            "thread",
+            "subscribe",
+            "--root-message-id",
+            first_root.as_str(),
+            "--actor",
+            "self",
+            "--mode",
+            "poll",
+            "--quiet",
+            "0s",
+            "--cap",
+            "0s",
+        ],
+    )
+    .await?;
+    parse_cli_result(&poll_subscription)?;
+
+    let timeout_wait = run_cli(
+        service_directory,
+        &[
+            "board",
+            "thread",
+            "wait",
+            "--root-message-id",
+            first_root.as_str(),
+            "--actor",
+            "self",
+            "--max-wait",
+            "0s",
+        ],
+    )
+    .await?;
+    let timeout_result = parse_cli_result(&timeout_wait)?;
+    ensure(
+        timeout_result["batch"].is_null(),
+        "wait with no pending activity did not return an empty batch",
+    )?;
+
+    client
+        .board_message_post(MessagePostRequest {
+            message_id: MessageId::generate(),
+            placement: Placement::Thread {
+                root_message_id: first_root.clone(),
+            },
+            actor: session_actor(NO_WATCH_SESSION_ID)?,
+            acting_for: None,
+            text: MessageText::try_from("poll wait due".to_owned())?,
+            references: Vec::new().try_into()?,
+        })
+        .await?;
+    let due_wait = run_cli(
+        service_directory,
+        &[
+            "board",
+            "thread",
+            "wait",
+            "--root-message-id",
+            first_root.as_str(),
+            "--actor",
+            "self",
+            "--max-wait",
+            "5s",
+        ],
+    )
+    .await?;
+    let due_result = parse_cli_result(&due_wait)?;
+    ensure(
+        due_result["batch"]["kind"] == "notice",
+        "due poll wait did not return the session Notice variant",
+    )?;
+    let due_roots = due_result["batch"]["roots"]
+        .as_array()
+        .ok_or("due poll Notice omitted root ranges")?;
+    ensure(
+        due_roots.len() == 1,
+        "due poll wait returned the wrong number of root ranges",
+    )?;
+    ensure(
+        due_roots[0]["rootId"] == first_root.as_str(),
+        "due poll wait returned a different root range",
+    )?;
+    let repeated_wait = run_cli(
+        service_directory,
+        &[
+            "board",
+            "thread",
+            "wait",
+            "--root-message-id",
+            first_root.as_str(),
+            "--actor",
+            "self",
+            "--max-wait",
+            "0s",
+        ],
+    )
+    .await?;
+    ensure(
+        parse_cli_result(&repeated_wait)?["batch"].is_null(),
+        "the handed-off poll batch was returned a second time",
     )?;
 
     for (scope_flag, scope_id) in [
