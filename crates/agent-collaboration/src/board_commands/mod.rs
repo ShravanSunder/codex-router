@@ -5,8 +5,8 @@ mod board_preparation;
 mod board_search_commands;
 mod board_subscription_arguments;
 mod board_thread_list_preparation;
-mod board_thread_subscription_preparation;
 mod board_thread_listen_execution;
+mod board_thread_subscription_preparation;
 mod board_value_parsing;
 
 use board_arguments::BoardArguments;
