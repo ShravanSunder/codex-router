@@ -306,7 +306,7 @@ fn nested_user_facing_help_does_not_leak_internal_commands() {
                 "codex-router account login --provider <openai|claude> --label <name>",
                 "--label <name>",
                 "--provider <name>",
-                "--codex-bin <path>",
+                "OpenAI login displays a device URL and code, then waits for approval.",
             ][..],
         ),
         (
@@ -359,7 +359,9 @@ fn nested_user_facing_help_does_not_leak_internal_commands() {
             "token",
             "import-codex-auth",
             "live quota",
+            "--codex-bin",
             "--allow-plaintext-file-secrets",
+            "--device-auth",
         ] {
             assert!(
                 !output.stdout.contains(hidden_line),

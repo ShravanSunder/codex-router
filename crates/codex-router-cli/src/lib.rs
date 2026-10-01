@@ -235,6 +235,28 @@ fn run_serve_command_with_upkeep_start(
         credential_upkeep_worker::CredentialUpkeepStartError,
     >,
 ) -> Result<(), CliError> {
+    run_serve_command_with_upkeep_start_and_token_reload_observer(
+        stdout,
+        command,
+        credential_store,
+        upkeep_start,
+        |_generation| {},
+    )
+}
+
+fn run_serve_command_with_upkeep_start_and_token_reload_observer(
+    stdout: &mut impl Write,
+    command: cli_argument_parsing::ServeCommand,
+    credential_store: EncryptedCredentialStore,
+    upkeep_start: impl FnOnce(
+        &Path,
+        EncryptedCredentialStore,
+    ) -> Result<
+        credential_upkeep_worker::CredentialUpkeepWorker,
+        credential_upkeep_worker::CredentialUpkeepStartError,
+    >,
+    token_reload_observer: impl Fn(codex_router_core::ids::TokenGeneration) + Send + 'static,
+) -> Result<(), CliError> {
     let mut runtime_config = base_serve_runtime_config(&command)?;
     let state_db = command.state_db.clone();
     let secret_root = command.secret_root.clone();
@@ -250,6 +272,7 @@ fn run_serve_command_with_upkeep_start(
     let token_service = LocalRouterTokenService::new(local_token_store.clone());
     let local_token = token_service.ensure_local_token(&secret_root)?;
     let initial_token_generation = local_token.generation();
+    runtime_config = runtime_config.with_claude_edge_local_token(local_token.clone());
     if command.require_local_token {
         runtime_config = runtime_config.with_required_local_token(local_token);
     }
@@ -261,7 +284,9 @@ fn run_serve_command_with_upkeep_start(
     let local_auth_reloader = runtime.local_auth_reloader();
     let _token_reload_watcher =
         LocalTokenReloadWatcher::start(local_token_store, initial_token_generation, move |auth| {
-            local_auth_reloader.reload_auth(auth)
+            let current_generation = auth.current_generation();
+            local_auth_reloader.reload_auth(auth);
+            token_reload_observer(current_generation);
         });
 
     crate::presentation::host::render_progress_event(

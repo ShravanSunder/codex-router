@@ -24,6 +24,193 @@ fn local_token_reload_watcher_reports_generation_changes() {
 }
 
 #[test]
+fn serve_scopes_claude_token_rotation_and_keeps_codex_optional() {
+    let test_root = TestRoot::new("serve-claude-token-scope-rotation");
+    must_ok(fs::create_dir(test_root.path()));
+    let state_path = test_root.path().join("state.sqlite");
+    let secret_root = test_root.path().join("secrets");
+    let state = must_ok(SqliteStateStore::open(&state_path));
+    let secrets = must_ok(
+        codex_router_secret_store::test_support::open_encrypted_credential_store(&secret_root),
+    );
+    let account_id = account_id("acct_cli_claude_token_scope");
+    let account = AccountRecord::new(
+        codex_router_core::provider::Provider::Openai,
+        account_id.clone(),
+        "cli-claude-token-scope",
+        AccountStatus::Enabled,
+    )
+    .with_active_credential_generation(1);
+    must_ok(AccountStateRepository::upsert_account(&state, &account));
+    let snapshot =
+        PersistedQuotaSnapshot::new(account_id.clone(), QuotaSnapshotSource::MockEndpoint)
+            .with_observed_unix_seconds(1_000)
+            .with_route_band("responses", 100);
+    must_ok(QuotaSnapshotRepository::upsert_snapshot(&state, &snapshot));
+    persist_effective_selector_window(&state, &account_id, "responses", 100);
+    let upstream_token_key = must_ok(openai_account_credential_bundle_key(&account_id, 1));
+    let upstream_credential_bundle = must_ok(
+        AccountCredentialBundle::imported_codex_auth(
+            "cli-claude-scope-upstream-token",
+            Some("cli-claude-scope-upstream-refresh-token".to_owned()),
+        )
+        .to_secret_string(),
+    );
+    must_ok(secrets.write_secret(&upstream_token_key, &upstream_credential_bundle));
+
+    let upstream_listener = must_ok(TcpListener::bind("127.0.0.1:0"));
+    let upstream_address = must_ok(upstream_listener.local_addr());
+    let (upstream_sender, upstream_receiver) = mpsc::channel();
+    let upstream_thread = thread::spawn(move || {
+        let (mut stream, _peer_address) = match upstream_listener.accept() {
+            Ok(connection) => connection,
+            Err(error) => panic!("mock upstream should accept: {error}"),
+        };
+        let request = read_http_request_with_body(&mut stream);
+        if request.is_empty() {
+            return;
+        }
+        if let Err(error) = upstream_sender.send(request) {
+            panic!("mock upstream request should record: {error}");
+        }
+        if let Err(error) =
+            stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\ndata: ok\n\n")
+        {
+            panic!("mock upstream should write response: {error}");
+        }
+    });
+
+    let router_port = reserve_loopback_port();
+    let command = must_ok(CliCommand::parse([
+        OsString::from("serve"),
+        OsString::from("--listen-host"),
+        OsString::from("127.0.0.1"),
+        OsString::from("--port"),
+        OsString::from(router_port.to_string()),
+        OsString::from("--state-db"),
+        state_path.as_os_str().to_os_string(),
+        OsString::from("--secret-root"),
+        secret_root.as_os_str().to_os_string(),
+        OsString::from("--upstream-base-url"),
+        OsString::from(format!("http://{upstream_address}/v1")),
+        OsString::from("--now-unix-seconds"),
+        OsString::from("1030"),
+        OsString::from("--max-snapshot-age-seconds"),
+        OsString::from("60"),
+        OsString::from("--disable-background-quota-refresh"),
+        OsString::from("--max-connections"),
+        OsString::from("5"),
+    ]));
+    let CliCommand::Serve(command) = command else {
+        panic!("serve arguments should parse as a serve command");
+    };
+    assert!(!command.require_local_token);
+
+    let (serve_ready_sender, serve_ready_receiver) = mpsc::channel();
+    let (token_reload_sender, token_reload_receiver) = mpsc::channel();
+    let serve_thread = thread::spawn(move || {
+        let mut stdout = Vec::new();
+        let result = run_serve_command_with_upkeep_start_and_token_reload_observer(
+            &mut stdout,
+            command,
+            secrets,
+            move |state_database_path, credential_store| {
+                let _send_result = serve_ready_sender.send(());
+                credential_upkeep_worker::start_background_credential_upkeep_worker(
+                    state_database_path,
+                    credential_store,
+                )
+            },
+            move |generation| {
+                let _send_result = token_reload_sender.send(generation);
+            },
+        );
+        (result, stdout)
+    });
+    match serve_ready_receiver.recv_timeout(Duration::from_secs(2)) {
+        Ok(()) => {}
+        Err(error) => panic!("serve should signal readiness before requests: {error}"),
+    }
+
+    let token_store = must_ok(FileSecretStore::open(&secret_root));
+    let token_service = LocalRouterTokenService::new(token_store);
+    let token_a = must_ok(token_service.load_current());
+    let missing_claude_token_response = send_claude_messages_request(router_port, None);
+    let valid_initial_claude_token_response =
+        send_claude_messages_request(router_port, Some(token_a.token().expose_secret()));
+
+    let rotate_output = run_cli(
+        [
+            "codex-router",
+            "token",
+            "rotate",
+            "--router-root",
+            path_to_str(&secret_root),
+        ],
+        CliContext::new(Vec::new()),
+    );
+    let token_b = must_ok(token_service.load_current());
+    let reload_observation = token_reload_receiver.recv_timeout(Duration::from_secs(2));
+    let stale_claude_token_response =
+        send_claude_messages_request(router_port, Some(token_a.token().expose_secret()));
+    let rotated_claude_token_response =
+        send_claude_messages_request(router_port, Some(token_b.token().expose_secret()));
+    let codex_response = send_tokenless_loopback_request_with_retry(
+        router_port,
+        br#"{"model":"gpt-5","serve":true}"#,
+    );
+    let upstream_request = match upstream_receiver.recv_timeout(Duration::from_secs(2)) {
+        Ok(request) => Some(request),
+        Err(_error) => {
+            if let Ok(wakeup_connection) = TcpStream::connect(upstream_address) {
+                drop(wakeup_connection);
+            }
+            None
+        }
+    };
+    let (serve_result, stdout) = match serve_thread.join() {
+        Ok(result) => result,
+        Err(error) => panic!("serve thread should not panic: {error:?}"),
+    };
+    must_ok(serve_result);
+    match upstream_thread.join() {
+        Ok(()) => {}
+        Err(error) => panic!("mock upstream thread panicked: {error:?}"),
+    }
+
+    assert_eq!(token_a.generation().as_u64(), 1);
+    assert_eq!(rotate_output.stdout, "generation: 2\n");
+    assert!(rotate_output.stderr.is_empty());
+    assert_eq!(token_b.generation().as_u64(), 2);
+    assert_eq!(reload_observation, Ok(token_b.generation()));
+    assert!(
+        missing_claude_token_response.starts_with("HTTP/1.1 401 Unauthorized\r\n"),
+        "Claude admission should require a token: {missing_claude_token_response}"
+    );
+    assert!(
+        !valid_initial_claude_token_response.starts_with("HTTP/1.1 401 Unauthorized\r\n"),
+        "the initial Claude token should pass admission: {valid_initial_claude_token_response}"
+    );
+    assert!(
+        stale_claude_token_response.starts_with("HTTP/1.1 401 Unauthorized\r\n"),
+        "the replaced Claude token should reject: {stale_claude_token_response}"
+    );
+    assert!(
+        !rotated_claude_token_response.starts_with("HTTP/1.1 401 Unauthorized\r\n"),
+        "the rotated Claude token should pass admission: {rotated_claude_token_response}"
+    );
+    assert!(codex_response.starts_with("HTTP/1.1 200 OK\r\n"));
+    let upstream_request = match upstream_request {
+        Some(request) => request,
+        None => panic!("tokenless Codex request should reach the fake upstream"),
+    };
+    assert!(upstream_request.starts_with("POST /v1/responses HTTP/1.1\r\n"));
+    assert!(upstream_request.contains("authorization: Bearer cli-claude-scope-upstream-token\r\n"));
+    assert!(!upstream_request.contains("X-Codex-Router-Token"));
+    assert!(String::from_utf8_lossy(&stdout).contains("listening: 127.0.0.1:"));
+}
+
+#[test]
 #[allow(clippy::result_large_err)]
 fn serve_command_reloads_token_rotation_without_restart() {
     let test_root = TestRoot::new("serve-command-token-rotation");
@@ -225,4 +412,83 @@ fn serve_command_reloads_token_rotation_without_restart() {
         Ok(()) => {}
         Err(error) => panic!("mock upstream thread panicked: {error:?}"),
     }
+}
+
+fn send_claude_messages_request(port: u16, token: Option<&str>) -> String {
+    let body = br#"{"model":"claude-3-5-sonnet","max_tokens":16,"messages":[{"role":"user","content":"hello"}]}"#;
+    let mut stream =
+        must_ok(TcpStream::connect(("127.0.0.1", port)).map_err(|error| error.to_string()));
+    let local_token_header = token.map_or_else(String::new, |token| {
+        format!("X-Codex-Router-Token: {token}\r\n")
+    });
+    let request = format!(
+        "POST /anthropic/v1/messages HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: {}\r\n{local_token_header}\r\n",
+        body.len()
+    );
+    must_ok(
+        stream
+            .write_all(request.as_bytes())
+            .map_err(|error| error.to_string()),
+    );
+    must_ok(stream.write_all(body).map_err(|error| error.to_string()));
+    must_ok(read_http_response_with_progress(&mut stream))
+}
+
+fn read_http_response_with_progress(stream: &mut TcpStream) -> Result<String, String> {
+    let mut response_bytes = Vec::new();
+    match stream.read_to_end(&mut response_bytes) {
+        Ok(_bytes_read) => String::from_utf8(response_bytes)
+            .map_err(|error| format!("HTTP response should be UTF-8: {error}")),
+        Err(error) => Err(format!(
+            "HTTP response read failed: {error}; {}",
+            describe_http_response_progress(&response_bytes)
+        )),
+    }
+}
+
+fn describe_http_response_progress(response_bytes: &[u8]) -> String {
+    let header_separator = response_bytes
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n");
+    let (status_line, headers_complete, declared_body_bytes, received_body_bytes, body_complete) =
+        match header_separator {
+            Some(header_end) => {
+                let headers = String::from_utf8_lossy(&response_bytes[..header_end]);
+                let status_line = headers.lines().next().unwrap_or_default().to_owned();
+                let declared_body_bytes = headers.lines().skip(1).find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("Content-Length")
+                        .then(|| value.trim().parse::<usize>().ok())
+                        .flatten()
+                });
+                let body = &response_bytes[header_end + 4..];
+                (
+                    status_line,
+                    true,
+                    declared_body_bytes,
+                    body.len(),
+                    declared_body_bytes.map(|expected_bytes| body.len() >= expected_bytes),
+                )
+            }
+            None => (
+                String::from_utf8_lossy(response_bytes)
+                    .lines()
+                    .next()
+                    .unwrap_or_default()
+                    .to_owned(),
+                false,
+                None,
+                0,
+                None,
+            ),
+        };
+    let response_text = String::from_utf8_lossy(response_bytes);
+    let response_bytes_hex = response_bytes
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!(
+        "status_line={status_line:?}; headers_complete={headers_complete}; declared_body_bytes={declared_body_bytes:?}; received_body_bytes={received_body_bytes}; body_complete={body_complete:?}; response_text={response_text:?}; response_bytes_hex={response_bytes_hex}"
+    )
 }
