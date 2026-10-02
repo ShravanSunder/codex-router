@@ -666,3 +666,6 @@ pub(crate) mod acp_scripted_fixture;
 #[cfg(test)]
 #[path = "external_provider_runtime/approval_dispatch_tests.rs"]
 mod approval_dispatch_tests;
+#[cfg(test)]
+#[path = "external_provider_runtime/approval_push_fixture.rs"]
+mod approval_push_fixture;

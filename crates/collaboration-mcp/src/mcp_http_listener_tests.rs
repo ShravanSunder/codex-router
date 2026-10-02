@@ -87,7 +87,7 @@ async fn cancelling_an_initialized_mcp_wake_wait_retires_its_call_local_connecti
         "version": 2,
         "serviceId": "00000000-0000-4000-8000-000000000001",
         "serviceEpoch": "00000000-0000-4000-8000-000000000002",
-        "control": {"transport": "unixJsonLines", "path": "control.sock"},
+        "machineLabel":"fixture-host","control": {"transport": "unixJsonLines", "path": "control.sock"},
         "controlSchemaDigest": digest,
         "mcp": {"transport":"streamableHttp","url":"http://127.0.0.1:0/mcp"}
     }))
@@ -263,7 +263,7 @@ async fn cancelling_an_initialized_mcp_wake_subscribe_retires_held_connection_wi
  {
     let temporary = tempfile::tempdir().expect("temporary service directory");
     let digest = format!("sha256:{}", "a".repeat(64));
-    let manifest = serde_json::from_value(json!({"version":2,"serviceId":"00000000-0000-4000-8000-000000000001","serviceEpoch":"00000000-0000-4000-8000-000000000002","control":{"transport":"unixJsonLines","path":"control.sock"},"controlSchemaDigest":digest,"mcp":{"transport":"streamableHttp","url":"http://127.0.0.1:0/mcp"}})).expect("manifest");
+    let manifest = serde_json::from_value(json!({"version":2,"serviceId":"00000000-0000-4000-8000-000000000001","serviceEpoch":"00000000-0000-4000-8000-000000000002","machineLabel":"fixture-host","control":{"transport":"unixJsonLines","path":"control.sock"},"controlSchemaDigest":digest,"mcp":{"transport":"streamableHttp","url":"http://127.0.0.1:0/mcp"}})).expect("manifest");
     let _publication =
         collaboration_service::ManifestPublication::publish(temporary.path(), &manifest)
             .expect("manifest publication");
@@ -368,7 +368,7 @@ async fn real_http_initialization_discovers_typed_tools_without_authentication()
         "version": 2,
         "serviceId": "00000000-0000-4000-8000-000000000001",
         "serviceEpoch": "00000000-0000-4000-8000-000000000002",
-        "control": {"transport": "unixJsonLines", "path": "control.sock"},
+        "machineLabel":"fixture-host","control": {"transport": "unixJsonLines", "path": "control.sock"},
         "controlSchemaDigest": digest,
         "mcp":{"transport":"streamableHttp","url":"http://127.0.0.1:0/mcp"}
     }))
@@ -557,7 +557,10 @@ async fn real_http_initialization_discovers_typed_tools_without_authentication()
     assert!(tool_names.contains(&"question_list"));
     assert!(tool_names.contains(&"question_answer"));
     assert!(tool_names.contains(&"provider_sessions_list"));
-    assert_eq!(tool_names.len(), 104);
+    assert!(tool_names.contains(&"board_thread_subscribe"));
+    assert!(tool_names.contains(&"board_thread_unsubscribe"));
+    assert!(tool_names.contains(&"board_thread_subscriptions"));
+    assert_eq!(tool_names.len(), 107);
     let tools = tools_body
         .pointer("/result/tools")
         .and_then(Value::as_array)
@@ -823,7 +826,7 @@ async fn run_initialized_mcp_resumed_prompt_after_load(load_error: Option<Value>
     .expect("control listener");
     let manifest = serde_json::from_value(json!({
         "version":2,"serviceId":service_id,"serviceEpoch":epoch,
-        "control":{"transport":"unixJsonLines","path":"control.sock"},
+        "machineLabel":"fixture-host","control":{"transport":"unixJsonLines","path":"control.sock"},
         "controlSchemaDigest":digest,"mcp":{"transport":"streamableHttp","url":"http://127.0.0.1:0/mcp"}
     }))
     .expect("service manifest");
@@ -961,7 +964,7 @@ async fn initialized_http_message_response_loss_retains_known_target() {
     let digest = format!("sha256:{}", "a".repeat(64));
     let manifest = serde_json::from_value(json!({
             "version":2,"serviceId":service_id,"serviceEpoch":epoch,
-            "control":{"transport":"unixJsonLines","path":"control.sock"},
+            "machineLabel":"fixture-host","control":{"transport":"unixJsonLines","path":"control.sock"},
             "controlSchemaDigest":digest,"mcp":{"transport":"streamableHttp","url":"http://127.0.0.1:0/mcp"}
         }))
         .expect("manifest");
@@ -1059,7 +1062,7 @@ async fn initialized_http_message_response_loss_retains_known_target() {
             .header("mcp-protocol-version", "2025-11-25")
             .json(&json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"message_send","arguments":{
                 "target":{"endpoint":{"serviceId":service_id,"endpointId":"codex-local"},"sessionId":"http-thread"},
-                "message":{"kind":"humanUser","text":"proof"},"delivery":"auto","generationGuard":null,"correlation":null
+                "message":{"kind":"humanUser","text":"proof"},"delivery":"auto","generationGuard":null
             }}}))
             .send()
             .await
@@ -1171,7 +1174,7 @@ async fn initialized_http_observation_attach_failure_retains_target_and_pre_disp
     .expect("control listener");
     let manifest = serde_json::from_value(json!({
         "version":2,"serviceId":service_id,"serviceEpoch":epoch,
-        "control":{"transport":"unixJsonLines","path":"control.sock"},"controlSchemaDigest":digest,
+        "machineLabel":"fixture-host","control":{"transport":"unixJsonLines","path":"control.sock"},"controlSchemaDigest":digest,
         "mcp":{"transport":"streamableHttp","url":"http://127.0.0.1:0/mcp"}
     }))
     .expect("service manifest");
@@ -1238,7 +1241,7 @@ async fn initialized_http_observation_resume_response_loss_retains_target_and_un
         identity,
     )
     .expect("control listener");
-    let manifest = serde_json::from_value(json!({"version":2,"serviceId":service_id,"serviceEpoch":epoch,"control":{"transport":"unixJsonLines","path":"control.sock"},"controlSchemaDigest":digest,"mcp":{"transport":"streamableHttp","url":"http://127.0.0.1:0/mcp"}})).expect("service manifest");
+    let manifest = serde_json::from_value(json!({"version":2,"serviceId":service_id,"serviceEpoch":epoch,"machineLabel":"fixture-host","control":{"transport":"unixJsonLines","path":"control.sock"},"controlSchemaDigest":digest,"mcp":{"transport":"streamableHttp","url":"http://127.0.0.1:0/mcp"}})).expect("service manifest");
     let publication =
         collaboration_service::ManifestPublication::publish(temporary.path(), &manifest)
             .expect("manifest publication");
@@ -1363,7 +1366,7 @@ async fn run_initialized_mcp_create_response_loss(
     .expect("control listener");
     let manifest = serde_json::from_value(json!({
         "version":2,"serviceId":service_id,"serviceEpoch":epoch,
-        "control":{"transport":"unixJsonLines","path":"control.sock"},
+        "machineLabel":"fixture-host","control":{"transport":"unixJsonLines","path":"control.sock"},
         "controlSchemaDigest":digest,"mcp":{"transport":"streamableHttp","url":"http://127.0.0.1:0/mcp"}
     }))
     .expect("service manifest");

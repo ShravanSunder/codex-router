@@ -88,8 +88,7 @@ impl AsyncSqliteStateStore {
         account_id: &AccountId,
         transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     ) -> Result<Option<CredentialMaintenanceRecord>, StateStoreError> {
-        load_credential_maintenance_from_connection(account_id, self.read_only, &mut **transaction)
-            .await
+        load_credential_maintenance_from_connection(account_id, self.read_only, transaction).await
     }
 
     /// Claims a successor generation in the existing maintenance row.

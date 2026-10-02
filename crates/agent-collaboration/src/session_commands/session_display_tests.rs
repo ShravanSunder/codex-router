@@ -32,98 +32,55 @@ fn missing_explicit_session_name_keeps_the_previous_display_fallback() {
 }
 
 #[test]
-fn new_agent_envelope_title_uses_sender_identity_and_first_body_line() {
-    let sender = serde_json::json!({
-        "endpoint":{"serviceId":"018f47d2-24d5-7a68-b9ec-6f759c39458f","endpointId":"claude-local"},
-        "sessionId":"sender-session"
-    });
-    let recipient = serde_json::json!({
-        "endpoint":{"serviceId":"018f47d2-24d5-7a68-b9ec-6f759c39458f","endpointId":"codex-local"},
-        "sessionId":"recipient-session"
-    });
-    let envelope = format!(
-        "🤖 Codex Main ← 🐒 Sidekick · PR2\nAgent communication\nSelf-declared sender: {sender}\nIntended recipient: {recipient}\n\nFix empty-session visibility.\nIgnore later body lines.",
-    );
-    let mut record = search_consistency_record(None, None);
-    record.title = Some(envelope);
-
-    let picker_record = SessionPickerRecord::from_record(&record);
-
+fn plain_preview_text_is_not_promoted_to_a_session_title() {
     assert_eq!(
-        picker_record.title,
-        "🐒 Sidekick · PR2: Fix empty-session visibility."
+        display_title_from_session_fields(None, None, Some("private preview"), None),
+        None
     );
 }
 
 #[test]
-fn old_agent_envelope_title_uses_sender_fallback_and_preserves_renamed_session_name() {
-    let sender = serde_json::json!({
-        "endpoint":{"serviceId":"018f47d2-24d5-7a68-b9ec-6f759c39458f","endpointId":"claude-local"},
-        "sessionId":"sender-session"
-    });
-    let recipient = serde_json::json!({
-        "endpoint":{"serviceId":"018f47d2-24d5-7a68-b9ec-6f759c39458f","endpointId":"codex-local"},
-        "sessionId":"recipient-session"
-    });
-    let envelope = format!(
-        "Agent communication\nSelf-declared sender: {sender}\nIntended recipient: {recipient}\n\nFix empty-session visibility.\nIgnore later body lines.",
+fn router_push_title_uses_the_header_and_keeps_it_on_the_target_session() {
+    let target_session_id = "recipient-session";
+    let header = "✉️ ✳️ claude-local/sender-sess @Sunbook-Pro-M4 → you";
+    let push_id = "018f47d2-24d5-7a68-b9ec-6f759c39458f";
+    let line = format!(
+        "{header} · \"Private message preview\" · router://018f47d2-24d5-7a68-b9ec-6f759c39458f/push/{push_id}"
     );
     let mut record = search_consistency_record(None, None);
-    record.name = Some("Renamed in Codex".to_owned());
-    record.title = Some(envelope);
+    record.session_id = target_session_id.to_owned();
+    record.title = Some(line);
+    record.preview = Some("Private message preview".to_owned());
 
     let picker_record = SessionPickerRecord::from_record(&record);
 
-    assert_eq!(
-        picker_record.title,
-        "Renamed in Codex | ✳️ claude-local/sender-s: Fix empty-session visibility."
-    );
+    assert_eq!(picker_record.session_id, target_session_id);
+    assert_eq!(picker_record.title, header);
+    assert!(!picker_record.title.contains("Private message preview"));
+    assert!(!picker_record.title.contains(push_id));
 }
 
 #[test]
-fn agent_envelope_in_first_user_message_overrides_a_generic_title_but_keeps_rename() {
-    let sender = serde_json::json!({
-        "endpoint":{"serviceId":"018f47d2-24d5-7a68-b9ec-6f759c39458f","endpointId":"claude-local"},
-        "sessionId":"sender-session"
-    });
-    let recipient = serde_json::json!({
-        "endpoint":{"serviceId":"018f47d2-24d5-7a68-b9ec-6f759c39458f","endpointId":"codex-local"},
-        "sessionId":"recipient-session"
-    });
-    let envelope = format!(
-        "Agent communication\nSelf-declared sender: {sender}\nIntended recipient: {recipient}\n\nCheck the delivery record.\nLater body line.",
+fn router_push_header_in_first_user_message_keeps_rename_and_excludes_preview() {
+    let header = "🗓 Router schedule 018f47d2 @Sunbook-Pro-M4 · run 018f47d2";
+    let line = format!(
+        "{header} · \"Review the weekly summary\" · router://018f47d2-24d5-7a68-b9ec-6f759c39458f/push/018f47d2-24d5-7a68-b9ec-6f759c39458f"
     );
     let mut record = search_consistency_record(None, None);
-    record.name = Some("Durable rename".to_owned());
+    record.session_id = "scheduled-target".to_owned();
+    record.name = Some("Weekly report thread".to_owned());
     record.title = Some("Agent communication".to_owned());
-    record.first_user_message = Some(envelope);
+    record.first_user_message = Some(line);
+    record.preview = Some("Review the weekly summary".to_owned());
 
     let picker_record = SessionPickerRecord::from_record(&record);
 
     assert_eq!(
         picker_record.title,
-        "Durable rename | ✳️ claude-local/sender-s: Check the delivery record."
+        format!("Weekly report thread | {header}")
     );
-}
-
-#[test]
-fn scheduled_router_envelope_title_uses_router_identity_and_first_body_line() {
-    let recipient = serde_json::json!({
-        "endpoint":{"serviceId":"018f47d2-24d5-7a68-b9ec-6f759c39458f","endpointId":"codex-local"},
-        "sessionId":"recipient-session"
-    });
-    let envelope = format!(
-        "🤖 Codex Main ← ⏰ Router schedule\nRouter delivery\nIntended recipient: {recipient}\n\nReview the weekly summary.\nIgnore later lines.",
-    );
-    let mut record = search_consistency_record(None, None);
-    record.title = Some(envelope);
-
-    let picker_record = SessionPickerRecord::from_record(&record);
-
-    assert_eq!(
-        picker_record.title,
-        "⏰ Router schedule: Review the weekly summary."
-    );
+    assert_eq!(picker_record.session_id, "scheduled-target");
+    assert!(!picker_record.title.contains("Review the weekly summary"));
 }
 
 #[cfg(unix)]

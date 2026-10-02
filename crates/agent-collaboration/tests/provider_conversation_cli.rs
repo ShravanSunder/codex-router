@@ -813,6 +813,7 @@ async fn live_cursor_create_wait_prompt_wait_through_compiled_cli() {
             mcp_bind: std::net::SocketAddr::from(([127, 0, 0, 1], 0)),
             native_schema: None,
             peer_registry_directory: None,
+            remote_control_server_name: None,
             owner_human_id: None,
         },
         vec![codex_router_host::ExternalProviderStartup::Launch(
@@ -986,7 +987,7 @@ fn publish_fixture(root: &std::path::Path) -> tokio::net::UnixListener {
     let digest = format!("sha256:{}", "a".repeat(64));
     let manifest = serde_json::from_value(json!({
         "version":2,"serviceId":SERVICE_ID,"serviceEpoch":SERVICE_EPOCH,
-        "control":{"transport":"unixJsonLines","path":"control.sock"},
+        "machineLabel":"fixture-host","control":{"transport":"unixJsonLines","path":"control.sock"},
         "controlSchemaDigest":digest,
         "mcp":{"transport":"streamableHttp","url":"http://127.0.0.1:0/mcp"}
     }))

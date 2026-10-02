@@ -19,7 +19,8 @@ mod summary_failure_recovery;
 mod worker_timeout_proof;
 use collaboration_client::protocol::{
     AutomationPageRequest, DeliveryClientReceipt, DeliveryEvidence, DeliveryListRequest,
-    MessageContent, MessageDelivery, NativeSendReceipt, SessionMessageSendParams,
+    MessageContent, MessageDelivery, NativeSendReceipt, PushMessageSendResult, PushOrigin,
+    PushRecordHistoryParams, SessionMessageSendParams,
 };
 use proof_context::{ProofContext, ProofResult, shell_quote};
 use serde_json::{Value, json};
@@ -88,7 +89,6 @@ async fn fresh_native_history_becomes_readable_without_resubmission() -> ProofRe
                     .try_into()?,
             },
             mode: MessageDelivery::Auto,
-            correlation: None,
         })
         .await?;
     let turn_id = match &receipt.client {
@@ -194,13 +194,15 @@ async fn luna_agents_arrange_wake_and_reply_through_the_real_cli() -> ProofResul
     let directory = shell_quote(&proof.service_directory.to_string_lossy());
     let alpha_address = shell_quote(&serde_json::to_string(&alpha)?);
     let beta_address = shell_quote(&serde_json::to_string(&beta)?);
+    let alpha_harness_id = shell_quote(&String::from(alpha.session_id.clone()));
+    let beta_harness_id = shell_quote(&String::from(beta.session_id.clone()));
     let reply = format!(
         "{reply_marker}. This is the requested explicit peer reply. Do not call any tools or send another message. Output exactly {acknowledgement}."
     );
     let reply_file = proof.workspace.join("peer-reply-message.txt");
     std::fs::write(&reply_file, &reply)?;
     let reply_command = format!(
-        "{cli} message send --from {beta_address} --to {alpha_address} --text-file {} --service-directory {directory} --json",
+        "env -u CLAUDE_CODE_SESSION_ID -u CURSOR_CONVERSATION_ID CODEX_THREAD_ID={beta_harness_id} {cli} message send --to {alpha_address} --text-file {} --service-directory {directory} --json",
         shell_quote(&reply_file.to_string_lossy())
     );
     let beta_task = format!(
@@ -209,7 +211,7 @@ async fn luna_agents_arrange_wake_and_reply_through_the_real_cli() -> ProofResul
     let wake_file = proof.workspace.join("peer-wake-message.txt");
     std::fs::write(&wake_file, &beta_task)?;
     let wake_command = format!(
-        "{cli} wake send --from {alpha_address} --to {beta_address} --text-file {} --after 1s --wait-until-first-fire --operation-id {} --service-directory {directory} --json",
+        "env -u CLAUDE_CODE_SESSION_ID -u CURSOR_CONVERSATION_ID CODEX_THREAD_ID={alpha_harness_id} {cli} wake send --to {beta_address} --text-file {} --after 1s --wait-until-first-fire --operation-id {} --service-directory {directory} --json",
         shell_quote(&wake_file.to_string_lossy()),
         identity.as_str()
     );
@@ -235,7 +237,6 @@ async fn luna_agents_arrange_wake_and_reply_through_the_real_cli() -> ProofResul
                 text: alpha_task.try_into()?,
             },
             mode: MessageDelivery::Auto,
-            correlation: None,
         })
         .await?;
     proof.record("alphaInputAccepted", json!(initial))?;
@@ -281,11 +282,32 @@ async fn luna_agents_arrange_wake_and_reply_through_the_real_cli() -> ProofResul
         .flat_map(str::lines)
         .filter_map(|line| serde_json::from_str::<Value>(line).ok())
         .filter_map(|output| output.get("result").cloned())
-        .filter_map(|result| serde_json::from_value::<NativeSendReceipt>(result).ok())
-        .find(|receipt| receipt.target == alpha)
+        .filter_map(|result| serde_json::from_value::<PushMessageSendResult>(result).ok())
+        .find(|result| result.target == alpha)
         .ok_or(
             "B emitted a completion marker but no successful real CLI reply receipt was observed",
         )?;
+    let reply_history = proof
+        .client
+        .message_history(PushRecordHistoryParams {
+            caller: alpha.clone(),
+            with: beta.clone(),
+            limit: 100,
+        })
+        .await?;
+    let stored_reply = reply_history
+        .records
+        .iter()
+        .find(|record| record.push_id == explicit_reply.push_id)
+        .ok_or("explicit reply push is absent from the participant history")?;
+    if stored_reply.target != alpha
+        || stored_reply.origin != PushOrigin::Session(beta.clone())
+        || stored_reply.delivery_state
+            != collaboration_client::protocol::PushDeliveryState::Delivered
+    {
+        return Err("reply push history lost its sender, target, or delivered state".into());
+    }
+    let reply_line = stored_reply.line.clone();
     let wakes = proof
         .client
         .list_wakeups(AutomationPageRequest {
@@ -324,33 +346,21 @@ async fn luna_agents_arrange_wake_and_reply_through_the_real_cli() -> ProofResul
             .and_then(Value::as_array)
             .is_some_and(|items| {
                 items.iter().enumerate().any(|(index, item)| {
-                    let incoming = item.get("type").and_then(Value::as_str) == Some("userMessage")
-                        && item
-                            .get("content")
-                            .and_then(Value::as_array)
-                            .is_some_and(|content| {
-                                content.iter().any(|input| {
-                                    input
-                                        .get("text")
-                                        .and_then(Value::as_str)
-                                        .filter(|text| {
-                                            let identity_line =
-                                                text.lines().next().unwrap_or_default();
-                                            identity_line.contains(" ← ")
-                                                && text.starts_with(&format!(
-                                                    "{identity_line}\nAgent communication\n"
-                                                ))
-                                        })
-                                        .and_then(
-                                            collaboration_client::protocol::parse_agent_message_envelope,
+                    let incoming =
+                        item.get("type").and_then(Value::as_str) == Some("userMessage")
+                            && item.get("content").and_then(Value::as_array).is_some_and(
+                                |content| {
+                                    content.iter().any(|input| {
+                                        input.get("text").and_then(Value::as_str).is_some_and(
+                                            |text| {
+                                                text == reply_line
+                                                    && text.contains(&reply_marker)
+                                                    && text.contains(&explicit_reply.link)
+                                            },
                                         )
-                                        .is_some_and(|envelope| {
-                                            envelope.sender == beta
-                                                && envelope.recipient == alpha
-                                                && envelope.body.contains(&reply_marker)
-                                        })
-                                })
-                            });
+                                    })
+                                },
+                            );
                     incoming
                         && items.iter().skip(index + 1).any(|later| {
                             later.get("type").and_then(Value::as_str) == Some("agentMessage")
@@ -362,9 +372,7 @@ async fn luna_agents_arrange_wake_and_reply_through_the_real_cli() -> ProofResul
                 })
             })
     }) {
-        return Err(
-            "A's acknowledgement did not follow the actual incoming declared peer message".into(),
-        );
+        return Err("A's acknowledgement did not follow the actual stored reply push line".into());
     }
     proof.record("agentCliRoundTripVerified", json!({"alpha":alpha,"beta":beta,"wakeupId":wake.definition.wakeup_id,"firstFire":wake.first_fire,"explicitReplyReceipt":explicit_reply,"deliveries":deliveries.records,"acknowledgement":acknowledgement}))?;
     proof.client.close().await?;

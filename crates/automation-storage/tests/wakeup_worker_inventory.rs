@@ -1,6 +1,8 @@
 use agent_automation::{DurableMessage, ExpiryRule, OperationId, TimingRule};
 use automation_storage::{AutomationStore, WakeCreate, WakeEvaluation};
 use serde::{Deserialize, Serialize};
+#[path = "support/wake_push_draft.rs"]
+mod wake_push_test_support;
 #[derive(Clone, Serialize, Deserialize)]
 struct ReminderMessage {
     target: String,
@@ -50,7 +52,11 @@ async fn worker_inventory_selects_due_wakes_and_eligible_deliveries_only()
         return Err("due wake was not selected".into());
     }
     let id = match store
-        .evaluate_wakeup::<ReminderMessage>(&wake.definition.wakeup_id, 60000)
+        .evaluate_wakeup::<ReminderMessage>(
+            &wake.definition.wakeup_id,
+            60000,
+            wake_push_test_support::build_test_wake_push_draft,
+        )
         .await?
     {
         WakeEvaluation::Fired { delivery_id, .. } => delivery_id,

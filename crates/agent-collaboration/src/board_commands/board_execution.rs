@@ -1,5 +1,6 @@
 use super::board_preparation::{self, CommandContext, PreparedBoardCommand};
 use collaboration_client::board::*;
+use collaboration_client::protocol::ThreadSubscriptionWaitFilter;
 use collaboration_client::{BoardClientError, ClientError, ControlClient};
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -16,7 +17,6 @@ enum CommandExecutionError {
 
 enum CommandExecutionResult {
     Value(Value),
-    Exit(i32),
 }
 
 pub(super) fn execute(command: PreparedBoardCommand, context: CommandContext) -> i32 {
@@ -51,70 +51,17 @@ pub(super) fn execute(command: PreparedBoardCommand, context: CommandContext) ->
         let mut command = command;
         board_preparation::finalize_command(&mut command, &client)
             .map_err(CommandExecutionError::InvalidUsage)?;
-        let result = match command {
-            PreparedBoardCommand::ThreadJoin(pending) => {
-                let board_preparation::PendingThreadJoin {
-                    request,
-                    actor,
-                    listen,
-                } = *pending;
-                if let Some(listen) = listen {
-                    let joined = client.board_thread_join(request).await.map_err(|error| {
-                        CommandExecutionError::Request {
-                            error,
-                            thread_create_text_file: None,
-                        }
-                    })?;
-                    let joined = serialize_result(joined).map_err(|error| {
-                        CommandExecutionError::Request {
-                            error,
-                            thread_create_text_file: None,
-                        }
-                    })?;
-                    if write_machine_result_and_flush(joined) != 0 {
-                        Ok(CommandExecutionResult::Exit(1))
-                    } else {
-                        Ok(CommandExecutionResult::Exit(
-                            super::board_thread_listen_execution::run_with_client(
-                                listen.request,
-                                &mut client,
-                            )
-                            .await,
-                        ))
-                    }
-                } else {
-                    dispatch(
-                        &mut client,
-                        PreparedBoardCommand::ThreadJoin(Box::new(
-                            board_preparation::PendingThreadJoin {
-                                request,
-                                actor,
-                                listen: None,
-                            },
-                        )),
-                    )
-                    .await
-                    .map(CommandExecutionResult::Value)
-                    .map_err(|error| CommandExecutionError::Request {
-                        error,
-                        thread_create_text_file: None,
-                    })
-                }
-            }
-            command => {
-                let thread_create_text_file = match &command {
-                    PreparedBoardCommand::MessagePost(pending) => pending.text_file.clone(),
-                    _ => None,
-                };
-                dispatch(&mut client, command)
-                    .await
-                    .map(CommandExecutionResult::Value)
-                    .map_err(|error| CommandExecutionError::Request {
-                        error,
-                        thread_create_text_file,
-                    })
-            }
+        let thread_create_text_file = match &command {
+            PreparedBoardCommand::MessagePost(pending) => pending.text_file.clone(),
+            _ => None,
         };
+        let result = dispatch(&mut client, command)
+            .await
+            .map(CommandExecutionResult::Value)
+            .map_err(|error| CommandExecutionError::Request {
+                error,
+                thread_create_text_file,
+            });
         let _closed = client.close().await;
         result
     });
@@ -257,23 +204,27 @@ async fn dispatch(
             serialize_result(client.board_thread_create(pending.request).await?)
         }
         PreparedBoardCommand::ThreadJoin(pending) => {
-            debug_assert!(pending.listen.is_none());
             serialize_result(client.board_thread_join(pending.request).await?)
         }
+        PreparedBoardCommand::ThreadSubscribe(pending) => {
+            serialize_result(client.board_thread_subscribe(pending.request).await?)
+        }
+        PreparedBoardCommand::ThreadUnsubscribe(pending) => {
+            serialize_result(client.board_thread_unsubscribe(pending.request).await?)
+        }
+        PreparedBoardCommand::ThreadSubscriptions(pending) => {
+            serialize_result(client.board_thread_subscriptions(pending.request).await?)
+        }
+        PreparedBoardCommand::ThreadSubscriptionWait(pending) => serialize_result(
+            client
+                .board_thread_wait(pending.request, pending.timeout)
+                .await?,
+        ),
         PreparedBoardCommand::ThreadLeave(pending) => {
             serialize_result(client.board_thread_leave(pending.request).await?)
         }
         PreparedBoardCommand::ThreadParticipantList(request) => {
             serialize_result(client.board_thread_participant_list(request).await?)
-        }
-        PreparedBoardCommand::ThreadListen(_) => {
-            Err(ClientError::Protocol("Thread Listen must use streaming stdout execution").into())
-        }
-        PreparedBoardCommand::ThreadListenShow(request) => {
-            serialize_result(client.board_thread_listen_show(request).await?)
-        }
-        PreparedBoardCommand::ThreadListenCancel(request) => {
-            serialize_result(client.board_thread_listen_cancel(request).await?)
         }
         PreparedBoardCommand::InboxFetch(request) => {
             serialize_result(client.board_inbox_fetch(request).await?)
@@ -437,7 +388,6 @@ fn serialize_result<TValue: Serialize>(value: TValue) -> Result<Value, BoardClie
 fn report(result: Result<CommandExecutionResult, CommandExecutionError>, machine: bool) -> i32 {
     match result {
         Ok(CommandExecutionResult::Value(result)) => write_result(result, machine),
-        Ok(CommandExecutionResult::Exit(code)) => code,
         Err(CommandExecutionError::Request {
             error: BoardClientError::Rejected(error),
             thread_create_text_file,
@@ -468,6 +418,10 @@ fn report(result: Result<CommandExecutionResult, CommandExecutionError>, machine
                 },
             ..
         }) => report_uncertain_outcome(machine, &resource, message, next_action),
+        Err(CommandExecutionError::Request {
+            error: BoardClientError::WaitOutcomeUnknown { actor, filter },
+            ..
+        }) => report_wait_outcome_unknown(&actor, &filter),
         Err(CommandExecutionError::InvalidUsage(message)) => {
             crate::endpoint_commands::report_failure("invalidField", &message, 2, machine)
         }
@@ -526,7 +480,7 @@ fn refusal_command(
         }
         (BoardNextAction::JoinThread, BoardErrorDetails::ParticipantRefusal { refusal }) => {
             format!(
-                "agent-collaboration board thread join --root-message-id {} --actor {} --role participant --no-watch --json",
+                "agent-collaboration board thread join --root-message-id {} --actor {} --role participant --json",
                 refusal.root_message_id.as_str(),
                 actor(&refusal.actor)
             )
@@ -535,7 +489,7 @@ fn refusal_command(
             BoardNextAction::ReplaceOrchestrator,
             BoardErrorDetails::ParticipantRefusal { refusal },
         ) => format!(
-            "agent-collaboration board thread join --root-message-id {} --actor {} --role orchestrator --replace {} (--watch | --no-watch) --json",
+            "agent-collaboration board thread join --root-message-id {} --actor {} --role orchestrator --replace {} --json",
             refusal.root_message_id.as_str(),
             actor(&refusal.actor),
             refusal
@@ -548,7 +502,7 @@ fn refusal_command(
             BoardNextAction::ReplaceImplementer,
             BoardErrorDetails::ParticipantRefusal { refusal },
         ) => format!(
-            "agent-collaboration board thread join --root-message-id {} --actor {} --role implementer --replace {} (--watch | --no-watch) --json",
+            "agent-collaboration board thread join --root-message-id {} --actor {} --role implementer --replace {} --json",
             refusal.root_message_id.as_str(),
             actor(&refusal.actor),
             refusal
@@ -569,7 +523,7 @@ fn refusal_command(
             BoardNextAction::JoinHandoverTarget,
             BoardErrorDetails::ParticipantRefusal { refusal },
         ) => format!(
-            "agent-collaboration board thread join --root-message-id {} --actor {} --role <role> (--watch | --no-watch) --json",
+            "agent-collaboration board thread join --root-message-id {} --actor {} --role <role> --json",
             refusal.root_message_id.as_str(),
             refusal
                 .target
@@ -588,7 +542,7 @@ fn refusal_command(
             BoardNextAction::RepeatJoinWithoutReplace,
             BoardErrorDetails::ParticipantRefusal { refusal },
         ) => format!(
-            "agent-collaboration board thread join --root-message-id {} --actor {} --role orchestrator (--watch | --no-watch) --json",
+            "agent-collaboration board thread join --root-message-id {} --actor {} --role orchestrator --json",
             refusal.root_message_id.as_str(),
             actor(&refusal.actor)
         ),
@@ -624,6 +578,27 @@ fn report_uncertain_outcome(
     }
 }
 
+const WAIT_OUTCOME_UNKNOWN_MESSAGE: &str = "wait result was lost; activity may have been handed off — run board thread subscriptions and board inbox fetch before waiting again";
+
+fn wait_outcome_unknown_output(actor: &Identity, filter: &ThreadSubscriptionWaitFilter) -> Value {
+    json!({
+        "kind":"error",
+        "error":{
+            "kind":"outcomeUnknown",
+            "stage":"response",
+            "effect":"unknown",
+            "message":WAIT_OUTCOME_UNKNOWN_MESSAGE,
+            "nextAction":BoardNextAction::InspectResource,
+            "actor":actor,
+            "filter":filter,
+        }
+    })
+}
+
+fn report_wait_outcome_unknown(actor: &Identity, filter: &ThreadSubscriptionWaitFilter) -> i32 {
+    write_json(&wait_outcome_unknown_output(actor, filter), 5)
+}
+
 fn wire_name<TValue: Serialize>(value: &TValue) -> String {
     serde_json::to_value(value)
         .ok()
@@ -642,16 +617,6 @@ fn write_result(result: Value, machine: bool) -> i32 {
         } else {
             3
         }
-    }
-}
-
-fn write_machine_result_and_flush(result: Value) -> i32 {
-    let value = crate::endpoint_commands::result_envelope(json!(result));
-    let mut stdout = io::stdout().lock();
-    if writeln!(stdout, "{value}").is_ok() && stdout.flush().is_ok() {
-        0
-    } else {
-        3
     }
 }
 
@@ -682,9 +647,54 @@ fn write_json(value: &Value, success_code: i32) -> i32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{refusal_command, refusal_output};
+    use super::{
+        WAIT_OUTCOME_UNKNOWN_MESSAGE, refusal_command, refusal_output, report_wait_outcome_unknown,
+        wait_outcome_unknown_output,
+    };
     use collaboration_client::board::*;
+    use collaboration_client::protocol::ThreadSubscriptionWaitFilter;
     use std::path::Path;
+
+    #[test]
+    fn wait_unknown_cli_output_matches_published_schema_and_retains_inspection_identity() {
+        let actor = Identity::Human {
+            human_id: HumanId::try_from("cli-test-human".to_owned()).expect("human ID"),
+        };
+        let filter = ThreadSubscriptionWaitFilter::Roots {
+            root_message_ids: vec![
+                MessageId::try_from("01900000-0000-7000-8000-000000000031".to_owned())
+                    .expect("root message ID"),
+            ],
+        };
+        let output = wait_outcome_unknown_output(&actor, &filter);
+        let schemas =
+            collaboration_client::protocol::protocol_type_schemas().expect("CLI output schemas");
+        let validator = jsonschema::validator_for(
+            schemas
+                .get("FiniteCommandRecord")
+                .expect("published CLI error envelope schema"),
+        )
+        .expect("CLI envelope validator");
+
+        assert!(
+            validator.is_valid(&output),
+            "unknown wait error must fit the published envelope: {output}"
+        );
+        assert_eq!(output["error"]["kind"], "outcomeUnknown");
+        assert_eq!(output["error"]["stage"], "response");
+        assert_eq!(output["error"]["effect"], "unknown");
+        assert_eq!(output["error"]["nextAction"], "inspectResource");
+        assert_eq!(output["error"]["message"], WAIT_OUTCOME_UNKNOWN_MESSAGE);
+        assert_eq!(
+            output["error"]["actor"],
+            serde_json::to_value(&actor).expect("actor JSON")
+        );
+        assert_eq!(
+            output["error"]["filter"],
+            serde_json::to_value(&filter).expect("filter JSON")
+        );
+        assert_eq!(report_wait_outcome_unknown(&actor, &filter), 5);
+    }
 
     #[test]
     fn actor_and_text_file_arguments_escape_apostrophes() {
@@ -813,7 +823,7 @@ mod tests {
 
         assert_eq!(
             command,
-            "agent-collaboration board thread join --root-message-id 019f0000-0000-7000-8000-000000000104 --actor '{\"kind\":\"human\",\"humanId\":\"owner\"}' --role participant --no-watch --json"
+            "agent-collaboration board thread join --root-message-id 019f0000-0000-7000-8000-000000000104 --actor '{\"kind\":\"human\",\"humanId\":\"owner\"}' --role participant --json"
         );
     }
 }

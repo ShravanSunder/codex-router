@@ -3,7 +3,7 @@ use crate::{
     ExternalProviderRuntime, ExternalProviderRuntimeError, ExternalProviderSupervisor,
     LiveSessionOwnership, LiveSessionOwnershipCheck, ProviderSessionActivity,
 };
-use collaboration_protocol::SessionRef;
+use collaboration_protocol::{DeliveryCorrelationId, SessionRef};
 use collaboration_service::{LoadPolicy, ProviderOperationStore};
 use std::{path::PathBuf, sync::Arc};
 use tokio::sync::Mutex;
@@ -34,28 +34,46 @@ pub(crate) enum ProviderSessionLoadability {
     Unavailable { reason: String },
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum ProviderSessionLoadRejection {
-    SessionNotFound { code: i64 },
-    ProviderRejected { code: i64 },
+    SessionNotFound {
+        code: i64,
+        correlation_id: DeliveryCorrelationId,
+    },
+    ProviderRejected {
+        code: i64,
+        correlation_id: DeliveryCorrelationId,
+    },
 }
 
 impl ProviderSessionLoadRejection {
     #[must_use]
-    pub(crate) fn code(self) -> i64 {
+    pub(crate) fn code(&self) -> i64 {
         match self {
-            Self::SessionNotFound { code } | Self::ProviderRejected { code } => code,
+            Self::SessionNotFound { code, .. } | Self::ProviderRejected { code, .. } => *code,
         }
     }
 
     #[must_use]
-    pub(crate) fn safe_detail(self) -> String {
+    pub(crate) fn safe_detail(&self) -> String {
         match self {
-            Self::SessionNotFound { .. } => {
-                "this session never started a turn and did not survive the provider restart; create a new conversation".to_owned()
+            Self::SessionNotFound {
+                code,
+                correlation_id,
+            } => {
+                format!(
+                    "this session never started a turn and did not survive the provider restart; create a new conversation (provider code {code}; reference {})",
+                    correlation_id.as_str()
+                )
             }
-            Self::ProviderRejected { code } => {
-                format!("provider rejected the ACP operation (code {code})")
+            Self::ProviderRejected {
+                code,
+                correlation_id,
+            } => {
+                format!(
+                    "provider rejected the ACP operation (provider code {code}; reference {})",
+                    correlation_id.as_str()
+                )
             }
         }
     }
@@ -108,16 +126,61 @@ pub(crate) async fn ensure_provider_session_loaded(
         .await
     {
         Ok(()) => ProviderSessionLoadOutcome::Ready,
-        Err(ExternalProviderRuntimeError::ProviderSessionNotFound { code }) => {
+        Err(ExternalProviderRuntimeError::ProviderSessionNotFound {
+            code,
+            correlation_id,
+        }) => {
+            let correlation_id = match DeliveryCorrelationId::try_from(correlation_id.to_string()) {
+                Ok(correlation_id) => correlation_id,
+                Err(_) => return unavailable("provider error reference was invalid"),
+            };
             ProviderSessionLoadOutcome::Rejected {
-                reason: ProviderSessionLoadRejection::SessionNotFound { code },
+                reason: ProviderSessionLoadRejection::SessionNotFound {
+                    code,
+                    correlation_id,
+                },
             }
         }
-        Err(ExternalProviderRuntimeError::AuthenticationRequired { code })
-        | Err(ExternalProviderRuntimeError::ProviderRejected { code }) => {
+        Err(ExternalProviderRuntimeError::AuthenticationRequired {
+            code,
+            correlation_id,
+        })
+        | Err(ExternalProviderRuntimeError::ProviderRejected {
+            code,
+            correlation_id,
+        }) => {
+            let correlation_id = match DeliveryCorrelationId::try_from(correlation_id.to_string()) {
+                Ok(correlation_id) => correlation_id,
+                Err(_) => return unavailable("provider error reference was invalid"),
+            };
             ProviderSessionLoadOutcome::Rejected {
-                reason: ProviderSessionLoadRejection::ProviderRejected { code },
+                reason: ProviderSessionLoadRejection::ProviderRejected {
+                    code,
+                    correlation_id,
+                },
             }
+        }
+        Err(ExternalProviderRuntimeError::ResourceNotFound {
+            code,
+            correlation_id,
+        }) => provider_error_unavailable("provider resource was not found", code, correlation_id),
+        Err(ExternalProviderRuntimeError::UnsupportedMethod {
+            code,
+            correlation_id,
+        }) => {
+            provider_error_unavailable("provider ACP method is unsupported", code, correlation_id)
+        }
+        Err(ExternalProviderRuntimeError::InvalidParams {
+            code,
+            correlation_id,
+        }) => {
+            provider_error_unavailable("provider ACP parameters are invalid", code, correlation_id)
+        }
+        Err(ExternalProviderRuntimeError::RequestCancelled {
+            code,
+            correlation_id,
+        }) => {
+            provider_error_unavailable("provider ACP request was cancelled", code, correlation_id)
         }
         Err(error) => unavailable(error.to_string()),
     }
@@ -165,6 +228,21 @@ fn unavailable(reason: impl Into<String>) -> ProviderSessionLoadOutcome {
     ProviderSessionLoadOutcome::Unavailable {
         reason: reason.into(),
     }
+}
+
+fn provider_error_unavailable(
+    explanation: &'static str,
+    provider_code: i64,
+    correlation_id: acp_client_runtime::ProviderErrorCorrelationId,
+) -> ProviderSessionLoadOutcome {
+    let correlation_id = match DeliveryCorrelationId::try_from(correlation_id.to_string()) {
+        Ok(correlation_id) => correlation_id,
+        Err(_) => return unavailable("provider error reference was invalid"),
+    };
+    unavailable(format!(
+        "{explanation} (ACP code {provider_code}; reference {})",
+        correlation_id.as_str()
+    ))
 }
 
 fn unavailable_loadability(reason: impl Into<String>) -> ProviderSessionLoadability {
@@ -432,7 +510,7 @@ sys.stdin.read()
         .await;
 
         assert!(
-            matches!(&result, ProviderSessionLoadOutcome::Rejected { reason: ProviderSessionLoadRejection::ProviderRejected { code } } if *code == -32001),
+            matches!(&result, ProviderSessionLoadOutcome::Rejected { reason: ProviderSessionLoadRejection::ProviderRejected { code, .. } } if *code == -32001),
             "{result:?}"
         );
         assert_eq!(

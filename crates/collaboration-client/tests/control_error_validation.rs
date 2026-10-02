@@ -73,9 +73,15 @@ mod tests {
             let request: Value = serde_json::from_str(&line).unwrap();
             assert_eq!(request["method"], "message/send");
             let response = json!({"jsonrpc":"2.0","id":request["id"],"result":{
+                "pushId":"01900000-0000-7000-8000-000000000003",
+                "link":"router://00000000-0000-4000-8000-000000000001/push/01900000-0000-7000-8000-000000000003",
+                "target":request["params"]["target"],
+                "targetIdentity":"fixture",
+                "deliveryState":"rejected",
+                "receipt":{
                 "outcome":{"kind":"rejected","reason":"childThread","nextAction":"inspectTarget","clientCode":-32000,"detail":null},
                 "reachability":"codexAppServer","client":null
-            }});
+            }}});
             stream
                 .get_mut()
                 .write_all(format!("{response}\n").as_bytes())
@@ -88,7 +94,7 @@ mod tests {
         let request: SessionMessageSendParams = serde_json::from_value(json!({
             "target":{"endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"codex-local"},"sessionId":"owned"},
             "message":{"kind":"humanUser","text":"fixture"},"mode":"auto",
-            "generationGuard":null,"correlation":null
+            "generationGuard":null
         })).unwrap();
         let receipt = client.send_human_input(request).await.unwrap();
         assert!(

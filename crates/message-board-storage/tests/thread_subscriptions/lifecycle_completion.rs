@@ -62,6 +62,8 @@ async fn leave_replacement_and_expiry_end_rows_and_delete_windows() {
         .store
         .join_thread(
             ThreadJoinRequest {
+                mode: None,
+                when_idle: None,
                 root_message_id: replaced_fixture.root_message_id.clone(),
                 actor: replacement_reader,
                 role: ParticipantRole::Implementer,
@@ -394,37 +396,94 @@ async fn topic_subscription_keeps_off_activity_unread_and_thread_rows_take_prece
         .collect::<Vec<_>>();
     assert!(unread_messages.contains(&existing_reply.message.message_id));
     assert!(unread_messages.contains(&new_reply.message.message_id));
-    let listen_context = fixture
+    fixture
         .store
-        .prepare_thread_listen(&ThreadListenRequest {
-            reader: topic_reader.clone(),
-            selection: ThreadListenSelection::Watched,
-            mode: ThreadListenMode::Once {
-                max_wait_seconds: 1,
+        .subscribe_thread_subscription(
+            ThreadSubscriptionSubscribeRequest {
+                reader: topic_reader.clone(),
+                scope: topic_scope.clone(),
+                policy: SubscriptionPolicyPatch {
+                    mode: Some(SubscriptionMode::Poll),
+                    timing: SubscriptionTimingPatch {
+                        quiet_seconds: Some(0),
+                        cap_seconds: Some(0),
+                    },
+                    ..SubscriptionPolicyPatch::default()
+                },
             },
-            from_activity_sequence: None,
-            acknowledge: false,
-            delivery: ThreadListenDelivery::Stdout,
-        })
+            fixture.now + chrono::Duration::seconds(4),
+        )
         .await
         .unwrap();
-    let selectable = fixture
+    let opened_windows = fixture
         .store
-        .select_pending_thread_listen_batch_set(ListenId::generate(), &listen_context, 32_000)
+        .rescan_missing_subscription_windows(
+            &topic_reader,
+            fixture.now + chrono::Duration::seconds(4),
+        )
+        .await
+        .unwrap();
+    assert_eq!(opened_windows, 2);
+    let due_roots = fixture
+        .store
+        .due_subscription_roots(&topic_reader, fixture.now + chrono::Duration::seconds(125))
+        .await
+        .unwrap();
+    assert_eq!(due_roots.len(), 2);
+    let (selectable, settlement) = fixture
+        .store
+        .select_subscription_notice(
+            &topic_reader,
+            &due_roots,
+            fixture.now + chrono::Duration::seconds(125),
+            usize::MAX,
+        )
         .await
         .unwrap();
     let selectable_ids = selectable
-        .batches
+        .roots
         .iter()
-        .flat_map(|batch| {
-            batch
-                .messages
-                .iter()
-                .map(|message| message.message_id.clone())
+        .map(|root| root.root_id.clone())
+        .collect::<Vec<_>>();
+    assert!(selectable_ids.contains(&fixture.root_message_id));
+    assert!(selectable_ids.contains(&new_root));
+    let serialized_notice = serde_json::to_string(&selectable).unwrap();
+    assert!(!serialized_notice.contains("off mode remains unread"));
+    assert!(!serialized_notice.contains("new root reply"));
+    fixture
+        .store
+        .settle_subscription_batch(
+            &topic_reader,
+            &settlement,
+            SubscriptionDeliveryOutcome::Accepted,
+        )
+        .await
+        .unwrap();
+    let unread_after_wait = fixture
+        .store
+        .fetch_inbox(InboxFetchRequest {
+            scope: InboxScope::Project {
+                project_id: fixture.project_id.clone(),
+            },
+            reader: topic_reader.clone(),
+            read_mode: InboxReadMode::Unread,
+            page: PageRequest {
+                limit: PageLimit::try_from(100).unwrap(),
+                cursor: None,
+            },
+        })
+        .await
+        .unwrap()
+        .page
+        .records
+        .into_iter()
+        .filter_map(|activity| match activity {
+            InboxActivity::MessageCreated { message, .. } => Some(message.message_id),
+            InboxActivity::ThreadStateChanged { .. } => None,
         })
         .collect::<Vec<_>>();
-    assert!(selectable_ids.contains(&existing_reply.message.message_id));
-    assert!(selectable_ids.contains(&new_reply.message.message_id));
+    assert!(unread_after_wait.contains(&existing_reply.message.message_id));
+    assert!(unread_after_wait.contains(&new_reply.message.message_id));
 
     let thread_reader = session("thread-precedence-reader");
     fixture

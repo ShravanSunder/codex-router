@@ -66,6 +66,7 @@ sys.stdin.read()
             mcp_bind: std::net::SocketAddr::from(([127, 0, 0, 1], 0)),
             native_schema: None,
             peer_registry_directory: None,
+            remote_control_server_name: None,
         },
         vec![ExternalProviderStartup::Launch(
             ExternalProviderLaunchBinding::claude(provider, Vec::new()).expect("provider binding"),
@@ -206,6 +207,7 @@ sys.stdin.read()
             mcp_bind: std::net::SocketAddr::from(([127, 0, 0, 1], 0)),
             native_schema: None,
             peer_registry_directory: None,
+            remote_control_server_name: None,
         },
         vec![ExternalProviderStartup::Launch(
             ExternalProviderLaunchBinding::claude(provider, Vec::new()).expect("provider binding"),

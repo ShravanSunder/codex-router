@@ -57,13 +57,16 @@ impl RuntimeState {
 
     pub(super) fn apply_readiness(&mut self, readiness: AppServerReadiness) {
         match readiness {
-            AppServerReadiness::Ready { running_version } => {
+            AppServerReadiness::Ready {
+                running_version, ..
+            } => {
                 self.app_server = AppServerCondition::NativeReady { running_version };
                 self.remote_control = RemoteControlCondition::Connected;
             }
             AppServerReadiness::LocalReadyRemoteDegraded {
                 running_version,
                 remote_control,
+                ..
             } => {
                 self.app_server = AppServerCondition::NativeReady { running_version };
                 self.remote_control = remote_control;
@@ -146,6 +149,7 @@ mod tests {
             RouterCondition::ExternalReachable,
             crate::AppServerReadiness::Ready {
                 running_version: "1.2.3".to_owned(),
+                remote_control_server_name: None,
             },
         );
         let drift = crate::RouterExecutableRelation::Drift {

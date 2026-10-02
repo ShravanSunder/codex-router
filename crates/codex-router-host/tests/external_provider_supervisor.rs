@@ -28,6 +28,9 @@ use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
 use tokio::sync::Mutex;
 use tokio_tungstenite::tungstenite::Message;
 
+#[path = "../src/external_provider_runtime/approval_push_fixture.rs"]
+mod approval_push_fixture;
+
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
 macro_rules! ensure {
@@ -662,8 +665,16 @@ async fn approval_broker_fixture(
     broker.install_session_delivery(Arc::new(
         collaboration_service::SessionDeliveryRouter::new(vec![route]),
     ))?;
+    let push_fixture =
+        approval_push_fixture::ApprovalPushFixture::compose(root.path(), service_id, &broker)
+            .await
+            .map_err(|error| format!("approval push fixture composition: {error}"))?;
+    let captured_approver = approver.clone();
     let backend = tokio::spawn(async move {
-        let (stream, _) = listener.accept().await?;
+        let (stream, _) =
+            tokio::time::timeout(std::time::Duration::from_secs(2), listener.accept())
+                .await
+                .map_err(|_| "native approval push did not connect")??;
         let mut socket = tokio_tungstenite::accept_async(stream).await?;
         let mut requests = Vec::new();
         for expected_method in ["initialize", "initialized", "thread/read", "turn/start"] {
@@ -689,6 +700,15 @@ async fn approval_broker_fixture(
                 request.get("method").and_then(Value::as_str),
                 Some(expected_method)
             );
+            if expected_method == "turn/start" {
+                let delivered_line = request
+                    .pointer("/params/input/0/text")
+                    .and_then(Value::as_str)
+                    .ok_or("native approver input omitted its push line")?;
+                let _record = push_fixture
+                    .captured_approval(delivered_line, &captured_approver)
+                    .await?;
+            }
             requests.push(request.clone());
             if expected_method == "initialized" {
                 continue;
@@ -1122,8 +1142,9 @@ async fn supervisor_permission_callback_uses_installed_broker_and_exact_selected
         serde_json::to_value(recorded_approver)?,
         json!({"kind":"session","session":approver.clone()})
     );
-    let native_requests = native_backend
-        .await?
+    let native_requests = tokio::time::timeout(std::time::Duration::from_secs(5), native_backend)
+        .await
+        .map_err(|_| "native approver fixture did not complete")??
         .map_err(|error| format!("native approver fixture failed: {error}"))?;
     ensure_eq!(native_requests.len(), 4);
     let decision = broker
@@ -1221,8 +1242,9 @@ async fn retired_provider_binding_cancels_pending_approval_before_selection() ->
     })
     .await
     .map_err(|_| "approval did not enter pending state")?;
-    let native_requests = native_backend
-        .await?
+    let native_requests = tokio::time::timeout(std::time::Duration::from_secs(5), native_backend)
+        .await
+        .map_err(|_| "native approver fixture did not complete")??
         .map_err(|error| format!("native approver fixture failed: {error}"))?;
     ensure_eq!(native_requests.len(), 4);
     binding_retirement.cancel();
@@ -1480,7 +1502,8 @@ async fn authentication_required_is_no_effect_and_does_not_poison_fresh_create()
         classification,
         Err(
             codex_router_host::ExternalProviderRuntimeError::AuthenticationRequired {
-                code: -32000
+                code: -32000,
+                ..
             }
         )
     ) {

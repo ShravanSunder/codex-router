@@ -57,7 +57,7 @@ impl ProviderAcpDeliveryRoute {
         let _guard = session_lock.lock().await;
         match self.claim.claim(&target).await {
             RouteClaim::Holds | RouteClaim::CanLoad => {}
-            RouteClaim::LiveElsewhere { .. } => {
+            RouteClaim::Rejected { .. } | RouteClaim::LiveElsewhere { .. } => {
                 return Err(ProviderQueueAdmissionError::LiveElsewhere.into());
             }
             RouteClaim::NotMine => return Err(ProviderQueueAdmissionError::SessionNotFound.into()),
@@ -142,7 +142,7 @@ impl ProviderAcpDeliveryRoute {
         let _guard = session_lock.lock().await;
         match self.claim.claim(&target).await {
             RouteClaim::Holds | RouteClaim::CanLoad => {}
-            RouteClaim::LiveElsewhere { .. } => {
+            RouteClaim::Rejected { .. } | RouteClaim::LiveElsewhere { .. } => {
                 return Err(ProviderQueueAdmissionError::LiveElsewhere.into());
             }
             RouteClaim::NotMine => return Err(ProviderQueueAdmissionError::SessionNotFound.into()),
@@ -209,7 +209,7 @@ impl ProviderAcpDeliveryRoute {
         let _guard = session_lock.lock().await;
         match self.claim.claim(&target).await {
             RouteClaim::Holds | RouteClaim::CanLoad => {}
-            RouteClaim::LiveElsewhere { .. } => {
+            RouteClaim::Rejected { .. } | RouteClaim::LiveElsewhere { .. } => {
                 return Err(ProviderQueueAdmissionError::LiveElsewhere);
             }
             RouteClaim::NotMine => return Err(ProviderQueueAdmissionError::SessionNotFound),

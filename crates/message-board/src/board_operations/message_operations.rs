@@ -2,7 +2,7 @@ use crate::{
     ActingForIdentity, ActivitySequence, Identity, ImplementerHolder, Message, MessageId,
     MessageListScope, MessagePage, MessageReferences, MessageSelection, MessageText,
     OrchestratorHolder, Page, PageRequest, Participant, ParticipantNote, ParticipantRole,
-    Placement, ProjectId, Thread, TopicId, WatchStatus,
+    Placement, ProjectId, SubscriptionMode, Thread, TopicId, WatchStatus, WhenIdle,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -120,6 +120,10 @@ contract!(ThreadJoinRequest {
     actor: Identity,
     role: ParticipantRole,
     watch: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    mode: Option<SubscriptionMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    when_idle: Option<WhenIdle>,
     replace: Option<Identity>,
     note: Option<ParticipantNote>
 });

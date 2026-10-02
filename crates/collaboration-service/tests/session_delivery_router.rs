@@ -1,13 +1,13 @@
 use agent_automation::RouteEffectEvidence;
 use collaboration_protocol::{
-    CodexGeneration, DeliveryCorrelationId, DeliveryOutcome, MessageContent, MessageDelivery,
+    CodexGeneration, DeliveryCorrelationId, DeliveryOutcome, MessageDelivery, MessageText, PushId,
     SessionReachability, SessionRef,
 };
 use collaboration_service::{
     AttemptEvidenceSink, AttemptReconciliation, AttemptReconciliationContext, DeliveryFuture,
-    DeliveryPrecondition, DeliveryReceipt, DeliveryRequest, LoadPolicy, RouteClaim, RoutePresence,
+    DeliveryPrecondition, DeliveryReceipt, LoadPolicy, RouteClaim, RoutePresence,
     RouteUnavailableReason, SessionDeliveryRoute, SessionDeliveryRouter, SessionMessageDelivery,
-    TargetPresence, TargetPresenceProbe,
+    TargetPresence, TargetPresenceProbe, layer_zero,
 };
 use std::sync::{
     Arc,
@@ -35,7 +35,7 @@ impl SessionDeliveryRoute for FakeRoute {
     }
     fn deliver(
         &self,
-        _: DeliveryRequest,
+        _: layer_zero::DeliveryRequest,
         _: &dyn AttemptEvidenceSink,
     ) -> DeliveryFuture<'_, DeliveryReceipt> {
         self.calls.fetch_add(1, Ordering::SeqCst);
@@ -72,23 +72,31 @@ fn target() -> Result<SessionRef, Box<dyn std::error::Error>> {
     }))?)
 }
 
-fn request() -> Result<DeliveryRequest, Box<dyn std::error::Error>> {
+fn request() -> Result<layer_zero::DeliveryRequest, Box<dyn std::error::Error>> {
     request_with_load_policy(LoadPolicy::MayLoad)
 }
 
 fn request_with_load_policy(
     load_policy: LoadPolicy,
-) -> Result<DeliveryRequest, Box<dyn std::error::Error>> {
-    Ok(DeliveryRequest {
-        target: target()?,
-        message: MessageContent::Router {
-            text: "hello".to_owned().try_into()?,
+) -> Result<layer_zero::DeliveryRequest, Box<dyn std::error::Error>> {
+    let target = target()?;
+    let push_id = PushId::try_from(agent_automation::AttemptId::generate().as_str().to_owned())?;
+    let correlation = DeliveryCorrelationId::try_from(push_id.as_str().to_owned())?;
+    let line = MessageText::try_from(format!(
+        "✉️ sender · \"hello\" · router://{}/push/{}",
+        String::from(target.endpoint.service_id.clone()),
+        push_id.as_str()
+    ))?;
+    Ok(layer_zero::DeliveryRequest {
+        payload: layer_zero::PreparedPush {
+            push_id,
+            line,
+            load_policy,
         },
-        header_context: collaboration_protocol::MessageHeaderContext::default(),
+        target,
         mode: MessageDelivery::Auto,
-        load_policy,
         precondition: DeliveryPrecondition::Unpinned,
-        correlation: DeliveryCorrelationId::generate(),
+        correlation,
         attempt: agent_automation::AttemptId::generate(),
     })
 }
@@ -109,6 +117,9 @@ fn fake_with_outcome(
         RouteClaim::NotMine => RoutePresence::NotMine,
         RouteClaim::Holds => RoutePresence::Running,
         RouteClaim::CanLoad => RoutePresence::Wakeable,
+        RouteClaim::Rejected { rejection } => RoutePresence::LiveElsewhere {
+            detail: rejection.detail.clone(),
+        },
         RouteClaim::LiveElsewhere { detail, .. } => RoutePresence::LiveElsewhere {
             detail: detail.clone(),
         },

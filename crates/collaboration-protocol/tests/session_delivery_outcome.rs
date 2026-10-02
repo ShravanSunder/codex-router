@@ -1,6 +1,6 @@
 use collaboration_protocol::{
-    AttemptId, DeliveryCorrelationId, DeliveryNextAction, DeliveryOutcome, DeliveryRejection,
-    DeliveryRejectionReason, SessionReachability,
+    AttemptId, DeliveryCorrelationId, DeliveryNextAction, DeliveryOutcome, DeliveryPeerClaim,
+    DeliveryRejection, DeliveryRejectionReason, SessionReachability,
 };
 use serde_json::{json, to_value};
 
@@ -31,8 +31,40 @@ fn delivery_outcomes_and_reachability_round_trip_without_losing_strength() {
                 next_action: DeliveryNextAction::CorrectRequest,
                 client_code: Some(-32601),
                 detail: Some("unsupported".to_owned()),
+                claims: None,
             }),
             json!({"kind": "rejected", "reason": "unsupportedCapability", "nextAction":"correctRequest", "clientCode":-32601, "detail":"unsupported"}),
+        ),
+        (
+            DeliveryOutcome::Rejected(DeliveryRejection {
+                reason: DeliveryRejectionReason::LiveElsewhere,
+                next_action: DeliveryNextAction::InspectTarget,
+                client_code: None,
+                detail: Some("two terminals claim this session".to_owned()),
+                claims: Some(vec![
+                    DeliveryPeerClaim {
+                        pid: 52304,
+                        name: Some("terminal-one".to_owned()),
+                        cwd: Some("/workspace/one".to_owned()),
+                    },
+                    DeliveryPeerClaim {
+                        pid: 68833,
+                        name: None,
+                        cwd: None,
+                    },
+                ]),
+            }),
+            json!({
+                "kind":"rejected",
+                "reason":"liveElsewhere",
+                "nextAction":"inspectTarget",
+                "clientCode":null,
+                "detail":"two terminals claim this session",
+                "claims":[
+                    {"pid":52304,"name":"terminal-one","cwd":"/workspace/one"},
+                    {"pid":68833,"name":null,"cwd":null}
+                ]
+            }),
         ),
         (DeliveryOutcome::Unknown, json!({"kind": "unknown"})),
     ] {

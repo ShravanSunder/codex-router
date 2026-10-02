@@ -29,6 +29,7 @@ async fn owned_host_automatically_prunes_events_without_deleting_current_state()
         mcp_bind: std::net::SocketAddr::from(([127, 0, 0, 1], 0)),
         native_schema: None,
         peer_registry_directory: None,
+        remote_control_server_name: None,
         owner_human_id: None,
     })
     .await?;

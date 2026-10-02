@@ -5,7 +5,7 @@ use super::*;
 impl ProviderAcpDeliveryRoute {
     pub(super) async fn queue_delivery(
         &self,
-        request: &DeliveryRequest,
+        request: &ProviderDeliveryRequest,
         sink: &dyn AttemptEvidenceSink,
         binding: &collaboration_protocol::ProviderBindingIdentity,
         operation_id: &OperationId,
@@ -23,9 +23,25 @@ impl ProviderAcpDeliveryRoute {
                 false,
             ));
         };
-        let requested_by = match &request.message {
-            MessageContent::Agent { sender, .. } => sender.clone().into(),
-            MessageContent::HumanUser { .. } | MessageContent::Router { .. } => record.created_by,
+        let (input_id, queued_prompt) = match &request.content {
+            ProviderDeliveryContent::PreparedPush { line, .. } => {
+                let input_id = request.input_id()?;
+                let prompt_request = ProviderPromptContentsRequest::from_prepared_push(
+                    operation_id.clone(),
+                    input_id.clone(),
+                    request.target.clone(),
+                    record.created_by.clone(),
+                    record.approver.clone(),
+                    line,
+                )?;
+                (
+                    input_id,
+                    ProviderQueuedPrompt::Contents {
+                        request: prompt_request,
+                        load_policy: request.load_policy,
+                    },
+                )
+            }
         };
         let permit = match self.queue.reserve(&request.target) {
             Ok(permit) => permit,
@@ -33,29 +49,22 @@ impl ProviderAcpDeliveryRoute {
         };
         let effect = Self::effect(request, binding, SubmissionEffect::RouterQueued)?;
         sink.record(effect).await?;
-        let input_id = session_event_model::InputId::generate();
-        self.supervisor.queued_operation_registry().record_queued(
-            operation_id.clone(),
-            request.target.clone(),
-            binding.clone(),
-            input_id.clone(),
-            &request.message,
-        );
-        permit.send(
-            crate::provider_acp_message_fifo::ProviderQueuedPrompt::MessageWithHeader {
-                header_context: request.header_context.clone(),
-                request: ConversationPromptRequest {
-                    operation_id: operation_id.clone(),
-                    input_id: Some(input_id),
-                    target: request.target.clone(),
-                    generation: Some(binding.generation.clone()),
-                    requested_by,
-                    approver: record.approver,
-                    prompt: request.message.clone(),
-                },
-                load_policy: request.load_policy,
-            },
-        );
+        match &queued_prompt {
+            ProviderQueuedPrompt::Contents {
+                request: prompt, ..
+            } => {
+                self.supervisor
+                    .queued_operation_registry()
+                    .record_queued_contents(
+                        operation_id.clone(),
+                        request.target.clone(),
+                        binding.clone(),
+                        input_id,
+                        &prompt.contents,
+                    );
+            }
+        }
+        permit.send(queued_prompt);
         Ok(Self::receipt(
             DeliveryOutcome::Queued,
             Some(operation_id.clone()),

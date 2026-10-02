@@ -4,13 +4,6 @@
 #[allow(dead_code)]
 mod proof_context;
 
-use collaboration_client::board::{
-    BoardCreateRequest, BoardId, Description, Identity, MessageId, MessagePostRequest,
-    MessageReferences, MessageText as BoardMessageText, ParticipantRole, Placement,
-    ProjectCreateRequest, ProjectId, ResourceName, ThreadCreateRequest, ThreadJoinRequest,
-    ThreadListenDelivery, ThreadListenMode, ThreadListenRequest, ThreadListenSelection,
-    TopicCreateRequest, TopicId,
-};
 use collaboration_client::protocol::{
     ConversationCreateOutcome, DestinationPreparation, ExecutionDestination,
     InstructionCreateParams, OperationId, RouterAccess, ScheduleCreateRequest, ScheduleDefinition,
@@ -27,10 +20,16 @@ use delivery_matrix_support::{
 #[path = "delivery_matrix/acp_target.rs"]
 mod delivery_matrix_acp_target;
 use proof_context::{ProofContext, ProofResult};
+#[path = "delivery_matrix/subscription.rs"]
+mod subscription;
 use serde_json::{Value, json};
 use std::time::Duration;
+use subscription::{
+    board_subscription_push, board_subscription_push_targets, verify_subscription_notice,
+};
 
-const ACP_TARGET_EXPECTED_PROMPTS: usize = 9;
+const ACP_TARGET_EXPECTED_PROMPTS: usize = 8;
+const SUBSCRIPTION_NOTICE_LABEL: &str = "🧵 Router: new thread activity";
 
 #[tokio::test]
 #[ignore = "requires an owned isolated CLI Host with scripted provider fixture"]
@@ -211,10 +210,10 @@ async fn exercise_delivery_matrix(config_guard: &ConfigHashGuard) -> ProofResult
     records.push(json!({"producer":"scheduledRun","target":"claudeCodePeer","status":"pass","evidence":"scheduled input in fixture peer socket frame"}));
     config_guard.verify()?;
 
-    let codex = proof.start_thread("Board Listen recipient").await?;
-    let codex_marker = matrix_marker("boardListen", "codex");
-    let peer_marker = matrix_marker("boardListen", "claude");
-    board_listen_push(
+    let codex = proof.start_thread("Board subscription recipient").await?;
+    let codex_marker = matrix_marker("boardSubscription", "codex");
+    let peer_marker = matrix_marker("boardSubscription", "claude");
+    board_subscription_push(
         &mut proof,
         &sender,
         &codex,
@@ -223,12 +222,22 @@ async fn exercise_delivery_matrix(config_guard: &ConfigHashGuard) -> ProofResult
         &peer_marker,
     )
     .await?;
-    wait_for_input_marker(&mut proof, &codex, &codex_marker, Duration::from_secs(400)).await?;
-    records.push(json!({"producer":"boardListen","target":"codex","status":"pass","evidence":"Thread Listen batch marker in thread/read"}));
+    let codex_notice = wait_for_input_marker(
+        &mut proof,
+        &codex,
+        SUBSCRIPTION_NOTICE_LABEL,
+        Duration::from_secs(120),
+    )
+    .await?;
+    verify_subscription_notice(&mut proof, &codex, &codex_notice, &codex_marker).await?;
+    records.push(json!({"producer":"boardSubscription","target":"codex","status":"pass","evidence":"neutral thread/read notice and stored-range fetch"}));
     config_guard.verify()?;
-    peer.expect_marker_with_timeout(&peer_marker, Duration::from_secs(400))
+    let peer_notice = peer
+        .expect_text_with_timeout(SUBSCRIPTION_NOTICE_LABEL, Duration::from_secs(120))
         .await?;
-    records.push(json!({"producer":"boardListen","target":"claudeCodePeer","status":"pass","evidence":"Thread Listen batch marker in fixture peer socket frame"}));
+    let peer_target = peer.target.clone();
+    verify_subscription_notice(&mut proof, &peer_target, &peer_notice, &peer_marker).await?;
+    records.push(json!({"producer":"boardSubscription","target":"claudeCodePeer","status":"pass","evidence":"neutral peer input and stored-range fetch"}));
     config_guard.verify()?;
 
     let codex = create_empty_conversation(&proof, &sender).await?;
@@ -291,26 +300,21 @@ fn matrix_marker(producer: &str, target: &str) -> String {
 }
 
 fn turns_contain_input(turns: &[Value], marker: &str) -> bool {
-    turns.iter().any(|turn| {
-        turn.get("items")
-            .and_then(Value::as_array)
-            .is_some_and(|items| {
-                items.iter().any(|item| {
-                    item.get("type").and_then(Value::as_str) == Some("userMessage")
-                        && item
-                            .get("content")
-                            .and_then(Value::as_array)
-                            .is_some_and(|content| {
-                                content.iter().any(|part| {
-                                    part.get("type").and_then(Value::as_str) == Some("text")
-                                        && part.get("text").and_then(Value::as_str).is_some_and(
-                                            |text| user_text_contains_marker(text, marker),
-                                        )
-                                })
-                            })
-                })
-            })
-    })
+    matching_input_text(turns, marker).is_some()
+}
+
+fn matching_input_text(turns: &[Value], marker: &str) -> Option<String> {
+    turns
+        .iter()
+        .filter_map(|turn| turn.get("items").and_then(Value::as_array))
+        .flatten()
+        .filter(|item| item.get("type").and_then(Value::as_str) == Some("userMessage"))
+        .filter_map(|item| item.get("content").and_then(Value::as_array))
+        .flatten()
+        .filter(|part| part.get("type").and_then(Value::as_str) == Some("text"))
+        .filter_map(|part| part.get("text").and_then(Value::as_str))
+        .find(|text| user_text_contains_marker(text, marker))
+        .map(str::to_owned)
 }
 
 fn user_text_contains_marker(text: &str, marker: &str) -> bool {
@@ -472,13 +476,13 @@ async fn wait_for_input_marker(
     target: &SessionRef,
     marker: &str,
     timeout: Duration,
-) -> ProofResult<()> {
+) -> ProofResult<String> {
     let deadline = tokio::time::Instant::now() + timeout;
     let mut interval = tokio::time::interval(Duration::from_secs(1));
     loop {
         interval.tick().await;
-        if turns_contain_input(&proof.turns(target).await?, marker) {
-            return Ok(());
+        if let Some(text) = matching_input_text(&proof.turns(target).await?, marker) {
+            return Ok(text);
         }
         if tokio::time::Instant::now() >= deadline {
             return Err(format!("recipient thread/read did not contain marker {marker}").into());
@@ -619,119 +623,6 @@ async fn schedule_send(
         .await?;
     if enabled.next_due_at.is_none() {
         return Err("Scheduled delivery has no next due time".into());
-    }
-    Ok(())
-}
-
-async fn board_listen_push(
-    proof: &mut ProofContext,
-    sender: &SessionRef,
-    codex: &SessionRef,
-    peer: &SessionRef,
-    codex_marker: &str,
-    peer_marker: &str,
-) -> ProofResult<()> {
-    board_listen_push_targets(proof, sender, &[(codex, codex_marker), (peer, peer_marker)]).await
-}
-
-async fn board_listen_push_targets(
-    proof: &mut ProofContext,
-    sender: &SessionRef,
-    targets: &[(&SessionRef, &str)],
-) -> ProofResult<()> {
-    let actor: Identity = serde_json::from_value(json!({"kind":"session","session":sender}))?;
-    let project_id = ProjectId::generate();
-    let board_id = BoardId::generate();
-    let topic_id = TopicId::generate();
-    proof
-        .client
-        .board_project_create(ProjectCreateRequest {
-            project_id: project_id.clone(),
-            name: ResourceName::try_from(format!("Delivery matrix {}", project_id.as_str()))?,
-            description: Description::try_from("Disposable recipient delivery proof".to_owned())?,
-            actor: actor.clone(),
-            acting_for: None,
-        })
-        .await?;
-    proof
-        .client
-        .board_create(BoardCreateRequest {
-            board_id: board_id.clone(),
-            project_id,
-            name: ResourceName::try_from(format!("Delivery board {}", board_id.as_str()))?,
-            description: Description::try_from("Thread Listen recipient proof".to_owned())?,
-            actor: actor.clone(),
-            acting_for: None,
-        })
-        .await?;
-    proof
-        .client
-        .board_topic_create(TopicCreateRequest {
-            topic_id: topic_id.clone(),
-            board_id,
-            name: ResourceName::try_from("Delivery".to_owned())?,
-            description: Description::try_from("One marker burst".to_owned())?,
-            actor: actor.clone(),
-            acting_for: None,
-        })
-        .await?;
-    let root_id = MessageId::generate();
-    proof
-        .client
-        .board_thread_create(ThreadCreateRequest {
-            message_id: root_id.clone(),
-            topic_id,
-            actor: actor.clone(),
-            acting_for: None,
-            text: BoardMessageText::try_from("Delivery matrix root".to_owned())?,
-            references: MessageReferences::try_from(Vec::new())?,
-            role: Some(ParticipantRole::Orchestrator),
-            watch: true,
-        })
-        .await?;
-    for (target, _) in targets {
-        let reader: Identity = serde_json::from_value(json!({"kind":"session","session":target}))?;
-        proof
-            .client
-            .board_thread_join(ThreadJoinRequest {
-                root_message_id: root_id.clone(),
-                actor: reader.clone(),
-                role: ParticipantRole::Participant,
-                watch: true,
-                replace: None,
-                note: None,
-            })
-            .await?;
-        proof
-            .client
-            .board_thread_listen(ThreadListenRequest {
-                reader,
-                selection: ThreadListenSelection::Roots {
-                    root_message_ids: vec![root_id.clone()],
-                },
-                mode: ThreadListenMode::Once {
-                    max_wait_seconds: 1500,
-                },
-                from_activity_sequence: None,
-                acknowledge: false,
-                delivery: ThreadListenDelivery::Session,
-            })
-            .await?;
-    }
-    for (_, marker) in targets {
-        proof
-            .client
-            .board_message_post(MessagePostRequest {
-                message_id: MessageId::generate(),
-                placement: Placement::Thread {
-                    root_message_id: root_id.clone(),
-                },
-                actor: actor.clone(),
-                acting_for: None,
-                text: BoardMessageText::try_from((*marker).to_owned())?,
-                references: MessageReferences::try_from(Vec::new())?,
-            })
-            .await?;
     }
     Ok(())
 }

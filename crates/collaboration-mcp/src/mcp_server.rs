@@ -8,14 +8,16 @@ use collaboration_client::{
 use collaboration_protocol::{
     AddressListParams, AddressPage, ApprovalDecideParams, ApprovalDecideResult, ApprovalListParams,
     ApprovalListResponse, ConversationCloseRequest, ConversationCreateOutcome,
-    ConversationOperationSubmission, ConversationResumeRequest, DeliveryOutcome, DeliveryReceipt,
-    EndpointInventory, JournalPage, JournalReadParams, JournalStatus, NativeInspectParams,
-    NativeInspectResult, NativeInterruptParams, NativeInterruptResult, NativeRenameParams,
-    NativeRenameResult, NativeSessionListParams, NativeSessionListResult, OperationId,
-    ProviderInspectFailure, ProviderSessionInspectRequest, ProviderSessionInspectResult,
-    ProviderSessionListParams, ProviderSessionListResult, ProviderSettingsAcceptRequest,
-    ProviderSettingsFailure, ProviderSettingsResult, ProviderSettingsSetRequest,
-    RouterExecutableRelation, SessionMessageReplyResult, router_build_warning,
+    ConversationOperationSubmission, ConversationResumeRequest, DeliveryOutcome, EndpointInventory,
+    JournalPage, JournalReadParams, JournalStatus, NativeInspectParams, NativeInspectResult,
+    NativeInterruptParams, NativeInterruptResult, NativeRenameParams, NativeRenameResult,
+    NativeSessionListParams, NativeSessionListResult, OperationId, ProviderInspectFailure,
+    ProviderSessionInspectRequest, ProviderSessionInspectResult, ProviderSessionListParams,
+    ProviderSessionListResult, ProviderSettingsAcceptRequest, ProviderSettingsFailure,
+    ProviderSettingsResult, ProviderSettingsSetRequest, PushDeliveryState, PushMessageSendResult,
+    PushRecordHistoryParams, PushRecordListParams, PushRecordListResult, PushRecordShowParams,
+    PushRecordShowResult, RouterExecutableRelation, SessionMessageReplyResult,
+    ThreadSubscriptionWaitRequest, ThreadSubscriptionWaitResult, router_build_warning,
 };
 use rmcp::{
     ServerHandler,
@@ -46,8 +48,8 @@ mod schema_binding;
 mod tool_output_contract;
 use catalog_descriptions::operation_description;
 use catalog_tools::{
-    EmptyToolInput, ThreadWaitToolInput, register_automation_inspection_tools,
-    register_automation_mutation_tools, register_board_tools,
+    EmptyToolInput, register_automation_inspection_tools, register_automation_mutation_tools,
+    register_board_tools,
 };
 use conversation_operation_tools::register_conversation_operation_tools;
 use conversation_tool_requests::{
@@ -365,7 +367,7 @@ impl CollaborationMcpServer {
         structured_result(result, OperationEffect::Unknown)
     }
 
-    #[tool(name = "message_send", description = "Submits one agent-authored or explicit human message with exact auto, queue, or steer semantics. The receipt reports the selected route and strongest observed outcome; accepted input or a peer write does not prove completion or an agent reply. Router-authored content is not a public caller input, and uncertain dispatch is never replayed automatically.", output_schema = rmcp::handler::server::tool::schema_for_type::<McpToolOutput<DeliveryReceipt>>())]
+    #[tool(name = "message_send", description = "Submits one agent-authored or explicit human message with exact auto, queue, or steer semantics. Agent sender identity is reported by the request's client, not authenticated. The result includes the stored push id, link, target and delivery receipt; accepted input or a peer write does not prove completion or an agent reply. Router-authored content is not a public caller input, and uncertain dispatch is never replayed automatically.", output_schema = rmcp::handler::server::tool::schema_for_type::<McpToolOutput<PushMessageSendResult>>())]
     async fn message_send(
         &self,
         Parameters(request): Parameters<MessageSendRequest>,
@@ -379,7 +381,49 @@ impl CollaborationMcpServer {
         message_tool_result(result)
     }
 
-    #[tool(name = "message_reply", description = "Replies to the most recent Agent sender delivered to the supplied caller session. Router deliveries do not change the reply address. Optionally refuses unless expectSender matches the resolved recipient; returns the selected target.", output_schema = rmcp::handler::server::tool::schema_for_type::<McpToolOutput<SessionMessageReplyResult>>())]
+    #[tool(name = "router_show", description = "Shows one stored Router push by id or router link, including its full body or expanded thread activity. The caller is reported by the MCP request, not authenticated; the service uses it as a confusion guard. A direct-message show by its target marks the message read.", output_schema = rmcp::handler::server::tool::schema_for_type::<McpToolOutput<PushRecordShowResult>>())]
+    async fn router_show(
+        &self,
+        Parameters(request): Parameters<PushRecordShowParams>,
+    ) -> CallToolResult {
+        let mut client = match self.connect().await {
+            Ok(value) => value,
+            Err(error) => return failure(error, OperationEffect::None),
+        };
+        let result = client.router_show(request).await;
+        let _closed = client.close().await;
+        structured_result(result, OperationEffect::None)
+    }
+
+    #[tool(name = "message_inbox", description = "Lists retained unread direct messages for the reported caller session. Caller identity is supplied by the MCP request and is not authenticated; the service uses it as a confusion guard.", output_schema = rmcp::handler::server::tool::schema_for_type::<McpToolOutput<PushRecordListResult>>())]
+    async fn message_inbox(
+        &self,
+        Parameters(request): Parameters<PushRecordListParams>,
+    ) -> CallToolResult {
+        let mut client = match self.connect().await {
+            Ok(value) => value,
+            Err(error) => return failure(error, OperationEffect::None),
+        };
+        let result = client.message_inbox(request).await;
+        let _closed = client.close().await;
+        structured_result(result, OperationEffect::None)
+    }
+
+    #[tool(name = "message_history", description = "Lists retained direct messages between the reported caller session and the explicit with session. Caller identity is supplied by the MCP request and is not authenticated; the service uses it as a confusion guard.", output_schema = rmcp::handler::server::tool::schema_for_type::<McpToolOutput<PushRecordListResult>>())]
+    async fn message_history(
+        &self,
+        Parameters(request): Parameters<PushRecordHistoryParams>,
+    ) -> CallToolResult {
+        let mut client = match self.connect().await {
+            Ok(value) => value,
+            Err(error) => return failure(error, OperationEffect::None),
+        };
+        let result = client.message_history(request).await;
+        let _closed = client.close().await;
+        structured_result(result, OperationEffect::None)
+    }
+
+    #[tool(name = "message_reply", description = "Replies to one direct message by its stored push id or router link, and records that reference on the reply. Caller identity is reported by the MCP request, not authenticated; the service uses it as a confusion guard. The result names the selected recipient.", output_schema = rmcp::handler::server::tool::schema_for_type::<McpToolOutput<SessionMessageReplyResult>>())]
     async fn message_reply(
         &self,
         Parameters(request): Parameters<MessageReplyRequest>,
@@ -388,7 +432,7 @@ impl CollaborationMcpServer {
             Ok(value) => value,
             Err(error) => return failure(error, OperationEffect::None),
         };
-        let result = client.reply_to_latest_agent_sender(request).await;
+        let result = client.reply_to_push(request).await;
         let _closed = client.close().await;
         message_reply_tool_result(result)
     }
@@ -596,20 +640,26 @@ impl CollaborationMcpServer {
         configuration_result(result, false)
     }
 
-    #[tool(name = "board_thread_wait", description = "Waits once for activity on an existing board listener. This observes board activity and does not prove agent completion.", output_schema = rmcp::handler::server::tool::schema_for_type::<McpToolOutput<collaboration_client::board::ThreadWaitResult>>())]
+    #[tool(
+        name = "board_thread_wait",
+        description = "Waits for one due batch from the supplied reader's poll-mode subscriptions, filtered to all scopes, selected roots or one topic. Returns an empty batch at maxWaitSeconds when nothing is due. A handed batch remains unread until the reader acknowledges it.",
+        output_schema = rmcp::handler::server::tool::schema_for_type::<
+            McpToolOutput<ThreadSubscriptionWaitResult>,
+        >()
+    )]
     async fn board_thread_wait(
         &self,
-        Parameters(input): Parameters<ThreadWaitToolInput>,
+        Parameters(request): Parameters<ThreadSubscriptionWaitRequest>,
     ) -> CallToolResult {
         let mut client = match self.connect().await {
             Ok(value) => value,
             Err(error) => return failure(error, OperationEffect::None),
         };
-        let result = client
-            .board_thread_wait(input.request, Duration::from_secs(input.timeout_seconds))
-            .await;
+        let timeout =
+            Duration::from_secs(request.max_wait_seconds).saturating_add(Duration::from_secs(5));
+        let result = client.board_thread_wait(request, timeout).await;
         let _closed = client.close().await;
-        board_result(result, false)
+        board_result(result, true)
     }
 
     #[tool(name = "wake_wait_until_first_fire", description = "Subscribes on one call-local Control connection and waits for the selected wake-up's first fire. Cancellation closes only this wait; it never recreates or replays the wake-up.", output_schema = rmcp::handler::server::tool::schema_for_type::<McpToolOutput<collaboration_protocol::FireReceipt>>())]
@@ -916,10 +966,13 @@ fn operation_error_result(
         .unwrap_or_else(|_| validation_failure("collaboration error encoding failed"))
 }
 
-fn message_tool_result(result: Result<DeliveryReceipt, MessageSendError>) -> CallToolResult {
+fn message_tool_result(result: Result<PushMessageSendResult, MessageSendError>) -> CallToolResult {
     match result {
-        Ok(receipt) => {
-            let (kind, message, effect) = match &receipt.outcome {
+        Ok(push) => {
+            if push.delivery_state == PushDeliveryState::Held {
+                return structured_result(Ok(push), OperationEffect::None);
+            }
+            let (kind, message, effect) = match &push.receipt.outcome {
                 DeliveryOutcome::NotSubmitted { reason, .. } => {
                     ("notSubmitted", reason.clone(), OperationEffect::None)
                 }
@@ -936,9 +989,9 @@ fn message_tool_result(result: Result<DeliveryReceipt, MessageSendError>) -> Cal
                     "Delivery acceptance is unknown".to_owned(),
                     OperationEffect::Unknown,
                 ),
-                _ => return structured_result(Ok(receipt), OperationEffect::None),
+                _ => return structured_result(Ok(push), OperationEffect::None),
             };
-            serde_json::to_value(receipt)
+            serde_json::to_value(push)
                 .map(|mut value| {
                     if let Some(fields) = value.as_object_mut() {
                         fields.insert("kind".to_owned(), serde_json::json!(kind));
@@ -947,7 +1000,7 @@ fn message_tool_result(result: Result<DeliveryReceipt, MessageSendError>) -> Cal
                     }
                     structured_tool_error(value)
                 })
-                .unwrap_or_else(|_| validation_failure("delivery receipt encoding failed"))
+                .unwrap_or_else(|_| validation_failure("push result encoding failed"))
         }
         Err(error) => {
             let (failure, target) = error.into_operation_failure_and_target();
@@ -968,6 +1021,9 @@ fn message_reply_tool_result(
 ) -> CallToolResult {
     match result {
         Ok(reply) => {
+            if reply.delivery_state == PushDeliveryState::Held {
+                return structured_result(Ok(reply), OperationEffect::None);
+            }
             let (kind, message, effect) = match &reply.receipt.outcome {
                 DeliveryOutcome::NotSubmitted { reason, .. } => {
                     ("notSubmitted", reason.clone(), OperationEffect::None)
@@ -1028,6 +1084,16 @@ fn board_result<TValue: serde::Serialize>(
         Err(collaboration_client::BoardClientError::Rejected(error)) => serde_json::to_value(error)
             .map(structured_tool_error)
             .unwrap_or_else(|_| validation_failure("board rejection encoding failed")),
+        Err(collaboration_client::BoardClientError::WaitOutcomeUnknown { actor, filter }) => {
+            structured_tool_error(serde_json::json!({
+                "kind": "outcomeUnknown",
+                "stage": "response",
+                "effect": "unknown",
+                "message": "The wait result was lost; activity may have been handed off. Inspect the Reader's subscriptions and unread inbox (run board thread subscriptions, then board inbox fetch) before waiting again.",
+                "actor": actor,
+                "filter": filter,
+            }))
+        }
         Err(collaboration_client::BoardClientError::OutcomeUnknown {
             resource,
             message,

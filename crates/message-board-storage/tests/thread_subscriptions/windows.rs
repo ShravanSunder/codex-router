@@ -1,5 +1,7 @@
 use super::*;
 use sqlx::{Connection, SqliteConnection};
+#[path = "release_tests.rs"]
+mod release_tests;
 
 fn policy_patch(
     mode: Option<SubscriptionMode>,
@@ -104,7 +106,7 @@ async fn subscription_notice_returns_only_ranges_and_counts_and_keeps_messages_u
     assert_eq!(due_roots, vec![root_message_id.clone()]);
     let (notice, settlement) = fixture
         .store
-        .select_subscription_notice(&reader, &due_roots, due_at)
+        .select_subscription_notice(&reader, &due_roots, due_at, usize::MAX)
         .await
         .unwrap();
 
@@ -204,7 +206,7 @@ async fn subscription_notice_caps_roots_without_settling_omitted_due_windows() {
     assert_eq!(due_roots.len(), 21);
     let (notice, settlement) = fixture
         .store
-        .select_subscription_notice(&reader, &due_roots, due_at)
+        .select_subscription_notice(&reader, &due_roots, due_at, usize::MAX)
         .await
         .unwrap();
     assert_eq!(notice.roots.len(), 20);
@@ -233,6 +235,111 @@ async fn subscription_notice_caps_roots_without_settling_omitted_due_windows() {
             .await
             .unwrap(),
         omitted_roots
+    );
+    fixture.finish().await;
+}
+
+#[tokio::test]
+async fn subscription_notice_byte_budget_selects_a_prefix_before_in_flight_commit() {
+    let mut fixture =
+        ThreadSubscriptionFixture::create_without_participant("notice-byte-budget").await;
+    let reader = session("notice-byte-budget-reader");
+    fixture
+        .store
+        .subscribe_thread_subscription(
+            ThreadSubscriptionSubscribeRequest {
+                reader: reader.clone(),
+                scope: SubscriptionScope::topic(fixture.topic_id.clone()),
+                policy: SubscriptionPolicyPatch::default(),
+            },
+            fixture.now,
+        )
+        .await
+        .unwrap();
+    for root_index in 0..2 {
+        fixture
+            .create_root(
+                human(&format!("budget-author-{root_index}")),
+                &format!("budget root {root_index}"),
+                fixture.now + chrono::Duration::seconds(i64::from(root_index + 1)),
+            )
+            .await;
+    }
+    let due_at = fixture.now + chrono::Duration::seconds(200);
+    let due_roots = fixture
+        .store
+        .due_subscription_roots(&reader, due_at)
+        .await
+        .unwrap();
+    assert_eq!(due_roots.len(), 2);
+
+    let (full_notice, full_settlement) = fixture
+        .store
+        .select_subscription_notice(&reader, &due_roots, due_at, usize::MAX)
+        .await
+        .unwrap();
+    let one_root_notice = full_notice.roots.iter().take(1).collect::<Vec<_>>();
+    let one_root_budget = serde_json::to_vec(&one_root_notice).unwrap().len();
+    assert!(serde_json::to_vec(&full_notice.roots).unwrap().len() > one_root_budget);
+    fixture
+        .store
+        .release_subscription_batch(&reader, &full_settlement)
+        .await
+        .unwrap();
+
+    let (bounded_notice, bounded_settlement) = fixture
+        .store
+        .select_subscription_notice(&reader, &due_roots, due_at, one_root_budget)
+        .await
+        .unwrap();
+    assert_eq!(bounded_notice.roots.len(), 1);
+    assert_eq!(bounded_settlement.roots.len(), 1);
+    assert_eq!(
+        serde_json::to_vec(&bounded_notice.roots).unwrap().len(),
+        one_root_budget
+    );
+    let selected_root_ids = bounded_notice
+        .roots
+        .iter()
+        .map(|root| root.root_id.clone())
+        .collect::<Vec<_>>();
+    let omitted_root = due_roots
+        .iter()
+        .find(|root| !selected_root_ids.contains(root))
+        .cloned()
+        .unwrap();
+    fixture
+        .store
+        .settle_subscription_batch(
+            &reader,
+            &bounded_settlement,
+            SubscriptionDeliveryOutcome::Accepted,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        fixture
+            .store
+            .due_subscription_roots(&reader, due_at)
+            .await
+            .unwrap(),
+        vec![omitted_root.clone()]
+    );
+
+    assert!(
+        fixture
+            .store
+            .select_subscription_notice(&reader, std::slice::from_ref(&omitted_root), due_at, 2)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        fixture
+            .store
+            .due_subscription_roots(&reader, due_at)
+            .await
+            .unwrap(),
+        vec![omitted_root]
     );
     fixture.finish().await;
 }
@@ -331,7 +438,7 @@ async fn residual_arrival_opens_at_first_arrival_while_batch_is_in_flight() {
         .unwrap();
     let (batch, settlement) = fixture
         .store
-        .select_subscription_notice(&fixture.reader, &due_roots, selection_time)
+        .select_subscription_notice(&fixture.reader, &due_roots, selection_time, usize::MAX)
         .await
         .unwrap();
     assert_eq!(batch.roots.len(), 1);
@@ -415,7 +522,7 @@ async fn residual_window_that_reaches_its_cap_is_due_immediately_after_settlemen
         .unwrap();
     let (_, settlement) = fixture
         .store
-        .select_subscription_notice(&fixture.reader, &due_roots, select_at)
+        .select_subscription_notice(&fixture.reader, &due_roots, select_at, usize::MAX)
         .await
         .unwrap();
 

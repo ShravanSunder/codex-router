@@ -141,6 +141,8 @@ async fn implementer_seat_is_unique_replaceable_and_visible_on_thread_reads() {
         .store
         .join_thread(
             ThreadJoinRequest {
+                mode: None,
+                when_idle: None,
                 root_message_id: root.clone(),
                 actor: first.clone(),
                 role: ParticipantRole::Implementer,
@@ -160,6 +162,8 @@ async fn implementer_seat_is_unique_replaceable_and_visible_on_thread_reads() {
         .store
         .join_thread(
             ThreadJoinRequest {
+                mode: None,
+                when_idle: None,
                 root_message_id: root.clone(),
                 actor: second.clone(),
                 role: ParticipantRole::Implementer,
@@ -177,6 +181,8 @@ async fn implementer_seat_is_unique_replaceable_and_visible_on_thread_reads() {
         .store
         .join_thread(
             ThreadJoinRequest {
+                mode: None,
+                when_idle: None,
                 root_message_id: root.clone(),
                 actor: second.clone(),
                 role: ParticipantRole::Implementer,
@@ -289,6 +295,8 @@ async fn create_and_repeat_join_preserve_one_valid_participant_and_explicit_watc
         .store
         .join_thread(
             ThreadJoinRequest {
+                mode: None,
+                when_idle: None,
                 root_message_id: created.message.message_id.clone(),
                 actor: creator.clone(),
                 role: ParticipantRole::Reviewer,
@@ -305,6 +313,8 @@ async fn create_and_repeat_join_preserve_one_valid_participant_and_explicit_watc
         .store
         .join_thread(
             ThreadJoinRequest {
+                mode: None,
+                when_idle: None,
                 root_message_id: created.message.message_id.clone(),
                 actor: creator,
                 role: ParticipantRole::Participant,
@@ -357,6 +367,8 @@ async fn create_and_repeat_join_preserve_one_valid_participant_and_explicit_watc
         .store
         .join_thread(
             ThreadJoinRequest {
+                mode: None,
+                when_idle: None,
                 root_message_id,
                 actor: second_join.participant.identity,
                 role: ParticipantRole::Advisor,
@@ -446,6 +458,8 @@ async fn replace_handover_and_human_resolve_are_atomic_sequence_transitions() {
         .store
         .join_thread(
             ThreadJoinRequest {
+                mode: None,
+                when_idle: None,
                 root_message_id: root.clone(),
                 actor: second.clone(),
                 role: ParticipantRole::Reviewer,
@@ -461,6 +475,8 @@ async fn replace_handover_and_human_resolve_are_atomic_sequence_transitions() {
         .store
         .join_thread(
             ThreadJoinRequest {
+                mode: None,
+                when_idle: None,
                 root_message_id: root.clone(),
                 actor: first.clone(),
                 role: ParticipantRole::Orchestrator,
@@ -477,6 +493,8 @@ async fn replace_handover_and_human_resolve_are_atomic_sequence_transitions() {
         .store
         .join_thread(
             ThreadJoinRequest {
+                mode: None,
+                when_idle: None,
                 root_message_id: root.clone(),
                 actor: third.clone(),
                 role: ParticipantRole::Orchestrator,
@@ -503,6 +521,8 @@ async fn replace_handover_and_human_resolve_are_atomic_sequence_transitions() {
         .store
         .join_thread(
             ThreadJoinRequest {
+                mode: None,
+                when_idle: None,
                 root_message_id: root.clone(),
                 actor: third.clone(),
                 role: ParticipantRole::Orchestrator,
@@ -622,7 +642,7 @@ async fn replace_handover_and_human_resolve_are_atomic_sequence_transitions() {
 }
 
 #[tokio::test]
-async fn session_post_and_listen_require_join_while_humans_remain_exempt() {
+async fn session_thread_subscriptions_require_join_while_topic_humans_remain_exempt() {
     let mut fixture = Fixture::open("gates").await;
     let created = fixture.create(human("owner"), None, false).await;
     let root = created.message.message_id;
@@ -663,6 +683,8 @@ async fn session_post_and_listen_require_join_while_humans_remain_exempt() {
         .store
         .join_thread(
             ThreadJoinRequest {
+                mode: None,
+                when_idle: None,
                 root_message_id: root.clone(),
                 actor: joined_non_orchestrator.clone(),
                 role: ParticipantRole::Reviewer,
@@ -687,23 +709,25 @@ async fn session_post_and_listen_require_join_while_humans_remain_exempt() {
         .await
         .unwrap_err();
     assert_eq!(resolve_failure.kind, BoardFailureKind::OrchestratorRequired);
-    let listen_failure = fixture
+    let subscription_failure = fixture
         .store
-        .prepare_thread_listen(&ThreadListenRequest {
-            reader: unjoined,
-            selection: ThreadListenSelection::Roots {
-                root_message_ids: vec![root.clone()],
+        .subscribe_thread_subscription(
+            ThreadSubscriptionSubscribeRequest {
+                reader: unjoined.clone(),
+                scope: SubscriptionScope::thread(root.clone()),
+                policy: SubscriptionPolicyPatch {
+                    mode: Some(SubscriptionMode::Poll),
+                    ..SubscriptionPolicyPatch::default()
+                },
             },
-            mode: ThreadListenMode::Once {
-                max_wait_seconds: 1,
-            },
-            acknowledge: false,
-            delivery: ThreadListenDelivery::Stdout,
-            from_activity_sequence: None,
-        })
+            chrono::Utc::now(),
+        )
         .await
         .unwrap_err();
-    assert_eq!(listen_failure.kind, BoardFailureKind::ParticipantRequired);
+    assert_eq!(
+        subscription_failure.kind,
+        BoardFailureKind::ParticipantRequired
+    );
     let human_reply = fixture
         .store
         .post_message(
@@ -722,28 +746,28 @@ async fn session_post_and_listen_require_join_while_humans_remain_exempt() {
         .await
         .unwrap();
     assert!(!human_reply.watch_status.watching);
-    fixture
+    let human_subscription = fixture
         .store
-        .prepare_thread_listen(&ThreadListenRequest {
-            reader: human("human-reader"),
-            selection: ThreadListenSelection::Roots {
-                root_message_ids: vec![root],
+        .subscribe_thread_subscription(
+            ThreadSubscriptionSubscribeRequest {
+                reader: human("human-reader"),
+                scope: SubscriptionScope::topic(fixture.topic_id.clone()),
+                policy: SubscriptionPolicyPatch {
+                    mode: Some(SubscriptionMode::Poll),
+                    ..SubscriptionPolicyPatch::default()
+                },
             },
-            mode: ThreadListenMode::Once {
-                max_wait_seconds: 1,
-            },
-            acknowledge: false,
-            delivery: ThreadListenDelivery::Stdout,
-            from_activity_sequence: None,
-        })
+            chrono::Utc::now(),
+        )
         .await
         .unwrap();
+    assert_eq!(human_subscription.policy().mode(), SubscriptionMode::Poll);
     fixture.finish().await;
 }
 
 #[tokio::test]
-async fn listen_refuses_every_missing_session_participant_without_creating_watches() {
-    let mut fixture = Fixture::open("listen-all-missing").await;
+async fn thread_subscriptions_refuse_each_missing_session_participant_without_creating_watches() {
+    let mut fixture = Fixture::open("subscription-missing-participants").await;
     let first_root = fixture
         .create(human("owner-one"), None, false)
         .await
@@ -756,36 +780,39 @@ async fn listen_refuses_every_missing_session_participant_without_creating_watch
         .message_id;
     let reader = session("unjoined-listener");
 
-    let failure = fixture
-        .store
-        .prepare_thread_listen(&ThreadListenRequest {
-            reader: reader.clone(),
-            selection: ThreadListenSelection::Roots {
-                root_message_ids: vec![first_root.clone(), second_root.clone()],
-            },
-            mode: ThreadListenMode::Once {
-                max_wait_seconds: 1,
-            },
-            acknowledge: false,
-            delivery: ThreadListenDelivery::Stdout,
-            from_activity_sequence: None,
-        })
-        .await
-        .unwrap_err();
-    assert_eq!(failure.kind, BoardFailureKind::ParticipantRequired);
-    let BoardErrorDetails::ParticipantRefusal { refusal } = failure.details else {
-        panic!("missing participant refusal details");
-    };
-    assert_eq!(refusal.root_message_id, first_root);
-    assert_eq!(
-        refusal.missing_root_message_ids,
-        vec![first_root.clone(), second_root.clone()]
-    );
-    for root_message_id in [first_root, second_root] {
+    for root_message_id in [first_root.clone(), second_root.clone()] {
+        let failure = fixture
+            .store
+            .subscribe_thread_subscription(
+                ThreadSubscriptionSubscribeRequest {
+                    reader: reader.clone(),
+                    scope: SubscriptionScope::thread(root_message_id.clone()),
+                    policy: SubscriptionPolicyPatch {
+                        mode: Some(SubscriptionMode::Poll),
+                        ..SubscriptionPolicyPatch::default()
+                    },
+                },
+                chrono::Utc::now(),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(failure.kind, BoardFailureKind::ParticipantRequired);
+        assert!(matches!(
+            &failure.details,
+            BoardErrorDetails::ParticipantRefusal { .. }
+        ));
+        let BoardErrorDetails::ParticipantRefusal { refusal } = failure.details else {
+            return;
+        };
+        assert_eq!(refusal.root_message_id, root_message_id);
+        assert_eq!(
+            refusal.missing_root_message_ids,
+            vec![root_message_id.clone()]
+        );
         let thread = fixture
             .store
             .show_thread(ThreadShowRequest {
-                root_message_id,
+                root_message_id: root_message_id.clone(),
                 reader: Some(reader.clone()),
             })
             .await
@@ -806,6 +833,8 @@ async fn concurrent_orchestrator_joins_commit_one_holder_and_report_the_winner()
     let first = session("first-racer");
     let second = session("second-racer");
     let first_request = ThreadJoinRequest {
+        mode: None,
+        when_idle: None,
         root_message_id: root.clone(),
         actor: first.clone(),
         role: ParticipantRole::Orchestrator,
@@ -814,6 +843,8 @@ async fn concurrent_orchestrator_joins_commit_one_holder_and_report_the_winner()
         note: None,
     };
     let second_request = ThreadJoinRequest {
+        mode: None,
+        when_idle: None,
         root_message_id: root.clone(),
         actor: second.clone(),
         role: ParticipantRole::Orchestrator,
@@ -847,7 +878,8 @@ async fn concurrent_orchestrator_joins_commit_one_holder_and_report_the_winner()
 }
 
 #[tokio::test]
-async fn emitted_batch_advances_last_seen_monotonically_and_lifecycle_is_not_acknowledgeable() {
+async fn subscription_handoff_advances_last_seen_monotonically_and_lifecycle_is_not_acknowledgeable()
+ {
     let mut fixture = Fixture::open("listen-presence").await;
     let created = fixture.create(human("owner"), None, false).await;
     let root = created.message.message_id;
@@ -856,6 +888,8 @@ async fn emitted_batch_advances_last_seen_monotonically_and_lifecycle_is_not_ack
         .store
         .join_thread(
             ThreadJoinRequest {
+                mode: Some(SubscriptionMode::Poll),
+                when_idle: Some(WhenIdle::Hold),
                 root_message_id: root.clone(),
                 actor: reader.clone(),
                 role: ParticipantRole::Reviewer,
@@ -868,6 +902,26 @@ async fn emitted_batch_advances_last_seen_monotonically_and_lifecycle_is_not_ack
         .await
         .unwrap();
     let join_sequence = joined.participant.joined_at_activity;
+    fixture
+        .store
+        .subscribe_thread_subscription(
+            ThreadSubscriptionSubscribeRequest {
+                reader: reader.clone(),
+                scope: SubscriptionScope::thread(root.clone()),
+                policy: SubscriptionPolicyPatch {
+                    mode: Some(SubscriptionMode::Poll),
+                    when_idle: Some(WhenIdle::Hold),
+                    timing: SubscriptionTimingPatch {
+                        quiet_seconds: Some(0),
+                        cap_seconds: Some(0),
+                    },
+                    ..SubscriptionPolicyPatch::default()
+                },
+            },
+            chrono::Utc::now(),
+        )
+        .await
+        .unwrap();
     let external_message = fixture
         .store
         .post_message(
@@ -883,22 +937,6 @@ async fn emitted_batch_advances_last_seen_monotonically_and_lifecycle_is_not_ack
             },
             chrono::Utc::now(),
         )
-        .await
-        .unwrap();
-    let context = fixture
-        .store
-        .prepare_thread_listen(&ThreadListenRequest {
-            reader: reader.clone(),
-            selection: ThreadListenSelection::Roots {
-                root_message_ids: vec![root.clone()],
-            },
-            mode: ThreadListenMode::Once {
-                max_wait_seconds: 1,
-            },
-            acknowledge: false,
-            delivery: ThreadListenDelivery::Stdout,
-            from_activity_sequence: Some(join_sequence),
-        })
         .await
         .unwrap();
     let own_message = fixture
@@ -918,16 +956,35 @@ async fn emitted_batch_advances_last_seen_monotonically_and_lifecycle_is_not_ack
         )
         .await
         .unwrap();
-    let batch = fixture
+    let selection_time = chrono::Utc::now() + chrono::Duration::seconds(120);
+    let due_roots = fixture
         .store
-        .select_thread_listen_batch_set(ListenId::generate(), &context, 900 * 1024)
+        .due_subscription_roots(&reader, selection_time)
         .await
         .unwrap();
-    assert_eq!(batch.batches.len(), 1);
+    assert_eq!(due_roots, vec![root.clone()]);
+    let (notice, settlement) = fixture
+        .store
+        .select_subscription_notice(&reader, &due_roots, selection_time, usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(notice.roots.len(), 1);
+    let selected_root_notice = notice.roots.first();
     assert_eq!(
-        batch.batches[0].delivered_through,
-        external_message.message.activity_sequence
+        selected_root_notice.map(|root_notice| root_notice.through_sequence),
+        Some(external_message.message.activity_sequence),
+        "the subscription notice should end at the external reply"
     );
+    assert!(
+        selected_root_notice.is_some_and(|root_notice| root_notice.from_sequence > join_sequence),
+        "the subscription notice should begin after the session joined"
+    );
+    assert!(!serde_json::to_string(&notice).unwrap().contains("external"));
+    fixture
+        .store
+        .settle_subscription_batch(&reader, &settlement, SubscriptionDeliveryOutcome::Accepted)
+        .await
+        .unwrap();
     let participant = fixture
         .store
         .list_thread_participants(ThreadParticipantListRequest {
@@ -943,7 +1000,7 @@ async fn emitted_batch_advances_last_seen_monotonically_and_lifecycle_is_not_ack
         .unwrap();
     assert_eq!(
         participant.last_seen_activity, own_message.message.activity_sequence,
-        "an older emitted Batch cannot reduce last-seen"
+        "an older subscription settlement cannot reduce last-seen"
     );
     let acknowledgement = fixture
         .store
@@ -974,6 +1031,8 @@ async fn emitted_batch_advances_last_seen_monotonically_and_lifecycle_is_not_ack
         .store
         .join_thread(
             ThreadJoinRequest {
+                mode: None,
+                when_idle: None,
                 root_message_id: root,
                 actor: session("later-participant"),
                 role: ParticipantRole::Advisor,
@@ -1011,6 +1070,8 @@ async fn participant_cursor_is_thread_bound_and_unknown_stored_role_is_rejected(
         .store
         .join_thread(
             ThreadJoinRequest {
+                mode: None,
+                when_idle: None,
                 root_message_id: second_root.clone(),
                 actor: session("other-thread"),
                 role: ParticipantRole::Participant,
@@ -1029,6 +1090,8 @@ async fn participant_cursor_is_thread_bound_and_unknown_stored_role_is_rejected(
             .store
             .join_thread(
                 ThreadJoinRequest {
+                    mode: None,
+                    when_idle: None,
                     root_message_id: first_root.clone(),
                     actor: session(name),
                     role: ParticipantRole::Participant,
@@ -1125,6 +1188,8 @@ async fn thread_list_rejects_corrupt_projected_orchestrator_records() {
         .store
         .join_thread(
             ThreadJoinRequest {
+                mode: None,
+                when_idle: None,
                 root_message_id: second_root,
                 actor: session("foreign-participant"),
                 role: ParticipantRole::Participant,

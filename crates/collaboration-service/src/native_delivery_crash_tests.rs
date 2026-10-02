@@ -6,7 +6,8 @@ use crate::{
 };
 use collaboration_client::ControlClient;
 use collaboration_protocol::{
-    DeliveryDisposition, DeliveryEvidence, DeliveryShowRequest, OperationId, SavedMessage,
+    DeliveryDisposition, DeliveryEvidence, DeliveryShowRequest, OperationId, PushId,
+    RouterOriginRef, SavedMessage,
 };
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
@@ -34,11 +35,21 @@ pub(super) fn checkpoint(stage: &str) {
     }
 }
 
+fn native_delivery_crash_root(fixture_id: &OperationId) -> PathBuf {
+    let uuid_tail: String = fixture_id
+        .as_str()
+        .chars()
+        .filter(|character| *character != '-')
+        .skip(16)
+        .collect();
+    std::env::temp_dir().join(format!("wake-crash-{uuid_tail}"))
+}
+
 #[tokio::test]
 async fn native_delivery_process_loss_preserves_uncertainty_without_resend() -> TestResult<()> {
     for stage in ["intent-persisted", "receipt-before-commit"] {
         let fixture_id = OperationId::generate();
-        let root = PathBuf::from(format!("/tmp/delivery-crash-{}", fixture_id.as_str()));
+        let root = native_delivery_crash_root(&fixture_id);
         std::fs::DirBuilder::new().mode(0o700).create(&root)?;
         let output = tokio::time::timeout(
             Duration::from_secs(15),
@@ -67,6 +78,7 @@ async fn native_delivery_process_loss_preserves_uncertainty_without_resend() -> 
         }
         let delivery: DeliveryId =
             serde_json::from_slice(&std::fs::read(root.join("delivery-id.json"))?)?;
+        let push_id: PushId = serde_json::from_slice(&std::fs::read(root.join("push-id.json"))?)?;
         let witness_path = root.join("native-receipt.json");
         if witness_path.exists() != (stage == "receipt-before-commit") {
             return Err(
@@ -75,7 +87,7 @@ async fn native_delivery_process_loss_preserves_uncertainty_without_resend() -> 
         }
         if witness_path.exists() {
             let witness: Value = serde_json::from_slice(&std::fs::read(&witness_path)?)?;
-            if witness.get("clientUserMessageId") != Some(&json!(delivery)) {
+            if witness.get("clientUserMessageId") != Some(&json!(push_id)) {
                 return Err("native mutation lost stable delivery correlation".into());
             }
         }
@@ -156,11 +168,196 @@ async fn native_delivery_process_loss_preserves_uncertainty_without_resend() -> 
 }
 
 #[tokio::test]
+async fn interrupted_wake_attempt_survives_shared_restore_and_worker_delivers_once()
+-> TestResult<()> {
+    let fixture_id = OperationId::generate();
+    let root = native_delivery_crash_root(&fixture_id);
+    std::fs::DirBuilder::new().mode(0o700).create(&root)?;
+    let output = tokio::time::timeout(
+        Duration::from_secs(15),
+        tokio::process::Command::new(std::env::current_exe()?)
+            .args([
+                "--exact",
+                "wakeup_delivery_sender::crash_tests::native_delivery_crash_child",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env(ROOT_ENV, &root)
+            .env(STAGE_ENV, "fire-committed")
+            .env(ID_ENV, fixture_id.as_str())
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await??;
+    if output.status.code() != Some(CRASH_EXIT) {
+        return Err(format!(
+            "fire-committed: checkpoint not reached: {:?}; {}; {}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        )
+        .into());
+    }
+    let delivery_id: DeliveryId =
+        serde_json::from_slice(&std::fs::read(root.join("delivery-id.json"))?)?;
+    let expected_push_id: PushId =
+        serde_json::from_slice(&std::fs::read(root.join("push-id.json"))?)?;
+    let witness_path = root.join("native-receipt.json");
+    if witness_path.exists() {
+        return Err("fire-committed child dispatched before exiting".into());
+    }
+
+    let store = Arc::new(Mutex::new(
+        AutomationStore::open(&root.join("automation.sqlite")).await?,
+    ));
+    let globally_settled = store
+        .lock()
+        .await
+        .settle_interrupted_pushes(chrono::Utc::now())
+        .await?;
+    if globally_settled != 0 {
+        return Err("shared startup recovery settled the Wake-owned attempt".into());
+    }
+    let before = store
+        .lock()
+        .await
+        .read_delivery::<SessionRef, CodexGeneration, crate::stored_delivery_receipt::StoredDeliveryReceipt>(
+            &delivery_id,
+        )
+        .await?;
+    if before.status != agent_automation::DeliveryStatus::Pending || before.attempt.is_some() {
+        return Err("fire commit did not leave one undispatched mailbox row".into());
+    }
+    let push_before = store
+        .lock()
+        .await
+        .get_push_record(&expected_push_id)
+        .await?
+        .ok_or("committed wake push missing after restart")?;
+    if push_before.delivery_state != automation_storage::PushDeliveryState::Attempted {
+        return Err("Wake-owned attempt did not remain available to its worker".into());
+    }
+
+    let listener = tokio::net::UnixListener::bind(root.join("native.sock"))?;
+    let (correlation_sender, correlation_receiver) = tokio::sync::oneshot::channel();
+    let native = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await?;
+        let mut socket = tokio_tungstenite::accept_async(stream).await?;
+        let init: Value =
+            serde_json::from_str(socket.next().await.ok_or("missing init")??.to_text()?)?;
+        socket
+            .send(Message::Text(
+                json!({"id":init["id"],"result":{}}).to_string().into(),
+            ))
+            .await?;
+        let _initialized = socket.next().await.ok_or("missing initialized")??;
+        let read: Value = serde_json::from_str(
+            socket
+                .next()
+                .await
+                .ok_or("missing native read")??
+                .to_text()?,
+        )?;
+        if read.get("method") != Some(&json!("thread/read")) {
+            return Err("wake delivery skipped the native residency read".into());
+        }
+        socket
+            .send(Message::Text(
+                json!({"id":read["id"],"result":{"thread":{"id":"fixture-thread","status":{"type":"idle"}}}})
+                    .to_string()
+                    .into(),
+            ))
+            .await?;
+        let start: Value = serde_json::from_str(
+            socket
+                .next()
+                .await
+                .ok_or("missing native start")??
+                .to_text()?,
+        )?;
+        if start.get("method") != Some(&json!("turn/start")) {
+            return Err("wake delivery did not use the saved auto mode".into());
+        }
+        let correlation = start
+            .pointer("/params/clientUserMessageId")
+            .and_then(Value::as_str)
+            .ok_or("wake push correlation missing")?
+            .to_owned();
+        socket
+            .send(Message::Text(
+                json!({"id":start["id"],"result":{"turn":{"id":"fixture-turn"}}})
+                    .to_string()
+                    .into(),
+            ))
+            .await?;
+        correlation_sender
+            .send(correlation)
+            .map_err(|_| "wake correlation receiver dropped")?;
+        Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+    });
+    let identity = identity(&root, Arc::clone(&store), NEW_EPOCH)?;
+    let sender = WakeDeliverySender {
+        delivery: identity
+            .session_delivery
+            .ok_or("session delivery missing")?,
+        configuration: identity.configuration,
+        machine_identity: identity.machine_identity,
+    };
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        sender.dispatch(Arc::clone(&store), delivery_id.clone()),
+    )
+    .await??;
+    let observed_correlation =
+        tokio::time::timeout(Duration::from_secs(5), correlation_receiver).await??;
+    if observed_correlation != expected_push_id.as_str() {
+        native.await??;
+        return Err("restart dispatched a different push id".into());
+    }
+    native.await??;
+    let recovered = store
+        .lock()
+        .await
+        .read_delivery::<
+            SessionRef,
+            CodexGeneration,
+            crate::stored_delivery_receipt::StoredDeliveryReceipt,
+        >(&delivery_id)
+        .await?;
+    if recovered.status != agent_automation::DeliveryStatus::Accepted || recovered.receipt.is_none()
+    {
+        return Err("restart delivery did not commit its accepted mailbox result".into());
+    }
+    let push_after = store
+        .lock()
+        .await
+        .get_push_record(&expected_push_id)
+        .await?
+        .ok_or("wake push missing after restart delivery")?;
+    if push_after.push_id != push_before.push_id
+        || push_after.delivery_state != automation_storage::PushDeliveryState::Delivered
+    {
+        return Err("restart did not settle the original wake push".into());
+    }
+    drop(store);
+    for entry in std::fs::read_dir(&root)? {
+        let entry = entry?;
+        if entry.file_type()?.is_dir() {
+            return Err("unexpected fixture directory".into());
+        }
+        std::fs::remove_file(entry.path())?;
+    }
+    std::fs::remove_dir(root)?;
+    Ok(())
+}
+
+#[tokio::test]
 #[ignore = "owned sender subprocess exits at the selected durable/native boundary"]
 async fn native_delivery_crash_child() -> TestResult<()> {
     let fixture_id: OperationId = std::env::var(ID_ENV)?.try_into()?;
     let root = PathBuf::from(std::env::var(ROOT_ENV)?);
-    if root.as_path() != Path::new(&format!("/tmp/delivery-crash-{}", fixture_id.as_str())) {
+    let expected_root = native_delivery_crash_root(&fixture_id);
+    if root != expected_root {
         return Err("refusing non-fixture sender root".into());
     }
     let store = Arc::new(Mutex::new(
@@ -181,10 +378,12 @@ async fn native_delivery_crash_child() -> TestResult<()> {
             now_ms: 0,
         })
         .await?;
-    let automation_storage::WakeEvaluation::Fired { delivery_id, .. } = store
+    let automation_storage::WakeEvaluation::Fired {
+        delivery_id, fire, ..
+    } = store
         .lock()
         .await
-        .evaluate_wakeup::<SavedMessage>(&wake.definition.wakeup_id, 1000)
+        .evaluate_wakeup::<SavedMessage>(&wake.definition.wakeup_id, 1000, build_wake_push_draft)
         .await?
     else {
         return Err("fixture firing missing".into());
@@ -193,6 +392,28 @@ async fn native_delivery_crash_child() -> TestResult<()> {
         root.join("delivery-id.json"),
         serde_json::to_vec(&delivery_id)?,
     )?;
+    let origin = RouterOriginRef::Wake {
+        wakeup_id: fire.wakeup_id,
+        occurrence_id: fire.occurrence_id,
+    };
+    let push = store
+        .lock()
+        .await
+        .get_push_record_by_origin_reference(&origin)
+        .await?
+        .ok_or("wake push missing in crash child")?;
+    std::fs::write(
+        root.join("push-id.json"),
+        serde_json::to_vec(&push.push_id)?,
+    )?;
+    if std::env::var(STAGE_ENV).as_deref() == Ok("fire-committed") {
+        store
+            .lock()
+            .await
+            .mark_push_attempted(&push.push_id)
+            .await?;
+    }
+    checkpoint("fire-committed");
     let listener = tokio::net::UnixListener::bind(root.join("native.sock"))?;
     let witness = root.join("native-receipt.json");
     let _native = tokio::spawn(async move {
@@ -247,7 +468,7 @@ async fn native_delivery_crash_child() -> TestResult<()> {
             .session_delivery
             .ok_or("session delivery missing")?,
         configuration: identity.configuration,
-        display_names: identity.display_names,
+        machine_identity: identity.machine_identity,
     };
     sender.dispatch(store, delivery_id).await?;
     Err("sender did not stop at selected checkpoint".into())

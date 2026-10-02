@@ -12,6 +12,11 @@ from pathlib import Path
 SqlxPreparationTarget = tuple[str, tuple[str, ...], str]
 SQLX_PREPARATION_TARGETS: t.Final[tuple[SqlxPreparationTarget, ...]] = (
     (
+        "automation-storage",
+        ("crates/automation-storage/migrations",),
+        "automation-schema.sqlite",
+    ),
+    (
         "codex-router-state",
         ("crates/codex-router-state/migrations",),
         "account-schema.sqlite",
@@ -26,6 +31,7 @@ SQLX_PREPARATION_TARGETS: t.Final[tuple[SqlxPreparationTarget, ...]] = (
         (
             "crates/message-board-storage/migrations",
             "crates/collaboration-service/migrations",
+            "crates/automation-storage/migrations",
         ),
         "provider-operation-schema.sqlite",
     ),

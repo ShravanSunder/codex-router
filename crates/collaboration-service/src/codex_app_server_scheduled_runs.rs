@@ -487,6 +487,7 @@ impl ScheduledRunExecution for CodexAppServerScheduledRuns {
                             detail: Some(
                                 "Held scheduled target belongs to an old generation".into(),
                             ),
+                            claims: None,
                         }));
                     }
                     let result = crate::scheduled_native_dispatch::dispatch(

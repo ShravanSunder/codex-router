@@ -3,11 +3,15 @@ use serde::{Deserialize, Serialize};
 use uuid::{Uuid, Variant};
 
 #[derive(Debug, thiserror::Error)]
-#[error("automation identity must be a canonical lowercase RFC UUIDv7")]
-pub struct AutomationIdentityError;
+#[error(
+    "automation identity parameter {parameter} must be a canonical lowercase RFC UUIDv7, for example 019f0000-0000-7000-8000-000000000001"
+)]
+pub struct AutomationIdentityError {
+    parameter: &'static str,
+}
 
 macro_rules! automation_identity {
-    ($($name:ident),+ $(,)?) => {$ (
+    ($($name:ident => $parameter:literal),+ $(,)?) => {$ (
         #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
         #[serde(try_from = "String", into = "String")]
         pub struct $name(String);
@@ -21,12 +25,16 @@ macro_rules! automation_identity {
         impl TryFrom<String> for $name {
             type Error = AutomationIdentityError;
             fn try_from(value: String) -> Result<Self, Self::Error> {
-                let parsed = Uuid::parse_str(&value).map_err(|_| AutomationIdentityError)?;
+                let parsed = Uuid::parse_str(&value).map_err(|_| AutomationIdentityError {
+                    parameter: $parameter,
+                })?;
                 if parsed.get_version_num() != 7
                     || parsed.get_variant() != Variant::RFC4122
                     || parsed.hyphenated().to_string() != value
                 {
-                    return Err(AutomationIdentityError);
+                    return Err(AutomationIdentityError {
+                        parameter: $parameter,
+                    });
                 }
                 Ok(Self(value))
             }
@@ -43,17 +51,34 @@ macro_rules! automation_identity {
     )+};
 }
 automation_identity!(
-    ScheduleId,
-    InstructionId,
-    RunId,
-    WakeupId,
-    DeliveryId,
-    ThreadBindingId,
-    OperationId,
-    RevisionId,
-    OccurrenceId,
-    AttemptId,
-    ChangeId,
-    EventId,
-    SubscriptionId
+    ScheduleId => "scheduleId",
+    InstructionId => "instructionId",
+    RunId => "runId",
+    WakeupId => "wakeupId",
+    DeliveryId => "deliveryId",
+    ThreadBindingId => "threadBindingId",
+    OperationId => "operationId",
+    RevisionId => "revisionId",
+    OccurrenceId => "occurrenceId",
+    AttemptId => "attemptId",
+    ChangeId => "changeId",
+    EventId => "eventId",
+    SubscriptionId => "subscriptionId"
 );
+
+#[cfg(test)]
+mod tests {
+    use super::{AutomationIdentityError, WakeupId};
+
+    #[test]
+    fn invalid_automation_identity_names_the_parameter_and_uuid_v7_example() {
+        let error = WakeupId::try_from("not-an-identity".to_owned())
+            .expect_err("invalid identity is rejected");
+
+        assert_eq!(
+            error.to_string(),
+            "automation identity parameter wakeupId must be a canonical lowercase RFC UUIDv7, for example 019f0000-0000-7000-8000-000000000001"
+        );
+        let _error_type_is_public = std::any::type_name::<AutomationIdentityError>();
+    }
+}
