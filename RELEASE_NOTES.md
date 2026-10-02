@@ -1,6 +1,6 @@
 # Release Notes
 
-## 0.1.62
+## 0.1.61
 
 - Sign `codex-router`, `agent-collaboration` and `agent-sessions` with the Developer ID identity of team `974QD84WVC` under fixed identifiers (`dev.shravansunder.<executable>`), with the hardened runtime and a secure timestamp. Keychain approvals now belong to that identity and survive upgrades instead of prompting after every release. After the first signed install, the next Host restart asks once per Router Keychain item; choose **Always Allow**.
 - Local Apple Silicon `cargo run`/`cargo test` sign the same executables as `dev.shravansunder.<executable>.debug`, a separate identity, so debug rebuilds stop prompting and debug builds never share production Keychain approvals. A debug Router started directly by a debug-host example can be signed with `scripts/cargo_debug_signing_runner.sh --sign-only target/debug/codex-router`.
