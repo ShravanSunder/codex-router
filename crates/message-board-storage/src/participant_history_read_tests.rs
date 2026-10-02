@@ -155,6 +155,11 @@ async fn participant_history_reads_fail_closed_for_corrupt_attribution_relations
             .join(&root.message_id, session("A"), Reviewer, None)
             .await;
         let reply = fixture.post(&root.message_id, session("A")).await;
+        // H's own join and later reply: a pointer between them passes every check
+        // except "humans carry no attribution".
+        let human_grant = fixture
+            .join(&root.message_id, human("H"), Reviewer, None)
+            .await;
         let human_reply = fixture.post(&root.message_id, human("H")).await;
         let message = match corruption {
             AttributionCorruption::MainWrongKind => &root,
@@ -206,7 +211,7 @@ async fn participant_history_reads_fail_closed_for_corrupt_attribution_relations
             }
             AttributionCorruption::HumanWithPointer => {
                 sqlx::query("UPDATE board_messages SET posted_from_activity=? WHERE message_id=?")
-                    .bind(grant)
+                    .bind(human_grant)
                     .bind(human_reply.message_id.as_str())
                     .execute(&mut fixture.store.connection)
                     .await
