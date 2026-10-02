@@ -1,8 +1,9 @@
 use crate::{
     EndpointId, EndpointRef, SessionDisplayName, SessionId, SessionRef, UuidIdentity,
     push_line::{
-        MachineId, MachineLabel, ParsedPushLineHeader, PushHeaderFacts, PushId, PushKind,
-        PushLineInput, PushOrigin, RouterLink, parse_push_line_header, render_push_line,
+        MAX_PUSH_LINE_BYTES, MachineId, MachineLabel, ParsedPushLineHeader, PushHeaderFacts,
+        PushId, PushKind, PushLineInput, PushOrigin, RouterLink, parse_push_line_header,
+        render_push_line,
     },
 };
 use agent_automation::{RunId, ScheduleId};
@@ -61,6 +62,54 @@ fn agent_dm_input(body: String, machine_label: &str) -> PushLineInput {
         Some(body),
         machine_label,
     )
+}
+
+fn arbitrary_display_name(source_scalars: &[char]) -> SessionDisplayName {
+    let mut value = String::from("Name");
+    for scalar in source_scalars
+        .iter()
+        .copied()
+        .filter(|scalar| !scalar.is_control())
+    {
+        let scalar = match scalar {
+            '→' => '›',
+            '←' => '‹',
+            other => other,
+        };
+        if value.chars().count() == 120 {
+            break;
+        }
+        value.push(scalar);
+    }
+    SessionDisplayName::try_from(value).expect("bounded display name")
+}
+
+fn arbitrary_uuid_v7(seed: u64) -> String {
+    format!(
+        "018f47d2-24d5-7a68-b9ec-{:012x}",
+        seed & 0x0000_ffff_ffff_ffff
+    )
+}
+
+fn bounded_fixture_text(prefix: &str, source_scalars: &[char], max_scalars: usize) -> String {
+    let mut value = prefix.to_owned();
+    let remaining_scalars = max_scalars.saturating_sub(value.chars().count());
+    value.extend(source_scalars.iter().copied().take(remaining_scalars));
+    value
+}
+
+fn assert_push_line_invariants(
+    request: &PushLineInput,
+) -> Result<(), proptest::test_runner::TestCaseError> {
+    let rendered = render_push_line(request).expect("valid push line input renders");
+    let has_raw_line_break = rendered
+        .chars()
+        .any(|scalar| matches!(scalar, '\r' | '\n' | '\u{2028}' | '\u{2029}'));
+    proptest::prop_assert!(rendered.len() <= MAX_PUSH_LINE_BYTES);
+    proptest::prop_assert_eq!(rendered.lines().count(), 1);
+    proptest::prop_assert!(!has_raw_line_break);
+    proptest::prop_assert!(rendered.ends_with(&request.link.to_string()));
+    Ok(())
 }
 
 #[test]
@@ -355,15 +404,117 @@ proptest::proptest! {
         ..proptest::test_runner::Config::default()
     })]
     #[test]
-    fn arbitrary_multibyte_and_control_text_always_stays_within_the_line_budget(
-        source_scalars in proptest::collection::vec(proptest::char::any(), 0..500)
+    fn arbitrary_display_fields_for_every_push_kind_fit_and_keep_the_link_suffix(
+        machine_scalars in proptest::collection::vec(proptest::char::any(), 0..300),
+        name_scalars in proptest::collection::vec(proptest::char::any(), 0..160),
+        body_scalars in proptest::collection::vec(proptest::char::any(), 0..500),
+        held_since_scalars in proptest::collection::vec(proptest::char::any(), 0..100),
+        scope_scalars in proptest::collection::vec(proptest::char::any(), 0..100),
+        schedule_seed in proptest::prelude::any::<u64>(),
+        run_seed in proptest::prelude::any::<u64>(),
+        root_count in 1_u8..=20,
+        message_count in proptest::prelude::any::<u64>(),
+        held_since_present in proptest::prelude::any::<bool>(),
+        thread_resolved in proptest::prelude::any::<bool>()
     ) {
-        let body: String = source_scalars.into_iter().collect();
-        let request = agent_dm_input(body, "machine");
-        let rendered = render_push_line(&request).expect("bounded line");
+        let machine_text: String = machine_scalars.into_iter().collect();
+        let machine_label = format!("Machine {machine_text}");
+        let name = arbitrary_display_name(&name_scalars);
+        let body: String = body_scalars.into_iter().collect();
+        let requester = session("claude-local", "12345678-session");
+        let schedule_id = ScheduleId::try_from(arbitrary_uuid_v7(schedule_seed))
+            .expect("generated schedule UUIDv7");
+        let run_id = RunId::try_from(arbitrary_uuid_v7(run_seed)).expect("generated run UUIDv7");
+        let held_since = held_since_present.then(|| {
+            bounded_fixture_text("since ", &held_since_scalars, 64)
+        });
+        let scope = bounded_fixture_text("scope", &scope_scalars, 64);
 
-        proptest::prop_assert!(rendered.len() <= 1024);
-        proptest::prop_assert_eq!(rendered.lines().count(), 1);
-        proptest::prop_assert!(rendered.ends_with(&request.link.to_string()));
+        // ScheduleRun currently stores IDs only; its absent display-name field is an explicit follow-up.
+        for kind in [
+            PushKind::DirectMessage,
+            PushKind::Wake,
+            PushKind::ScheduleRun,
+            PushKind::Approval,
+            PushKind::Question,
+            PushKind::SubscriptionActivity,
+            PushKind::SubscriptionExpiry,
+        ] {
+            let request = match kind {
+                PushKind::DirectMessage => line_input(
+                    PushOrigin::Session(requester.clone()),
+                    PushHeaderFacts::DirectMessage {
+                        sender_display_name: Some(name.clone()),
+                    },
+                    Some(body.clone()),
+                    &machine_label,
+                ),
+                PushKind::Wake => line_input(
+                    PushOrigin::Router(PushKind::Wake),
+                    PushHeaderFacts::Wake,
+                    Some(body.clone()),
+                    &machine_label,
+                ),
+                PushKind::ScheduleRun => line_input(
+                    PushOrigin::Router(PushKind::ScheduleRun),
+                    PushHeaderFacts::ScheduleRun {
+                        schedule_id: schedule_id.clone(),
+                        run_id: run_id.clone(),
+                    },
+                    Some(body.clone()),
+                    &machine_label,
+                ),
+                PushKind::Approval => line_input(
+                    PushOrigin::Router(PushKind::Approval),
+                    PushHeaderFacts::Approval {
+                        requester: requester.clone(),
+                        requester_display_name: Some(name.clone()),
+                    },
+                    Some(body.clone()),
+                    &machine_label,
+                ),
+                PushKind::Question => line_input(
+                    PushOrigin::Router(PushKind::Question),
+                    PushHeaderFacts::Question {
+                        requester: requester.clone(),
+                        requester_display_name: Some(name.clone()),
+                    },
+                    Some(body.clone()),
+                    &machine_label,
+                ),
+                PushKind::SubscriptionActivity => line_input(
+                    PushOrigin::Router(PushKind::SubscriptionActivity),
+                    PushHeaderFacts::SubscriptionActivity {
+                        root_count,
+                        message_count,
+                        held_since: held_since.clone(),
+                        thread_resolved,
+                    },
+                    None,
+                    &machine_label,
+                ),
+                PushKind::SubscriptionExpiry => line_input(
+                    PushOrigin::Router(PushKind::SubscriptionExpiry),
+                    PushHeaderFacts::SubscriptionExpiry {
+                        scope: scope.clone(),
+                    },
+                    None,
+                    &machine_label,
+                ),
+            };
+            assert_push_line_invariants(&request)?;
+
+            if kind == PushKind::DirectMessage {
+                let owner_request = line_input(
+                    PushOrigin::OwnerUnverified,
+                    PushHeaderFacts::DirectMessage {
+                        sender_display_name: None,
+                    },
+                    Some(body.clone()),
+                    &machine_label,
+                );
+                assert_push_line_invariants(&owner_request)?;
+            }
+        }
     }
 }
