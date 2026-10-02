@@ -41,14 +41,15 @@ pub enum SessionsCommandError {
     /// The selected profile sets permission keys, so Codex would refuse the remote
     /// resume or fork.
     #[error(
-        "{} sets {keys}; Codex refuses to reopen or fork a Router session while its profile sets a permission key, because the session keeps its saved permissions. Remove those keys from that file and keep permission defaults in CODEX_HOME/config.toml",
-        profile_path.display()
+        "{} sets {}; Codex refuses to reopen or fork a Router session while its profile sets a permission key, because the session keeps its saved permissions. Remove those keys from that file (`codex-router profile --approve-codex-home-write` rewrites the Router profile without them) and keep permission defaults in CODEX_HOME/config.toml",
+        profile_path.display(),
+        keys.join(", ")
     )]
     ProfileBlocksRemoteResume {
         /// Profile file Codex loads for the Router profile.
         profile_path: std::path::PathBuf,
-        /// Comma-separated permission keys the profile sets.
-        keys: String,
+        /// Permission keys the profile sets.
+        keys: Vec<&'static str>,
     },
     /// Codex exited unsuccessfully.
     #[error("codex resume command exited with {status}")]

@@ -33,7 +33,7 @@ fn hosted_resume_names_the_permission_keys_the_router_profile_sets() {
     assert!(matches!(
         &error,
         SessionsCommandError::ProfileBlocksRemoteResume { keys, .. }
-            if keys == "approval_policy, sandbox_mode"
+            if keys == &["approval_policy", "sandbox_mode"]
     ));
     assert!(error.to_string().contains("codex-router.config.toml"));
 }

@@ -37,6 +37,7 @@ impl SessionsLaunchTarget {
         }
         Ok(())
     }
+
     /// Stops a hosted resume or fork when the selected profile sets a permission key,
     /// naming the keys and file instead of leaving the user with Codex's generic
     /// "Permission overrides are not supported when resuming a remote task."
@@ -63,10 +64,7 @@ impl SessionsLaunchTarget {
         if keys.is_empty() {
             return Ok(());
         }
-        Err(SessionsCommandError::ProfileBlocksRemoteResume {
-            profile_path,
-            keys: keys.join(", "),
-        })
+        Err(SessionsCommandError::ProfileBlocksRemoteResume { profile_path, keys })
     }
 
     fn profile(&self) -> codex_native_integration::SessionProfile {
