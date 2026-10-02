@@ -6,6 +6,7 @@ mod lifecycle_proofs;
 mod owner_fixture;
 mod push_store_proofs;
 mod queued_proofs;
+mod restore_corruption_proofs;
 mod stall_diagnosis;
 mod timing_proofs;
 mod wait_proofs;

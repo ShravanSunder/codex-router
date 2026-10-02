@@ -1,10 +1,118 @@
-use super::super::{SubscriptionClock, subscription_service::OwnerObservation};
+use super::super::{
+    SubscriptionClock, SubscriptionWaitFilter, subscription_service::OwnerObservation,
+};
 use super::owner_fixture::*;
 use crate::AttemptReconciliation;
 use collaboration_protocol::{
     DeliveryOutcome, DeliveryReceipt, PushDeliveryState, SessionReachability,
 };
-use message_board::{SubscriptionDeliveryOutcome, SubscriptionScope};
+use message_board::{SubscriptionDeliveryOutcome, SubscriptionMode, SubscriptionScope, WhenIdle};
+
+#[tokio::test(start_paused = true)]
+async fn covering_wait_renews_only_covered_poll_subscription_timestamps() {
+    let fixture = OwnerFixture::new().await;
+    let uncovered_root = fixture.add_root().await;
+    for root in [&fixture.root, &uncovered_root] {
+        fixture
+            .policy(root, SubscriptionMode::Poll, WhenIdle::Hold, 0, 0)
+            .await;
+    }
+    let covered_scope = SubscriptionScope::thread(fixture.root.clone());
+    let uncovered_scope = SubscriptionScope::thread(uncovered_root);
+    let (covered_before, uncovered_before) = {
+        let mut store = fixture.store.lock().await;
+        (
+            store
+                .get_thread_subscription_record(&fixture.reader, &covered_scope)
+                .await
+                .unwrap()
+                .unwrap(),
+            store
+                .get_thread_subscription_record(&fixture.reader, &uncovered_scope)
+                .await
+                .unwrap()
+                .unwrap(),
+        )
+    };
+    let runtime = fixture.runtime().await;
+    fixture.clock.advance(3600).await;
+    runtime.synchronize(&fixture.reader).await;
+    let renewal_time = fixture.clock.now();
+    let non_covering = runtime
+        .service
+        .wait(
+            fixture.reader.clone(),
+            SubscriptionWaitFilter::Roots(vec![message_board::MessageId::generate()]),
+            0,
+            usize::MAX,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(
+        non_covering.kind,
+        message_board::BoardFailureKind::InvalidField
+    );
+    for (scope, before) in [
+        (&covered_scope, &covered_before),
+        (&uncovered_scope, &uncovered_before),
+    ] {
+        let unchanged = fixture
+            .store
+            .lock()
+            .await
+            .get_thread_subscription_record(&fixture.reader, scope)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(unchanged.renewed_at(), before.renewed_at());
+        assert_eq!(unchanged.expires_at(), before.expires_at());
+    }
+    let service = runtime.service.clone();
+    let reader = fixture.reader.clone();
+    let covered_root = fixture.root.clone();
+    let waiter = tokio::spawn(async move {
+        service
+            .wait(
+                reader,
+                SubscriptionWaitFilter::Roots(vec![covered_root]),
+                60,
+                usize::MAX,
+            )
+            .await
+            .unwrap()
+    });
+    runtime
+        .observe(|event| matches!(event, OwnerObservation::WaitQueued))
+        .await;
+    let (covered_after, uncovered_after) = {
+        let mut store = fixture.store.lock().await;
+        (
+            store
+                .get_thread_subscription_record(&fixture.reader, &covered_scope)
+                .await
+                .unwrap()
+                .unwrap(),
+            store
+                .get_thread_subscription_record(&fixture.reader, &uncovered_scope)
+                .await
+                .unwrap()
+                .unwrap(),
+        )
+    };
+    assert_eq!(covered_after.renewed_at(), renewal_time);
+    assert_eq!(
+        covered_after.expires_at(),
+        renewal_time + (covered_before.expires_at() - covered_before.renewed_at())
+    );
+    assert!(covered_after.renewed_at() > covered_before.renewed_at());
+    assert!(covered_after.expires_at() > covered_before.expires_at());
+    assert_eq!(uncovered_after.renewed_at(), uncovered_before.renewed_at());
+    assert_eq!(uncovered_after.expires_at(), uncovered_before.expires_at());
+    fixture.clock.advance(60).await;
+    assert!(waiter.await.unwrap().is_none());
+    assert!(runtime.requests.lock().await.try_recv().is_err());
+    runtime.close().await;
+}
 
 #[tokio::test(start_paused = true)]
 async fn loaded_only_acp_queue_is_reconciled_before_any_settlement() {

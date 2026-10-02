@@ -476,7 +476,6 @@ impl BoardStore {
             .begin_with("BEGIN IMMEDIATE")
             .await
             .map_err(storage_error)?;
-        let _ = end_expired_rows(&mut transaction, now, None).await?;
         sqlx::query!(
             "UPDATE subscription_windows SET in_flight_through=NULL,residual_opened_at=NULL"
         )
@@ -490,35 +489,51 @@ impl BoardStore {
         .fetch_all(&mut *transaction)
         .await
         .map_err(storage_error)?;
-        for reader_key in &reader_keys {
-            crate::subscription_window_records::rescan_missing_windows_in_transaction(
-                &mut transaction,
-                reader_key,
-                now,
-            )
-            .await?;
-        }
         let mut records = Vec::new();
         for reader_key in reader_keys {
-            let scopes = sqlx::query!(
-                "SELECT scope_kind,scope_id FROM thread_subscriptions \
-                 WHERE reader_key=? AND state IN ('active','draining') \
-                 ORDER BY scope_kind,scope_id",
-                reader_key,
-            )
-            .fetch_all(&mut *transaction)
-            .await
-            .map_err(storage_error)?;
-            for row in scopes {
-                let scope = decode_subscription_scope(row.scope_kind.as_str(), row.scope_id)?;
-                records.push(
-                    load_subscription_record(&mut transaction, reader_key.as_str(), &scope)
-                        .await?
-                        .ok_or_else(invalid_record)?,
-                );
+            match restore_reader_records(&mut transaction, &reader_key, now).await {
+                Ok(reader_records) => records.extend(reader_records),
+                Err(error) if error.kind == BoardFailureKind::InvalidRecord => {
+                    tracing::warn!(%error, "corrupt subscription reader skipped during restore");
+                }
+                Err(error) => return Err(error),
             }
         }
         transaction.commit().await.map_err(storage_error)?;
         Ok(records)
     }
+}
+
+/// A corrupt row quarantines its reader for this restore; other readers continue.
+async fn restore_reader_records(
+    transaction: &mut BoardTransaction<'_>,
+    reader_key: &str,
+    now: DateTime<Utc>,
+) -> Result<Vec<ThreadSubscriptionRecord>, BoardError> {
+    let _ = end_expired_rows(transaction, now, Some(reader_key)).await?;
+    crate::subscription_window_records::rescan_missing_windows_in_transaction(
+        transaction,
+        reader_key,
+        now,
+    )
+    .await?;
+    let scopes = sqlx::query!(
+        "SELECT scope_kind,scope_id FROM thread_subscriptions \
+         WHERE reader_key=? AND state IN ('active','draining') \
+         ORDER BY scope_kind,scope_id",
+        reader_key,
+    )
+    .fetch_all(&mut **transaction)
+    .await
+    .map_err(storage_error)?;
+    let mut records = Vec::with_capacity(scopes.len());
+    for row in scopes {
+        let scope = decode_subscription_scope(row.scope_kind.as_str(), row.scope_id)?;
+        records.push(
+            load_subscription_record(transaction, reader_key, &scope)
+                .await?
+                .ok_or_else(invalid_record)?,
+        );
+    }
+    Ok(records)
 }

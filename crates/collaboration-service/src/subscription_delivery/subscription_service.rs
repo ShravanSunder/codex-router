@@ -117,7 +117,17 @@ impl SubscriptionDeliveryService {
             }
             BoardAvailability::Unavailable => Vec::new(),
         };
-        let dm_targets = self.inner.push.restore_direct_messages().await?;
+        let dm_targets = match self.inner.push.restore_direct_messages().await {
+            Ok(targets) => targets,
+            Err(error) if recovery_connection_failed(&error) => {
+                tracing::warn!(%error, "direct-message recovery connection unavailable");
+                return Err(BoardError::board_unavailable());
+            }
+            Err(error) => {
+                tracing::warn!(%error, "direct-message recovery failed; healthy subscription readers continue");
+                Vec::new()
+            }
+        };
         *started = true;
         let mut readers = records
             .iter()
@@ -330,6 +340,27 @@ fn reader_for_target(target: &SessionRef) -> Result<Identity, BoardError> {
     )
     .map_err(|_| BoardError::board_unavailable())?;
     Ok(Identity::Session { session })
+}
+
+fn recovery_connection_failed(error: &automation_storage::StorageError) -> bool {
+    if let automation_storage::StorageError::Database(sqlx::Error::Database(database)) = error {
+        // SQLite extended error codes retain the primary connection/storage class.
+        return database
+            .code()
+            .and_then(|code| code.parse::<i32>().ok())
+            .is_some_and(|code| matches!(code & 0xff, 7 | 10 | 11 | 14 | 26));
+    }
+    matches!(
+        error,
+        automation_storage::StorageError::Database(
+            sqlx::Error::Io(_)
+                | sqlx::Error::Tls(_)
+                | sqlx::Error::Protocol(_)
+                | sqlx::Error::WorkerCrashed
+                | sqlx::Error::PoolClosed
+                | sqlx::Error::PoolTimedOut
+        )
+    )
 }
 
 #[cfg(test)]

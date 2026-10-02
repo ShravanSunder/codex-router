@@ -7,6 +7,115 @@ use message_board::{EndReason, SubscriptionMode, SubscriptionScope, WhenIdle};
 use sqlx::Connection;
 
 #[tokio::test(start_paused = true)]
+async fn mode_change_during_flight_settles_original_push_and_polls_only_later_activity() {
+    let fixture = OwnerFixture::new().await;
+    let runtime = fixture.runtime().await;
+    let original_post = fixture
+        .post(&fixture.root, "Original in-flight activity")
+        .await;
+    let original_request = runtime.requests.lock().await.recv().await.unwrap();
+    let original_record = fixture
+        .push_store
+        .lock()
+        .await
+        .get_push_record(&original_request.payload.push_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let scope = SubscriptionScope::thread(fixture.root.clone());
+    let original_generation = fixture
+        .store
+        .lock()
+        .await
+        .get_thread_subscription_record(&fixture.reader, &scope)
+        .await
+        .unwrap()
+        .unwrap()
+        .generation();
+    fixture
+        .policy(&fixture.root, SubscriptionMode::Poll, WhenIdle::Hold, 0, 0)
+        .await;
+    let later_post = fixture.post(&fixture.root, "Later poll activity").await;
+    assert!(runtime.requests.lock().await.try_recv().is_err());
+    runtime.await_settled().await;
+    runtime.synchronize(&fixture.reader).await;
+
+    let settled_record = fixture
+        .push_store
+        .lock()
+        .await
+        .get_push_record(&original_request.payload.push_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(settled_record.push_id, original_record.push_id);
+    assert_eq!(settled_record.activity, original_record.activity);
+    assert_eq!(
+        settled_record.delivery_state,
+        collaboration_protocol::PushDeliveryState::Delivered
+    );
+    assert_eq!(
+        settled_record.last_outcome.unwrap().outcome,
+        collaboration_protocol::DeliveryOutcome::Started
+    );
+    let updated_subscription = fixture
+        .store
+        .lock()
+        .await
+        .get_thread_subscription_record(&fixture.reader, &scope)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(updated_subscription.policy().mode(), SubscriptionMode::Poll);
+    assert_ne!(updated_subscription.generation(), original_generation);
+    assert_eq!(updated_subscription.last_outcome(), None);
+    assert_eq!(updated_subscription.roots()[0].pending_count(), 1);
+    assert!(runtime.requests.lock().await.try_recv().is_err());
+
+    let result = runtime
+        .service
+        .wait(
+            fixture.reader.clone(),
+            SubscriptionWaitFilter::Roots(vec![fixture.root.clone()]),
+            60,
+            usize::MAX,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let SubscriptionWaitResult::Notice { push_id, batch, .. } = result else {
+        panic!("session poll must return a stored notice");
+    };
+    assert_ne!(push_id, original_request.payload.push_id);
+    assert_eq!(batch.roots.len(), 1);
+    assert_eq!(batch.roots[0].message_count, 1);
+    assert_eq!(
+        batch.roots[0].from_sequence,
+        later_post.message.activity_sequence
+    );
+    assert_eq!(
+        batch.roots[0].through_sequence,
+        later_post.message.activity_sequence
+    );
+    assert!(batch.roots[0].from_sequence > original_post.message.activity_sequence);
+    runtime
+        .observe(|event| matches!(event, OwnerObservation::Settled))
+        .await;
+    runtime.synchronize(&fixture.reader).await;
+    let final_subscription = fixture
+        .store
+        .lock()
+        .await
+        .get_thread_subscription_record(&fixture.reader, &scope)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(final_subscription.roots().is_empty());
+    assert!(runtime.requests.lock().await.try_recv().is_err());
+    runtime.close().await;
+}
+
+#[tokio::test(start_paused = true)]
 async fn one_owner_serializes_push_and_wait_and_does_not_hold_the_board_lock() {
     let fixture = OwnerFixture::new().await;
     let poll_root = fixture.add_root().await;

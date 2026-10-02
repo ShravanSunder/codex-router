@@ -13,16 +13,14 @@ use collaboration_protocol::{
 use message_board::BoardError;
 
 impl SubscriptionPushStore {
-    pub(super) async fn restore_direct_messages(&self) -> Result<Vec<SessionRef>, BoardError> {
+    pub(super) async fn restore_direct_messages(
+        &self,
+    ) -> Result<Vec<SessionRef>, automation_storage::StorageError> {
         let mut store = self.store.lock().await;
         store
             .settle_interrupted_direct_messages(self.clock.now())
-            .await
-            .map_err(|_| BoardError::board_unavailable())?;
-        store
-            .direct_message_recovery_targets()
-            .await
-            .map_err(|_| BoardError::board_unavailable())
+            .await?;
+        store.direct_message_recovery_targets().await
     }
 
     pub(super) async fn direct_messages(

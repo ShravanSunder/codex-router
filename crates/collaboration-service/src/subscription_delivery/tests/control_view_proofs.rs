@@ -5,7 +5,7 @@ use crate::control_service_context::subscription_delivery::subscription_service:
 use collaboration_protocol::{DeliveryOutcome, ThreadSubscriptionsRequest};
 use message_board::SubscriptionDeliveryOutcome;
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn control_subscriptions_view_reports_pending_held_outcome_and_retry_deadline() {
     let fixture = OwnerFixture::new().await;
     *fixture.presence.0.lock().unwrap() = crate::TargetPresence::Wakeable;
@@ -51,7 +51,7 @@ async fn control_subscriptions_view_reports_pending_held_outcome_and_retry_deadl
     );
 
     *fixture.presence.0.lock().unwrap() = crate::TargetPresence::Running;
-    fixture.clock.advance(30).await;
+    fixture.clock.advance_without_tokio_time(30);
     runtime.requests.lock().await.recv().await.unwrap();
     runtime
         .completions
