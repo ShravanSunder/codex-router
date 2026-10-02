@@ -123,9 +123,8 @@ pub use session_message_reply::{SessionMessageReplyParams, SessionMessageReplyRe
 mod native_schema_references;
 mod native_session_catalog;
 pub use message_content::{
-    AcceptedResumeEffect, MessageContent, MessageDelivery, MessageHeaderContext,
-    MessageHeaderOrigin, MessageInputKind, MessageRepresentation, MessageText, MessageTextError,
-    RenderedMessage, RouterNoticeKind, SessionDisplayName, SessionDisplayNameError,
+    AcceptedResumeEffect, MessageContent, MessageDelivery, MessageInputKind, MessageRepresentation,
+    MessageText, MessageTextError, RenderedMessage, SessionDisplayName, SessionDisplayNameError,
     SessionDisplayNameLookup, SessionDisplayNameLookupError, session_identity,
 };
 pub use native_control_contract::{

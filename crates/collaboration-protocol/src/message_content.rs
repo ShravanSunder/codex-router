@@ -112,58 +112,6 @@ pub trait SessionDisplayNameLookup: Send + Sync {
     ) -> Result<Option<SessionDisplayName>, SessionDisplayNameLookupError>;
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub enum RouterNoticeKind {
-    Wake,
-    Schedule,
-    BoardListen,
-    #[default]
-    Other,
-}
-
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub enum MessageHeaderOrigin {
-    #[default]
-    Agent,
-    RouterNotice(RouterNoticeKind),
-}
-
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct MessageHeaderContext {
-    pub sender_display_name: Option<SessionDisplayName>,
-    pub recipient_display_name: Option<SessionDisplayName>,
-    pub origin: MessageHeaderOrigin,
-}
-
-impl MessageHeaderContext {
-    #[must_use]
-    pub fn resolve(
-        target: &SessionRef,
-        message: &MessageContent,
-        display_names: &dyn SessionDisplayNameLookup,
-        origin: MessageHeaderOrigin,
-    ) -> Self {
-        let sender_display_name = match message {
-            MessageContent::Agent { sender, .. } => {
-                display_names.display_name_for(sender).ok().flatten()
-            }
-            MessageContent::HumanUser { .. } | MessageContent::Router { .. } => None,
-        };
-        let recipient_display_name = match message {
-            MessageContent::Agent { .. }
-            | MessageContent::HumanUser { .. }
-            | MessageContent::Router { .. } => {
-                display_names.display_name_for(target).ok().flatten()
-            }
-        };
-        Self {
-            sender_display_name,
-            recipient_display_name,
-            origin,
-        }
-    }
-}
-
 impl JsonSchema for MessageText {
     fn schema_name() -> Cow<'static, str> {
         "MessageText".into()
