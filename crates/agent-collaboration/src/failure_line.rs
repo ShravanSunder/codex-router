@@ -185,6 +185,9 @@ fn rejection_next_step(
     if reason == DeliveryRejectionReason::ProviderSessionNotFound {
         return "create a new conversation".to_owned();
     }
+    if reason == DeliveryRejectionReason::QueueUnsupported {
+        return "resend with --delivery auto".to_owned();
+    }
     match next_action {
         DeliveryNextAction::InspectTarget => {
             format!("run agent-collaboration show {push_link}")
@@ -307,13 +310,13 @@ mod tests {
         let line = render_rejection_line(&rejection, "fixture-session", "router://host/push/id");
 
         assert!(line.chars().count() <= MAX_FAILURE_LINE_SCALARS);
-        assert!(line.contains(" more) — close one of these terminals"));
-        let omitted_claims = line
-            .split('+')
-            .nth(1)
-            .and_then(|rest| rest.split_whitespace().next())
-            .and_then(|count| count.parse::<usize>().ok());
-        assert!(omitted_claims.is_some_and(|count| count > 0));
+        assert!(line.contains("error: fixture-session is open in 5 terminals"));
+        assert!(line.contains("pid 600"));
+        assert!(line.contains("pid 601"));
+        assert!(line.contains("pid 602"));
+        assert!(!line.contains("pid 603"));
+        assert!(!line.contains("pid 604"));
+        assert!(line.contains("+2 more)"));
         assert_eq!(rejection.claims.as_ref(), Some(&claims));
     }
 }
