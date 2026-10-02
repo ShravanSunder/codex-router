@@ -540,27 +540,6 @@ async fn publish_message_unread(
     Ok(())
 }
 
-#[cfg(test)]
-mod cooldown_boundary_tests {
-    use super::calculate_cooldown_retry_after_seconds;
-
-    #[test]
-    fn top_level_cooldown_waits_sixty_seconds_and_rounds_up() {
-        for (elapsed, expected) in [
-            (0, Some(60)),
-            (1, Some(60)),
-            (30_000, Some(30)),
-            (59_999, Some(1)),
-            (60_000, None),
-        ] {
-            assert_eq!(
-                calculate_cooldown_retry_after_seconds(1_000_000, 1_000_000 - elapsed).unwrap(),
-                expected
-            );
-        }
-    }
-}
-
 /// Select a barrier first; accepting only known grants prevents stale attribution.
 async fn latest_role_barrier(
     transaction: &mut BoardTransaction<'_>,
@@ -589,4 +568,25 @@ async fn latest_role_barrier(
             event.participant_key.as_deref() == Some(author) && event.participant_role.is_some()
         })
         .map(|event| event.activity_sequence))
+}
+
+#[cfg(test)]
+mod cooldown_boundary_tests {
+    use super::calculate_cooldown_retry_after_seconds;
+
+    #[test]
+    fn top_level_cooldown_waits_sixty_seconds_and_rounds_up() {
+        for (elapsed, expected) in [
+            (0, Some(60)),
+            (1, Some(60)),
+            (30_000, Some(30)),
+            (59_999, Some(1)),
+            (60_000, None),
+        ] {
+            assert_eq!(
+                calculate_cooldown_retry_after_seconds(1_000_000, 1_000_000 - elapsed).unwrap(),
+                expected
+            );
+        }
+    }
 }

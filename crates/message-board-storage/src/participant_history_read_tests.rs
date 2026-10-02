@@ -127,15 +127,25 @@ async fn participant_history_reads_omit_unknown_and_human_roles() {
     serde_json::from_value::<Message>(old_json).unwrap();
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum AttributionCorruption {
+    InvalidRole,
+    WrongAuthor,
+    WrongRoot,
+    LaterSequence,
+    NoRole,
+    MainWrongKind,
+}
+
 #[tokio::test]
 async fn participant_history_reads_fail_closed_for_corrupt_attribution_relationships() {
     for corruption in [
-        "invalidRole",
-        "wrongAuthor",
-        "wrongRoot",
-        "laterSequence",
-        "noRole",
-        "mainWrongKind",
+        AttributionCorruption::InvalidRole,
+        AttributionCorruption::WrongAuthor,
+        AttributionCorruption::WrongRoot,
+        AttributionCorruption::LaterSequence,
+        AttributionCorruption::NoRole,
+        AttributionCorruption::MainWrongKind,
     ] {
         let mut fixture = HistoryFixture::open().await;
         let root = fixture.create(session("O"), Some(Orchestrator)).await;
@@ -143,13 +153,13 @@ async fn participant_history_reads_fail_closed_for_corrupt_attribution_relations
             .join(&root.message_id, session("A"), Reviewer, None)
             .await;
         let reply = fixture.post(&root.message_id, session("A")).await;
-        let message = if corruption == "mainWrongKind" {
+        let message = if corruption == AttributionCorruption::MainWrongKind {
             &root
         } else {
             &reply
         };
         match corruption {
-            "invalidRole" => {
+            AttributionCorruption::InvalidRole => {
                 sqlx::query(
                     "UPDATE board_activity SET participant_role='bogus' WHERE activity_sequence=?",
                 )
@@ -158,11 +168,11 @@ async fn participant_history_reads_fail_closed_for_corrupt_attribution_relations
                 .await
                 .unwrap();
             }
-            "wrongAuthor" => {
+            AttributionCorruption::WrongAuthor => {
                 sqlx::query("UPDATE board_activity SET participant_key=actor_key WHERE activity_sequence=(SELECT posted_from_activity FROM board_messages WHERE message_id=?)").bind(root.message_id.as_str()).execute(&mut fixture.store.connection).await.unwrap();
                 sqlx::query("UPDATE board_messages SET posted_from_activity=(SELECT posted_from_activity FROM board_messages WHERE message_id=?) WHERE message_id=?").bind(root.message_id.as_str()).bind(reply.message_id.as_str()).execute(&mut fixture.store.connection).await.unwrap();
             }
-            "wrongRoot" => {
+            AttributionCorruption::WrongRoot => {
                 let other = fixture.create(human("other"), None).await;
                 sqlx::query("UPDATE board_activity SET root_id=? WHERE activity_sequence=?")
                     .bind(other.message_id.as_str())
@@ -171,7 +181,7 @@ async fn participant_history_reads_fail_closed_for_corrupt_attribution_relations
                     .await
                     .unwrap();
             }
-            "laterSequence" => {
+            AttributionCorruption::LaterSequence => {
                 let later = fixture
                     .join(&root.message_id, session("A"), Advisor, None)
                     .await;
@@ -182,7 +192,7 @@ async fn participant_history_reads_fail_closed_for_corrupt_attribution_relations
                     .await
                     .unwrap();
             }
-            "noRole" => {
+            AttributionCorruption::NoRole => {
                 sqlx::query(
                     "UPDATE board_activity SET participant_role=NULL WHERE activity_sequence=?",
                 )
@@ -191,10 +201,9 @@ async fn participant_history_reads_fail_closed_for_corrupt_attribution_relations
                 .await
                 .unwrap();
             }
-            "mainWrongKind" => {
+            AttributionCorruption::MainWrongKind => {
                 sqlx::query("UPDATE board_activity SET kind='orchestratorReplaced' WHERE activity_sequence=(SELECT posted_from_activity FROM board_messages WHERE message_id=?)").bind(root.message_id.as_str()).execute(&mut fixture.store.connection).await.unwrap();
             }
-            _ => unreachable!(),
         }
         let error = fixture
             .store
@@ -203,7 +212,11 @@ async fn participant_history_reads_fail_closed_for_corrupt_attribution_relations
             })
             .await
             .unwrap_err();
-        assert_eq!(error.kind, BoardFailureKind::InvalidRecord, "{corruption}");
+        assert_eq!(
+            error.kind,
+            BoardFailureKind::InvalidRecord,
+            "{corruption:?}"
+        );
         assert_eq!(
             error.details,
             BoardErrorDetails::Resource {
