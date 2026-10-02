@@ -7,6 +7,7 @@ use codex_native_integration::AppServerCommandSpec;
 use codex_native_integration::CodexPaths;
 use codex_native_integration::CodexRouterProfile;
 use codex_native_integration::SessionLaunch;
+use codex_native_integration::profile_remote_resume_permission_keys;
 
 #[test]
 fn codex_paths_keep_native_state_under_normal_codex_home() {
@@ -41,27 +42,12 @@ fn expected_router_root_overrides() -> Vec<String> {
 
 #[test]
 fn rendered_profile_sets_no_permission_key_so_remote_resume_works() {
-    // Arrange: the keys the Codex TUI treats as a permission override on remote resume.
-    let permission_keys = [
-        "approval_policy",
-        "approvals_reviewer",
-        "sandbox_mode",
-        "default_permissions",
-        "permissions",
-        "network",
-        "sandbox_workspace_write",
-    ];
-
     // Act
-    let profile = CodexRouterProfile::new(8787)
-        .render()
-        .parse::<toml::Table>()
-        .unwrap();
+    let keys =
+        profile_remote_resume_permission_keys(&CodexRouterProfile::new(8787).render()).unwrap();
 
     // Assert
-    for key in permission_keys {
-        assert!(!profile.contains_key(key), "profile must not set {key}");
-    }
+    assert!(keys.is_empty(), "profile must not set {keys:?}");
 }
 
 #[test]

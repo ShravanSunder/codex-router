@@ -22,10 +22,9 @@ impl CodexRouterProfile {
     /// Renders the profile file used by existing CLI commands.
     ///
     /// The profile carries model routing only. The Codex TUI refuses to resume a
-    /// remote thread when the selected profile sets any permission key
-    /// (`approval_policy`, `approvals_reviewer`, `sandbox_mode`, `default_permissions`,
-    /// `permissions`, `network`, `sandbox_workspace_write`), because a remote resume
-    /// always restores the thread's saved permissions and would silently drop them.
+    /// remote thread when the selected profile sets any of
+    /// [`crate::REMOTE_RESUME_PERMISSION_KEYS`], because a remote resume always
+    /// restores the thread's saved permissions and would silently drop them.
     #[must_use]
     pub fn render(self) -> String {
         format!(
