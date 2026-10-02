@@ -16,12 +16,15 @@ const THREAD_SUBSCRIPTIONS: &str =
 const TOPIC_WATCHES_EMPTY_BOUNDARY: &str =
     include_str!("../migrations/202610010001_topic_watches_empty_boundary.sql");
 
+const PARTICIPANT_HISTORY: &str =
+    include_str!("../migrations/202610020001_participant_history.sql");
+
 pub(crate) async fn initialize(connection: &mut SqliteConnection) -> Result<(), BoardStorageError> {
     initialize_with(
         connection,
         &MIGRATOR,
         &format!(
-            "{BASELINE} {THREAD_DELIVERY_POSITIONS} {THREAD_PARTICIPANTS} {THREAD_IMPLEMENTER} {TOPIC_WATCHES} {THREAD_SUBSCRIPTIONS} {TOPIC_WATCHES_EMPTY_BOUNDARY}"
+            "{BASELINE} {THREAD_DELIVERY_POSITIONS} {THREAD_PARTICIPANTS} {THREAD_IMPLEMENTER} {TOPIC_WATCHES} {THREAD_SUBSCRIPTIONS} {TOPIC_WATCHES_EMPTY_BOUNDARY} {PARTICIPANT_HISTORY}"
         ),
     )
     .await
@@ -130,3 +133,14 @@ async fn validate_schema(
 #[cfg(test)]
 #[path = "board_migration_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "participant_history_legacy_support.rs"]
+mod participant_history_legacy_support;
+#[cfg(test)]
+#[path = "participant_history_migration_tests.rs"]
+mod participant_history_migration_tests;
+
+#[cfg(test)]
+#[path = "participant_history_upgrade_tests.rs"]
+mod participant_history_upgrade_tests;

@@ -2,7 +2,7 @@
 
 # Thread participants: who is on a thread, as what
 
-Date: 2026-09-14 (amended 2026-09-14: role-less human creator, CHECK constraints). Status: owner-accepted requirements and observable contract; structural design to be produced through `orchestrator-design` before implementation. Depends on `2026-09-14-thread-listen.md` landing first. Author: Fable design session on the owner's behalf. Owner decisions are marked **(owner)**.
+Date: 2026-09-14 (amended 2026-09-14: role-less human creator, CHECK constraints; 2026-10-01: Participant history, §4a). Status: owner-accepted requirements and observable contract; structural design to be produced through `orchestrator-design` before implementation. Depends on `2026-09-14-thread-listen.md` landing first. Author: Fable design session on the owner's behalf. Owner decisions are marked **(owner)**.
 
 ## 1. Problem
 
@@ -97,6 +97,41 @@ CREATE UNIQUE INDEX thread_single_implementer
 
 Join, leave, replace, and resolve each write in one transaction with the activity they record. The partial unique index enforces invariant 1 at the storage boundary; the handler turns the conflict into the refusal with the holder. Closed sets (`role`, `closed_reason`) are validated in Rust on request and on row decoding, per the repo rule that SQL CHECK is for booleans only; the SQL above is illustrative shape, not the migration text.
 
+## 4a. Participant history **(owner, 2026-10-01)**
+
+`thread_participants` holds one row per Reader and Thread and answers "who is on this Thread now". A repeat join overwrites that row, and a handover rewrites the target's `role` in place, so the Role a Participant held earlier was not stored anywhere: replies record their author but not the Role they were posted under. History lives in the board's existing event stream, `board_activity`, which already records `participantJoined`, `participantLeft`, `orchestratorReplaced`, `implementerReplaced`, and `threadResolved`; those events now also say whose Role changed and to what. `thread_participants` keeps its meaning and its invariants.
+
+```sql
+ALTER TABLE board_activity ADD COLUMN participant_key TEXT REFERENCES board_identities(identity_key);
+ALTER TABLE board_activity ADD COLUMN participant_role TEXT;
+ALTER TABLE board_activity ADD COLUMN replaced_participant_key TEXT REFERENCES board_identities(identity_key);
+ALTER TABLE board_messages ADD COLUMN posted_from_activity INTEGER REFERENCES board_activity(activity_sequence);
+CREATE INDEX board_activity_participant_history
+  ON board_activity(root_id, participant_key, activity_sequence) WHERE participant_key IS NOT NULL;
+```
+
+| Event | `actor_key` | `participant_key` | `participant_role` | `replaced_participant_key` |
+|---|---|---|---|---|
+| `create --role`, `join`, repeat `join` (`participantJoined`) | the joiner | the joiner | the stated Role | NULL |
+| `join --replace` (`orchestratorReplaced` / `implementerReplaced`) | the joiner | the joiner | `orchestrator` / `implementer` | the previous holder |
+| `leave --handover-to` (`orchestratorReplaced`) | the leaver | the handover target | `orchestrator` | the leaver |
+| `leave` (`participantLeft`) | the leaver | the leaver | NULL (Role ended) | NULL |
+| `resolve` (`threadResolved`) | the resolver | NULL | NULL | NULL |
+
+Rules:
+
+1. Every event that gives a Participant a Role writes that Role; a Participant's Role never changes without such an event.
+2. A reply by a `session` identity stores `posted_from_activity`: the latest event before the reply that could have changed the author's Role (their join or leave, a replacement naming them, an unattributed replacement, or `threadResolved`), when that event grants the author a Role; otherwise NULL, "Role unknown" **(2026-10-02, amended after design review: the latest *granting* event is not provable when an unknown event lies after it)**. A new Thread's main message, posted by a session with `create --role`, stores that create's `participantJoined` event. A `human` post stores NULL; its author kind already says why there is no Role. A Participant whose current Role predates Participant history and cannot be proven posts with a NULL Role until their next join or handover **(owner-deferred, 2026-10-02: no baseline event; see the Program Design)**.
+3. Message reads report `postedAsRole` from that event when it is known, and omit it otherwise. Absent means "human author", "posted before Participant history", or "Role unknown" (rule 2).
+4. Role names stay validated in Rust like `thread_participants.role`; no SQL `CHECK` (AGENTS.md).
+
+Existing data is backfilled only where provable, in the same migration; everything else stays NULL, meaning "before Participant history":
+
+- `participant_key` is set on every past participant event: the actor for `participantJoined`, `participantLeft`, and `join --replace`; for a handover, the target recorded in the leaver's closed row (`replaced_by`, `closed_at_activity` equal to the event).
+- `participant_role` is set on an event only when the current `thread_participants` row proves it: the event is that row's `joined_at_activity`, and no later handover made the row `orchestrator`; a handover event gets `orchestrator`; a proven `join --replace` gets the Role its kind names, because only that replacement writes that kind **(2026-10-02)**. Earlier, overwritten joins keep a NULL Role.
+- `replaced_participant_key` is set from the replaced holder's closed row where its `replaced_by` and `closed_at_activity` match the event.
+- `posted_from_activity` on an existing reply uses rule 2 over the backfilled events. Existing main messages stay NULL: sessions could post a root before Participants existed, so a root followed by its author's first join does not prove `create --role`.
+
 ## 5. Process **(owner)**
 
 This slice runs through `orchestrator-design`: Requirements from this document, a Specification and Program Design authored by the executor, and an independent three-artifact design review by a separate 🦉 Advisor session before implementation. The Fable design session is the final reviewer of the reviewed design and again of the implementation. Implementation follows only after the reviewed design is `ready`.
@@ -107,6 +142,7 @@ This slice runs through `orchestrator-design`: Requirements from this document, 
 - Gate: unjoined agent post, listen, resolve refused with `nextAction`; human post allowed without join.
 - Validation: every omitted choice fails naming the flag; `--actor self` fails without environment.
 - DX proof with Luna **(owner)**: Luna subagents, given only the skill reference and the CLI, complete create, join, listen, post, leave, and an orchestrator handover on a scratch project without a human correction. Record every refusal they hit and whether the `nextAction` text got them to the right command. A refusal that did not lead to the right next command is a DX defect to fix before ship.
+- Participant history: a repeat join with a different Role, a handover, and a `join --replace` each leave the earlier Role readable from `board_activity`; replies keep the Role they were posted under across later joins, handovers, resolves, and unresolves; a human reply has no `postedAsRole`; the migration backfills only provable Roles and leaves the rest NULL, with a test per backfill rule.
 - Repo checks: fmt, clippy, tests, `git diff --check`.
 
 ## 7. Skill reference
