@@ -121,16 +121,16 @@ CREATE INDEX board_activity_participant_history
 Rules:
 
 1. Every event that gives a Participant a Role writes that Role; a Participant's Role never changes without such an event.
-2. A reply by a `session` identity stores `posted_from_activity`: the latest event on the Thread whose `participant_key` is the author and whose `participant_role` is not NULL, at or before the reply. The Join gate (invariant 3) guarantees one exists for new replies. A `human` reply stores NULL; its author kind already says why there is no Role.
+2. A reply by a `session` identity stores `posted_from_activity`: the latest event before the reply that could have changed the author's Role (their join or leave, a replacement naming them, an unattributed replacement, or `threadResolved`), when that event grants the author a Role; otherwise NULL, "Role unknown" **(2026-10-02, amended after design review: the latest *granting* event is not provable when an unknown event lies after it)**. A new Thread's main message, posted by a session with `create --role`, stores that create's `participantJoined` event. A `human` post stores NULL; its author kind already says why there is no Role. A Participant whose current Role predates Participant history and cannot be proven posts with a NULL Role until their next join or handover **(owner-deferred, 2026-10-02: no baseline event; see the Program Design)**.
 3. Message reads report `postedAsRole` from that event when it is known, and omit it otherwise. Absent means "human author" or "posted before Participant history".
 4. Role names stay validated in Rust like `thread_participants.role`; no SQL `CHECK` (AGENTS.md).
 
 Existing data is backfilled only where provable, in the same migration; everything else stays NULL, meaning "before Participant history":
 
 - `participant_key` is set on every past participant event: the actor for `participantJoined`, `participantLeft`, and `join --replace`; for a handover, the target recorded in the leaver's closed row (`replaced_by`, `closed_at_activity` equal to the event).
-- `participant_role` is set on an event only when the current `thread_participants` row proves it: the event is that row's `joined_at_activity`, and no later handover made the row `orchestrator`; a handover event gets `orchestrator`. Earlier, overwritten joins keep a NULL Role.
+- `participant_role` is set on an event only when the current `thread_participants` row proves it: the event is that row's `joined_at_activity`, and no later handover made the row `orchestrator`; a handover event gets `orchestrator`; a proven `join --replace` gets the Role its kind names, because only that replacement writes that kind **(2026-10-02)**. Earlier, overwritten joins keep a NULL Role.
 - `replaced_participant_key` is set from the replaced holder's closed row where its `replaced_by` and `closed_at_activity` match the event.
-- `posted_from_activity` on an existing reply uses rule 2 over the backfilled events; a reply whose author has no participant event at or before it stays NULL.
+- `posted_from_activity` on an existing reply uses rule 2 over the backfilled events. Existing main messages stay NULL: sessions could post a root before Participants existed, so a root followed by its author's first join does not prove `create --role`.
 
 ## 5. Process **(owner)**
 
