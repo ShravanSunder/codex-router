@@ -1,0 +1,62 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT activity_sequence, participant_key, participant_role, kind FROM board_activity WHERE root_id = ? AND activity_sequence < ? AND ( (kind IN ('participantJoined', 'participantLeft') AND actor_key = ?) OR (kind IN ('orchestratorReplaced', 'implementerReplaced') AND ( participant_key = ? OR replaced_participant_key = ? OR participant_key IS NULL)) OR kind = 'threadResolved') ORDER BY activity_sequence DESC LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "name": "activity_sequence",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "board_activity",
+            "name": "activity_sequence"
+          }
+        }
+      },
+      {
+        "name": "participant_key",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "board_activity",
+            "name": "participant_key"
+          }
+        }
+      },
+      {
+        "name": "participant_role",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "board_activity",
+            "name": "participant_role"
+          }
+        }
+      },
+      {
+        "name": "kind",
+        "ordinal": 3,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "board_activity",
+            "name": "kind"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": [
+      false,
+      true,
+      true,
+      false
+    ]
+  },
+  "hash": "9033dfaabd232e11aa4e8661124a2735831eac47df160e7d8399b86f4f78ece1"
+}

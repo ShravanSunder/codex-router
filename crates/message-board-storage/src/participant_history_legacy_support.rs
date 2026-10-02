@@ -53,7 +53,7 @@ impl LegacyHistory {
         for label in ["A", "B", "O"] {
             sqlx::query("INSERT INTO board_identities(identity_key,kind,service_id,endpoint_id,session_id) VALUES(?,'session','550e8400-e29b-41d4-a716-446655440000','codex-local',?)").bind(legacy_key(label)).bind(label).execute(&mut connection).await.unwrap();
         }
-        sqlx::raw_sql("INSERT INTO board_identities(identity_key,kind,human_id) VALUES('human:H','human','H'); INSERT INTO board_projects VALUES('550e8400-e29b-41d4-a716-446655440001','Project',''); INSERT INTO project_boards VALUES('550e8400-e29b-41d4-a716-446655440002','550e8400-e29b-41d4-a716-446655440001','Board','','active'); INSERT INTO board_topics VALUES('550e8400-e29b-41d4-a716-446655440003','550e8400-e29b-41d4-a716-446655440002','Topic','');").execute(&mut connection).await.unwrap();
+        sqlx::raw_sql("INSERT INTO board_identities(identity_key,kind,human_id) VALUES('human:H','human','H'); INSERT INTO board_projects VALUES('01a00000-0000-7000-8000-000000000001','Project',''); INSERT INTO project_boards VALUES('01a00000-0000-7000-8000-000000000002','01a00000-0000-7000-8000-000000000001','Board','','active'); INSERT INTO board_topics VALUES('01a00000-0000-7000-8000-000000000003','01a00000-0000-7000-8000-000000000002','Topic','');").execute(&mut connection).await.unwrap();
         let roots = [
             MessageId::generate().as_str().to_owned(),
             MessageId::generate().as_str().to_owned(),
@@ -81,7 +81,7 @@ impl LegacyHistory {
             .execute(&mut self.connection)
             .await
             .unwrap();
-        sqlx::query("INSERT INTO board_activity VALUES(?,'550e8400-e29b-41d4-a716-446655440001','550e8400-e29b-41d4-a716-446655440002','550e8400-e29b-41d4-a716-446655440003',?,?,?,NULL)")
+        sqlx::query("INSERT INTO board_activity VALUES(?,'01a00000-0000-7000-8000-000000000001','01a00000-0000-7000-8000-000000000002','01a00000-0000-7000-8000-000000000003',?,?,?,NULL)")
             .bind(self.sequence)
             .bind(root)
             .bind(kind)
@@ -146,7 +146,7 @@ impl LegacyHistory {
         message
     }
     async fn message(&mut self, message: &str, root: Option<&str>, actor: &str) {
-        sqlx::query("INSERT INTO board_messages(message_id,topic_id,board_id,root_id,actor_key,text) VALUES(?,'550e8400-e29b-41d4-a716-446655440003','550e8400-e29b-41d4-a716-446655440002',?,?,'history')").bind(message).bind(root).bind(legacy_key(actor)).execute(&mut self.connection).await.unwrap();
+        sqlx::query("INSERT INTO board_messages(message_id,topic_id,board_id,root_id,actor_key,text) VALUES(?,'01a00000-0000-7000-8000-000000000003','01a00000-0000-7000-8000-000000000002',?,?,'history')").bind(message).bind(root).bind(legacy_key(actor)).execute(&mut self.connection).await.unwrap();
         self.sequence += 1;
         sqlx::query("UPDATE activity_checkpoint SET last_sequence=?")
             .bind(self.sequence)
@@ -158,7 +158,7 @@ impl LegacyHistory {
         } else {
             "mainMessageCreated"
         };
-        sqlx::query("INSERT INTO board_activity VALUES(?,'550e8400-e29b-41d4-a716-446655440001','550e8400-e29b-41d4-a716-446655440002','550e8400-e29b-41d4-a716-446655440003',?,?,?,?)")
+        sqlx::query("INSERT INTO board_activity VALUES(?,'01a00000-0000-7000-8000-000000000001','01a00000-0000-7000-8000-000000000002','01a00000-0000-7000-8000-000000000003',?,?,?,?)")
             .bind(self.sequence)
             .bind(root)
             .bind(kind)

@@ -140,3 +140,7 @@ mod participant_history_legacy_support;
 #[cfg(test)]
 #[path = "participant_history_migration_tests.rs"]
 mod participant_history_migration_tests;
+
+#[cfg(test)]
+#[path = "participant_history_upgrade_tests.rs"]
+mod participant_history_upgrade_tests;
