@@ -41,6 +41,7 @@ pub(super) struct SubscriptionPushStoreProps {
 }
 
 pub(super) struct SubscriptionPushReceipt {
+    pub push_id: PushId,
     pub receipt: DeliveryReceipt,
     pub evidence: serde_json::Value,
 }
@@ -248,7 +249,11 @@ impl SubscriptionPushStore {
         }
         self.record_receipt(&prepared, &receipt, true).await?;
         let evidence = serde_json::json!({ "receipt": receipt, "routeEvidence": sink.recorded.lock().await.clone() });
-        Ok(SubscriptionPushReceipt { receipt, evidence })
+        Ok(SubscriptionPushReceipt {
+            push_id: prepared.push_id,
+            receipt,
+            evidence,
+        })
     }
 
     async fn reconcile_queued(

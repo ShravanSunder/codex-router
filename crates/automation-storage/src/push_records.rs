@@ -256,6 +256,44 @@ impl AutomationStore {
             .collect()
     }
 
+    /// Give replaced Reader batches a terminal, known-not-submitted outcome.
+    pub async fn settle_held_subscription_pushes(
+        &mut self,
+        target: &SessionRef,
+        except_push_id: Option<&PushId>,
+        reason: &str,
+        settled_at: DateTime<Utc>,
+    ) -> Result<u64, StorageError> {
+        let kind = push_record_rows::serialize_kind(PushKind::SubscriptionActivity)?;
+        let outcome = DeliveryReceipt {
+            outcome: DeliveryOutcome::NotSubmitted {
+                retryable: false,
+                reason: reason.to_owned(),
+            },
+            reachability: None,
+            client: None,
+        };
+        let outcome_json = push_record_rows::serialize_json(&outcome)?;
+        let settled_at = push_record_rows::serialize_timestamp(settled_at);
+        let (service_id, endpoint_id, session_id) = session_key(target);
+        let excluded_push_id = except_push_id.map(|push_id| push_id.as_str());
+        let result = sqlx::query!(
+            "UPDATE router_pushes SET delivery_state='rejected',last_outcome_json=?,settled_at=? \
+             WHERE kind=? AND target_service_id=? AND target_endpoint_id=? AND target_session_id=? \
+               AND delivery_state='held' AND push_id<>COALESCE(?, '')",
+            outcome_json,
+            settled_at,
+            kind,
+            service_id,
+            endpoint_id,
+            session_id,
+            excluded_push_id,
+        )
+        .execute(&mut self.connection)
+        .await?;
+        Ok(result.rows_affected())
+    }
+
     pub async fn list_direct_message_inbox(
         &mut self,
         request: &PushInboxQuery,

@@ -425,6 +425,7 @@ dependencies = [
  "agent-automation",
  "chrono",
  "collaboration-protocol",
+ "message-board",
  "serde",
  "serde_json",
  "sqlx",

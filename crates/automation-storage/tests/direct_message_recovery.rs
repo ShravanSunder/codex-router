@@ -1,8 +1,13 @@
+use agent_automation::{OccurrenceId, RunId, ScheduleId, WakeupId};
 use automation_storage::{AutomationStore, StorageError};
 use chrono::Utc;
 use collaboration_protocol::{
-    CodexGeneration, EndpointId, EndpointRef, MessageDelivery, PushHeaderFacts, PushId, PushKind,
-    PushOrigin, PushRecordDraft, SessionId, SessionRef, UuidIdentity,
+    CodexGeneration, DeliveryOutcome, DeliveryReceipt, EndpointId, EndpointRef, MessageDelivery,
+    PushActivityRange, PushActivitySnapshot, PushDeliveryState, PushHeaderFacts, PushId, PushKind,
+    PushOrigin, PushRecordDraft, RouterOriginRef, SessionId, SessionRef, UuidIdentity,
+};
+use message_board::{
+    ActivitySequence, BatchId, MessageId, SubscriptionGeneration, SubscriptionScope,
 };
 use serde_json::{Value, json};
 use sqlx::{Connection, sqlite::SqliteConnectOptions};
@@ -69,6 +74,30 @@ fn direct_message_draft(
         "createdAt":Utc::now(),
     });
     Ok(serde_json::from_value(value)?)
+}
+
+fn router_push_draft(
+    target: &SessionRef,
+    kind: PushKind,
+    origin: RouterOriginRef,
+    header_facts: PushHeaderFacts,
+    body: Option<String>,
+    activity: Option<PushActivitySnapshot>,
+) -> Result<PushRecordDraft, TestError> {
+    Ok(PushRecordDraft {
+        push_id: PushId::try_from(uuid::Uuid::now_v7().to_string())?,
+        kind,
+        origin: PushOrigin::Router(kind),
+        origin_router_ref: Some(origin.canonical_string()?),
+        target: target.clone(),
+        mode: None,
+        guard: None,
+        reply_to_push_id: None,
+        header_facts,
+        body,
+        activity,
+        created_at: Utc::now(),
+    })
 }
 
 #[tokio::test]
@@ -141,8 +170,7 @@ async fn corrupt_direct_message_mode_and_guard_fail_closed() -> TestResult {
 }
 
 #[tokio::test]
-async fn restart_discovers_every_unsent_dm_target_and_settles_only_attempted_dms() -> TestResult {
-    use collaboration_protocol::{DeliveryOutcome, DeliveryReceipt, PushDeliveryState};
+async fn restart_discovers_unsent_dm_targets_and_settles_every_attempted_push() -> TestResult {
     let database = TestDatabase::new();
     let mut store = AutomationStore::open(&database.path).await?;
     let first = direct_message_draft(MessageDelivery::Auto, None)?;
@@ -169,30 +197,123 @@ async fn restart_discovers_every_unsent_dm_target_and_settles_only_attempted_dms
     let attempted_id = attempted.push_id.clone();
     store.insert_push_record(attempted).await?;
     store.mark_push_attempted(&attempted_id).await?;
-    let mut wake = direct_message_draft(MessageDelivery::Auto, None)?;
-    wake.kind = PushKind::Wake;
-    wake.origin = PushOrigin::Router(PushKind::Wake);
-    wake.origin_router_ref = Some(
-        collaboration_protocol::RouterOriginRef::Wake {
-            wakeup_id: agent_automation::WakeupId::generate(),
-            occurrence_id: agent_automation::OccurrenceId::generate(),
-        }
-        .canonical_string()?,
-    );
-    wake.mode = None;
-    wake.guard = None;
-    wake.header_facts = PushHeaderFacts::Wake;
-    let wake_id = wake.push_id.clone();
-    store.insert_push_record(wake).await?;
-    store.mark_push_attempted(&wake_id).await?;
+    let target = session("target")?;
+    let root = MessageId::generate();
+    let activity = PushActivitySnapshot {
+        ranges: vec![PushActivityRange {
+            root_message_id: root.clone(),
+            from_activity_sequence: ActivitySequence::try_from(1_u64)?,
+            through_activity_sequence: ActivitySequence::try_from(2_u64)?,
+        }],
+        held: false,
+        draining: false,
+    };
+    let schedule_id = ScheduleId::generate();
+    let run_id = RunId::generate();
+    let router_attempts = vec![
+        router_push_draft(
+            &target,
+            PushKind::Wake,
+            RouterOriginRef::Wake {
+                wakeup_id: WakeupId::generate(),
+                occurrence_id: OccurrenceId::generate(),
+            },
+            PushHeaderFacts::Wake,
+            Some("wake body".to_owned()),
+            None,
+        )?,
+        router_push_draft(
+            &target,
+            PushKind::ScheduleRun,
+            RouterOriginRef::ScheduleRun {
+                schedule_id: schedule_id.clone(),
+                run_id: run_id.clone(),
+            },
+            PushHeaderFacts::ScheduleRun {
+                schedule_id,
+                run_id,
+            },
+            Some("schedule body".to_owned()),
+            None,
+        )?,
+        router_push_draft(
+            &target,
+            PushKind::Approval,
+            RouterOriginRef::Interaction {
+                interaction_id: collaboration_protocol::InteractionId::try_from(
+                    "approval-interaction".to_owned(),
+                )
+                .expect("interaction id"),
+                presentation_id: collaboration_protocol::InteractionPresentationId::generate(),
+            },
+            PushHeaderFacts::Approval {
+                requester: session("approval-requester")?,
+                requester_display_name: None,
+            },
+            Some("approval body".to_owned()),
+            None,
+        )?,
+        router_push_draft(
+            &target,
+            PushKind::Question,
+            RouterOriginRef::Interaction {
+                interaction_id: collaboration_protocol::InteractionId::try_from(
+                    "question-interaction".to_owned(),
+                )
+                .expect("interaction id"),
+                presentation_id: collaboration_protocol::InteractionPresentationId::generate(),
+            },
+            PushHeaderFacts::Question {
+                requester: session("question-requester")?,
+                requester_display_name: None,
+            },
+            Some("question body".to_owned()),
+            None,
+        )?,
+        router_push_draft(
+            &target,
+            PushKind::SubscriptionActivity,
+            RouterOriginRef::SubscriptionActivity {
+                target: target.clone(),
+                batch_id: BatchId::generate(),
+            },
+            PushHeaderFacts::SubscriptionActivity {
+                root_count: 1,
+                message_count: 1,
+                held_since: None,
+                thread_resolved: false,
+            },
+            None,
+            Some(activity),
+        )?,
+        router_push_draft(
+            &target,
+            PushKind::SubscriptionExpiry,
+            RouterOriginRef::SubscriptionExpiry {
+                target: target.clone(),
+                scope: SubscriptionScope::thread(root),
+                subscription_generation: SubscriptionGeneration::new(1).expect("generation"),
+            },
+            PushHeaderFacts::SubscriptionExpiry {
+                scope: "thread expired-root".to_owned(),
+            },
+            Some("renew subscription".to_owned()),
+            None,
+        )?,
+    ];
+    let mut attempted_ids = vec![attempted_id.clone()];
+    for draft in router_attempts {
+        let push_id = draft.push_id.clone();
+        store.insert_push_record(draft).await?;
+        store.mark_push_attempted(&push_id).await?;
+        attempted_ids.push(push_id);
+    }
     store.close().await?;
 
     let mut restored = AutomationStore::open(&database.path).await?;
+    let attempted_count = u64::try_from(attempted_ids.len())?;
     ensure(
-        restored
-            .settle_interrupted_direct_messages(Utc::now())
-            .await?
-            == 1,
+        restored.settle_interrupted_pushes(Utc::now()).await? == attempted_count,
         "recovery touched the wrong attempts",
     )?;
     let targets = restored.direct_message_recovery_targets().await?;
@@ -210,14 +331,6 @@ async fn restart_discovers_every_unsent_dm_target_and_settles_only_attempted_dms
         .get_push_record(&second_id)
         .await?
         .ok_or("held missing")?;
-    let unknown = restored
-        .get_push_record(&attempted_id)
-        .await?
-        .ok_or("attempt missing")?;
-    let untouched = restored
-        .get_push_record(&wake_id)
-        .await?
-        .ok_or("wake missing")?;
     ensure(
         pending.delivery_state == PushDeliveryState::Pending,
         "known unsent pending was settled",
@@ -226,23 +339,21 @@ async fn restart_discovers_every_unsent_dm_target_and_settles_only_attempted_dms
         held.delivery_state == PushDeliveryState::Held && held.mode == Some(MessageDelivery::Queue),
         "unsubmitted hold did not survive crash",
     )?;
-    ensure(
-        unknown.delivery_state == PushDeliveryState::OutcomeUnknown
-            && unknown
-                .last_outcome
-                .is_some_and(|receipt| receipt.outcome == DeliveryOutcome::Unknown),
-        "attempted DM was replayable",
-    )?;
-    ensure(
-        untouched.delivery_state == PushDeliveryState::Attempted
-            && untouched.last_outcome.is_none(),
-        "DM recovery changed non-DM ownership",
-    )?;
-    ensure(
-        restored
-            .settle_interrupted_direct_messages(Utc::now())
+    for push_id in &attempted_ids {
+        let unknown = restored
+            .get_push_record(push_id)
             .await?
-            == 0,
+            .ok_or("attempted push missing")?;
+        ensure(
+            unknown.delivery_state == PushDeliveryState::OutcomeUnknown
+                && unknown
+                    .last_outcome
+                    .is_some_and(|receipt| receipt.outcome == DeliveryOutcome::Unknown),
+            "attempted push was replayable",
+        )?;
+    }
+    ensure(
+        restored.settle_interrupted_pushes(Utc::now()).await? == 0,
         "restore was not idempotent",
     )?;
     restored.close().await?;

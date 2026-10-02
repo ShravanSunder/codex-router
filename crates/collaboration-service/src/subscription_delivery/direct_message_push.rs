@@ -19,9 +19,7 @@ impl SubscriptionPushStore {
         &self,
     ) -> Result<Vec<SessionRef>, automation_storage::StorageError> {
         let mut store = self.store.lock().await;
-        store
-            .settle_interrupted_direct_messages(self.clock.now())
-            .await?;
+        store.settle_interrupted_pushes(self.clock.now()).await?;
         store.direct_message_recovery_targets().await
     }
 

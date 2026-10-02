@@ -1,4 +1,4 @@
-//! DM-only recovery and known-unsent holds; other push owners keep their transitions.
+//! Recover interrupted push attempts and restore known-unsent direct messages.
 use crate::{AutomationStore, StorageError, push_record_rows};
 use chrono::{DateTime, Utc};
 use collaboration_protocol::{
@@ -58,11 +58,10 @@ impl AutomationStore {
     }
 
     /// The process died after an attempt began. Its effect is unknowable; never resend it.
-    pub async fn settle_interrupted_direct_messages(
+    pub async fn settle_interrupted_pushes(
         &mut self,
         now: DateTime<Utc>,
     ) -> Result<u64, StorageError> {
-        let kind = push_record_rows::serialize_kind(PushKind::DirectMessage)?;
         let receipt = DeliveryReceipt {
             outcome: DeliveryOutcome::Unknown,
             reachability: None,
@@ -71,8 +70,8 @@ impl AutomationStore {
         let outcome_json = push_record_rows::serialize_json(&receipt)?;
         let settled_at = push_record_rows::serialize_timestamp(now);
         let result = sqlx::query!(
-            "UPDATE router_pushes SET delivery_state='outcome_unknown',last_outcome_json=?,settled_at=? WHERE kind=? AND delivery_state='attempted' AND last_outcome_json IS NULL",
-            outcome_json, settled_at, kind
+            "UPDATE router_pushes SET delivery_state='outcome_unknown',last_outcome_json=?,settled_at=? WHERE delivery_state='attempted' AND last_outcome_json IS NULL",
+            outcome_json, settled_at
         ).execute(&mut self.connection).await?;
         Ok(result.rows_affected())
     }

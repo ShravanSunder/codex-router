@@ -18,3 +18,6 @@ thiserror.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
+
+[dev-dependencies]
+message-board = { path = "../message-board", version = "0.1.58" }

@@ -20,6 +20,7 @@ impl ReaderDeliveryOwner {
         let Ok(store) = self.board_store() else {
             return;
         };
+        let mut ended_reason = None;
         for prior in &self.prior_records {
             if records.iter().any(|record| record.scope() == prior.scope()) {
                 continue;
@@ -32,7 +33,11 @@ impl ReaderDeliveryOwner {
             let Ok(Some(expired)) = expired else {
                 continue;
             };
-            if expired.state().end_reason() != Some(EndReason::Expired)
+            let Some(end_reason) = expired.state().end_reason() else {
+                continue;
+            };
+            ended_reason.get_or_insert(end_reason);
+            if end_reason != EndReason::Expired
                 || expired.policy().mode() != SubscriptionMode::Deliver
             {
                 continue;
@@ -53,6 +58,12 @@ impl ReaderDeliveryOwner {
             {
                 let _ = self.push.deliver(&target, prepared).await;
             }
+        }
+        if let Some(end_reason) = ended_reason {
+            self.settle_held_subscription_pushes_in_background(
+                None,
+                format!("subscription ended: {}", end_reason.as_str()),
+            );
         }
     }
 
@@ -205,7 +216,7 @@ impl ReaderDeliveryOwner {
         facts: &HashMap<MessageId, RootSubscriptionFacts>,
     ) -> Result<(), BoardError> {
         let evidence = delivered.evidence.clone();
-        match &delivered.receipt.outcome {
+        let result = match &delivered.receipt.outcome {
             DeliveryOutcome::Started
             | DeliveryOutcome::Steered
             | DeliveryOutcome::StartedOrSteered
@@ -261,7 +272,70 @@ impl ReaderDeliveryOwner {
                 self.observe(OwnerObservation::RetryScheduled);
                 Ok(())
             }
-        }
+        };
+        result?;
+        let link = collaboration_protocol::RouterLink::new(
+            collaboration_protocol::MachineId::from(self.push.machine.service_id().clone()),
+            delivered.push_id.clone(),
+        );
+        self.settle_held_subscription_pushes_in_background(
+            Some(delivered.push_id.clone()),
+            format!("superseded by {link}"),
+        );
+        Ok(())
+    }
+
+    /// Retry stale held-record settlement without delaying the current delivery.
+    fn settle_held_subscription_pushes_in_background(
+        &self,
+        except_push_id: Option<PushId>,
+        reason: String,
+    ) {
+        let Ok(target) = target_session(&self.reader) else {
+            return;
+        };
+        let store = Arc::clone(&self.push.store);
+        let clock = Arc::clone(&self.clock);
+        let shutdown = self.shutdown.clone();
+        #[cfg(test)]
+        let observations = self.observations.clone();
+        tokio::spawn(async move {
+            let mut delay = Duration::from_secs(1);
+            loop {
+                let result = store
+                    .lock()
+                    .await
+                    .settle_held_subscription_pushes(
+                        &target,
+                        except_push_id.as_ref(),
+                        &reason,
+                        clock.now(),
+                    )
+                    .await;
+                match result {
+                    Ok(_settled) => {
+                        #[cfg(test)]
+                        let _ = observations
+                            .send(OwnerObservation::HeldSubscriptionPushesSettled(_settled));
+                        break;
+                    }
+                    Err(error) => tracing::warn!(
+                        %error,
+                        %reason,
+                        "retrying stale held subscription-push settlement"
+                    ),
+                }
+                let Some(deadline) = clock.monotonic_now().checked_add(delay) else {
+                    tracing::warn!("subscription-push settlement retry deadline overflowed");
+                    break;
+                };
+                tokio::select! {
+                    () = shutdown.cancelled() => break,
+                    () = clock.sleep_until(deadline) => {}
+                }
+                delay = delay.saturating_mul(2).min(Duration::from_secs(30));
+            }
+        });
     }
 
     pub(super) async fn settle(

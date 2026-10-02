@@ -1,6 +1,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 mod control_view_proofs;
 mod direct_message_proofs;
+mod f6_held_record_proofs;
 mod flight_proofs;
 mod lifecycle_proofs;
 mod owner_fixture;

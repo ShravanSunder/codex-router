@@ -41,6 +41,7 @@ pub(super) enum OwnerObservation {
     DirectMessageQueued,
     DirectMessageHeld,
     DirectMessageSettled,
+    HeldSubscriptionPushesSettled(u64),
     Stopped,
 }
 
@@ -323,6 +324,17 @@ impl SubscriptionDeliveryService {
         response
             .await
             .expect("owner reached storage-derived sleep boundary");
+    }
+
+    #[cfg(test)]
+    pub(super) async fn request_reconcile(&self, reader: Identity) {
+        let (reply, _response) = oneshot::channel();
+        self.ensure_owner(reader)
+            .await
+            .expect("active owner")
+            .send(ReaderDeliveryCommand::Reconcile(reply))
+            .await
+            .expect("owner command");
     }
 }
 

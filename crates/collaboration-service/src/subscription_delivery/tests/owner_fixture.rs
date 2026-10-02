@@ -353,6 +353,9 @@ impl OwnerRuntime {
     pub async fn synchronize(&self, reader: &Identity) {
         self.service.synchronize_reader(reader.clone()).await;
     }
+    pub async fn reconcile(&self, reader: &Identity) {
+        self.service.request_reconcile(reader.clone()).await;
+    }
     pub async fn close(self) {
         self.service.shutdown().await;
     }
