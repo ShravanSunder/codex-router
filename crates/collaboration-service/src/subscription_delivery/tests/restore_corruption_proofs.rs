@@ -139,39 +139,105 @@ async fn corrupt_subscription_mode_is_skipped_while_valid_reader_restores_and_de
     runtime.close().await;
 }
 
-#[tokio::test(start_paused = true)]
+async fn bounded_stage<TValue>(
+    stage: &str,
+    work: impl std::future::Future<Output = TValue>,
+) -> TValue {
+    eprintln!("recovery proof: {stage}");
+    tokio::time::timeout(Duration::from_secs(10), work)
+        .await
+        .unwrap_or_else(|_| panic!("recovery proof timed out during {stage}"))
+}
+
+#[tokio::test]
 async fn failed_direct_message_recovery_query_does_not_stop_valid_subscription_reader() {
-    let fixture = OwnerFixture::new().await;
-    fixture
-        .post(&fixture.root, "Healthy reader despite DM query failure")
-        .await;
-    let mut observer = sqlx::SqliteConnection::connect_with(
-        &sqlx::sqlite::SqliteConnectOptions::new()
-            .filename(fixture.directory.path().join("automation.sqlite")),
+    let fixture = bounded_stage("create fixture", OwnerFixture::new()).await;
+    bounded_stage(
+        "post healthy subscription activity",
+        fixture.post(&fixture.root, "Healthy reader despite DM query failure"),
+    )
+    .await;
+    let mut observer = bounded_stage(
+        "open automation observer",
+        sqlx::SqliteConnection::connect_with(
+            &sqlx::sqlite::SqliteConnectOptions::new()
+                .filename(fixture.directory.path().join("automation.sqlite")),
+        ),
     )
     .await
     .unwrap();
     // The connection remains usable; only the DM recovery repository query is unavailable.
-    sqlx::query("ALTER TABLE router_pushes RENAME TO temporarily_unavailable_pushes")
-        .execute(&mut observer)
-        .await
-        .unwrap();
-    let runtime = fixture.runtime().await;
-    sqlx::query("ALTER TABLE temporarily_unavailable_pushes RENAME TO router_pushes")
-        .execute(&mut observer)
-        .await
-        .unwrap();
-    // Wake the reader after the query becomes available; no Host/service restart.
-    runtime
-        .service
-        .reconcile_reader(fixture.reader.clone())
-        .await
-        .unwrap();
-    let request = runtime.requests.lock().await.recv().await.unwrap();
+    bounded_stage(
+        "inject recovery query failure",
+        sqlx::query("ALTER TABLE router_pushes RENAME TO temporarily_unavailable_pushes")
+            .execute(&mut observer),
+    )
+    .await
+    .unwrap();
+    let recovery_error = bounded_stage("verify recovery query failure", async {
+        fixture
+            .push_store
+            .lock()
+            .await
+            .direct_message_recovery_targets()
+            .await
+    })
+    .await
+    .unwrap_err();
+    assert!(
+        matches!(recovery_error,
+        automation_storage::StorageError::Database(sqlx::Error::Database(ref error))
+            if error.code().as_deref() == Some("1") && error.message().contains("no such table")),
+        "injection must fail the repository query without converting it to a successful empty result"
+    );
+    let runtime = bounded_stage(
+        "start service with unavailable push table",
+        fixture.runtime(),
+    )
+    .await;
+    bounded_stage(
+        "observe owner query-failure retry boundary",
+        runtime.observe(|event| matches!(event, OwnerObservation::Sleeping(Some(_)))),
+    )
+    .await;
+    bounded_stage(
+        "restore push table",
+        sqlx::query("ALTER TABLE temporarily_unavailable_pushes RENAME TO router_pushes")
+            .execute(&mut observer),
+    )
+    .await
+    .unwrap();
+    fixture.clock.advance_without_tokio_time(1);
+    let request = bounded_stage("receive healthy subscription notice", async {
+        let mut requests = runtime.requests.lock().await;
+        let mut observations = runtime.observations.lock().await;
+        loop {
+            tokio::select! {
+                request = requests.recv() => break request.unwrap(),
+                event = observations.recv() => eprintln!("recovery proof owner: {:?}", event.unwrap()),
+            }
+        }
+    }).await;
     assert!(request.payload.line.as_str().contains("1 message"));
-    runtime.await_settled().await;
-    observer.close().await.unwrap();
-    runtime.close().await;
+    // Delivery has already been admitted. The owner serializes its receipt
+    // before commands, so the scripted recipient must finish before this test
+    // awaits Reconcile. Retain and join the task; never detach it.
+    let service = runtime.service.clone();
+    let reader = fixture.reader.clone();
+    let reconcile = tokio::spawn(async move { service.reconcile_reader(reader).await });
+    bounded_stage(
+        "settle healthy subscription notice",
+        runtime.await_settled(),
+    )
+    .await;
+    bounded_stage("acknowledge reconcile after delivery completes", reconcile)
+        .await
+        .unwrap()
+        .unwrap();
+    bounded_stage("close automation observer", observer.close())
+        .await
+        .unwrap();
+    bounded_stage("shut down service", runtime.close()).await;
 }
 
 #[tokio::test]
