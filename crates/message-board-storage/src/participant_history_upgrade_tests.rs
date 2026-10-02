@@ -25,6 +25,12 @@ async fn participant_history_upgrade_p2_p4_post_unknown_then_recover_after_join(
             attribution(&mut store, unknown.message_id.as_str()).await,
             None
         );
+        assert!(
+            serde_json::to_value(&unknown)
+                .unwrap()
+                .get("postedAsRole")
+                .is_none()
+        );
         let joined = store
             .join_thread(
                 ThreadJoinRequest {
@@ -42,6 +48,22 @@ async fn participant_history_upgrade_p2_p4_post_unknown_then_recover_after_join(
             .await
             .unwrap();
         let known = post(&mut store, &root, session("A")).await;
+        assert_eq!(
+            serde_json::to_value(&known).unwrap()["postedAsRole"],
+            "orchestrator"
+        );
+        let old = store
+            .show_message(MessageShowRequest {
+                message_id: unknown.message_id.clone(),
+            })
+            .await
+            .unwrap();
+        assert!(
+            serde_json::to_value(old.0)
+                .unwrap()
+                .get("postedAsRole")
+                .is_none()
+        );
         assert_eq!(
             attribution(&mut store, known.message_id.as_str()).await,
             Some(

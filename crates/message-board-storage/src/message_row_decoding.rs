@@ -17,6 +17,12 @@ struct StoredMessageRow {
     activity_actor_key: String,
     activity_kind: String,
     activity_root_id: Option<String>,
+    posted_from_activity: Option<i64>,
+    participant_activity_sequence: Option<i64>,
+    participant_root_id: Option<String>,
+    participant_kind: Option<String>,
+    participant_key: Option<String>,
+    participant_role: Option<String>,
 }
 
 struct StoredReferenceRow {
@@ -33,9 +39,12 @@ async fn load_message_unattributed(
         StoredMessageRow,
         "SELECT m.message_id,m.board_id,m.topic_id,m.root_id,m.actor_key,m.acting_for_key,m.text, \
                 a.activity_sequence,a.actor_key AS activity_actor_key,a.kind AS activity_kind, \
-                a.root_id AS activity_root_id \
+                a.root_id AS activity_root_id, m.posted_from_activity, \
+                pa.activity_sequence AS participant_activity_sequence, pa.root_id AS participant_root_id, \
+                pa.kind AS participant_kind, pa.participant_key, pa.participant_role \
          FROM board_messages m \
          JOIN board_activity a ON a.message_id=m.message_id \
+         LEFT JOIN board_activity pa ON pa.activity_sequence=m.posted_from_activity \
          WHERE m.message_id=?",
         message_id.as_str(),
     )
@@ -51,6 +60,7 @@ async fn load_message_unattributed(
         return Err(invalid_record());
     }
     let actor = load_identity(transaction, &row.actor_key).await?;
+    let posted_as_role = decode_posted_as_role(&row, &actor)?;
     let acting_for = match row.acting_for_key {
         None => None,
         Some(identity_key) => match load_identity(transaction, &identity_key).await? {
@@ -104,6 +114,7 @@ async fn load_message_unattributed(
         placement,
         actor,
         acting_for,
+        posted_as_role,
         text: MessageText::try_from(escape_stored_controls(row.text))
             .map_err(|_| invalid_record())?,
         references: MessageReferences::try_from(references).map_err(|_| invalid_record())?,
@@ -160,4 +171,25 @@ fn decode_reference(row: StoredReferenceRow) -> Result<ReferenceTarget, BoardErr
         }),
         _ => Err(invalid_record()),
     }
+}
+
+fn decode_posted_as_role(
+    row: &StoredMessageRow,
+    actor: &Identity,
+) -> Result<Option<ParticipantRole>, BoardError> {
+    let Some(sequence) = row.posted_from_activity else {
+        return Ok(None);
+    };
+    let expected_root = row.root_id.as_deref().unwrap_or(&row.message_id);
+    if !matches!(actor, Identity::Session { .. })
+        || row.participant_activity_sequence != Some(sequence)
+        || row.participant_key.as_deref() != Some(row.actor_key.as_str())
+        || row.participant_root_id.as_deref() != Some(expected_root)
+        || (row.root_id.is_some() && sequence >= row.activity_sequence)
+        || (row.root_id.is_none() && row.participant_kind.as_deref() != Some("participantJoined"))
+    {
+        return Err(invalid_record());
+    }
+    let role = row.participant_role.as_deref().ok_or_else(invalid_record)?;
+    crate::participant_row_decoding::decode_role(role).map(Some)
 }
