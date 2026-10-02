@@ -8,7 +8,8 @@ use serde_json::{Value, json};
 use sqlx::Connection;
 use std::time::Duration;
 
-#[tokio::test(start_paused = true)]
+// SQLite works on background threads; its acknowledgement bound needs real time.
+#[tokio::test]
 async fn cleanup_write_retry_does_not_block_reader_reconcile() {
     let fixture = OwnerFixture::new().await;
     let runtime = fixture.runtime().await;
@@ -73,7 +74,7 @@ async fn cleanup_write_retry_does_not_block_reader_reconcile() {
         .execute(&mut observer)
         .await
         .unwrap();
-    fixture.clock.advance(30).await;
+    fixture.clock.advance_without_tokio_time(30);
     runtime
         .observe(|event| matches!(event, OwnerObservation::HeldSubscriptionPushesSettled(1)))
         .await;
