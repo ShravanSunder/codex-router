@@ -551,6 +551,7 @@ impl SessionsCommandRunner for ProcessSessionsCommandRunner {
         session_id: &str,
         model_choice: &ResumeModelChoice,
     ) -> Result<(), SessionsCommandError> {
+        self.launch_target.ensure_profile_allows_remote_resume()?;
         self.launch_target.resolve_for_launch()?;
         let launch = self
             .launch_target
@@ -574,6 +575,7 @@ impl SessionsCommandRunner for ProcessSessionsCommandRunner {
         session_id: &str,
         model_choice: &ResumeModelChoice,
     ) -> Result<(), SessionsCommandError> {
+        self.launch_target.ensure_profile_allows_remote_resume()?;
         self.launch_target.resolve_for_launch()?;
         let launch = self
             .launch_target
