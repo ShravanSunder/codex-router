@@ -1,9 +1,11 @@
 //! OpenAI account authentication boundaries for codex-router.
 #![cfg_attr(test, allow(clippy::panic_in_result_fn))]
 
+pub mod claude_oauth;
 pub mod credential_activation;
 pub mod live_quota;
 pub mod oauth;
+pub mod openai_oauth;
 pub mod quota_client;
 pub mod refresh_worker;
 pub mod resolver;
@@ -41,6 +43,7 @@ mod tests {
     use codex_router_secret_store::account_tokens::AccountCredentialBundle;
     use codex_router_secret_store::account_tokens::openai_account_credential_bundle_key;
     use codex_router_secret_store::account_tokens::upstream_access_token_key;
+    use codex_router_secret_store::credential_bundle::CredentialBundle;
     use codex_router_secret_store::encrypted_credential_store::EncryptedCredentialStore;
     use codex_router_secret_store::keychain_data_key::KeychainAccess;
     use codex_router_secret_store::keychain_data_key::KeychainAccessError;
@@ -80,6 +83,8 @@ mod tests {
     use crate::router_credentials::RouterCredentialBundle;
 
     mod credential_activation_tests;
+    mod credential_maintenance_reauth_tests;
+    mod credential_provider_mismatch_tests;
     mod credential_renewal_http_outcome_tests;
     mod credential_renewal_outcome_tests;
     mod credential_renewal_tests;
@@ -117,27 +122,35 @@ mod tests {
             last_success_unix_seconds: Some(1_000),
             next_attempt_unix_seconds: None,
             claimed_successor_generation: None,
+            claim_purpose: None,
+            claim_started_unix_seconds: None,
+            claim_prior_state: None,
             consecutive_failures: 0,
         };
-        let short =
+        let short = CredentialBundle::from(
             AccountCredentialBundle::imported_codex_auth("short", Some("refresh".to_owned()))
-                .with_expires_unix_seconds(1_120);
+                .with_expires_unix_seconds(1_120),
+        );
         assert!(!credential_renewal_is_due(
             &short,
             Some(&maintenance),
             1_059
         ));
         assert!(credential_renewal_is_due(&short, Some(&maintenance), 1_060));
-        let long = AccountCredentialBundle::imported_codex_auth("long", Some("refresh".to_owned()))
-            .with_expires_unix_seconds(50_000);
+        let long = CredentialBundle::from(
+            AccountCredentialBundle::imported_codex_auth("long", Some("refresh".to_owned()))
+                .with_expires_unix_seconds(50_000),
+        );
         assert!(!credential_renewal_is_due(
             &long,
             Some(&maintenance),
             15_399
         ));
         assert!(credential_renewal_is_due(&long, Some(&maintenance), 15_400));
-        let unknown =
-            AccountCredentialBundle::imported_codex_auth("unknown", Some("refresh".to_owned()));
+        let unknown = CredentialBundle::from(AccountCredentialBundle::imported_codex_auth(
+            "unknown",
+            Some("refresh".to_owned()),
+        ));
         assert!(!credential_renewal_is_due(
             &unknown,
             Some(&maintenance),
@@ -312,7 +325,10 @@ mod tests {
         let resolver =
             RouterCredentialResolver::new(&state, &secrets, NoopCredentialRefreshClient, 1_000);
 
-        let resolved = must_ok(resolver.resolve_provider_credentials(&account_id));
+        let resolved = must_ok(resolver.resolve_provider_credentials(
+            &account_id,
+            codex_router_core::provider::Provider::Openai,
+        ));
 
         assert_eq!(resolved.account_id(), &account_id);
         assert_eq!(
@@ -370,7 +386,10 @@ mod tests {
         let resolver =
             RouterCredentialResolver::new(&state, &secrets, refresh_client.clone(), 1_000);
 
-        let resolved = must_ok(resolver.resolve_provider_credentials(&account_id));
+        let resolved = must_ok(resolver.resolve_provider_credentials(
+            &account_id,
+            codex_router_core::provider::Provider::Openai,
+        ));
 
         assert_eq!(
             resolved.access_token().expose_secret(),
@@ -469,7 +488,10 @@ mod tests {
         let resolver =
             RouterCredentialResolver::new(&state, &secrets, refresh_client.clone(), 1_000);
 
-        let resolved = must_ok(resolver.resolve_provider_credentials(&account_id));
+        let resolved = must_ok(resolver.resolve_provider_credentials(
+            &account_id,
+            codex_router_core::provider::Provider::Openai,
+        ));
 
         assert_eq!(
             resolved.access_token().expose_secret(),
@@ -527,7 +549,10 @@ mod tests {
             .with_refresh_commit_failpoint(RefreshCommitFailpoint::AfterSecretWrite);
 
         assert_eq!(
-            resolver.resolve_provider_credentials(&account_id),
+            resolver.resolve_provider_credentials(
+                &account_id,
+                codex_router_core::provider::Provider::Openai
+            ),
             Err(CredentialResolverError::RefreshUnavailable)
         );
         let loaded_account = must_ok(AccountStateRepository::load_account(&state, &account_id))
@@ -598,13 +623,19 @@ mod tests {
                 .with_refresh_commit_failpoint(RefreshCommitFailpoint::AfterStateCommit);
 
         assert_eq!(
-            resolver.resolve_provider_credentials(&account_id),
+            resolver.resolve_provider_credentials(
+                &account_id,
+                codex_router_core::provider::Provider::Openai
+            ),
             Err(CredentialResolverError::RefreshUnavailable)
         );
 
         let retry_resolver =
             RouterCredentialResolver::new(&state, &secrets, refresh_client.clone(), 1_000);
-        let resolved = must_ok(retry_resolver.resolve_provider_credentials(&account_id));
+        let resolved = must_ok(retry_resolver.resolve_provider_credentials(
+            &account_id,
+            codex_router_core::provider::Provider::Openai,
+        ));
         assert_eq!(
             resolved.access_token().expose_secret(),
             "new-state-access-token-canary"
@@ -686,10 +717,13 @@ mod tests {
                 );
                 start_barrier.wait();
 
-                must_ok(resolver.resolve_provider_credentials(&account_id))
-                    .access_token()
-                    .expose_secret()
-                    .to_owned()
+                must_ok(resolver.resolve_provider_credentials(
+                    &account_id,
+                    codex_router_core::provider::Provider::Openai,
+                ))
+                .access_token()
+                .expose_secret()
+                .to_owned()
             }));
         }
         start_barrier.wait();

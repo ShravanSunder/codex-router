@@ -116,6 +116,7 @@ fn current_unix_seconds() -> u64 {
         .map_or(0, |duration| duration.as_secs())
 }
 
+mod claude_quota_fetcher;
 mod quota_background_refresh_worker;
 mod quota_command_dispatch;
 mod quota_refresh_command;

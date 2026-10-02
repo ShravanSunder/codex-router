@@ -14,7 +14,7 @@ pub(super) async fn append_success_quota_history_observation(
         window,
         observed_unix_seconds,
         reset_credits_available,
-    );
+    )?;
     state
         .append_quota_history_observation(&observation)
         .await
@@ -27,8 +27,15 @@ pub(super) fn success_quota_history_observation(
     window: &QuotaRefreshProviderWindow,
     observed_unix_seconds: u64,
     reset_credits_available: Option<u32>,
-) -> PersistedQuotaHistoryObservation {
-    let status = if window.remaining_headroom == 0 {
+) -> Result<PersistedQuotaHistoryObservation, QuotaCommandError> {
+    let remaining_headroom =
+        window
+            .headroom
+            .percent()
+            .ok_or_else(|| QuotaCommandError::ProviderResponse {
+                message: "OpenAI quota history window was not expressed as a percent".to_owned(),
+            })?;
+    let status = if remaining_headroom == 0 {
         SelectorQuotaWindowStatus::Ineligible
     } else {
         SelectorQuotaWindowStatus::Eligible
@@ -39,7 +46,7 @@ pub(super) fn success_quota_history_observation(
         route_band,
         window.limit_window_seconds,
         observed_unix_seconds,
-        window.remaining_headroom,
+        remaining_headroom,
     )
     .with_effective(window.effective)
     .with_window_status(status)
@@ -51,7 +58,7 @@ pub(super) fn success_quota_history_observation(
     if let Some(reset_credits_available) = reset_credits_available {
         observation = observation.with_reset_credits_available(reset_credits_available);
     }
-    observation
+    Ok(observation)
 }
 
 pub(super) async fn append_failure_quota_history_observations(

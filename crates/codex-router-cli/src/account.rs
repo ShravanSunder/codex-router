@@ -1,22 +1,25 @@
 //! Account command glue for router-owned account state.
 
+use std::io::BufRead;
 use std::io::Write;
-use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::path::PathBuf;
-use std::process::Command;
-use std::time::SystemTime;
-use std::time::UNIX_EPOCH;
 
-use base64::Engine;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use codex_router_auth::claude_oauth::AccountLoginFlow;
+use codex_router_auth::claude_oauth::ClaudeOAuthLoginFlow;
+use codex_router_auth::claude_oauth::LoginFlowError;
+use codex_router_auth::claude_oauth::PendingClaudeOAuthLogin;
 use codex_router_auth::credential_activation::CredentialActivation;
 use codex_router_auth::credential_activation::CredentialActivationError;
 use codex_router_auth::credential_activation::CredentialActivationRequest;
+use codex_router_auth::openai_oauth::OpenAiOAuthDeviceLoginClient;
+use codex_router_auth::openai_oauth::OpenAiOAuthDeviceLoginError;
+use codex_router_auth::openai_oauth::OpenAiOAuthLoginTokens;
 use codex_router_core::ids::AccountId;
 use codex_router_core::provider::Provider;
 use codex_router_secret_store::SecretStore;
 use codex_router_secret_store::account_tokens::AccountCredentialBundle;
+use codex_router_secret_store::encrypted_credential_store::EncryptedCredentialStore;
 use codex_router_secret_store::encrypted_credential_store::EncryptedCredentialStoreStatus;
 use codex_router_secret_store::model::SecretStoreError;
 #[cfg(test)]
@@ -29,6 +32,7 @@ use codex_router_state::sqlite::StateStoreError;
 use comfy_table::Table;
 use comfy_table::presets::UTF8_FULL;
 use thiserror::Error;
+use tokio_util::sync::CancellationToken;
 
 use crate::ArgumentParser;
 use crate::CliError;
@@ -39,16 +43,14 @@ use crate::router_root_or_default;
 pub enum AccountCommand {
     /// Prints account command help.
     Help(&'static str),
-    /// Delegates device-code login to Codex, then imports the resulting auth.json.
-    LoginDeviceAuth {
+    /// Runs provider OAuth login and activates the resulting credentials.
+    Login {
         /// Router-owned root.
         router_root: PathBuf,
         /// Display label.
         label: String,
-        /// Codex executable to run.
-        codex_bin: PathBuf,
-        /// Explicit plaintext file-backend acknowledgement.
-        allow_plaintext_file_secrets: bool,
+        /// Typed provider flow selected by the shared login dispatcher.
+        provider_login_flow: ProviderLoginFlow,
     },
     /// Lists router-owned accounts.
     List {
@@ -75,6 +77,15 @@ pub enum AccountCommand {
     },
 }
 
+/// Provider-specific OAuth flow selected by `account login --provider`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ProviderLoginFlow {
+    /// Router-native OpenAI OAuth device-code flow.
+    OpenAiDevice,
+    /// Claude's hosted callback and pasted code#state flow.
+    ClaudeOAuth,
+}
+
 impl AccountCommand {
     pub(crate) fn parse(parser: &mut ArgumentParser) -> Result<Self, CliError> {
         let Some(command) = parser.next_string()? else {
@@ -94,11 +105,15 @@ impl AccountCommand {
                     return Ok(Self::Help(ACCOUNT_LOGIN_HELP_TEXT));
                 }
                 let options = AccountLoginOptions::parse(parser)?;
-                Ok(Self::LoginDeviceAuth {
+                let provider = options.provider.unwrap_or(Provider::Openai);
+                let provider_login_flow = match provider {
+                    Provider::Openai => ProviderLoginFlow::OpenAiDevice,
+                    Provider::Claude => ProviderLoginFlow::ClaudeOAuth,
+                };
+                Ok(Self::Login {
                     router_root: options.router_root()?,
                     label: options.label()?,
-                    codex_bin: options.codex_bin.unwrap_or_else(|| PathBuf::from("codex")),
-                    allow_plaintext_file_secrets: options.allow_plaintext_file_secrets,
+                    provider_login_flow,
                 })
             }
             "list" => {
@@ -153,9 +168,6 @@ impl AccountCommand {
 /// Account command failure.
 #[derive(Debug, Error)]
 pub enum AccountCommandError {
-    /// Plaintext file-backed import needs explicit acknowledgement.
-    #[error("account login/import requires --allow-plaintext-file-secrets")]
-    PlaintextFileSecretsNotAllowed,
     /// Router root creation failed.
     #[error("failed to create router root {path}: {source}")]
     CreateRouterRoot {
@@ -165,60 +177,9 @@ pub enum AccountCommandError {
         #[source]
         source: std::io::Error,
     },
-    /// Auth JSON read failed.
-    #[error("failed to read auth json: {message}")]
-    ReadAuthJson {
-        /// Redacted message.
-        message: String,
-    },
-    /// Auth JSON parse failed.
-    #[error("failed to parse auth json: {message}")]
-    ParseAuthJson {
-        /// Redacted message.
-        message: String,
-    },
-    /// API-key auth cannot be imported as quota-compatible OAuth state.
-    #[error("device login requires Codex OAuth credentials, not API-key auth")]
-    ApiKeyAuth,
     /// An account id already belongs to another provider.
     #[error("account provider does not match OpenAI credential import")]
     AccountProviderMismatch,
-    /// Device-auth process failed to start.
-    #[error("failed to start codex device-auth login {path}: {source}")]
-    DeviceAuthLaunch {
-        /// Codex executable path.
-        path: PathBuf,
-        /// IO source.
-        #[source]
-        source: std::io::Error,
-    },
-    /// Device-auth process failed.
-    #[error("codex device-auth login failed with status {status}")]
-    DeviceAuthFailed {
-        /// Process status.
-        status: String,
-    },
-    /// Temporary Codex home creation failed.
-    #[error("failed to create temporary Codex home {path}: {source}")]
-    CreateTemporaryCodexHome {
-        /// Temporary Codex home path.
-        path: PathBuf,
-        /// IO source.
-        #[source]
-        source: std::io::Error,
-    },
-    /// Temporary Codex home cleanup failed.
-    #[error("failed to remove temporary Codex home {path}: {source}")]
-    RemoveTemporaryCodexHome {
-        /// Temporary Codex home path.
-        path: PathBuf,
-        /// IO source.
-        #[source]
-        source: std::io::Error,
-    },
-    /// Access token was missing.
-    #[error("access token not found in auth json")]
-    MissingAccessToken,
     /// Display label was empty.
     #[error("account label must not be empty")]
     EmptyLabel,
@@ -243,6 +204,18 @@ pub enum AccountCommandError {
         /// Duplicated option name.
         option: &'static str,
     },
+    /// Provider login option was supplied more than once.
+    #[error("account login option supplied more than once: {option}")]
+    DuplicateAccountLoginOption {
+        /// Duplicated option name.
+        option: &'static str,
+    },
+    /// OpenAI OAuth device-code login failed.
+    #[error(transparent)]
+    OpenAiOAuth(#[from] OpenAiOAuthDeviceLoginError),
+    /// Claude OAuth flow could not safely produce account credentials.
+    #[error(transparent)]
+    ClaudeOAuth(#[from] LoginFlowError),
     /// No configured account has the supplied exact label.
     #[error("weekly floor account label did not match a configured account")]
     WeeklyFloorAccountNotFound,
@@ -301,22 +274,132 @@ pub fn run_account_command(
     stdout: &mut impl Write,
     command: AccountCommand,
 ) -> Result<(), AccountCommandError> {
+    let stdin = std::io::stdin();
+    let mut reader = stdin.lock();
+    run_account_command_with_input(stdout, &mut reader, command)
+}
+
+pub(crate) fn run_account_command_with_input(
+    stdout: &mut impl Write,
+    reader: &mut impl BufRead,
+    command: AccountCommand,
+) -> Result<(), AccountCommandError> {
+    let openai_client = OpenAiOAuthDeviceLoginClient::new();
+    run_account_command_with_input_and_openai_client(stdout, reader, command, &openai_client)
+}
+
+pub(crate) fn run_account_command_with_input_and_openai_client(
+    stdout: &mut impl Write,
+    reader: &mut impl BufRead,
+    command: AccountCommand,
+    openai_client: &OpenAiOAuthDeviceLoginClient,
+) -> Result<(), AccountCommandError> {
+    run_account_command_with_input_and_provider_flows_and_store_overrides(
+        stdout,
+        reader,
+        command,
+        openai_client,
+        None,
+        None,
+        None,
+    )
+}
+
+#[cfg(test)]
+pub(crate) fn run_account_command_with_input_and_openai_client_and_secret_store(
+    stdout: &mut impl Write,
+    reader: &mut impl BufRead,
+    command: AccountCommand,
+    openai_client: &OpenAiOAuthDeviceLoginClient,
+    secret_store: EncryptedCredentialStore,
+) -> Result<(), AccountCommandError> {
+    run_account_command_with_input_and_provider_flows_and_store_overrides(
+        stdout,
+        reader,
+        command,
+        openai_client,
+        Some(secret_store),
+        None,
+        None,
+    )
+}
+
+#[cfg(all(test, target_os = "macos"))]
+pub(crate) fn run_account_command_with_input_and_claude_flow_and_secret_store(
+    stdout: &mut impl Write,
+    reader: &mut impl BufRead,
+    command: AccountCommand,
+    claude_flow: &impl AccountLoginFlow<PendingLogin = PendingClaudeOAuthLogin>,
+    secret_store: EncryptedCredentialStore,
+) -> Result<(), AccountCommandError> {
+    assert!(
+        matches!(
+            &command,
+            AccountCommand::Login {
+                provider_login_flow: ProviderLoginFlow::ClaudeOAuth,
+                ..
+            }
+        ),
+        "test Claude login runner requires a Claude login command"
+    );
+    let openai_client = OpenAiOAuthDeviceLoginClient::new();
+    let claude_flow_override: &dyn AccountLoginFlow<PendingLogin = PendingClaudeOAuthLogin> =
+        claude_flow;
+    run_account_command_with_input_and_provider_flows_and_store_overrides(
+        stdout,
+        reader,
+        command,
+        &openai_client,
+        None,
+        Some(claude_flow_override),
+        Some(secret_store),
+    )
+}
+
+fn run_account_command_with_input_and_provider_flows_and_store_overrides(
+    stdout: &mut impl Write,
+    reader: &mut impl BufRead,
+    command: AccountCommand,
+    openai_client: &OpenAiOAuthDeviceLoginClient,
+    openai_secret_store_override: Option<EncryptedCredentialStore>,
+    claude_flow_override: Option<&dyn AccountLoginFlow<PendingLogin = PendingClaudeOAuthLogin>>,
+    claude_secret_store_override: Option<EncryptedCredentialStore>,
+) -> Result<(), AccountCommandError> {
     match command {
         AccountCommand::Help(text) => stdout
             .write_all(text.as_bytes())
             .map_err(AccountCommandError::Stdout),
-        AccountCommand::LoginDeviceAuth {
+        AccountCommand::Login {
             router_root,
             label,
-            codex_bin,
-            allow_plaintext_file_secrets,
-        } => login_with_codex_device_auth(
-            stdout,
-            router_root,
-            label,
-            codex_bin,
-            allow_plaintext_file_secrets,
-        ),
+            provider_login_flow,
+        } => match provider_login_flow {
+            ProviderLoginFlow::OpenAiDevice => login_with_openai_device_auth(
+                stdout,
+                router_root,
+                label,
+                openai_client,
+                openai_secret_store_override,
+            ),
+            ProviderLoginFlow::ClaudeOAuth => match claude_flow_override {
+                Some(claude_flow) => login_with_claude_oauth(
+                    stdout,
+                    reader,
+                    router_root,
+                    label,
+                    claude_flow,
+                    claude_secret_store_override,
+                ),
+                None => login_with_claude_oauth(
+                    stdout,
+                    reader,
+                    router_root,
+                    label,
+                    &ClaudeOAuthLoginFlow::new(),
+                    claude_secret_store_override,
+                ),
+            },
+        },
         AccountCommand::List { router_root } => list_accounts(stdout, router_root),
         AccountCommand::SetStatus {
             router_root,
@@ -337,19 +420,21 @@ codex-router account
 commands:
   disable --account <name>  Stop routing to an account while retaining its credentials
   enable --account <name>   Resume routing to an account
-  login --label <name>  Add an OAuth account with device-code login
+  login --provider <openai|claude> --label <name>  Add a provider OAuth account
   list                  Show configured router accounts
   set-weekly-floor      Set or disable one account's weekly quota floor
 ";
 
 const ACCOUNT_LOGIN_HELP_TEXT: &str = "\
-codex-router account login --label <name>
+codex-router account login --provider <openai|claude> --label <name>
 
-Adds an OAuth account to router-owned storage.
+Adds an OAuth account to router-owned encrypted storage.
 
 options:
   --label <name>         Friendly account name shown in quota and account list
-  --codex-bin <path>     Codex binary to use for device-code login [default: codex]
+  --provider <name>      OAuth account provider [default: openai]
+  OpenAI login displays a device URL and code, then waits for approval.
+  Claude login opens the hosted authorization URL and asks you to paste code#state.
 ";
 
 const ACCOUNT_LIST_HELP_TEXT: &str = "\
@@ -376,42 +461,55 @@ codex-router account set-weekly-floor --account <label> --percent <0-15>
 Sets an integer weekly quota floor for exactly one account label. Zero disables it.
 ";
 
-fn import_codex_auth_text(
+fn login_with_openai_device_auth(
     stdout: &mut impl Write,
     router_root: PathBuf,
     label: String,
-    auth_text: &str,
+    client: &OpenAiOAuthDeviceLoginClient,
+    secret_store_override: Option<EncryptedCredentialStore>,
 ) -> Result<(), AccountCommandError> {
-    let trimmed_label = normalize_label(&label)?;
-    let account_id = account_id_from_label(&trimmed_label)?;
-    let imported_auth = ImportedCodexAuth::parse(auth_text)?;
+    let label = normalize_label(&label)?;
+    ensure_account_label_available_at_router_root(&router_root, &label, Provider::Openai)?;
+    let account_id = account_id_from_label(&label)?;
+    let runtime = account_command_runtime()?;
+    let tokens = collect_openai_oauth_tokens(stdout, client, &runtime)?;
 
     create_router_root(&router_root)?;
-    let runtime = account_command_runtime()?;
     let state = runtime.block_on(AsyncSqliteStateStore::open(
         &router_root.join("state.sqlite"),
     ))?;
-    ensure_account_label_available(&state, &trimmed_label, Provider::Openai, &runtime)?;
-    let secrets = runtime
-        .block_on(crate::secret_store_factory::open_cli_secret_store_async(
-            router_root.join("secrets"),
-        ))
-        .map_err(|_| AccountCommandError::CredentialStoreInitialization)?;
+    ensure_account_label_available(&state, &label, Provider::Openai, &runtime)?;
+    let secret_store = match secret_store_override {
+        Some(secret_store) => secret_store,
+        None => runtime
+            .block_on(crate::secret_store_factory::open_cli_secret_store_async(
+                router_root.join("secrets"),
+            ))
+            .map_err(|_| AccountCommandError::CredentialStoreInitialization)?,
+    };
 
-    let mut request = AccountImportRequest::new(
-        account_id.clone(),
-        trimmed_label.clone(),
-        imported_auth.access_token,
-    )
-    .with_optional_refresh_token(imported_auth.refresh_token);
-    if let Some(chatgpt_account_id) = imported_auth.chatgpt_account_id {
-        request = request.with_chatgpt_account_id(chatgpt_account_id);
+    let mut bundle = AccountCredentialBundle::imported_codex_auth(
+        tokens.access_token().expose_secret().to_owned(),
+        Some(tokens.refresh_token().expose_secret().to_owned()),
+    );
+    if let Some(chatgpt_account_id) = tokens.chatgpt_account_id() {
+        bundle = bundle.with_chatgpt_account_id(chatgpt_account_id.as_str());
     }
-    runtime.block_on(import_codex_auth_from_request_async(
-        &state, &secrets, request,
-    ))?;
+    let activation_request = CredentialActivationRequest::new(
+        Provider::Openai,
+        account_id.clone(),
+        label.clone(),
+        bundle.into(),
+    );
+    runtime
+        .block_on(CredentialActivation::activate_login(
+            &state,
+            &secret_store,
+            activation_request,
+        ))
+        .map_err(map_credential_activation_error)?;
 
-    writeln!(stdout, "logged in account: {trimmed_label}").map_err(AccountCommandError::Stdout)?;
+    writeln!(stdout, "logged in account: {label}").map_err(AccountCommandError::Stdout)?;
     writeln!(stdout, "account_id: {}", account_id.as_str()).map_err(AccountCommandError::Stdout)?;
     writeln!(
         stdout,
@@ -419,93 +517,111 @@ fn import_codex_auth_text(
         router_root.display()
     )
     .map_err(AccountCommandError::Stdout)?;
-
     Ok(())
 }
 
-fn login_with_codex_device_auth(
+fn collect_openai_oauth_tokens(
     stdout: &mut impl Write,
+    client: &OpenAiOAuthDeviceLoginClient,
+    runtime: &tokio::runtime::Runtime,
+) -> Result<OpenAiOAuthLoginTokens, AccountCommandError> {
+    let cancellation = CancellationToken::new();
+    let device_code = runtime.block_on(client.request_user_code(&cancellation))?;
+    writeln!(
+        stdout,
+        "Open this URL and enter the code to sign in to OpenAI:"
+    )
+    .map_err(AccountCommandError::Stdout)?;
+    writeln!(stdout, "{}", device_code.verification_url()).map_err(AccountCommandError::Stdout)?;
+    writeln!(stdout, "Code: {}", device_code.user_code()).map_err(AccountCommandError::Stdout)?;
+    writeln!(stdout, "Waiting for approval...").map_err(AccountCommandError::Stdout)?;
+    stdout.flush().map_err(AccountCommandError::Stdout)?;
+
+    runtime
+        .block_on(client.complete_device_code_login(&device_code, &cancellation))
+        .map_err(Into::into)
+}
+
+fn collect_claude_oauth_bundle(
+    stdout: &mut impl Write,
+    reader: &mut impl BufRead,
+    flow: &(impl AccountLoginFlow<PendingLogin = PendingClaudeOAuthLogin> + ?Sized),
+) -> Result<codex_router_secret_store::credential_bundle::CredentialBundle, AccountCommandError> {
+    let pending = flow.begin_login()?;
+    let authorization_url = flow.authorization_url(&pending)?;
+    writeln!(stdout, "Open this URL and finish the Claude authorization:")
+        .map_err(AccountCommandError::Stdout)?;
+    writeln!(stdout, "{authorization_url}").map_err(AccountCommandError::Stdout)?;
+    write!(stdout, "Paste the returned code#state: ").map_err(AccountCommandError::Stdout)?;
+    stdout.flush().map_err(AccountCommandError::Stdout)?;
+    let mut pasted_callback = String::new();
+    reader.read_line(&mut pasted_callback)?;
+    flow.finish_login(pending, &pasted_callback)
+        .map_err(Into::into)
+}
+
+fn map_credential_activation_error(error: CredentialActivationError) -> AccountCommandError {
+    match error {
+        CredentialActivationError::AccountProviderMismatch => {
+            AccountCommandError::AccountProviderMismatch
+        }
+        other => AccountCommandError::CredentialActivation(other),
+    }
+}
+
+fn login_with_claude_oauth(
+    stdout: &mut impl Write,
+    reader: &mut impl BufRead,
     router_root: PathBuf,
     label: String,
-    codex_bin: PathBuf,
-    allow_plaintext_file_secrets: bool,
+    flow: &(impl AccountLoginFlow<PendingLogin = PendingClaudeOAuthLogin> + ?Sized),
+    secret_store_override: Option<EncryptedCredentialStore>,
 ) -> Result<(), AccountCommandError> {
     let label = normalize_label(&label)?;
-    ensure_account_label_available_at_router_root(&router_root, &label, Provider::Openai)?;
-    if !allow_plaintext_file_secrets {
-        return Err(AccountCommandError::PlaintextFileSecretsNotAllowed);
-    }
+    ensure_account_label_available_at_router_root(&router_root, &label, Provider::Claude)?;
+    let account_id = account_id_from_label(&label)?;
+    let bundle = collect_claude_oauth_bundle(stdout, reader, flow)?;
 
-    let temporary_codex_home = temporary_codex_home_path();
-    std::fs::create_dir_all(&temporary_codex_home).map_err(|source| {
-        AccountCommandError::CreateTemporaryCodexHome {
-            path: temporary_codex_home.clone(),
-            source,
-        }
-    })?;
-    let permissions = std::fs::Permissions::from_mode(0o700);
-    std::fs::set_permissions(&temporary_codex_home, permissions).map_err(|source| {
-        AccountCommandError::CreateTemporaryCodexHome {
-            path: temporary_codex_home.clone(),
-            source,
-        }
-    })?;
-    let status = match Command::new(&codex_bin)
-        .arg("login")
-        .arg("--device-auth")
-        .env("CODEX_HOME", &temporary_codex_home)
-        .status()
-    {
-        Ok(status) => status,
-        Err(source) => {
-            remove_temporary_codex_home(&temporary_codex_home)?;
-            return Err(AccountCommandError::DeviceAuthLaunch {
-                path: codex_bin,
-                source,
-            });
-        }
+    create_router_root(&router_root)?;
+    let runtime = account_command_runtime()?;
+    let state = runtime.block_on(AsyncSqliteStateStore::open(
+        &router_root.join("state.sqlite"),
+    ))?;
+    ensure_account_label_available(&state, &label, Provider::Claude, &runtime)?;
+    let secret_store = match secret_store_override {
+        Some(secret_store) => secret_store,
+        None => runtime
+            .block_on(crate::secret_store_factory::open_cli_secret_store_async(
+                router_root.join("secrets"),
+            ))
+            .map_err(|_| AccountCommandError::CredentialStoreInitialization)?,
     };
-    if !status.success() {
-        remove_temporary_codex_home(&temporary_codex_home)?;
-        return Err(AccountCommandError::DeviceAuthFailed {
-            status: status.to_string(),
-        });
-    }
+    let activation_request = CredentialActivationRequest::new(
+        Provider::Claude,
+        account_id.clone(),
+        label.clone(),
+        bundle,
+    );
+    runtime
+        .block_on(CredentialActivation::activate_login(
+            &state,
+            &secret_store,
+            activation_request,
+        ))
+        .map_err(map_credential_activation_error)?;
 
-    let auth_json = temporary_codex_home.join("auth.json");
-    let auth_text = match std::fs::read_to_string(&auth_json) {
-        Ok(auth_text) => auth_text,
-        Err(error) => {
-            remove_temporary_codex_home(&temporary_codex_home)?;
-            return Err(AccountCommandError::ReadAuthJson {
-                message: error.to_string(),
-            });
-        }
-    };
-    remove_temporary_codex_home(&temporary_codex_home)?;
-    import_codex_auth_text(stdout, router_root, label, &auth_text)
+    writeln!(stdout, "logged in Claude account: {label}").map_err(AccountCommandError::Stdout)?;
+    writeln!(stdout, "account_id: {}", account_id.as_str()).map_err(AccountCommandError::Stdout)?;
+    writeln!(
+        stdout,
+        "next: codex-router quota refresh --router-root {}",
+        router_root.display()
+    )
+    .map_err(AccountCommandError::Stdout)?;
+    Ok(())
 }
 
-fn temporary_codex_home_path() -> PathBuf {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |duration| duration.as_nanos());
-    std::env::temp_dir().join(format!(
-        "codex-router-device-auth-{}-{nanos}",
-        std::process::id()
-    ))
-}
-
-fn remove_temporary_codex_home(temporary_codex_home: &Path) -> Result<(), AccountCommandError> {
-    std::fs::remove_dir_all(temporary_codex_home).map_err(|source| {
-        AccountCommandError::RemoveTemporaryCodexHome {
-            path: temporary_codex_home.to_path_buf(),
-            source,
-        }
-    })
-}
-
-/// Parsed import request used by CLI and failure-injection tests.
+/// OpenAI credential activation request used by account storage tests.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AccountImportRequest {
     account_id: AccountId,
@@ -575,7 +691,7 @@ where
         Provider::Openai,
         request.account_id,
         request.label,
-        bundle,
+        bundle.into(),
     );
     CredentialActivation::activate_login(state, secrets, activation_request)
         .await
@@ -816,7 +932,7 @@ mod account_provider_cli_tests {
     use codex_router_core::provider::Provider;
 
     #[test]
-    fn login_refuses_a_label_owned_by_another_provider_before_launching_codex() {
+    fn login_refuses_a_label_owned_by_another_provider_before_device_request() {
         let temporary_root = tempfile::tempdir().expect("temporary router root should exist");
         let runtime = account_command_runtime().expect("test runtime should initialize");
         let state = runtime
@@ -837,12 +953,16 @@ mod account_provider_cli_tests {
             .block_on(state.close())
             .expect("test state should close");
 
-        let error = login_with_codex_device_auth(
+        let client = OpenAiOAuthDeviceLoginClient::with_test_issuer(
+            "http://127.0.0.1:1",
+            std::time::Duration::from_secs(1),
+        );
+        let error = login_with_openai_device_auth(
             &mut Vec::new(),
             temporary_root.path().to_path_buf(),
             " shared-label ".to_owned(),
-            PathBuf::from("codex-that-must-not-launch"),
-            true,
+            &client,
+            None,
         )
         .expect_err("duplicate labels must be refused before device auth");
         assert!(matches!(
@@ -933,89 +1053,11 @@ fn account_id_from_label(label: &str) -> Result<AccountId, AccountCommandError> 
     AccountId::new(format!("acct_{stem}")).map_err(|_| AccountCommandError::EmptyLabel)
 }
 
-struct ImportedCodexAuth {
-    access_token: String,
-    refresh_token: Option<String>,
-    chatgpt_account_id: Option<String>,
-}
-
-impl ImportedCodexAuth {
-    fn parse(auth_text: &str) -> Result<Self, AccountCommandError> {
-        let value: serde_json::Value = serde_json::from_str(auth_text).map_err(|error| {
-            AccountCommandError::ParseAuthJson {
-                message: error.to_string(),
-            }
-        })?;
-        let auth_mode = value
-            .get("auth_mode")
-            .and_then(serde_json::Value::as_str)
-            .map(normalize_auth_mode);
-        let has_api_key = value
-            .get("OPENAI_API_KEY")
-            .and_then(serde_json::Value::as_str)
-            .is_some_and(|api_key| !api_key.trim().is_empty());
-        if auth_mode.as_deref() == Some("apikey") || has_api_key {
-            return Err(AccountCommandError::ApiKeyAuth);
-        }
-
-        let tokens = value
-            .get("tokens")
-            .and_then(serde_json::Value::as_object)
-            .ok_or(AccountCommandError::MissingAccessToken)?;
-        let access_token = tokens
-            .get("access_token")
-            .and_then(serde_json::Value::as_str)
-            .map(str::trim)
-            .filter(|token| !token.is_empty())
-            .ok_or(AccountCommandError::MissingAccessToken)?
-            .to_owned();
-        let refresh_token = tokens
-            .get("refresh_token")
-            .and_then(serde_json::Value::as_str)
-            .map(str::trim)
-            .filter(|token| !token.is_empty())
-            .map(str::to_owned);
-        let chatgpt_account_id = tokens
-            .get("id_token")
-            .and_then(serde_json::Value::as_str)
-            .and_then(chatgpt_account_id_from_id_token);
-
-        Ok(Self {
-            access_token,
-            refresh_token,
-            chatgpt_account_id,
-        })
-    }
-}
-
-fn chatgpt_account_id_from_id_token(id_token: &str) -> Option<String> {
-    let payload_segment = id_token.split('.').nth(1)?;
-    let payload = URL_SAFE_NO_PAD.decode(payload_segment).ok()?;
-    let value: serde_json::Value = serde_json::from_slice(&payload).ok()?;
-    value
-        .get("https://api.openai.com/auth")
-        .and_then(|auth| auth.get("chatgpt_account_id"))
-        .and_then(serde_json::Value::as_str)
-        .map(str::trim)
-        .filter(|account_id| !account_id.is_empty())
-        .map(str::to_owned)
-}
-
-fn normalize_auth_mode(value: &str) -> String {
-    value
-        .trim()
-        .chars()
-        .filter(|character| !matches!(character, '_' | '-' | ' '))
-        .flat_map(char::to_lowercase)
-        .collect()
-}
-
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 struct AccountLoginOptions {
     router_root: Option<PathBuf>,
     label: Option<String>,
-    codex_bin: Option<PathBuf>,
-    allow_plaintext_file_secrets: bool,
+    provider: Option<Provider>,
 }
 
 impl AccountLoginOptions {
@@ -1031,13 +1073,20 @@ impl AccountLoginOptions {
                 "--label" => {
                     options.label = Some(parser.next_required_value("--label")?);
                 }
-                "--device-auth" => {}
-                "--codex-bin" => {
-                    options.codex_bin =
-                        Some(PathBuf::from(parser.next_required_value("--codex-bin")?));
+                "--provider" if options.provider.is_none() => {
+                    let value = parser.next_required_value("--provider")?;
+                    options.provider =
+                        Some(
+                            Provider::parse(&value).ok_or_else(|| CliError::UnknownOption {
+                                option: format!("--provider {value}"),
+                            })?,
+                        );
                 }
-                "--allow-plaintext-file-secrets" => {
-                    options.allow_plaintext_file_secrets = true;
+                "--provider" => {
+                    return Err(AccountCommandError::DuplicateAccountLoginOption {
+                        option: "--provider",
+                    }
+                    .into());
                 }
                 unknown => {
                     return Err(CliError::UnknownOption {
@@ -1058,6 +1107,110 @@ impl AccountLoginOptions {
         self.label
             .clone()
             .ok_or(CliError::MissingOption { option: "--label" })
+    }
+}
+
+#[cfg(test)]
+mod claude_login_glue_tests {
+    use super::*;
+    use codex_router_core::redaction::SecretString;
+    use codex_router_secret_store::credential_bundle::CredentialBundle;
+    use std::io::Cursor;
+    use std::sync::Mutex;
+
+    struct RecordingClaudeLoginFlow {
+        flow: ClaudeOAuthLoginFlow,
+        pasted_callbacks: Mutex<Vec<String>>,
+    }
+
+    impl RecordingClaudeLoginFlow {
+        fn new() -> Self {
+            Self {
+                flow: ClaudeOAuthLoginFlow::new(),
+                pasted_callbacks: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    impl AccountLoginFlow for RecordingClaudeLoginFlow {
+        type PendingLogin = PendingClaudeOAuthLogin;
+
+        fn begin_login(&self) -> Result<Self::PendingLogin, LoginFlowError> {
+            self.flow.begin_login()
+        }
+
+        fn authorization_url(
+            &self,
+            pending: &Self::PendingLogin,
+        ) -> Result<String, LoginFlowError> {
+            self.flow.authorization_url(pending)
+        }
+
+        fn finish_login(
+            &self,
+            _pending: Self::PendingLogin,
+            pasted_callback: &str,
+        ) -> Result<CredentialBundle, LoginFlowError> {
+            self.pasted_callbacks
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(pasted_callback.to_owned());
+            if pasted_callback.trim().is_empty() {
+                return Err(LoginFlowError::InvalidCallback);
+            }
+            CredentialBundle::new_claude(
+                SecretString::new("glue-access-canary"),
+                SecretString::new("glue-refresh-canary"),
+                2_000,
+            )
+            .map_err(|_| LoginFlowError::InvalidTokenResponse)
+        }
+    }
+
+    #[test]
+    fn claude_login_glue_prints_prompt_and_passes_the_pasted_callback() {
+        let flow = RecordingClaudeLoginFlow::new();
+        let mut stdout = Vec::new();
+        let mut reader = Cursor::new(b"code-value#state-value\n".to_vec());
+
+        let bundle = collect_claude_oauth_bundle(&mut stdout, &mut reader, &flow)
+            .unwrap_or_else(|error| panic!("test login should finish: {error}"));
+
+        let prompt = String::from_utf8(stdout)
+            .unwrap_or_else(|error| panic!("test prompt should be UTF-8: {error}"));
+        assert!(prompt.contains("Open this URL and finish the Claude authorization:"));
+        assert!(prompt.contains("Paste the returned code#state: "));
+        assert_eq!(
+            *flow
+                .pasted_callbacks
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            ["code-value#state-value\n"]
+        );
+        assert_eq!(bundle.access_token().expose_secret(), "glue-access-canary");
+    }
+
+    #[test]
+    fn claude_login_glue_reports_eof_as_an_invalid_callback() {
+        let flow = RecordingClaudeLoginFlow::new();
+        let mut stdout = Vec::new();
+        let mut reader = Cursor::new(Vec::<u8>::new());
+
+        let error = collect_claude_oauth_bundle(&mut stdout, &mut reader, &flow)
+            .expect_err("EOF must not activate an empty callback");
+
+        assert!(matches!(
+            error,
+            AccountCommandError::ClaudeOAuth(LoginFlowError::InvalidCallback)
+        ));
+    }
+
+    #[test]
+    fn claude_login_glue_maps_provider_mismatch_from_activation() {
+        assert!(matches!(
+            map_credential_activation_error(CredentialActivationError::AccountProviderMismatch),
+            AccountCommandError::AccountProviderMismatch
+        ));
     }
 }
 

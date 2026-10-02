@@ -5,9 +5,40 @@ use codex_router_core::ids::AccountId;
 use codex_router_core::provider::Provider;
 
 use crate::account::AccountStatus;
+use crate::credential_maintenance::CredentialMaintenanceState;
 use crate::credit_store::CreditUsageObservation;
 use crate::window_observation::WindowObservation;
 use crate::window_observation::WindowRejection;
+
+/// Non-secret credential-maintenance state associated with one generation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct SelectorCredentialMaintenance {
+    credential_generation: u64,
+    state: CredentialMaintenanceState,
+}
+
+impl SelectorCredentialMaintenance {
+    /// Creates selector maintenance state for one credential generation.
+    #[must_use]
+    pub(crate) const fn new(credential_generation: u64, state: CredentialMaintenanceState) -> Self {
+        Self {
+            credential_generation,
+            state,
+        }
+    }
+
+    /// Returns the credential generation represented by this state.
+    #[must_use]
+    pub(crate) const fn credential_generation(self) -> u64 {
+        self.credential_generation
+    }
+
+    /// Returns the non-secret maintenance state.
+    #[must_use]
+    pub(crate) const fn state(self) -> CredentialMaintenanceState {
+        self.state
+    }
+}
 
 /// Source that produced a persisted quota snapshot.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -532,6 +563,7 @@ pub struct SelectorQuotaInput {
     provider: Provider,
     account_status: AccountStatus,
     active_credential_generation: Option<u64>,
+    credential_maintenance: Option<SelectorCredentialMaintenance>,
     route_band: String,
     windows: Vec<PersistedSelectorQuotaWindow>,
     window_observations: Vec<WindowObservation>,
@@ -559,6 +591,7 @@ impl SelectorQuotaInput {
             provider,
             account_status,
             active_credential_generation,
+            credential_maintenance: None,
             route_band: route_band.into(),
             windows,
             window_observations: Vec::new(),
@@ -567,6 +600,16 @@ impl SelectorQuotaInput {
             credit_observation: None,
             suspect_exhausted_credit_suppression: false,
         }
+    }
+
+    /// Attaches durable maintenance state for a credential generation.
+    #[must_use]
+    pub(crate) fn with_credential_maintenance(
+        mut self,
+        credential_maintenance: Option<SelectorCredentialMaintenance>,
+    ) -> Self {
+        self.credential_maintenance = credential_maintenance;
+        self
     }
 
     /// Attaches the account's durable Claude per-window state.
@@ -623,6 +666,15 @@ impl SelectorQuotaInput {
     #[must_use]
     pub const fn active_credential_generation(&self) -> Option<u64> {
         self.active_credential_generation
+    }
+
+    /// Returns maintenance state only when it belongs to the active generation.
+    #[must_use]
+    pub(crate) fn active_credential_maintenance_state(&self) -> Option<CredentialMaintenanceState> {
+        let active_generation = self.active_credential_generation?;
+        self.credential_maintenance
+            .filter(|maintenance| maintenance.credential_generation() == active_generation)
+            .map(SelectorCredentialMaintenance::state)
     }
 
     /// Returns route band.

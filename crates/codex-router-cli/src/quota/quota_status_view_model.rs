@@ -1,6 +1,7 @@
 use super::*;
 use codex_router_core::credit_usage::CreditProviderObservation;
 use codex_router_core::credit_usage::CreditUsagePolicy;
+use codex_router_core::provider::Provider;
 use codex_router_secret_store::model::CredentialMigrationFailure;
 
 pub(super) struct QuotaStatusReport {
@@ -141,6 +142,7 @@ mod tests {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct QuotaStatusAccountInput {
+    pub(super) provider: Provider,
     pub(super) account_label: String,
     pub(super) account_status: String,
     pub(super) account_id: AccountId,
@@ -157,6 +159,7 @@ pub(super) struct QuotaStatusAccountInput {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct QuotaStatusRow {
+    pub(super) provider: Provider,
     pub(super) account_id: AccountId,
     pub(super) active_credential_generation: Option<u64>,
     pub(super) account_label: String,
@@ -202,6 +205,7 @@ impl QuotaStatusRow {
         unicode_bars: bool,
     ) -> Self {
         Self {
+            provider: input.provider,
             account_id: input.account_id.clone(),
             active_credential_generation: input.active_credential_generation,
             account_label: assessment.account_label().to_owned(),
@@ -284,6 +288,32 @@ pub(super) struct DisplayQuotaWindow {
 }
 
 impl DisplayQuotaWindow {
+    pub(super) fn from_claude_observation(
+        observation: &codex_router_state::window_observation::WindowObservation,
+        now_unix_seconds: u64,
+    ) -> Self {
+        Self {
+            window_seconds: match observation.window_kind() {
+                codex_router_core::route_profile::WindowKind::FiveHour => V1_SHORT_WINDOW_SECONDS,
+                codex_router_core::route_profile::WindowKind::Weekly => V1_WEEKLY_WINDOW_SECONDS,
+            },
+            status: match observation.freshness_at(now_unix_seconds) {
+                codex_router_selection::burn_down::QuotaEvidenceFreshness::Fresh => {
+                    QuotaWindowStatus::Eligible
+                }
+                codex_router_selection::burn_down::QuotaEvidenceFreshness::Stale
+                | codex_router_selection::burn_down::QuotaEvidenceFreshness::Unknown => {
+                    QuotaWindowStatus::Stale
+                }
+            },
+            remaining_headroom: observation.remaining_basis_points() / 100,
+            reset_unix_seconds: observation.reset_unix_seconds(),
+            observed_unix_seconds: observation.observation_started_at(),
+            effective: true,
+            run_rate_estimate: QuotaRunRateEstimate::unknown(),
+        }
+    }
+
     pub(super) fn from_selector_window(window: &PersistedSelectorQuotaWindow) -> Self {
         Self {
             window_seconds: window.limit_window_seconds(),
@@ -349,5 +379,34 @@ impl ActiveClientMirrorStatus {
             Self::MirrorFresh { .. } => "sqlx_mirror",
             Self::Unavailable => "unavailable",
         }
+    }
+}
+
+#[cfg(test)]
+mod freshness_tests {
+    use super::*;
+    use codex_router_core::ids::AccountId;
+    use codex_router_core::route_profile::WindowKind;
+    use codex_router_state::window_observation::WindowObservation;
+    use codex_router_state::window_observation::WindowObservationProps;
+
+    #[test]
+    fn claude_status_uses_the_persisted_freshness_deadline() {
+        let account_id = AccountId::new("claude_status_freshness")
+            .unwrap_or_else(|error| panic!("test account id should validate: {error}"));
+        let observation = WindowObservation::new(
+            WindowObservationProps::new(account_id, WindowKind::FiveHour, 5_000, 100)
+                .with_fresh_until_unix_seconds(620),
+        )
+        .unwrap_or_else(|error| panic!("test observation should validate: {error}"));
+
+        assert_eq!(
+            DisplayQuotaWindow::from_claude_observation(&observation, 620).status,
+            QuotaWindowStatus::Eligible
+        );
+        assert_eq!(
+            DisplayQuotaWindow::from_claude_observation(&observation, 621).status,
+            QuotaWindowStatus::Stale
+        );
     }
 }

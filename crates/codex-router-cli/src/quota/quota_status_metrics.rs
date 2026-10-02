@@ -127,6 +127,19 @@ pub(super) fn record_quota_refresh_metric(
         );
 }
 
+pub(super) fn record_claude_usage_auth_rejected_after_renewal() {
+    global::meter("codex-router")
+        .u64_counter("codex_router_claude_usage_auth_rejected_after_renewal_total")
+        .build()
+        .add(
+            1,
+            &[
+                KeyValue::new("provider", "claude"),
+                KeyValue::new("route_band", "claude_messages"),
+            ],
+        );
+}
+
 pub(super) fn quota_remaining_bucket(remaining_headroom: u32) -> &'static str {
     match remaining_headroom {
         0 => "empty",

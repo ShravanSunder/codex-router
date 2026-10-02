@@ -11,6 +11,7 @@ impl AsyncProviderCredentialResolver for CredentialGenerationRaceResolver {
     async fn resolve_provider_credentials_async(
         &self,
         account_id: &AccountId,
+        _expected_provider: codex_router_core::provider::Provider,
     ) -> Result<ResolvedProviderCredential, CredentialResolverError> {
         if account_id == &self.stale_account_id {
             self.stale_resolution_started.notify_one();

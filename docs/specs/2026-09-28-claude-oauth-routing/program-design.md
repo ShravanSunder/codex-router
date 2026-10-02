@@ -188,6 +188,13 @@ The OpenAI variant wraps today's code paths without behaviour change.
       Attempt 1's observation is discarded, so stale first-attempt authority can never publish.
     - In both branches the two-attempt cap and the eligibility checks apply.
 
+  - **Admission release under contention (R5; Lead decision 2026-10-01, found in P6s):** when the observed pin is a
+    Reserve account that R5 releases (a Preferred candidate exists), admission releases it by compare-and-set. If
+    that loses and the re-read pin is also releasable, admission tries **one** more compare-and-set release; if
+    that loses too, it selects afresh with the latest observation (publication may then make no change, so R5 can
+    lag by one request under contention). Bounded: at most two release attempts per admission. The returned
+    observation is always the latest read.
+
 **D6 — Selection: one selector, explicit per-window policy (G6).** `codex-router-selection` gains
 `WindowPolicy { kind, rule }` with:
 - `rule = LegacyOpenAi` — reproduces today's decisions exactly: the long-window reserve thresholds,
@@ -354,6 +361,19 @@ existing writer.
   - launches `claude` or `claude --resume <id>` with the same two environment variables for that child
     only;
   - preflights `GET /healthz`, and fails with a clear message if Router is down (R14).
+
+- *Endpoint discovery (Lead decision 2026-09-30, filling a gap found in PR7-impl):* the Host writes an
+  additive `routerProxyEndpoint` (from `HostConfig::router_endpoint()`, so a custom `--port` is honoured) into the
+  service directory's `service.json`, alongside the existing runtime handoff fields. `agent-sessions` reads it
+  from its service directory; if it is absent it fails with a clear message ("Router proxy endpoint not
+  published; restart the Router Host") and never falls back to a default port.
+
+- *Claude upstream destination (Lead decision 2026-09-30, gap found in PR6/PR7):* the Claude edge uses its own
+  provider-specific upstream endpoint, fixed to `https://api.anthropic.com` in release builds (no runtime override,
+  so pooled OAuth tokens can never be redirected). For acceptance only, a Claude upstream override exists in debug
+  builds (`cfg(debug_assertions)`) and only with debug isolation required: a debug-only `serve` flag, passed by the
+  isolated debug Host from a debug-only environment variable (same pattern as
+  `CODEX_ROUTER_DEBUG_APP_SERVER_SOCKET`). Proof: a release-build test shows the override is absent/rejected.
 
 **D10b — Claude evidence classifier (R10a).** A pure function
 `classify(status, headers, body_prefix) -> AttemptOutcome`:

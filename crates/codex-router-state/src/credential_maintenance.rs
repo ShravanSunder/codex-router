@@ -1,5 +1,8 @@
 //! Non-secret health and provider-use claim for one active credential generation.
 
+/// Login claim age after which maintenance may reclaim an abandoned OAuth activation.
+pub const LOGIN_CREDENTIAL_CLAIM_TIMEOUT_SECONDS: u64 = 300;
+
 /// The durable renewal state for an account's current credential generation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CredentialMaintenanceState {
@@ -84,15 +87,81 @@ pub struct CredentialMaintenanceRecord {
     pub last_success_unix_seconds: Option<u64>,
     pub next_attempt_unix_seconds: Option<u64>,
     pub claimed_successor_generation: Option<u64>,
+    pub claim_purpose: Option<ClaimPurpose>,
+    pub claim_started_unix_seconds: Option<u64>,
+    pub claim_prior_state: Option<CredentialMaintenanceState>,
     pub consecutive_failures: u32,
 }
 
 /// Why a credential generation is being claimed.
 ///
-/// This value selects guards for a transient claim stored in the existing
-/// `credential_maintenance` row; the purpose itself is never persisted.
+/// This value selects guards for a claim stored in the existing
+/// `credential_maintenance` row.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ClaimPurpose {
     Refresh,
     Login,
+}
+
+/// Terminal or retry disposition for one claimed credential refresh.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CredentialRefreshClaimDisposition {
+    /// The provider confirmed the refresh token is unspent and may be retried later.
+    Retrying {
+        failure_class: CredentialFailureClass,
+        next_attempt_unix_seconds: u64,
+    },
+    /// The provider refused the token or its outcome is uncertain; require login.
+    ReauthRequired {
+        failure_class: CredentialFailureClass,
+    },
+    /// This credential cannot be refreshed by the current provider flow.
+    Unrefreshable {
+        failure_class: CredentialFailureClass,
+    },
+}
+
+impl CredentialRefreshClaimDisposition {
+    pub const fn state(self) -> CredentialMaintenanceState {
+        match self {
+            Self::Retrying { .. } => CredentialMaintenanceState::Retrying,
+            Self::ReauthRequired { .. } => CredentialMaintenanceState::ReauthRequired,
+            Self::Unrefreshable { .. } => CredentialMaintenanceState::Unrefreshable,
+        }
+    }
+
+    pub const fn failure_class(self) -> CredentialFailureClass {
+        match self {
+            Self::Retrying { failure_class, .. }
+            | Self::ReauthRequired { failure_class }
+            | Self::Unrefreshable { failure_class } => failure_class,
+        }
+    }
+
+    pub const fn next_attempt_unix_seconds(self) -> Option<u64> {
+        match self {
+            Self::Retrying {
+                next_attempt_unix_seconds,
+                ..
+            } => Some(next_attempt_unix_seconds),
+            Self::ReauthRequired { .. } | Self::Unrefreshable { .. } => None,
+        }
+    }
+}
+
+impl ClaimPurpose {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Refresh => "refresh",
+            Self::Login => "login",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "refresh" => Some(Self::Refresh),
+            "login" => Some(Self::Login),
+            _ => None,
+        }
+    }
 }

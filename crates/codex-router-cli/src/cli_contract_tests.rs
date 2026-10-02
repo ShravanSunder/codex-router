@@ -9,7 +9,6 @@ use std::io::Write;
 use std::net::Shutdown;
 use std::net::TcpListener;
 use std::net::TcpStream;
-use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command as ProcessCommand;
@@ -128,6 +127,13 @@ mod profile_command_tests;
 #[path = "cli_contract_tests/account_import_tests.rs"]
 mod account_import_tests;
 
+#[path = "cli_contract_tests/account_login_tests.rs"]
+mod account_login_tests;
+
+#[cfg(target_os = "macos")]
+#[path = "cli_contract_tests/account_login_sandbox_tests.rs"]
+mod account_login_sandbox_tests;
+
 #[path = "cli_contract_tests/quota_rendering_tests.rs"]
 mod quota_rendering_tests;
 
@@ -136,6 +142,9 @@ mod quota_observation_tests;
 
 #[path = "cli_contract_tests/quota_auth_tests.rs"]
 mod quota_auth_tests;
+
+#[path = "cli_contract_tests/claude_quota_auth_rejection_tests.rs"]
+mod claude_quota_auth_rejection_tests;
 
 #[path = "cli_contract_tests/quota_worker_tests.rs"]
 mod quota_worker_tests;

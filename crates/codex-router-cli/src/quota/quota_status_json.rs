@@ -49,6 +49,7 @@ impl JsonQuotaStatusReport {
 
 #[derive(Serialize)]
 pub(super) struct JsonQuotaStatusAccount {
+    pub(super) provider: &'static str,
     pub(super) account_hash: String,
     pub(super) safe_account_label: String,
     pub(super) availability: &'static str,
@@ -96,6 +97,7 @@ impl JsonQuotaStatusAccount {
         credential_store_availability: &CredentialStoreAvailability,
     ) -> Self {
         Self {
+            provider: row.provider.as_str(),
             account_hash: telemetry_hash(row.account_id.as_str()),
             safe_account_label: row.account_label.clone(),
             availability: availability_json(row.availability),

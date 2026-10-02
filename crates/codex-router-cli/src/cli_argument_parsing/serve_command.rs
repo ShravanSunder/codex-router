@@ -24,6 +24,10 @@ pub(crate) struct ServeCommand {
     pub(crate) state_db: PathBuf,
     pub(crate) secret_root: PathBuf,
     pub(crate) upstream_base_url: String,
+    #[cfg(debug_assertions)]
+    pub(crate) debug_claude_upstream_base_url: Option<String>,
+    #[cfg(debug_assertions)]
+    pub(crate) require_debug_isolation: bool,
     pub(crate) now_unix_seconds: Option<u64>,
     pub(crate) max_snapshot_age_seconds: u64,
     pub(crate) session_pin_idle_ttl_seconds: u64,
@@ -39,6 +43,12 @@ pub(crate) struct ServeCommand {
 impl ServeCommand {
     pub(super) fn parse(parser: &mut ArgumentParser) -> Result<Self, CliError> {
         let options = ServeCommandOptions::parse(parser)?;
+        #[cfg(debug_assertions)]
+        if options.debug_claude_upstream_base_url.is_some() && !options.require_debug_isolation {
+            return Err(CliError::MissingOption {
+                option: "--require-debug-isolation",
+            });
+        }
         let listen_host = options
             .listen_host
             .unwrap_or_else(|| "127.0.0.1".to_owned());
@@ -60,6 +70,10 @@ impl ServeCommand {
             state_db,
             secret_root,
             upstream_base_url,
+            #[cfg(debug_assertions)]
+            debug_claude_upstream_base_url: options.debug_claude_upstream_base_url,
+            #[cfg(debug_assertions)]
+            require_debug_isolation: options.require_debug_isolation,
             now_unix_seconds: options.now_unix_seconds,
             max_snapshot_age_seconds: options
                 .max_snapshot_age_seconds
@@ -90,6 +104,10 @@ struct ServeCommandOptions {
     state_db: Option<PathBuf>,
     secret_root: Option<PathBuf>,
     upstream_base_url: Option<String>,
+    #[cfg(debug_assertions)]
+    debug_claude_upstream_base_url: Option<String>,
+    #[cfg(debug_assertions)]
+    require_debug_isolation: bool,
     now_unix_seconds: Option<u64>,
     max_snapshot_age_seconds: Option<u64>,
     session_pin_idle_ttl_seconds: Option<NonZeroU64>,
@@ -110,6 +128,10 @@ impl ServeCommandOptions {
             state_db: None,
             secret_root: None,
             upstream_base_url: None,
+            #[cfg(debug_assertions)]
+            debug_claude_upstream_base_url: None,
+            #[cfg(debug_assertions)]
+            require_debug_isolation: false,
             now_unix_seconds: None,
             max_snapshot_age_seconds: None,
             session_pin_idle_ttl_seconds: None,
@@ -142,6 +164,15 @@ impl ServeCommandOptions {
                 "--upstream-base-url" => {
                     options.upstream_base_url =
                         Some(parser.next_required_value("--upstream-base-url")?);
+                }
+                #[cfg(debug_assertions)]
+                "--debug-claude-upstream-base-url" => {
+                    options.debug_claude_upstream_base_url =
+                        Some(parser.next_required_value("--debug-claude-upstream-base-url")?);
+                }
+                #[cfg(debug_assertions)]
+                "--require-debug-isolation" => {
+                    options.require_debug_isolation = true;
                 }
                 "--now-unix-seconds" => {
                     let value = parser.next_required_value("--now-unix-seconds")?;

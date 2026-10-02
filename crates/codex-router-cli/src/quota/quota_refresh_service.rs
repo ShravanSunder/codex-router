@@ -1,5 +1,10 @@
 use super::*;
 use codex_router_core::ids::AccountId;
+use codex_router_core::provider::Provider;
+use codex_router_core::route_profile::WindowKind;
+use codex_router_state::window_observation::WindowObservation;
+use codex_router_state::window_observation::WindowObservationProps;
+use codex_router_state::window_observation::calculate_window_observation_fresh_until_unix_seconds;
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct QuotaRefreshReport {
@@ -31,7 +36,27 @@ pub(crate) trait WeeklyQuotaFloorIntentObserver: Send + Sync {
 
 pub(crate) struct QuotaRefreshObservationContext<'a> {
     pub(crate) observed_unix_seconds: u64,
+    pub(crate) schedule: QuotaRefreshSchedule,
     pub(crate) weekly_floor_observer: Option<&'a dyn WeeklyQuotaFloorIntentObserver>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum QuotaRefreshSchedule {
+    Manual,
+    Background { interval_seconds: u64 },
+}
+
+impl QuotaRefreshSchedule {
+    const fn interval_seconds(self) -> u64 {
+        match self {
+            Self::Manual => crate::DEFAULT_QUOTA_REFRESH_INTERVAL_SECONDS,
+            Self::Background { interval_seconds } => interval_seconds,
+        }
+    }
+
+    const fn polls_only_idle_claude_accounts(self) -> bool {
+        matches!(self, Self::Background { .. })
+    }
 }
 
 impl WeeklyQuotaFloorIntentObserver for WebSocketQuotaFloorNotifier {
@@ -96,6 +121,7 @@ where
         quota_provider,
         QuotaRefreshObservationContext {
             observed_unix_seconds,
+            schedule: QuotaRefreshSchedule::Manual,
             weekly_floor_observer: None,
         },
     )
@@ -117,10 +143,27 @@ where
 {
     let QuotaRefreshObservationContext {
         observed_unix_seconds,
+        schedule,
         weekly_floor_observer,
     } = observation_context;
+    let refresh_interval_seconds = schedule.interval_seconds();
     let quota_history_state = AsyncSqliteStateStore::open(state_db).await?;
     let accounts = quota_history_state.list_accounts().await?;
+    let active_claude_accounts = if schedule.polls_only_idle_claude_accounts() {
+        quota_history_state
+            .active_client_counts_for_route_band_read_only(
+                "claude_messages",
+                observed_unix_seconds,
+                ACTIVE_CLIENT_LEASE_MAX_AGE_SECONDS,
+            )
+            .await?
+            .into_iter()
+            .filter(|count| count.active_clients() > 0)
+            .map(|count| count.account_id().clone())
+            .collect::<std::collections::HashSet<_>>()
+    } else {
+        std::collections::HashSet::new()
+    };
     let weekly_quota_floors = quota_history_state
         .list_account_routing_policies()
         .await?
@@ -140,10 +183,37 @@ where
         .filter(|account| account.status() == AccountStatus::Enabled)
         .filter(|account| account.active_credential_generation().is_some())
     {
-        let Some(active_credential_generation) = account.active_credential_generation() else {
-            continue;
+        if schedule.polls_only_idle_claude_accounts() && account.provider() == Provider::Claude {
+            if active_claude_accounts.contains(account.account_id()) {
+                continue;
+            }
+            let latest_activity = quota_history_state
+                .latest_active_session_activity_unix_seconds(
+                    account.account_id(),
+                    "claude_messages",
+                )
+                .await?;
+            let account_has_been_idle_long_enough = match latest_activity {
+                None => true,
+                Some(last_activity_unix_seconds) => {
+                    observed_unix_seconds >= last_activity_unix_seconds
+                        && observed_unix_seconds - last_activity_unix_seconds
+                            > refresh_interval_seconds
+                }
+            };
+            if !account_has_been_idle_long_enough {
+                continue;
+            }
+        }
+        let route_bands: &[&str] = if account.provider() == Provider::Claude {
+            &["claude_messages"]
+        } else {
+            DEFAULT_ROUTE_BANDS
         };
-        let mut responses_credit_attempt =
+        let mut responses_credit_attempt = if account.provider() == Provider::Openai {
+            let Some(active_credential_generation) = account.active_credential_generation() else {
+                continue;
+            };
             match begin_credit_refresh_attempt_for_current_generation(
                 &quota_history_state,
                 account.account_id(),
@@ -156,9 +226,12 @@ where
                     record_superseded_account_refresh(&mut *stdout, account, &mut failed_count)?;
                     continue 'accounts;
                 }
-            };
+            }
+        } else {
+            None
+        };
         let mut resolved = match credential_resolver
-            .resolve_provider_credentials_async(account.account_id())
+            .resolve_provider_credentials_async(account.account_id(), account.provider())
             .await
         {
             Ok(resolved) => {
@@ -187,8 +260,8 @@ where
                 resolved
             }
             Err(error) => {
-                failed_count = failed_count.saturating_add(DEFAULT_ROUTE_BANDS.len() as u64);
-                for route_band in DEFAULT_ROUTE_BANDS {
+                failed_count = failed_count.saturating_add(route_bands.len() as u64);
+                for route_band in route_bands {
                     if *route_band == USER_QUOTA_ROUTE_BAND {
                         let Some(attempt) = responses_credit_attempt.as_ref() else {
                             return Err(QuotaCommandError::ProviderResponse {
@@ -247,7 +320,152 @@ where
                 continue;
             }
         };
-        for route_band in DEFAULT_ROUTE_BANDS {
+        if account.provider() == Provider::Claude {
+            let observation_started_at = current_unix_seconds();
+            let first_response = quota_provider
+                .fetch_quota(QuotaRefreshProviderRequest::new_for_provider(
+                    Provider::Claude,
+                    account.account_id().clone(),
+                    account.label(),
+                    "claude_messages",
+                    base_url.clone(),
+                    resolved.access_token().clone(),
+                    resolved.chatgpt_account_id(),
+                ))
+                .await;
+            let initial_unauthorized = matches!(
+                &first_response,
+                Err(QuotaCommandError::ProviderStatus { status: 401 })
+            );
+            let (response, retry_generation, renewed_for_retry) = if initial_unauthorized {
+                match credential_resolver
+                    .recover_unauthorized_credentials_async(
+                        account.account_id(),
+                        Provider::Claude,
+                        resolved.credential_generation(),
+                    )
+                    .await
+                {
+                    Ok((recovered, renewed_here)) => {
+                        let retry_generation = Some(recovered.credential_generation());
+                        let retry_response = quota_provider
+                            .fetch_quota(QuotaRefreshProviderRequest::new_for_provider(
+                                Provider::Claude,
+                                account.account_id().clone(),
+                                account.label(),
+                                "claude_messages",
+                                base_url.clone(),
+                                recovered.access_token().clone(),
+                                recovered.chatgpt_account_id(),
+                            ))
+                            .await;
+                        (retry_response, retry_generation, renewed_here)
+                    }
+                    Err(error) => (
+                        Err(QuotaCommandError::CredentialResolver(error)),
+                        None,
+                        false,
+                    ),
+                }
+            } else {
+                (first_response, None, false)
+            };
+            let response = match response {
+                Ok(response) => response,
+                Err(error) => {
+                    failed_count = failed_count.saturating_add(1);
+                    let error_class = quota_refresh_error_class(&error);
+                    quota_history_state
+                        .record_refresh_failure_preserving_selector_windows(
+                            account.account_id(),
+                            "claude_messages",
+                            observed_unix_seconds,
+                            error_class,
+                        )
+                        .await?;
+                    let provider_rejected_credentials =
+                        matches!(error, QuotaCommandError::ProviderStatus { status: 401 });
+                    if provider_rejected_credentials
+                        && renewed_for_retry
+                        && let Some(retry_generation) = retry_generation
+                    {
+                        tracing::warn!(
+                            account.hash = telemetry_hash(account.account_id().as_str()),
+                            credential_generation = retry_generation,
+                            http.status_code = 401,
+                            endpoint.path = "/api/oauth/usage",
+                            "Claude usage endpoint rejected a freshly renewed credential"
+                        );
+                        record_claude_usage_auth_rejected_after_renewal();
+                    }
+                    let diagnostic_error_class = if provider_rejected_credentials {
+                        "provider_auth_rejected"
+                    } else {
+                        error_class.as_str()
+                    };
+                    tracing::warn!(
+                        account.hash = telemetry_hash(account.account_id().as_str()),
+                        route_band = "claude_messages",
+                        error.class = diagnostic_error_class,
+                        "codex_router.claude_quota_refresh_failed"
+                    );
+                    record_quota_refresh_metric(
+                        "claude_messages",
+                        "failure",
+                        diagnostic_error_class,
+                    );
+                    let diagnostic_account = quota_refresh_diagnostic_account_label(account);
+                    writeln!(
+                        stdout,
+                        "refresh failed: account={diagnostic_account} route_band=claude_messages error={error}",
+                    )
+                    .map_err(QuotaCommandError::Stdout)?;
+                    continue;
+                }
+            };
+            let mut observations_recorded = 0_u64;
+            let fresh_until_unix_seconds = calculate_window_observation_fresh_until_unix_seconds(
+                observation_started_at,
+                refresh_interval_seconds,
+            )
+            .map_err(|error| QuotaCommandError::ProviderResponse {
+                message: error.to_string(),
+            })?;
+            for window in response.windows {
+                let window_kind = match window.limit_window_seconds {
+                    18_000 => WindowKind::FiveHour,
+                    604_800 => WindowKind::Weekly,
+                    _ => continue,
+                };
+                let mut properties = WindowObservationProps::new(
+                    account.account_id().clone(),
+                    window_kind,
+                    window.headroom.basis_points().ok_or_else(|| {
+                        QuotaCommandError::ProviderResponse {
+                            message: "Claude quota window was not expressed in basis points"
+                                .to_owned(),
+                        }
+                    })?,
+                    observation_started_at,
+                );
+                if let Some(reset_unix_seconds) = window.reset_unix_seconds {
+                    properties = properties.with_reset_unix_seconds(reset_unix_seconds);
+                }
+                properties = properties.with_fresh_until_unix_seconds(fresh_until_unix_seconds);
+                let observation = WindowObservation::new(properties)?;
+                if quota_history_state
+                    .record_window_observation(&observation, current_unix_seconds)
+                    .await?
+                {
+                    observations_recorded = observations_recorded.saturating_add(1);
+                }
+            }
+            if observations_recorded > 0 {
+                refreshed_count = refreshed_count.saturating_add(1);
+            }
+            continue;
+        }
+        for route_band in route_bands {
             let mut credit_refresh_attempt = if *route_band == USER_QUOTA_ROUTE_BAND {
                 let prepared_attempt = responses_credit_attempt.take();
                 Some(match prepared_attempt {
@@ -280,7 +498,8 @@ where
                 None
             };
             let first_response = quota_provider
-                .fetch_quota(QuotaRefreshProviderRequest::new(
+                .fetch_quota(QuotaRefreshProviderRequest::new_for_provider(
+                    account.provider(),
                     account.account_id().clone(),
                     account.label(),
                     *route_band,
@@ -297,6 +516,7 @@ where
                 match credential_resolver
                     .recover_unauthorized_credentials_async(
                         account.account_id(),
+                        account.provider(),
                         resolved.credential_generation(),
                     )
                     .await
@@ -324,7 +544,8 @@ where
                                 };
                         }
                         let retry_response = quota_provider
-                            .fetch_quota(QuotaRefreshProviderRequest::new(
+                            .fetch_quota(QuotaRefreshProviderRequest::new_for_provider(
+                                account.provider(),
                                 account.account_id().clone(),
                                 account.label(),
                                 *route_band,
@@ -485,7 +706,12 @@ where
             let mut selector_windows = Vec::new();
             let mut responses_history_observations = Vec::new();
             for window in &response.windows {
-                let status = if window.remaining_headroom == 0 {
+                let remaining_headroom = window.headroom.percent().ok_or_else(|| {
+                    QuotaCommandError::ProviderResponse {
+                        message: "OpenAI quota window was not expressed as a percent".to_owned(),
+                    }
+                })?;
+                let status = if remaining_headroom == 0 {
                     SelectorQuotaWindowStatus::Ineligible
                 } else {
                     SelectorQuotaWindowStatus::Eligible
@@ -496,7 +722,7 @@ where
                     window.limit_window_seconds,
                     status,
                 )
-                .with_remaining_headroom(window.remaining_headroom)
+                .with_remaining_headroom(remaining_headroom)
                 .with_effective(window.effective)
                 .with_observed_unix_seconds(observed_unix_seconds);
                 let selector_window = if let Some(reset_unix_seconds) = window.reset_unix_seconds {
@@ -512,7 +738,7 @@ where
                         window,
                         observed_unix_seconds,
                         response.reset_credits_available,
-                    ));
+                    )?);
                 } else {
                     append_success_quota_history_observation(
                         &quota_history_state,
@@ -530,7 +756,14 @@ where
                 QuotaSnapshotSource::OpenAiEndpoint,
             )
             .with_observed_unix_seconds(observed_unix_seconds)
-            .with_route_band(*route_band, effective_window.remaining_headroom)
+            .with_route_band(
+                *route_band,
+                effective_window.headroom.percent().ok_or_else(|| {
+                    QuotaCommandError::ProviderResponse {
+                        message: "OpenAI quota window was not expressed as a percent".to_owned(),
+                    }
+                })?,
+            )
             .with_stale_penalty(false);
             let snapshot = if let Some(reset_unix_seconds) = effective_window.reset_unix_seconds {
                 snapshot.with_reset_unix_seconds(reset_unix_seconds)
@@ -598,11 +831,23 @@ where
                 && let Some(observer) = weekly_floor_observer
             {
                 let floor = weekly_quota_floors.get(account.account_id()).copied();
-                let weekly_remaining_basis_points = response
+                let weekly_remaining_basis_points = match response
                     .windows
                     .iter()
                     .find(|window| window.limit_window_seconds == V1_WEEKLY_WINDOW_SECONDS)
-                    .map(|window| window.remaining_headroom.saturating_mul(100));
+                {
+                    Some(window) => Some(
+                        window
+                            .headroom
+                            .percent()
+                            .ok_or_else(|| QuotaCommandError::ProviderResponse {
+                                message: "OpenAI quota window was not expressed as a percent"
+                                    .to_owned(),
+                            })?
+                            .saturating_mul(100),
+                    ),
+                    None => None,
+                };
                 let intent = match (floor, weekly_remaining_basis_points) {
                     (None, _) => Some(WeeklyQuotaFloorIntent::Clear),
                     (Some(floor), Some(remaining)) if remaining <= floor => {
@@ -710,5 +955,19 @@ fn quota_refresh_error_class(error: &QuotaCommandError) -> QuotaRefreshErrorClas
         | QuotaCommandError::StateStore(_)
         | QuotaCommandError::BackgroundWorkerInitialization(_)
         | QuotaCommandError::Stdout(_) => QuotaRefreshErrorClass::ProviderError,
+    }
+}
+
+#[cfg(test)]
+mod freshness_tests {
+    use super::*;
+
+    #[test]
+    fn active_refresh_freshness_deadline_uses_the_shared_window_policy() {
+        let deadline = calculate_window_observation_fresh_until_unix_seconds(100, 400)
+            .expect("active refresh deadline should fit timestamp range");
+
+        assert_eq!(deadline, 620);
+        assert_eq!(deadline - 100, 520);
     }
 }

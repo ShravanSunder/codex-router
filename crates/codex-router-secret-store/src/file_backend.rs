@@ -31,6 +31,8 @@ pub struct FileSecretStore {
     root: PathBuf,
     #[cfg(any(test, feature = "test-support"))]
     write_trace: Option<FileWriteTrace>,
+    #[cfg(any(test, feature = "test-support"))]
+    read_trace: Option<FileReadTrace>,
 }
 
 trait FileWriteObserver {
@@ -38,6 +40,52 @@ trait FileWriteObserver {
     fn file_renamed(&self, from: &Path, to: &Path);
     #[cfg(any(test, feature = "test-support"))]
     fn file_removed(&self, path: &Path);
+}
+
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum FileReadTraceEvent {
+    FileOpenAttempted { path: PathBuf },
+    DirectoryOpenAttempted { path: PathBuf },
+}
+
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Clone, Default)]
+pub struct FileReadTrace(Arc<Mutex<Vec<FileReadTraceEvent>>>);
+
+#[cfg(any(test, feature = "test-support"))]
+impl std::fmt::Debug for FileReadTrace {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("FileReadTrace([PATHS REDACTED])")
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl FileReadTrace {
+    pub fn events(&self) -> Vec<FileReadTraceEvent> {
+        self.0
+            .lock()
+            .map(|events| events.clone())
+            .unwrap_or_default()
+    }
+
+    fn file_open_attempted(&self, path: &Path) {
+        self.record(FileReadTraceEvent::FileOpenAttempted {
+            path: path.to_path_buf(),
+        });
+    }
+
+    fn directory_open_attempted(&self, path: &Path) {
+        self.record(FileReadTraceEvent::DirectoryOpenAttempted {
+            path: path.to_path_buf(),
+        });
+    }
+
+    fn record(&self, event: FileReadTraceEvent) {
+        if let Ok(mut events) = self.0.lock() {
+            events.push(event);
+        }
+    }
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -134,6 +182,8 @@ impl FileSecretStore {
             root,
             #[cfg(any(test, feature = "test-support"))]
             write_trace: None,
+            #[cfg(any(test, feature = "test-support"))]
+            read_trace: None,
         })
     }
 
@@ -143,6 +193,18 @@ impl FileSecretStore {
         write_trace: FileWriteTrace,
     ) -> Result<Self, SecretStoreError> {
         let mut store = Self::open(root)?;
+        store.write_trace = Some(write_trace);
+        Ok(store)
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn open_with_read_and_write_traces(
+        root: impl AsRef<Path>,
+        read_trace: FileReadTrace,
+        write_trace: FileWriteTrace,
+    ) -> Result<Self, SecretStoreError> {
+        let mut store = Self::open(root)?;
+        store.read_trace = Some(read_trace);
         store.write_trace = Some(write_trace);
         Ok(store)
     }
@@ -167,6 +229,8 @@ impl FileSecretStore {
             root,
             #[cfg(any(test, feature = "test-support"))]
             write_trace: None,
+            #[cfg(any(test, feature = "test-support"))]
+            read_trace: None,
         })
     }
 
@@ -177,6 +241,53 @@ impl FileSecretStore {
     /// Returns the canonical secret-root path to sibling storage components.
     pub(crate) fn root(&self) -> &Path {
         &self.root
+    }
+
+    pub(super) fn read_directory(&self, path: &Path) -> Result<fs::ReadDir, SecretStoreError> {
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(trace) = &self.read_trace {
+            trace.directory_open_attempted(path);
+        }
+        fs::read_dir(path).map_err(|source| SecretStoreError::Filesystem {
+            path: path.to_path_buf(),
+            source,
+        })
+    }
+
+    pub(super) fn read_file_bytes(&self, path: &Path) -> Result<Vec<u8>, SecretStoreError> {
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(trace) = &self.read_trace {
+            trace.file_open_attempted(path);
+        }
+        fs::read(path).map_err(|source| SecretStoreError::Filesystem {
+            path: path.to_path_buf(),
+            source,
+        })
+    }
+
+    pub(super) fn read_file_to_string(&self, path: &Path) -> Result<String, SecretStoreError> {
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(trace) = &self.read_trace {
+            trace.file_open_attempted(path);
+        }
+        fs::read_to_string(path).map_err(|source| SecretStoreError::Filesystem {
+            path: path.to_path_buf(),
+            source,
+        })
+    }
+
+    fn read_optional_metadata(&self, file_name: &str) -> Result<Option<String>, SecretStoreError> {
+        let path = self.root.join(file_name);
+        reject_symlink_path(&path)?;
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(trace) = &self.read_trace {
+            trace.file_open_attempted(&path);
+        }
+        match fs::read_to_string(&path) {
+            Ok(value) => Ok(Some(value)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(source) => Err(SecretStoreError::Filesystem { path, source }),
+        }
     }
 
     fn write_atomically(
@@ -197,7 +308,7 @@ impl FileSecretStore {
 
     /// Reads the non-secret identifier that binds the secret root to its Keychain item.
     pub(crate) fn read_store_id_file(&self) -> Result<Option<String>, SecretStoreError> {
-        read_optional_metadata(&self.root, "store-id")
+        self.read_optional_metadata("store-id")
     }
 
     /// Publishes the non-secret identifier through a private temporary file and rename.
@@ -208,7 +319,7 @@ impl FileSecretStore {
 
     /// Reports whether the completed format-v2 marker exists and contains the supported value.
     pub(crate) fn has_format_v2_marker(&self) -> Result<bool, SecretStoreError> {
-        match read_optional_metadata(&self.root, "format-v2.marker")? {
+        match self.read_optional_metadata("format-v2.marker")? {
             Some(value) if value == "2" || value == "2\n" => Ok(true),
             Some(_) => Err(SecretStoreError::InvalidCredentialStoreMarker {
                 path: self.root.join("format-v2.marker"),
@@ -225,10 +336,7 @@ impl FileSecretStore {
 
     /// Removes abandoned atomic-write temps for the non-secret format marker.
     pub(crate) fn remove_orphaned_format_v2_marker_temps(&self) -> Result<(), SecretStoreError> {
-        let entries = fs::read_dir(&self.root).map_err(|source| SecretStoreError::Filesystem {
-            path: self.root.clone(),
-            source,
-        })?;
+        let entries = self.read_directory(&self.root)?;
         for entry in entries {
             let entry = entry.map_err(|source| SecretStoreError::Filesystem {
                 path: self.root.clone(),
@@ -296,9 +404,15 @@ impl SecretStore for FileSecretStore {
         reject_pooled_credential_key(key)?;
         let target_path = self.secret_path(key);
         reject_symlink_path(&target_path)?;
-        let value = read_to_string(&target_path)?;
+        let value = self.read_file_to_string(&target_path)?;
 
         Ok(SecretString::new(value))
+    }
+
+    fn delete_staged(&self, key: &SecretKey) -> Result<(), SecretStoreError> {
+        Err(SecretStoreError::PooledCredentialRequiresEncryption {
+            key: key.as_str().to_owned(),
+        })
     }
 }
 
@@ -457,24 +571,4 @@ fn rename(from_path: &Path, to_path: &Path) -> Result<(), SecretStoreError> {
         path: to_path.to_path_buf(),
         source,
     })
-}
-
-fn read_to_string(path: &Path) -> Result<String, SecretStoreError> {
-    fs::read_to_string(path).map_err(|source| SecretStoreError::Filesystem {
-        path: path.to_path_buf(),
-        source,
-    })
-}
-
-fn read_optional_metadata(
-    root: &Path,
-    file_name: &str,
-) -> Result<Option<String>, SecretStoreError> {
-    let path = root.join(file_name);
-    reject_symlink_path(&path)?;
-    match fs::read_to_string(&path) {
-        Ok(value) => Ok(Some(value)),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(source) => Err(SecretStoreError::Filesystem { path, source }),
-    }
 }

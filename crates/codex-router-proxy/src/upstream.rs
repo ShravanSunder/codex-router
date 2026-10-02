@@ -43,6 +43,9 @@ use crate::http_sse::UpstreamHttpRequest;
 use crate::http_sse::UpstreamHttpTransport;
 use crate::routes::RouteKind;
 
+pub use crate::claude_edge::upstream_endpoint::ClaudeUpstreamEndpoint;
+pub use crate::claude_edge::upstream_endpoint::ClaudeUpstreamEndpointError;
+
 /// Upstream provider endpoint used to build request URLs.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct UpstreamEndpoint {
@@ -176,9 +179,17 @@ impl StreamingUpstreamHttpTransport for HttpUpstreamTransport {
 }
 
 /// Hyper-backed async HTTP/SSE upstream transport.
+/// Release builds expose no way to override Claude's fixed production destination.
+/// The release API check is collected with `RUSTDOCFLAGS="--cfg docsrs"`:
+/// rustdoc's collection session enables debug assertions independently of the library profile.
+#[cfg_attr(
+    docsrs,
+    doc = "```compile_fail,E0599\nuse codex_router_proxy::upstream::ClaudeUpstreamEndpoint;\nlet _ = ClaudeUpstreamEndpoint::isolated_debug_override(\n    \"http://127.0.0.1:18888\", true\n);\n```"
+)]
 #[derive(Clone)]
 pub struct HyperHttpUpstreamTransport {
     endpoint: UpstreamEndpoint,
+    claude_endpoint: ClaudeUpstreamEndpoint,
     client: Client<HttpsConnector<HttpConnector>, BoxBody<Bytes, AsyncHttpBodyError>>,
 }
 
@@ -194,7 +205,26 @@ impl HyperHttpUpstreamTransport {
             .build();
         let client = Client::builder(TokioExecutor::new()).build(connector);
 
-        Self { endpoint, client }
+        Self {
+            endpoint,
+            claude_endpoint: ClaudeUpstreamEndpoint::production(),
+            client,
+        }
+    }
+
+    /// Applies a validated override only in explicitly isolated debug builds.
+    #[cfg(debug_assertions)]
+    #[must_use]
+    pub fn with_debug_claude_upstream_endpoint(mut self, endpoint: ClaudeUpstreamEndpoint) -> Self {
+        self.claude_endpoint = endpoint;
+        self
+    }
+
+    pub(crate) fn upstream_url(&self, route: RouteKind, request_path: &str) -> String {
+        match route {
+            RouteKind::ClaudeMessages => self.claude_endpoint.url_for_path(request_path),
+            _ => self.endpoint.url_for_path(request_path),
+        }
     }
 
     async fn send_streaming_inner(
@@ -202,8 +232,7 @@ impl HyperHttpUpstreamTransport {
         request: StreamingUpstreamHttpRequest,
     ) -> Result<AsyncStreamingHttpProxyResponse, HttpProxyError> {
         let uri = self
-            .endpoint
-            .url_for_path(request.path())
+            .upstream_url(request.route_kind(), request.path())
             .parse::<http::Uri>()
             .map_err(|_error| HttpProxyError::Upstream {
                 message: "upstream URI was invalid".to_owned(),
@@ -212,7 +241,12 @@ impl HyperHttpUpstreamTransport {
             .method(hyper_method(request.method()))
             .uri(uri);
         for header in request.headers().as_slice() {
-            builder = builder.header(header.name(), header.value());
+            let value = http::HeaderValue::from_bytes(header.value_bytes()).map_err(|_error| {
+                HttpProxyError::Upstream {
+                    message: "request header value was invalid".to_owned(),
+                }
+            })?;
+            builder = builder.header(header.name(), value);
         }
         let request =
             builder
@@ -291,7 +325,12 @@ fn send_https_request(
     let method = reqwest_method(&request);
     let mut builder = client.request(method, endpoint.url_for_path(request.path()));
     for header in request.headers().as_slice() {
-        builder = builder.header(header.name(), header.value());
+        let value = http::HeaderValue::from_bytes(header.value_bytes()).map_err(|_error| {
+            HttpProxyError::Upstream {
+                message: "request header value was invalid".to_owned(),
+            }
+        })?;
+        builder = builder.header(header.name(), value);
     }
     let response = builder
         .body(request.body().to_vec())
@@ -392,7 +431,11 @@ fn write_request(
         .write_all(b"Connection: close\r\n")
         .map_err(upstream_io_error)?;
     for header in request.headers().as_slice() {
-        write!(stream, "{}: {}\r\n", header.name(), header.value()).map_err(upstream_io_error)?;
+        write!(stream, "{}: ", header.name()).map_err(upstream_io_error)?;
+        stream
+            .write_all(header.value_bytes())
+            .map_err(upstream_io_error)?;
+        stream.write_all(b"\r\n").map_err(upstream_io_error)?;
     }
     stream.write_all(b"\r\n").map_err(upstream_io_error)?;
     stream.write_all(request.body()).map_err(upstream_io_error)

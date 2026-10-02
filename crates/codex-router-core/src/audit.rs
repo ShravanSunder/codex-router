@@ -18,6 +18,8 @@ use crate::redaction::SecretString;
 pub enum RouteKind {
     /// `/v1/responses`.
     Responses,
+    /// Claude `POST /anthropic/v1/messages`.
+    ClaudeMessages,
     /// `/v1/models`.
     Models,
     /// `/v1/responses/compact`.
@@ -286,5 +288,12 @@ mod tests {
                 .unwrap_or_else(|error| panic!("audit route kind should serialize: {error}"));
             assert_eq!(serialized, format!("\"{expected_name}\""));
         }
+    }
+
+    #[test]
+    fn claude_messages_route_kind_has_stable_audit_name() {
+        let serialized = serde_json::to_string(&RouteKind::ClaudeMessages)
+            .unwrap_or_else(|error| panic!("audit route kind should serialize: {error}"));
+        assert_eq!(serialized, "\"claude_messages\"");
     }
 }

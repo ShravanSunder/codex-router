@@ -12,13 +12,113 @@ use codex_router_core::credit_usage::CreditProviderObservation;
 use codex_router_core::credit_usage::CreditSpendControl;
 use codex_router_core::credit_usage::CreditUsagePolicy;
 use codex_router_core::provider::Provider;
+use codex_router_core::route_profile::WindowKind;
 use codex_router_core::routes::RouteBand;
+use codex_router_selection::selection_outcome::SelectionAccountRestriction;
 use codex_router_state::account::AccountRecord;
 use codex_router_state::account::AccountStatus;
 use codex_router_state::account_routing_policy::WeeklyQuotaFloorBasisPoints;
 use codex_router_state::repositories::AccountStateRepository;
 use codex_router_state::sqlite::AsyncWeeklyQuotaFloorMutationStore;
 use codex_router_state::sqlite::SqliteStateStore;
+use codex_router_state::window_observation::WindowObservation;
+use codex_router_state::window_observation::WindowObservationProps;
+
+#[tokio::test]
+async fn source_assessment_preserves_openai_credit_with_claude_state_in_snapshot() {
+    let directory = CreditTurnTestDirectory::new();
+    let fixture = CreditTurnFixture::new(&directory).await;
+    let claude_account_id = codex_router_core::ids::AccountId::new("acct_a_claude_credit_sidecar")
+        .expect("Claude sidecar account id should parse");
+    let synchronous_state =
+        SqliteStateStore::open(&fixture.database_path).expect("mixed-provider state should open");
+    AccountStateRepository::upsert_account(
+        &synchronous_state,
+        &AccountRecord::new(
+            Provider::Claude,
+            claude_account_id.clone(),
+            "claude-sidecar",
+            AccountStatus::Enabled,
+        )
+        .with_active_credential_generation(2),
+    )
+    .expect("Claude sidecar account should persist");
+    drop(synchronous_state);
+
+    let claude_observation = WindowObservation::new(
+        WindowObservationProps::new(
+            claude_account_id.clone(),
+            WindowKind::FiveHour,
+            7_500,
+            CREDIT_TURN_FIXTURE_TIME,
+        )
+        .with_fresh_until_unix_seconds(CREDIT_TURN_FIXTURE_TIME + 600),
+    )
+    .expect("Claude observation should validate");
+    assert!(
+        fixture
+            .writer
+            .record_window_observation(&claude_observation, || CREDIT_TURN_FIXTURE_TIME)
+            .await
+            .expect("Claude observation should persist")
+    );
+    assert!(
+        fixture
+            .writer
+            .mark_generation_reauth_required(&claude_account_id, 2)
+            .await
+            .expect("Claude maintenance state should persist")
+    );
+
+    let selector_inputs = fixture
+        .reader
+        .selector_inputs_for_route_band(RouteBand::Responses.as_str(), CREDIT_TURN_FIXTURE_TIME)
+        .await
+        .expect("mixed-provider selector snapshot should load");
+    let claude_input = selector_inputs
+        .iter()
+        .find(|input| input.account_id() == &claude_account_id)
+        .expect("Claude sidecar should remain in the selector snapshot");
+    assert_eq!(claude_input.provider(), Provider::Claude);
+    assert_eq!(
+        claude_input.credit_usage_policy(),
+        CreditUsagePolicy::Disallow
+    );
+    assert!(claude_input.credit_observation().is_none());
+    assert_eq!(claude_input.window_observations().len(), 1);
+    assert_eq!(
+        claude_input.window_observations()[0].freshness_at(CREDIT_TURN_FIXTURE_TIME),
+        codex_router_selection::burn_down::QuotaEvidenceFreshness::Fresh
+    );
+    let selection_projection =
+        codex_router_state::selection_projection::project_route_band_selection_inputs_read_only(
+            &fixture.reader,
+            RouteBand::Responses.as_str(),
+            CREDIT_TURN_FIXTURE_TIME,
+            7_200,
+        )
+        .await
+        .expect("mixed-provider selection projection should preserve Claude maintenance");
+    let claude_state = selection_projection
+        .account_states()
+        .iter()
+        .find(|state| state.account_id() == &claude_account_id)
+        .expect("Claude maintenance state should project");
+    assert_eq!(
+        claude_state.restriction(),
+        Some(&SelectionAccountRestriction::NeedsLogin)
+    );
+
+    assert_eq!(
+        fixture
+            .assessor
+            .assess_source_account(&fixture.account_id, 1, RouteBand::Responses, true)
+            .await,
+        AccountSourceAdmission::PermittedByCreditBackedQuota,
+        "Claude maintenance and windows must not block the OpenAI source account"
+    );
+    close_fixture(&fixture).await;
+}
 
 #[tokio::test]
 async fn source_assessment_rejects_provider_credit_depletion_and_spend_controls() {

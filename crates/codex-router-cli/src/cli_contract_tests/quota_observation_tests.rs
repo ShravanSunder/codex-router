@@ -264,6 +264,7 @@ fn quota_status_json_exposes_burndown_debug_fields_without_secret_material() {
             codex_router_state::credential_maintenance::ClaimPurpose::Refresh,
             1,
             2,
+            1_000
         )
     )));
     must_ok(runtime.block_on(native_state.close()));
@@ -319,11 +320,13 @@ fn quota_status_json_exposes_burndown_debug_fields_without_secret_material() {
     assert!(must_ok(runtime.block_on(
         maintenance_store.finish_credential_refresh_claim(
             primary_account.account_id(),
+            codex_router_core::provider::Provider::Openai,
             1,
             2,
-            codex_router_state::credential_maintenance::CredentialMaintenanceState::Retrying,
-            codex_router_state::credential_maintenance::CredentialFailureClass::RateLimited,
-            Some(11_500),
+            codex_router_state::credential_maintenance::CredentialRefreshClaimDisposition::Retrying {
+                failure_class: codex_router_state::credential_maintenance::CredentialFailureClass::RateLimited,
+                next_attempt_unix_seconds: 11_500,
+            },
         )
     )));
     must_ok(runtime.block_on(maintenance_store.close()));

@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT window_kind, remaining_basis_points,\n                reset_unix_seconds, observation_started_at\n           FROM account_window_observations\n          WHERE account_id = ?1\n          ORDER BY window_kind",
+  "query": "SELECT window_kind, remaining_basis_points,\n                reset_unix_seconds, observation_started_at,\n                fresh_until_unix_seconds\n           FROM account_window_observations\n          WHERE account_id = ?1\n          ORDER BY window_kind",
   "describe": {
     "columns": [
       {
@@ -46,6 +46,17 @@
             "name": "observation_started_at"
           }
         }
+      },
+      {
+        "name": "fresh_until_unix_seconds",
+        "ordinal": 4,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "account_window_observations",
+            "name": "fresh_until_unix_seconds"
+          }
+        }
       }
     ],
     "parameters": {
@@ -55,8 +66,9 @@
       false,
       false,
       true,
-      false
+      false,
+      true
     ]
   },
-  "hash": "5c4ac2a9619664879b78e429a9048b079fbcde6fee5634a1b399f3df069ee8e7"
+  "hash": "a7df63ed1773d65e2e2897a7dedcbb317131cdf99c43320108e081c42f20a256"
 }

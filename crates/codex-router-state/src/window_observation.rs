@@ -3,7 +3,8 @@
 use codex_router_core::ids::AccountId;
 use codex_router_core::provider::Provider;
 use codex_router_core::route_profile::WindowKind;
-use codex_router_selection::burn_down::QUOTA_EVIDENCE_FRESHNESS_INTERVAL_SECONDS;
+use codex_router_selection::burn_down::QuotaEvidenceFreshness;
+use thiserror::Error;
 
 use crate::sqlite::AsyncSqliteStateStore;
 use crate::sqlite::StateStoreError;
@@ -12,6 +13,27 @@ use crate::sqlite::sqlx_error;
 use crate::sqlite::u64_to_i64;
 
 const MAX_REMAINING_BASIS_POINTS: u32 = 10_000;
+const WINDOW_OBSERVATION_FRESHNESS_MARGIN_SECONDS: u64 = 120;
+pub(crate) const LEGACY_QUOTA_EVIDENCE_FRESHNESS_SECONDS: u64 = 300;
+
+/// Failure to calculate a quota observation freshness deadline.
+#[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
+pub enum WindowObservationFreshnessError {
+    /// The observation start, refresh interval, and margin exceed the timestamp range.
+    #[error("quota observation freshness deadline exceeded timestamp range")]
+    DeadlineOverflow,
+}
+
+/// Calculates the freshness deadline shared by active and passive quota observations.
+pub fn calculate_window_observation_fresh_until_unix_seconds(
+    observation_started_at_unix_seconds: u64,
+    refresh_interval_seconds: u64,
+) -> Result<u64, WindowObservationFreshnessError> {
+    observation_started_at_unix_seconds
+        .checked_add(refresh_interval_seconds)
+        .and_then(|deadline| deadline.checked_add(WINDOW_OBSERVATION_FRESHNESS_MARGIN_SECONDS))
+        .ok_or(WindowObservationFreshnessError::DeadlineOverflow)
+}
 
 /// Input values for one Claude quota observation.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -21,6 +43,7 @@ pub struct WindowObservationProps {
     remaining_basis_points: u32,
     reset_unix_seconds: Option<u64>,
     observation_started_at: u64,
+    fresh_until_unix_seconds: Option<u64>,
 }
 
 impl WindowObservationProps {
@@ -38,6 +61,7 @@ impl WindowObservationProps {
             remaining_basis_points,
             reset_unix_seconds: None,
             observation_started_at,
+            fresh_until_unix_seconds: None,
         }
     }
 
@@ -45,6 +69,13 @@ impl WindowObservationProps {
     #[must_use]
     pub const fn with_reset_unix_seconds(mut self, reset_unix_seconds: u64) -> Self {
         self.reset_unix_seconds = Some(reset_unix_seconds);
+        self
+    }
+
+    /// Sets the persisted freshness deadline derived by the observing quota worker.
+    #[must_use]
+    pub const fn with_fresh_until_unix_seconds(mut self, fresh_until_unix_seconds: u64) -> Self {
+        self.fresh_until_unix_seconds = Some(fresh_until_unix_seconds);
         self
     }
 }
@@ -57,6 +88,7 @@ pub struct WindowObservation {
     remaining_basis_points: u32,
     reset_unix_seconds: Option<u64>,
     observation_started_at: u64,
+    fresh_until_unix_seconds: Option<u64>,
 }
 
 impl WindowObservation {
@@ -67,6 +99,14 @@ impl WindowObservation {
                 field: "remaining_basis_points",
             });
         }
+        if props
+            .fresh_until_unix_seconds
+            .is_some_and(|fresh_until| fresh_until < props.observation_started_at)
+        {
+            return Err(StateStoreError::InvalidAccountWindowState {
+                field: "fresh_until_unix_seconds",
+            });
+        }
 
         Ok(Self {
             account_id: props.account_id,
@@ -74,6 +114,7 @@ impl WindowObservation {
             remaining_basis_points: props.remaining_basis_points,
             reset_unix_seconds: props.reset_unix_seconds,
             observation_started_at: props.observation_started_at,
+            fresh_until_unix_seconds: props.fresh_until_unix_seconds,
         })
     }
 
@@ -105,6 +146,35 @@ impl WindowObservation {
     #[must_use]
     pub const fn observation_started_at(&self) -> u64 {
         self.observation_started_at
+    }
+
+    /// Returns the stored freshness deadline when this row uses the current format.
+    #[must_use]
+    pub const fn fresh_until_unix_seconds(&self) -> Option<u64> {
+        self.fresh_until_unix_seconds
+    }
+
+    /// Returns the explicit deadline, or the legacy quota freshness deadline for old rows.
+    #[must_use]
+    pub const fn effective_fresh_until_unix_seconds(&self) -> u64 {
+        match self.fresh_until_unix_seconds {
+            Some(fresh_until_unix_seconds) => fresh_until_unix_seconds,
+            None => self
+                .observation_started_at
+                .saturating_add(LEGACY_QUOTA_EVIDENCE_FRESHNESS_SECONDS),
+        }
+    }
+
+    /// Classifies this row against its own persisted freshness deadline.
+    #[must_use]
+    pub const fn freshness_at(&self, now_unix_seconds: u64) -> QuotaEvidenceFreshness {
+        if now_unix_seconds < self.observation_started_at {
+            QuotaEvidenceFreshness::Unknown
+        } else if now_unix_seconds <= self.effective_fresh_until_unix_seconds() {
+            QuotaEvidenceFreshness::Fresh
+        } else {
+            QuotaEvidenceFreshness::Stale
+        }
     }
 }
 
@@ -200,17 +270,22 @@ impl AsyncSqliteStateStore {
             .map(u64_to_i64)
             .transpose()?;
         let observation_started_at = u64_to_i64(observation.observation_started_at())?;
+        let fresh_until_unix_seconds = observation
+            .fresh_until_unix_seconds()
+            .map(u64_to_i64)
+            .transpose()?;
         let mut transaction = self.pool.begin().await.map_err(sqlx_error)?;
         let write_result = sqlx::query!(
             "INSERT INTO account_window_observations (
                 account_id, window_kind, remaining_basis_points,
-                reset_unix_seconds, observation_started_at
+                reset_unix_seconds, observation_started_at, fresh_until_unix_seconds
              )
-             VALUES (?1, ?2, ?3, ?4, ?5)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
              ON CONFLICT(account_id, window_kind) DO UPDATE SET
                 remaining_basis_points = excluded.remaining_basis_points,
                 reset_unix_seconds = excluded.reset_unix_seconds,
-                observation_started_at = excluded.observation_started_at
+                observation_started_at = excluded.observation_started_at,
+                fresh_until_unix_seconds = excluded.fresh_until_unix_seconds
              WHERE excluded.observation_started_at
                    > account_window_observations.observation_started_at",
             account_id,
@@ -218,6 +293,7 @@ impl AsyncSqliteStateStore {
             remaining_basis_points,
             reset_unix_seconds,
             observation_started_at,
+            fresh_until_unix_seconds,
         )
         .execute(&mut *transaction)
         .await
@@ -226,10 +302,10 @@ impl AsyncSqliteStateStore {
 
         if observation_was_newest && observation.remaining_basis_points() > 0 {
             let applied_at_unix_seconds = application_clock();
-            let observation_age_is_fresh = applied_at_unix_seconds
-                >= observation.observation_started_at()
-                && applied_at_unix_seconds.saturating_sub(observation.observation_started_at())
-                    <= QUOTA_EVIDENCE_FRESHNESS_INTERVAL_SECONDS;
+            let observation_age_is_fresh = matches!(
+                observation.freshness_at(applied_at_unix_seconds),
+                QuotaEvidenceFreshness::Fresh
+            );
             if observation_age_is_fresh {
                 sqlx::query!(
                     "DELETE FROM account_window_rejections
@@ -289,7 +365,8 @@ impl AsyncSqliteStateStore {
         ensure_claude_account(&self.pool, account_id).await?;
         let rows = sqlx::query!(
             "SELECT window_kind, remaining_basis_points,
-                    reset_unix_seconds, observation_started_at
+                    reset_unix_seconds, observation_started_at,
+                    fresh_until_unix_seconds
                FROM account_window_observations
               WHERE account_id = ?1
               ORDER BY window_kind",
@@ -325,6 +402,12 @@ impl AsyncSqliteStateStore {
                 account_id.as_str(),
                 "observation_started_at",
             )?;
+            let fresh_until_unix_seconds = row
+                .fresh_until_unix_seconds
+                .map(|value| {
+                    i64_to_u64_window_state(value, account_id.as_str(), "fresh_until_unix_seconds")
+                })
+                .transpose()?;
             observations.push(WindowObservation::new(
                 WindowObservationProps::new(
                     account_id.clone(),
@@ -332,7 +415,8 @@ impl AsyncSqliteStateStore {
                     remaining_basis_points,
                     observation_started_at,
                 )
-                .with_reset_unix_seconds_option(reset_unix_seconds),
+                .with_reset_unix_seconds_option(reset_unix_seconds)
+                .with_fresh_until_unix_seconds_option(fresh_until_unix_seconds),
             )?);
         }
         Ok(observations)
@@ -406,7 +490,8 @@ pub(crate) async fn window_observations_for_account_in_transaction(
 ) -> Result<Vec<WindowObservation>, StateStoreError> {
     let rows = sqlx::query!(
         "SELECT window_kind, remaining_basis_points,
-                reset_unix_seconds, observation_started_at
+                reset_unix_seconds, observation_started_at,
+                fresh_until_unix_seconds
            FROM account_window_observations
           WHERE account_id = ?1
           ORDER BY window_kind",
@@ -439,6 +524,12 @@ pub(crate) async fn window_observations_for_account_in_transaction(
             account_id.as_str(),
             "observation_started_at",
         )?;
+        let fresh_until_unix_seconds = row
+            .fresh_until_unix_seconds
+            .map(|value| {
+                i64_to_u64_window_state(value, account_id.as_str(), "fresh_until_unix_seconds")
+            })
+            .transpose()?;
         observations.push(WindowObservation::new(
             WindowObservationProps::new(
                 account_id.clone(),
@@ -446,7 +537,8 @@ pub(crate) async fn window_observations_for_account_in_transaction(
                 remaining_basis_points,
                 observation_started_at,
             )
-            .with_reset_unix_seconds_option(reset_unix_seconds),
+            .with_reset_unix_seconds_option(reset_unix_seconds)
+            .with_fresh_until_unix_seconds_option(fresh_until_unix_seconds),
         )?);
     }
     Ok(observations)
@@ -486,6 +578,14 @@ pub(crate) async fn window_rejections_for_account_in_transaction(
 impl WindowObservationProps {
     fn with_reset_unix_seconds_option(mut self, reset_unix_seconds: Option<u64>) -> Self {
         self.reset_unix_seconds = reset_unix_seconds;
+        self
+    }
+
+    fn with_fresh_until_unix_seconds_option(
+        mut self,
+        fresh_until_unix_seconds: Option<u64>,
+    ) -> Self {
+        self.fresh_until_unix_seconds = fresh_until_unix_seconds;
         self
     }
 }

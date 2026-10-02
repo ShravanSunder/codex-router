@@ -9,7 +9,6 @@ use codex_router_core::routes::RouteBand;
 use codex_router_selection::burn_down::ACTIVE_SESSION_ROLLUP_BUCKET_SECONDS;
 use codex_router_selection::burn_down::BurnDownAccountInput;
 use codex_router_selection::burn_down::CreditBackedEligibility;
-use codex_router_selection::burn_down::QUOTA_EVIDENCE_FRESHNESS_INTERVAL_SECONDS;
 use codex_router_selection::burn_down::QuotaEvidenceFreshness;
 use codex_router_selection::burn_down::QuotaWindowFact;
 use codex_router_selection::burn_down::QuotaWindowRejectionFact;
@@ -28,6 +27,7 @@ use futures_util::future::BoxFuture;
 
 use crate::account::AccountStatus;
 use crate::account_routing_policy::AccountRoutingPolicy;
+use crate::credential_maintenance::CredentialMaintenanceState;
 use crate::quota_snapshot::PersistedQuotaHistoryObservation;
 use crate::quota_snapshot::PersistedSelectorQuotaWindow;
 use crate::quota_snapshot::SelectorQuotaInput;
@@ -36,9 +36,9 @@ use crate::sqlite::ActiveClientCount;
 use crate::sqlite::ActiveSessionRollup;
 use crate::sqlite::AsyncSqliteStateStore;
 use crate::sqlite::StateStoreError;
+use crate::window_observation::LEGACY_QUOTA_EVIDENCE_FRESHNESS_SECONDS;
 
 const QUOTA_HISTORY_LOOKBACK_SECONDS: u64 = 14 * 24 * 60 * 60;
-const QUOTA_HISTORY_FRESHNESS_SECONDS: u64 = QUOTA_EVIDENCE_FRESHNESS_INTERVAL_SECONDS;
 
 /// Projected selector inputs for one route band.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -471,7 +471,7 @@ where
         )
         .with_rejected_windows(rejected_windows)
         .with_account_enabled(input.account_status() == AccountStatus::Enabled)
-        .with_active_credential(input.active_credential_generation().is_some())
+        .with_active_credential(active_credential_is_routable(&input))
         .with_current_active_sessions(current_active_sessions);
         let credit_backed_eligibility = if route_band == RouteBand::Responses.as_str()
             && input.provider() == Provider::Openai
@@ -505,8 +505,7 @@ fn claude_window_facts_from_observations(
         .window_observations()
         .iter()
         .map(|observation| {
-            let freshness =
-                quota_observation_freshness(observation.observation_started_at(), now_unix_seconds);
+            let freshness = observation.freshness_at(now_unix_seconds);
             let status = match freshness {
                 QuotaEvidenceFreshness::Fresh => QuotaWindowStatus::Eligible,
                 QuotaEvidenceFreshness::Stale => QuotaWindowStatus::Stale,
@@ -545,7 +544,7 @@ fn selection_account_state_from_selector_input(
                     .reset_unix_seconds()
                     .map(HeadroomTimestamp::from_unix_seconds),
                 observation.observation_started_at(),
-                quota_observation_freshness(observation.observation_started_at(), now_unix_seconds),
+                observation.freshness_at(now_unix_seconds),
             )
         })
         .collect();
@@ -563,18 +562,20 @@ fn selection_account_state_from_selector_input(
         })
         .collect::<Vec<_>>();
 
-    let restriction = if input.active_credential_generation().is_none() {
-        SelectionAccountRestriction::NeedsLogin
-    } else if input.provider() == Provider::Claude && !window_rejections.is_empty() {
-        SelectionAccountRestriction::Exhausted
-    } else if let Some(floor_basis_points) = weekly_floor_basis_points {
-        match weekly_floor_hold_reason(input, floor_basis_points, now_unix_seconds) {
-            Some(reason) => SelectionAccountRestriction::HeldByFloor { reason },
-            None => SelectionAccountRestriction::Available,
-        }
-    } else {
-        SelectionAccountRestriction::Available
-    };
+    let active_credential_needs_login = active_credential_requires_login(input);
+    let restriction =
+        if input.active_credential_generation().is_none() || active_credential_needs_login {
+            SelectionAccountRestriction::NeedsLogin
+        } else if input.provider() == Provider::Claude && !window_rejections.is_empty() {
+            SelectionAccountRestriction::Exhausted
+        } else if let Some(floor_basis_points) = weekly_floor_basis_points {
+            match weekly_floor_hold_reason(input, floor_basis_points, now_unix_seconds) {
+                Some(reason) => SelectionAccountRestriction::HeldByFloor { reason },
+                None => SelectionAccountRestriction::Available,
+            }
+        } else {
+            SelectionAccountRestriction::Available
+        };
 
     SelectionAccountState::enabled(
         input.account_id().clone(),
@@ -583,6 +584,21 @@ fn selection_account_state_from_selector_input(
         window_observations,
         window_rejections,
     )
+}
+
+fn active_credential_requires_login(input: &SelectorQuotaInput) -> bool {
+    input.provider() == Provider::Claude
+        && matches!(
+            input.active_credential_maintenance_state(),
+            Some(
+                CredentialMaintenanceState::ReauthRequired
+                    | CredentialMaintenanceState::Unrefreshable
+            )
+        )
+}
+
+fn active_credential_is_routable(input: &SelectorQuotaInput) -> bool {
+    input.active_credential_generation().is_some() && !active_credential_requires_login(input)
 }
 
 fn weekly_floor_hold_reason(
@@ -598,11 +614,7 @@ fn weekly_floor_hold_reason(
         else {
             return Some(SelectionHoldReason::WaitingForFreshWeeklyObservation);
         };
-        if quota_observation_freshness(
-            weekly_observation.observation_started_at(),
-            now_unix_seconds,
-        ) != QuotaEvidenceFreshness::Fresh
-        {
+        if weekly_observation.freshness_at(now_unix_seconds) != QuotaEvidenceFreshness::Fresh {
             return Some(SelectionHoldReason::WaitingForFreshWeeklyObservation);
         }
         weekly_observation.remaining_basis_points()
@@ -621,21 +633,6 @@ fn weekly_floor_hold_reason(
     };
 
     (current_weekly_basis_points <= floor_basis_points).then_some(SelectionHoldReason::HardFloor)
-}
-
-fn quota_observation_freshness(
-    observation_started_at: u64,
-    now_unix_seconds: u64,
-) -> QuotaEvidenceFreshness {
-    if now_unix_seconds < observation_started_at {
-        QuotaEvidenceFreshness::Unknown
-    } else if now_unix_seconds.saturating_sub(observation_started_at)
-        <= QUOTA_EVIDENCE_FRESHNESS_INTERVAL_SECONDS
-    {
-        QuotaEvidenceFreshness::Fresh
-    } else {
-        QuotaEvidenceFreshness::Stale
-    }
 }
 
 const fn window_seconds_for_kind(window_kind: WindowKind) -> u64 {
@@ -689,7 +686,7 @@ async fn estimate_window_burn_rate(
         });
     };
     if now_unix_seconds.saturating_sub(latest_observation.observed_unix_seconds())
-        > QUOTA_HISTORY_FRESHNESS_SECONDS
+        > LEGACY_QUOTA_EVIDENCE_FRESHNESS_SECONDS
     {
         return Ok(ProjectedBurnRateEstimate {
             confidence: QuotaRunRateConfidence::Stale,
@@ -895,6 +892,8 @@ mod tests {
     use crate::account::AccountRecord;
     use crate::account::AccountStatus;
     use crate::account_routing_policy::WeeklyQuotaFloorBasisPoints;
+    use crate::credential_maintenance::CredentialMaintenanceState;
+    use crate::quota_snapshot::SelectorCredentialMaintenance;
     use crate::sqlite::AsyncWeeklyQuotaFloorMutationStore;
 
     use super::*;
@@ -910,6 +909,64 @@ mod tests {
         assert!(
             !active_session_rollups_cover_interval(&rollups, &account, 0, 900),
             "a missing middle rollup bucket must downgrade active-session history"
+        );
+    }
+
+    fn credential_maintenance_projection_input(
+        maintenance_generation: u64,
+        maintenance_state: CredentialMaintenanceState,
+    ) -> SelectorQuotaInput {
+        SelectorQuotaInput::new(
+            AccountId::new("acct_maintenance_projection")
+                .unwrap_or_else(|error| panic!("test account id should be valid: {error}")),
+            "Claude Maintenance",
+            Provider::Claude,
+            AccountStatus::Enabled,
+            Some(2),
+            "messages",
+            Vec::new(),
+        )
+        .with_credential_maintenance(Some(SelectorCredentialMaintenance::new(
+            maintenance_generation,
+            maintenance_state,
+        )))
+    }
+
+    #[test]
+    fn projection_maps_active_generation_reauth_and_unrefreshable_to_needs_login() {
+        for maintenance_state in [
+            CredentialMaintenanceState::ReauthRequired,
+            CredentialMaintenanceState::Unrefreshable,
+        ] {
+            let input = credential_maintenance_projection_input(2, maintenance_state);
+            let projected = selection_account_state_from_selector_input(&input, None, 1_000);
+
+            assert_eq!(
+                projected.restriction(),
+                Some(&SelectionAccountRestriction::NeedsLogin),
+                "active generation maintenance state {maintenance_state:?} requires login"
+            );
+            assert!(
+                !active_credential_is_routable(&input),
+                "the reauth-required active generation must not be selected"
+            );
+        }
+    }
+
+    #[test]
+    fn projection_ignores_reauth_state_for_stale_credential_generation() {
+        let input =
+            credential_maintenance_projection_input(1, CredentialMaintenanceState::ReauthRequired);
+        let projected = selection_account_state_from_selector_input(&input, None, 1_000);
+
+        assert_eq!(
+            projected.restriction(),
+            Some(&SelectionAccountRestriction::Available),
+            "stale maintenance state must not restrict the newer active credential"
+        );
+        assert!(
+            active_credential_is_routable(&input),
+            "a stale maintenance generation must leave the active credential routable"
         );
     }
 

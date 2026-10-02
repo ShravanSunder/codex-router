@@ -1,0 +1,11 @@
+{
+  "status": 429,
+  "headers": {},
+  "body": {
+    "type": "error",
+    "error": {
+      "type": "rate_limit_error",
+      "message": "Your organization has hit a rate limit."
+    }
+  }
+}

@@ -181,6 +181,16 @@ pub(crate) async fn run_host_command<W: Write + Send>(
                 .to_owned(),
         ));
     }
+    if context
+        .env_var("CODEX_ROUTER_DEBUG_CLAUDE_UPSTREAM_BASE_URL")
+        .is_some()
+        && (!cfg!(debug_assertions) || !command.require_debug_isolation)
+    {
+        return Err(HostCommandError::RouterRoot(
+            "debug Claude upstream override requires --require-debug-isolation in a debug build"
+                .to_owned(),
+        ));
+    }
     let router_root = crate::router_root_or_default(command.router_root.clone())
         .map_err(|error| HostCommandError::RouterRoot(error.to_string()))?;
     validate_router_root(&router_root)?;
@@ -508,6 +518,24 @@ mod tests {
         assert!(matches!(
             validate_router_root(Path::new("/tmp/private/../router")),
             Err(HostCommandError::RouterRootParentSegment)
+        ));
+    }
+
+    #[tokio::test]
+    async fn claude_upstream_override_requires_debug_isolation_before_launch() {
+        let context = CliContext::new(vec![(
+            "CODEX_ROUTER_DEBUG_CLAUDE_UPSTREAM_BASE_URL".to_owned(),
+            "http://127.0.0.1:18888".to_owned(),
+        )]);
+        let command = HostCommand::parse(Vec::new()).expect("default Host command");
+        let error = run_host_command(&mut Vec::new(), command, &context, None)
+            .await
+            .expect_err("a Claude endpoint override requires isolated debug Host mode");
+
+        assert!(matches!(
+            error,
+            HostCommandError::RouterRoot(message)
+                if message == "debug Claude upstream override requires --require-debug-isolation in a debug build"
         ));
     }
 }

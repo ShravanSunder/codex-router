@@ -53,6 +53,7 @@ mod tests {
     use crate::affinity_owner::PreviousResponseAffinityOwnerRecord;
     use crate::credential_maintenance::ClaimPurpose;
     use crate::credential_maintenance::CredentialMaintenanceState;
+    use crate::credential_maintenance::CredentialRefreshClaimDisposition;
     use crate::quota_snapshot::PersistedQuotaHistoryObservation;
     use crate::quota_snapshot::PersistedQuotaSnapshot;
     use crate::quota_snapshot::PersistedSelectorQuotaWindow;
@@ -67,6 +68,7 @@ mod tests {
     use crate::repositories::SelectorQuotaRepository;
     use crate::selection_projection::project_route_band_selection_inputs;
     use crate::selection_projection::project_route_band_selection_inputs_with_active_counts;
+    use crate::session_account_affinity::PinObservation;
     use crate::session_account_affinity::SessionAccountAffinity;
     use crate::sqlite::AsyncAffinityRepository;
     use crate::sqlite::AsyncQuotaExhaustionRepository;
@@ -78,6 +80,8 @@ mod tests {
     use crate::sqlite::SqliteStateStore;
     use crate::sqlite::StateStoreError;
     use crate::sqlite::WeeklyQuotaFloorMutationResult;
+
+    mod credential_maintenance_store_tests;
 
     fn expect_error<T, E>(result: Result<T, E>, context: &'static str) -> E {
         match result {
@@ -113,7 +117,8 @@ mod tests {
                     Provider::Openai,
                     crate::credential_maintenance::ClaimPurpose::Refresh,
                     1,
-                    3
+                    3,
+                    10
                 )
                 .await
                 .expect("claim should save")
@@ -137,7 +142,8 @@ mod tests {
                     Provider::Openai,
                     crate::credential_maintenance::ClaimPurpose::Refresh,
                     1,
-                    4
+                    4,
+                    20
                 )
                 .await
                 .expect("second claim should evaluate")
@@ -184,6 +190,105 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stale_login_claim_restores_previous_health_instead_of_requiring_login() {
+        let temp_dir = TestTempDir::new("credential_stale_login_claim");
+        let database_path = temp_dir.path().join("state.sqlite");
+        let account_id = account_id("stale-login-claim");
+        let store = AsyncSqliteStateStore::open(&database_path)
+            .await
+            .expect("state should open");
+        store
+            .upsert_account(
+                &AccountRecord::new(
+                    Provider::Claude,
+                    account_id.clone(),
+                    "pooled claude",
+                    AccountStatus::Enabled,
+                )
+                .with_active_credential_generation(1),
+            )
+            .await
+            .expect("account should save");
+
+        assert!(
+            store
+                .claim_credential_refresh(
+                    &account_id,
+                    Provider::Claude,
+                    ClaimPurpose::Refresh,
+                    1,
+                    2,
+                    900,
+                )
+                .await
+                .expect("initial refresh claim should save")
+        );
+        assert!(
+            store
+                .activate_claimed_credential_generation(
+                    &account_id,
+                    Provider::Claude,
+                    ClaimPurpose::Refresh,
+                    1,
+                    2,
+                    1_000,
+                )
+                .await
+                .expect("refresh claim should activate")
+        );
+        assert!(
+            store
+                .claim_credential_refresh(
+                    &account_id,
+                    Provider::Claude,
+                    ClaimPurpose::Login,
+                    2,
+                    3,
+                    2_000,
+                )
+                .await
+                .expect("login claim should save")
+        );
+
+        let in_progress = store
+            .load_credential_maintenance(&account_id)
+            .await
+            .expect("maintenance should load")
+            .expect("login claim should be durable");
+        assert_eq!(in_progress.claim_purpose, Some(ClaimPurpose::Login));
+        assert_eq!(in_progress.claim_started_unix_seconds, Some(2_000));
+        assert_eq!(
+            in_progress.claim_prior_state,
+            Some(CredentialMaintenanceState::Healthy)
+        );
+
+        assert!(
+            !store
+                .release_stale_login_credential_claim(&account_id, Provider::Claude, 2_300, 300)
+                .await
+                .expect("claim younger than timeout should remain active")
+        );
+        assert!(
+            store
+                .release_stale_login_credential_claim(&account_id, Provider::Claude, 2_301, 300)
+                .await
+                .expect("stale login claim should be released")
+        );
+
+        let restored = store
+            .load_credential_maintenance(&account_id)
+            .await
+            .expect("maintenance should load")
+            .expect("pre-login maintenance should be restored");
+        assert_eq!(restored.credential_generation, 2);
+        assert_eq!(restored.state, CredentialMaintenanceState::Healthy);
+        assert_eq!(restored.claimed_successor_generation, None);
+        assert_eq!(restored.claim_purpose, None);
+        assert_eq!(restored.claim_started_unix_seconds, None);
+        assert_eq!(restored.claim_prior_state, None);
+    }
+
+    #[tokio::test]
     async fn login_claim_accepts_a_new_disabled_account_and_removes_its_claim_on_activation() {
         let temp_dir = TestTempDir::new("credential_login_claim_first_generation");
         let database_path = temp_dir.path().join("state.sqlite");
@@ -203,7 +308,14 @@ mod tests {
 
         assert!(
             store
-                .claim_credential_refresh(&account_id, Provider::Claude, ClaimPurpose::Login, 0, 1,)
+                .claim_credential_refresh(
+                    &account_id,
+                    Provider::Claude,
+                    ClaimPurpose::Login,
+                    0,
+                    1,
+                    100,
+                )
                 .await
                 .expect("login claim should evaluate")
         );
@@ -280,6 +392,7 @@ mod tests {
                     ClaimPurpose::Refresh,
                     1,
                     2,
+                    100,
                 )
                 .await
                 .expect("refresh provider guard should evaluate")
@@ -292,6 +405,7 @@ mod tests {
                     ClaimPurpose::Login,
                     1,
                     2,
+                    100,
                 )
                 .await
                 .expect("login provider guard should evaluate")
@@ -325,7 +439,8 @@ mod tests {
                     Provider::Openai,
                     crate::credential_maintenance::ClaimPurpose::Refresh,
                     1,
-                    2
+                    2,
+                    100
                 )
                 .await
                 .expect("old claim")
@@ -350,7 +465,8 @@ mod tests {
                     Provider::Openai,
                     crate::credential_maintenance::ClaimPurpose::Refresh,
                     3,
-                    4
+                    4,
+                    200
                 )
                 .await
                 .expect("new claim")
@@ -419,7 +535,8 @@ mod tests {
                     Provider::Openai,
                     crate::credential_maintenance::ClaimPurpose::Refresh,
                     1,
-                    2
+                    2,
+                    100
                 )
                 .await
                 .expect("initial claim")
@@ -445,7 +562,8 @@ mod tests {
                     Provider::Openai,
                     crate::credential_maintenance::ClaimPurpose::Refresh,
                     2,
-                    3
+                    3,
+                    200
                 )
                 .await
                 .expect("same-generation claim")
@@ -460,11 +578,13 @@ mod tests {
             state
                 .finish_credential_refresh_claim(
                     &account_id,
+                    Provider::Openai,
                     2,
                     3,
-                    CredentialMaintenanceState::Retrying,
-                    CredentialFailureClass::TransportUnspent,
-                    Some(200),
+                    CredentialRefreshClaimDisposition::Retrying {
+                        failure_class: CredentialFailureClass::TransportUnspent,
+                        next_attempt_unix_seconds: 200,
+                    },
                 )
                 .await
                 .expect("safe claim failure")
@@ -511,7 +631,8 @@ mod tests {
                     Provider::Openai,
                     crate::credential_maintenance::ClaimPurpose::Refresh,
                     6,
-                    7
+                    7,
+                    400
                 )
                 .await
                 .expect("replacement claim")
@@ -735,6 +856,185 @@ mod tests {
             .await,
             Ok(Some(replacement))
         );
+    }
+
+    #[tokio::test]
+    async fn session_account_affinity_cas_allows_one_writer_for_the_same_observation() {
+        let temp_dir = TestTempDir::new("session_account_affinity_cas_race");
+        let database_path = temp_dir.path().join("state.sqlite");
+        let first_store = AsyncSqliteStateStore::open(&database_path)
+            .await
+            .expect("first state store should open");
+        let second_store = AsyncSqliteStateStore::open(&database_path)
+            .await
+            .expect("second state store should open");
+        let observation = PinObservation::new(None, 0);
+        let first_writer = SessionAccountAffinity::with_pin_state(
+            Provider::Claude,
+            "racing-session",
+            Some(account_id("acct_first_writer")),
+            1,
+            10_000,
+        );
+        let second_writer = SessionAccountAffinity::with_pin_state(
+            Provider::Claude,
+            "racing-session",
+            Some(account_id("acct_second_writer")),
+            1,
+            10_000,
+        );
+
+        let (first_result, second_result) = tokio::join!(
+            AsyncSessionAccountAffinityRepository::compare_and_set_session_account_affinity(
+                &first_store,
+                &observation,
+                &first_writer,
+                4_500,
+            ),
+            AsyncSessionAccountAffinityRepository::compare_and_set_session_account_affinity(
+                &second_store,
+                &observation,
+                &second_writer,
+                4_500,
+            ),
+        );
+        let first_won = first_result.expect("first writer should reach the compare-and-set");
+        let second_won = second_result.expect("second writer should reach the compare-and-set");
+
+        assert_ne!(first_won, second_won);
+        let stored_affinity = AsyncSessionAccountAffinityRepository::load_session_account_affinity(
+            &first_store,
+            Provider::Claude,
+            "racing-session",
+        )
+        .await
+        .expect("winning affinity should load")
+        .expect("one writer should create the affinity");
+        let winning_account = if first_won {
+            first_writer.account_id()
+        } else {
+            second_writer.account_id()
+        };
+        assert_eq!(stored_affinity.account_id(), winning_account);
+        assert_eq!(stored_affinity.pin_version(), 1);
+
+        first_store.close().await.expect("first store should close");
+        second_store
+            .close()
+            .await
+            .expect("second store should close");
+    }
+
+    #[tokio::test]
+    async fn session_account_affinity_cas_rejects_late_writes_after_expiry_and_release() {
+        let temp_dir = TestTempDir::new("session_account_affinity_cas_expiry_release");
+        let database_path = temp_dir.path().join("state.sqlite");
+        let store = AsyncSqliteStateStore::open(&database_path)
+            .await
+            .expect("state store should open");
+        let expired_account = account_id("acct_expired");
+        let initial_pin = SessionAccountAffinity::with_pin_state(
+            Provider::Claude,
+            "expiry-session",
+            Some(expired_account.clone()),
+            7,
+            1_000,
+        );
+        AsyncSessionAccountAffinityRepository::upsert_session_account_affinity(
+            &store,
+            &initial_pin,
+        )
+        .await
+        .expect("initial pin should persist");
+
+        let stale_active_observation = PinObservation::new(Some(expired_account.clone()), 7);
+        let late_renewal = SessionAccountAffinity::with_pin_state(
+            Provider::Claude,
+            "expiry-session",
+            Some(expired_account),
+            7,
+            5_501,
+        );
+        assert!(
+            !AsyncSessionAccountAffinityRepository::compare_and_set_session_account_affinity(
+                &store,
+                &stale_active_observation,
+                &late_renewal,
+                4_500,
+            )
+            .await
+            .expect("late renewal should be rejected without a storage error")
+        );
+
+        let expired_observation = PinObservation::new(None, 7);
+        let replacement_account = account_id("acct_replacement");
+        let replacement_pin = SessionAccountAffinity::with_pin_state(
+            Provider::Claude,
+            "expiry-session",
+            Some(replacement_account.clone()),
+            8,
+            5_501,
+        );
+        assert!(
+            AsyncSessionAccountAffinityRepository::compare_and_set_session_account_affinity(
+                &store,
+                &expired_observation,
+                &replacement_pin,
+                4_500,
+            )
+            .await
+            .expect("fresh observation should claim the expired pin")
+        );
+
+        let active_replacement_observation =
+            PinObservation::new(Some(replacement_account.clone()), 8);
+        let released_pin = SessionAccountAffinity::with_pin_state(
+            Provider::Claude,
+            "expiry-session",
+            None,
+            9,
+            5_502,
+        );
+        assert!(
+            AsyncSessionAccountAffinityRepository::compare_and_set_session_account_affinity(
+                &store,
+                &active_replacement_observation,
+                &released_pin,
+                4_500,
+            )
+            .await
+            .expect("release should compare-and-set the active pin")
+        );
+
+        let late_success_after_release = SessionAccountAffinity::with_pin_state(
+            Provider::Claude,
+            "expiry-session",
+            Some(replacement_account),
+            8,
+            5_503,
+        );
+        assert!(
+            !AsyncSessionAccountAffinityRepository::compare_and_set_session_account_affinity(
+                &store,
+                &active_replacement_observation,
+                &late_success_after_release,
+                4_500,
+            )
+            .await
+            .expect("stale success should be rejected without a storage error")
+        );
+
+        let stored_pin = AsyncSessionAccountAffinityRepository::load_session_account_affinity(
+            &store,
+            Provider::Claude,
+            "expiry-session",
+        )
+        .await
+        .expect("released pin should load")
+        .expect("released pin row should remain persisted");
+        assert_eq!(stored_pin.account_id(), None);
+        assert_eq!(stored_pin.pin_version(), 9);
+        store.close().await.expect("state store should close");
     }
 
     #[tokio::test]

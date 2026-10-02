@@ -61,6 +61,7 @@ pub(super) fn quota_capture_row(fixture: QuotaCaptureRowFixture) -> QuotaStatusR
     };
 
     QuotaStatusRow {
+        provider: codex_router_core::provider::Provider::Openai,
         account_id: account_id(fixture.account_id_value),
         active_credential_generation: Some(1),
         account_label: fixture.account_label.to_owned(),
