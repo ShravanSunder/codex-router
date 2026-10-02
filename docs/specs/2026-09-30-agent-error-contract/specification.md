@@ -60,3 +60,5 @@ delivery id and directs push references to `agent-collaboration show <link>`. Th
 `malformed_delivery_show_names_delivery_id_and_uuidv7_constraint` and
 `missing_delivery_show_names_the_id_and_push_show_command` in
 `crates/collaboration-service/src/wakeup_lifecycle_dispatch.rs`.
+
+R2/R4 for JSON-only subscribe/wait commands are met by structured `invalidField` responses; the human `error:` line applies to commands that support human mode.

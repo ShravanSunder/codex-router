@@ -52,7 +52,7 @@ pub(super) fn prepare(
     };
     let max_wait_seconds = parse_subscription_duration(&arguments.max_wait, "--max-wait", true)?;
     if max_wait_seconds > MAX_SUBSCRIPTION_WAIT_SECONDS {
-        return Err("--max-wait must be at most 1500 seconds".into());
+        return Err("--max-wait must be at most 1500 seconds; for example --max-wait 10m".into());
     }
     let request = ThreadSubscriptionWaitRequest {
         actor: match &actor {
