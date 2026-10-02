@@ -317,6 +317,35 @@ mod tests {
         assert!(!line.contains("pid 603"));
         assert!(!line.contains("pid 604"));
         assert!(line.contains("+2 more)"));
+        let visible_pids = line
+            .split("pid ")
+            .skip(1)
+            .map(|claim| {
+                claim
+                    .split_whitespace()
+                    .next()
+                    .expect("visible claim has a PID")
+                    .parse::<u32>()
+                    .expect("visible PID is numeric")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(visible_pids, vec![600, 601, 602]);
+        assert_eq!(line.matches("pid ").count(), 3);
+        let remainder = line
+            .rsplit_once(", +")
+            .expect("omitted peers have a remainder summary")
+            .1
+            .split_once(" more)")
+            .expect("remainder summary closes the peer list")
+            .0;
+        assert_eq!(remainder, "2");
+        assert_eq!(
+            remainder
+                .parse::<usize>()
+                .expect("omitted count is numeric"),
+            claims.len() - visible_pids.len()
+        );
+        assert_eq!(line.matches(" more)").count(), 1);
         assert_eq!(rejection.claims.as_ref(), Some(&claims));
     }
 }

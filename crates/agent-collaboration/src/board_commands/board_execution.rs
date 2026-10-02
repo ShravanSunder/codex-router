@@ -421,7 +421,7 @@ fn report(result: Result<CommandExecutionResult, CommandExecutionError>, machine
         Err(CommandExecutionError::Request {
             error: BoardClientError::WaitOutcomeUnknown { actor, filter },
             ..
-        }) => report_wait_outcome_unknown(machine, &actor, &filter),
+        }) => report_wait_outcome_unknown(&actor, &filter),
         Err(CommandExecutionError::InvalidUsage(message)) => {
             crate::endpoint_commands::report_failure("invalidField", &message, 2, machine)
         }
@@ -579,7 +579,6 @@ fn report_uncertain_outcome(
 }
 
 const WAIT_OUTCOME_UNKNOWN_MESSAGE: &str = "wait result was lost; activity may have been handed off — run board thread subscriptions and board inbox fetch before waiting again";
-const WAIT_OUTCOME_UNKNOWN_LINE: &str = "error: wait result was lost; activity may have been handed off — run board thread subscriptions and board inbox fetch before waiting again";
 
 fn wait_outcome_unknown_output(actor: &Identity, filter: &ThreadSubscriptionWaitFilter) -> Value {
     json!({
@@ -596,17 +595,8 @@ fn wait_outcome_unknown_output(actor: &Identity, filter: &ThreadSubscriptionWait
     })
 }
 
-fn report_wait_outcome_unknown(
-    machine: bool,
-    actor: &Identity,
-    filter: &ThreadSubscriptionWaitFilter,
-) -> i32 {
-    if machine {
-        write_json(&wait_outcome_unknown_output(actor, filter), 5)
-    } else {
-        let _written = writeln!(io::stderr().lock(), "{WAIT_OUTCOME_UNKNOWN_LINE}");
-        5
-    }
+fn report_wait_outcome_unknown(actor: &Identity, filter: &ThreadSubscriptionWaitFilter) -> i32 {
+    write_json(&wait_outcome_unknown_output(actor, filter), 5)
 }
 
 fn wire_name<TValue: Serialize>(value: &TValue) -> String {
@@ -658,8 +648,8 @@ fn write_json(value: &Value, success_code: i32) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::{
-        WAIT_OUTCOME_UNKNOWN_LINE, WAIT_OUTCOME_UNKNOWN_MESSAGE, refusal_command, refusal_output,
-        report_wait_outcome_unknown, wait_outcome_unknown_output,
+        WAIT_OUTCOME_UNKNOWN_MESSAGE, refusal_command, refusal_output, report_wait_outcome_unknown,
+        wait_outcome_unknown_output,
     };
     use collaboration_client::board::*;
     use collaboration_client::protocol::ThreadSubscriptionWaitFilter;
@@ -703,12 +693,7 @@ mod tests {
             output["error"]["filter"],
             serde_json::to_value(&filter).expect("filter JSON")
         );
-        assert_eq!(report_wait_outcome_unknown(true, &actor, &filter), 5);
-        assert_eq!(
-            WAIT_OUTCOME_UNKNOWN_LINE,
-            "error: wait result was lost; activity may have been handed off — run board thread subscriptions and board inbox fetch before waiting again"
-        );
-        assert_eq!(report_wait_outcome_unknown(false, &actor, &filter), 5);
+        assert_eq!(report_wait_outcome_unknown(&actor, &filter), 5);
     }
 
     #[test]
