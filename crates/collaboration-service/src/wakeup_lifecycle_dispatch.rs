@@ -208,4 +208,44 @@ mod tests {
             )
         );
     }
+
+    #[tokio::test]
+    async fn malformed_delivery_show_names_delivery_id_and_uuidv7_constraint() {
+        let directory = tempfile::tempdir().expect("isolated automation store");
+        let store = Arc::new(Mutex::new(
+            AutomationStore::open(&directory.path().join("automation.sqlite"))
+                .await
+                .expect("automation store"),
+        ));
+        let service_id = UuidIdentity::try_from("00000000-0000-4000-8000-000000000001".to_owned())
+            .expect("service id");
+
+        let response = inspect_delivery(WakeRequest {
+            id: json!(1),
+            method: "delivery/show",
+            params: json!({"deliveryId":"not-a-uuid"}),
+            service_id: &service_id,
+            store: Some(&store),
+        })
+        .await;
+
+        let constraint = "deliveryId must be a canonical lowercase RFC UUIDv7, for example 019f0000-0000-7000-8000-000000000001.";
+        assert_eq!(response.pointer("/error/code"), Some(&json!(-32050)));
+        assert_eq!(
+            response.pointer("/error/data/kind"),
+            Some(&json!("invalidField"))
+        );
+        assert_eq!(
+            response.pointer("/error/data/field"),
+            Some(&json!("deliveryId"))
+        );
+        assert_eq!(
+            response.pointer("/error/data/constraint"),
+            Some(&json!(constraint))
+        );
+        assert_eq!(
+            response.pointer("/error/data/message"),
+            Some(&json!(constraint))
+        );
+    }
 }

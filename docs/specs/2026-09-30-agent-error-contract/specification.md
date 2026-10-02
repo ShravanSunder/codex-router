@@ -28,7 +28,7 @@ Requirements: [requirements.md](requirements.md) (U1–U4, revision 2: narrowed 
 - **R4 — CLI human line (U4).** Without `--json`, a failure prints one line: `error: <explanation> — <next
   step>`. A held send prints `held: <link> — delivered when <target> is next running`. Exit codes: delivered and
   held 0, rejected 4, unknown 5.
-- **R5 — small fixes (follow-up).** `delivery_show` not-found names the delivery id (and, for a push id, points
+- **R5 — small fixes.** `delivery_show` not-found names the delivery id (and, for a push id, points
   to `show <link>`); "automation identity must be…" names the parameter (`deliveryId`, `wakeupId`, …) and shows
   a UUIDv7 example.
 
@@ -50,4 +50,13 @@ Requirements: [requirements.md](requirements.md) (U1–U4, revision 2: narrowed 
 | R3 | the real peer route with two live registry records (S1); the real route and owner for an unloaded thread (S2); `show` after rejected/unknown (S3) |
 | R1 secrets + OTel link | a synthetic secret marker in an injected provider error never appears in the line or the stored outcome; the captured OTel log record (test tracing subscriber) holds the raw text, and its correlation id and provider code equal the ones in the error and the stored outcome |
 | R3 many claims | five claims with long names: line ≤ 240 characters with `+N more`; structured `claims` has all five |
-| R5 | MCP `delivery_show` tests for the corrected messages (follow-up) |
+| R5 | Control dispatch tests for malformed `deliveryId` constraints and missing-delivery guidance |
+
+## Implementation note (2026-10-01)
+
+R5 is implemented in PR #112. A malformed `delivery/show` identifier returns `invalidField` with the
+`deliveryId` field and the canonical lowercase RFC UUIDv7 constraint; a missing delivery still identifies the
+delivery id and directs push references to `agent-collaboration show <link>`. These contracts are tested by
+`malformed_delivery_show_names_delivery_id_and_uuidv7_constraint` and
+`missing_delivery_show_names_the_id_and_push_show_command` in
+`crates/collaboration-service/src/wakeup_lifecycle_dispatch.rs`.
