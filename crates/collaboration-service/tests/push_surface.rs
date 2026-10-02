@@ -31,6 +31,8 @@ const SERVICE_ID: &str = "00000000-0000-4000-8000-000000000001";
 
 #[path = "push_surface/board_and_history_proofs.rs"]
 mod board_and_history_proofs;
+#[path = "push_surface/subscription_expansion_proofs.rs"]
+mod subscription_expansion_proofs;
 
 struct RecordingDelivery {
     requests: Mutex<Vec<collaboration_service::layer_zero::DeliveryRequest>>,

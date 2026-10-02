@@ -18,6 +18,9 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 
 #[cfg(test)]
+#[path = "wakeup_delivery_sender/aged_wake_retention_tests.rs"]
+mod aged_wake_retention_tests;
+#[cfg(test)]
 #[path = "native_delivery_crash_tests.rs"]
 mod crash_tests;
 #[cfg(test)]
