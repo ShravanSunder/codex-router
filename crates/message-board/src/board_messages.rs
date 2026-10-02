@@ -1,6 +1,6 @@
 use crate::{
     BoardId, HumanId, Identity, ImplementerHolder, MessageId, MessageText, OrchestratorHolder,
-    ProjectId, ThreadState, TopicId,
+    ParticipantRole, ProjectId, ThreadState, TopicId,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -266,6 +266,8 @@ pub struct Message {
     pub text: MessageText,
     pub references: MessageReferences,
     pub activity_sequence: ActivitySequence,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub posted_as_role: Option<ParticipantRole>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
