@@ -13,6 +13,7 @@ fn service_manifest(router_proxy_endpoint: Option<&str>) -> serde_json::Value {
     let mut manifest = serde_json::json!({
         "version": 2,
         "serviceId": "00000000-0000-4000-8000-000000000001",
+        "machineLabel": "fixture-machine",
         "serviceEpoch": "00000000-0000-4000-8000-000000000002",
         "control": {"transport": "unixJsonLines", "path": "control.sock"},
         "controlSchemaDigest": format!("sha256:{}", "a".repeat(64)),
@@ -476,6 +477,7 @@ async fn active_inventory_uses_the_existing_claude_local_discovery() {
             mcp_bind: "127.0.0.1:0".parse().expect("MCP bind"),
             native_schema: None,
             peer_registry_directory: Some(peer_registry_directory),
+            remote_control_server_name: None,
             owner_human_id: None,
         },
         vec![claude_endpoint],

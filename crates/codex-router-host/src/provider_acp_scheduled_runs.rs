@@ -263,7 +263,7 @@ impl ScheduledRunExecution for ProviderAcpScheduledRuns {
                     }
                     ProviderSessionLoadOutcome::Rejected { reason } => {
                         SchedulePreparationOutcome::Failed(SchedulePreparationFailure {
-                            kind: if matches!(reason, crate::provider_acp_session_loading::ProviderSessionLoadRejection::SessionNotFound { .. }) {
+                            kind: if matches!(&reason, crate::provider_acp_session_loading::ProviderSessionLoadRejection::SessionNotFound { .. }) {
                                 ScheduleFailureKind::ResourceNotFound
                             } else {
                                 ScheduleFailureKind::OutcomeUnknown

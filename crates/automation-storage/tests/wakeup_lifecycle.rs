@@ -1,6 +1,8 @@
 use agent_automation::{DurableMessage, ExpiryRule, OperationId, TimingRule, WakeState};
 use automation_storage::{AutomationStore, WakeAction, WakeCreate, WakeEvaluation, WakeMutation};
 use serde::{Deserialize, Serialize};
+#[path = "support/wake_push_draft.rs"]
+mod wake_push_test_support;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Message {
     target: String,
@@ -45,7 +47,14 @@ async fn pause_discards_unsent_input_and_resume_keeps_original_timing()
         })
         .await?;
     let id = wake.definition.wakeup_id;
-    let first = match store.evaluate_wakeup::<Message>(&id, 60000).await? {
+    let first = match store
+        .evaluate_wakeup::<Message>(
+            &id,
+            60000,
+            wake_push_test_support::build_test_wake_push_draft,
+        )
+        .await?
+    {
         WakeEvaluation::Fired { fire, .. } => fire,
         _ => return Err("first firing absent".into()),
     };

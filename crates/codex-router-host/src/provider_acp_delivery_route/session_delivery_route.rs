@@ -9,8 +9,7 @@ use collaboration_protocol::{
 };
 use collaboration_service::{
     AttemptEvidenceSink, AttemptReconciliation, AttemptReconciliationContext,
-    DeliveryContractError, DeliveryFuture, DeliveryRequest, RouteClaim, RoutePresence,
-    SessionDeliveryRoute,
+    DeliveryContractError, DeliveryFuture, RouteClaim, RoutePresence, SessionDeliveryRoute,
 };
 use std::sync::Arc;
 
@@ -44,6 +43,9 @@ impl SessionDeliveryRoute for ProviderAcpDeliveryRoute {
             let presence = match self.claim.claim(&target).await {
                 RouteClaim::NotMine => RoutePresence::NotMine,
                 RouteClaim::Holds => RoutePresence::Running,
+                RouteClaim::Rejected { rejection } => RoutePresence::LiveElsewhere {
+                    detail: rejection.detail,
+                },
                 RouteClaim::LiveElsewhere { detail, .. } => RoutePresence::LiveElsewhere { detail },
                 RouteClaim::Unavailable { reason, .. } => RoutePresence::Unreachable {
                     reason: reason.reason,
@@ -85,10 +87,10 @@ impl SessionDeliveryRoute for ProviderAcpDeliveryRoute {
 
     fn deliver<'a>(
         &'a self,
-        request: DeliveryRequest,
+        request: collaboration_service::layer_zero::DeliveryRequest,
         sink: &'a dyn AttemptEvidenceSink,
     ) -> DeliveryFuture<'a, DeliveryReceipt> {
-        Box::pin(async move { self.deliver_provider(request, sink).await })
+        Box::pin(async move { self.deliver_provider(request.into(), sink).await })
     }
 
     fn reconcile_attempt(

@@ -105,7 +105,11 @@ impl WakeTimingWorker {
             self.store
                 .lock()
                 .await
-                .evaluate_wakeup::<SavedMessage>(&id, now_ms)
+                .evaluate_wakeup::<SavedMessage>(
+                    &id,
+                    now_ms,
+                    crate::wakeup_delivery_sender::build_wake_push_draft,
+                )
                 .await?;
         }
         Ok(())

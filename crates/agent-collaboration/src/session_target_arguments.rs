@@ -35,13 +35,13 @@ impl SessionTargetArguments {
                 endpoint_id: endpoint
                     .clone()
                     .try_into()
-                    .map_err(|_| "Invalid --endpoint".to_owned())?,
+                    .map_err(|_| "--endpoint must be a lowercase endpoint id, for example codex-local".to_owned())?,
                 session_id: session
                     .clone()
                     .try_into()
-                    .map_err(|_| "Invalid --session".to_owned())?,
+                    .map_err(|_| "--session must be a non-empty session id, for example target-session".to_owned())?,
             }),
-            _ => Err("Provide either --to SessionRef JSON or both --endpoint and --session".into()),
+            _ => Err("Provide either --to SessionRef JSON or both --endpoint and --session; for example --to '{\"endpoint\":{\"serviceId\":\"00000000-0000-4000-8000-000000000001\",\"endpointId\":\"codex-local\"},\"sessionId\":\"target-session\"}'".into()),
         }
     }
 }
@@ -72,5 +72,5 @@ impl ParsedSessionTarget {
 }
 
 fn guidance() -> String {
-    "--to must be compact SessionRef JSON with endpoint.serviceId, endpoint.endpointId, and sessionId. nativeThreadId is a lifecycle address, not a SessionRef. Copy .target from sessions list --json.".into()
+    "--to must be compact SessionRef JSON with endpoint.serviceId, endpoint.endpointId, and sessionId; for example --to '{\"endpoint\":{\"serviceId\":\"00000000-0000-4000-8000-000000000001\",\"endpointId\":\"codex-local\"},\"sessionId\":\"target-session\"}'. nativeThreadId is a lifecycle address, not a SessionRef. Copy .target from sessions list --json.".into()
 }

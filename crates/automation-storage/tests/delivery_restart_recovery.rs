@@ -7,6 +7,8 @@ use automation_storage::{
     WakeEvaluation,
 };
 use serde::{Deserialize, Serialize};
+#[path = "support/wake_push_draft.rs"]
+mod wake_push_test_support;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Message {
     target: String,
@@ -63,7 +65,11 @@ async fn explicit_host_recovery_preserves_identity_without_replaying_dispatch()
         })
         .await?;
     let id = match store
-        .evaluate_wakeup::<Message>(&wake.definition.wakeup_id, 1000)
+        .evaluate_wakeup::<Message>(
+            &wake.definition.wakeup_id,
+            1000,
+            wake_push_test_support::build_test_wake_push_draft,
+        )
         .await?
     {
         WakeEvaluation::Fired { delivery_id, .. } => delivery_id,
@@ -138,7 +144,11 @@ async fn unselected_claim_recovers_as_known_not_submitted_and_retries()
         })
         .await?;
     let id = match store
-        .evaluate_wakeup::<Message>(&wake.definition.wakeup_id, 1000)
+        .evaluate_wakeup::<Message>(
+            &wake.definition.wakeup_id,
+            1000,
+            wake_push_test_support::build_test_wake_push_draft,
+        )
         .await?
     {
         WakeEvaluation::Fired { delivery_id, .. } => delivery_id,
@@ -205,7 +215,11 @@ async fn paused_unselected_claim_is_discarded_after_recovery()
         })
         .await?;
     let id = match store
-        .evaluate_wakeup::<Message>(&wake.definition.wakeup_id, 1000)
+        .evaluate_wakeup::<Message>(
+            &wake.definition.wakeup_id,
+            1000,
+            wake_push_test_support::build_test_wake_push_draft,
+        )
         .await?
     {
         WakeEvaluation::Fired { delivery_id, .. } => delivery_id,

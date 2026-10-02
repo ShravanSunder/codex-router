@@ -10,6 +10,7 @@ fn runtime_inputs(directory: &std::path::Path) -> CollaborationRuntimeInputs {
         mcp_bind: SocketAddr::from(([127, 0, 0, 1], 0)),
         native_schema: None,
         peer_registry_directory: Some(directory.join("claude-sessions")),
+        remote_control_server_name: None,
         owner_human_id: None,
     }
 }

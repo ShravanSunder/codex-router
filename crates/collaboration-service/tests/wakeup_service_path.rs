@@ -4,6 +4,8 @@ use collaboration_protocol::{OperationId, WakeSendRequest, WakeShowRequest};
 use collaboration_service::{ServiceIdentity, serve_control_connection};
 use serde_json::json;
 use std::sync::Arc;
+#[path = "support/wake_push_draft.rs"]
+mod wake_push_test_support;
 
 #[tokio::test]
 async fn real_control_client_preserves_wake_identity_timing_and_message()
@@ -101,6 +103,7 @@ async fn real_control_client_preserves_wake_identity_timing_and_message()
         .evaluate_wakeup::<collaboration_protocol::SavedMessage>(
             &immediate.definition.wakeup_id,
             chrono::Utc::now().timestamp_millis(),
+            wake_push_test_support::build_test_wake_push_draft,
         )
         .await?
     {

@@ -1,8 +1,9 @@
 //! Real SQLite and WebSocket protocol fixture; this does not invoke Codex or a model.
 use agent_automation::{ExpiryRule, TimingRule};
-use automation_storage::{AutomationStore, WakeCreate};
+use automation_storage::{AutomationStore, WakeCreate, WakeEvaluation};
 use collaboration_protocol::{
-    CodexGeneration, EndpointDescription, OperationId, SavedMessage, SessionRef,
+    CodexGeneration, EndpointDescription, OperationId, PushId, RouterOriginRef, SavedMessage,
+    SessionRef,
 };
 use collaboration_service::{
     CodexAppServerDeliveryRoute, NativeControlBackend, NativeGenerationGate, ServiceIdentity,
@@ -13,6 +14,8 @@ use serde_json::{Value, json};
 use sqlx::Connection;
 use std::{collections::BTreeMap, os::unix::fs::DirBuilderExt, sync::Arc, time::Duration};
 use tokio_tungstenite::tungstenite::Message;
+#[path = "support/wake_push_draft.rs"]
+mod wake_push_test_support;
 
 #[tokio::test]
 async fn timed_worker_uses_native_queue_and_persists_actual_receipt()
@@ -25,7 +28,7 @@ async fn timed_worker_retains_lost_native_response_without_replay()
     exercise_delivery(NativeOutcome::ResponseLost).await
 }
 #[tokio::test]
-async fn lost_queue_receipt_reconciles_exact_saved_input()
+async fn lost_queue_receipt_reconciles_same_push_after_machine_label_change()
 -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     exercise_delivery(NativeOutcome::ReconcileFound).await
 }
@@ -35,9 +38,9 @@ async fn queue_absence_never_proves_non_submission()
     exercise_delivery(NativeOutcome::ReconcileAbsent).await
 }
 #[tokio::test]
-async fn matching_correlation_with_different_content_stays_uncertain()
--> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    exercise_delivery(NativeOutcome::ReconcileMismatch).await
+async fn mismatched_push_id_stays_uncertain() -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+{
+    exercise_delivery(NativeOutcome::ReconcileWrongPushId).await
 }
 #[derive(Clone, Copy)]
 enum NativeOutcome {
@@ -45,7 +48,7 @@ enum NativeOutcome {
     ResponseLost,
     ReconcileFound,
     ReconcileAbsent,
-    ReconcileMismatch,
+    ReconcileWrongPushId,
 }
 async fn exercise_delivery(
     outcome: NativeOutcome,
@@ -99,6 +102,60 @@ async fn exercise_delivery(
         gate,
         codex_home: root.clone(),
     };
+    let message: SavedMessage = serde_json::from_value(
+        json!({"target":target,"content":{"kind":"agent","sender":target,"text":"A durable finding"},"delivery":"queue","generationGuard":null}),
+    )?;
+    let wake = store
+        .lock()
+        .await
+        .create_wakeup(&WakeCreate {
+            operation_id: OperationId::generate(),
+            message,
+            timing: TimingRule::After { seconds: 1 },
+            expiry: ExpiryRule::None,
+            now_ms: 0,
+        })
+        .await?;
+    let (fire, delivery_id) = match store
+        .lock()
+        .await
+        .evaluate_wakeup::<SavedMessage>(
+            &wake.definition.wakeup_id,
+            5_000,
+            wake_push_test_support::build_test_wake_push_draft,
+        )
+        .await?
+    {
+        WakeEvaluation::Fired {
+            fire, delivery_id, ..
+        } => (fire, delivery_id),
+        _ => return Err("wake did not commit before restart".into()),
+    };
+    let origin = RouterOriginRef::Wake {
+        wakeup_id: fire.wakeup_id.clone(),
+        occurrence_id: fire.occurrence_id.clone(),
+    };
+    let committed_push = store
+        .lock()
+        .await
+        .get_push_record_by_origin_reference(&origin)
+        .await?
+        .ok_or("wake push missing before restart")?;
+    let expected_push_id: PushId = committed_push.push_id.clone();
+    let owned_store = Arc::try_unwrap(store)
+        .map_err(|_| std::io::Error::other("wake store remained shared before restart"))?;
+    owned_store.into_inner().close().await?;
+    let store = Arc::new(tokio::sync::Mutex::new(
+        AutomationStore::open(&database).await?,
+    ));
+    let recovered_delivery_ids = store
+        .lock()
+        .await
+        .eligible_delivery_ids(chrono::Utc::now().timestamp_millis(), 16)
+        .await?;
+    if !recovered_delivery_ids.contains(&delivery_id) {
+        return Err("restart did not expose the committed wake for dispatch".into());
+    }
     let identity = ServiceIdentity::new(
         service_id,
         service_id,
@@ -116,20 +173,6 @@ async fn exercise_delivery(
     let delivery: Arc<dyn SessionMessageDelivery> =
         Arc::new(SessionDeliveryRouter::new(vec![route]));
     let identity = identity.with_session_delivery(delivery);
-    let message: SavedMessage = serde_json::from_value(
-        json!({"target":target,"content":{"kind":"agent","sender":target,"text":"A durable finding"},"delivery":"queue","generationGuard":null}),
-    )?;
-    let wake = store
-        .lock()
-        .await
-        .create_wakeup(&WakeCreate {
-            operation_id: OperationId::generate(),
-            message,
-            timing: TimingRule::After { seconds: 1 },
-            expiry: ExpiryRule::None,
-            now_ms: 0,
-        })
-        .await?;
     let shutdown = tokio_util::sync::CancellationToken::new();
     let worker = tokio::spawn(
         identity
@@ -176,6 +219,34 @@ async fn exercise_delivery(
             &sqlx::sqlite::SqliteConnectOptions::new().filename(&backend_database),
         )
         .await?;
+        let stored_push: Option<(String, Option<String>)> = sqlx::query_as(
+            "SELECT push_id,body FROM router_pushes WHERE target_service_id=? AND target_endpoint_id=? AND target_session_id=?",
+        )
+        .bind(service_id)
+        .bind("codex-local")
+        .bind("fixture-new-target")
+        .fetch_optional(&mut evidence_connection)
+        .await?;
+        let Some((push_id, Some(body))) = stored_push else {
+            return Err("old wake firing reached native delivery without a stored push".into());
+        };
+        let delivered_line = queued
+            .pointer("/params/input/0/text")
+            .and_then(Value::as_str)
+            .ok_or("wake delivery line missing")?;
+        let expected_link = format!("router://{service_id}/push/{push_id}");
+        if body != "A durable finding"
+            || push_id != expected_push_id.as_str()
+            || queued
+                .pointer("/params/clientUserMessageId")
+                .and_then(Value::as_str)
+                != Some(push_id.as_str())
+            || !delivered_line.starts_with("⏰ Router wake @")
+            || delivered_line.contains('\n')
+            || !delivered_line.contains(&expected_link)
+        {
+            return Err("wake did not deliver the stored Router push id and line".into());
+        }
         let evidence:String=sqlx::query_scalar("SELECT latest_attempt_json FROM mailbox_deliveries WHERE delivery_status='dispatching'").fetch_one(&mut evidence_connection).await?;
         let evidence: Value = serde_json::from_str(&evidence)?;
         if evidence
@@ -202,7 +273,7 @@ async fn exercise_delivery(
             outcome,
             NativeOutcome::ReconcileFound
                 | NativeOutcome::ReconcileAbsent
-                | NativeOutcome::ReconcileMismatch
+                | NativeOutcome::ReconcileWrongPushId
         ) {
             let (stream, _) = listener.accept().await?;
             let mut socket = tokio_tungstenite::accept_async(stream).await?;
@@ -234,10 +305,37 @@ async fn exercise_delivery(
                 );
             }
             let mut item = json!({"id":"recovered-queue-id","input":queued.pointer("/params/input"),"clientUserMessageId":queued.pointer("/params/clientUserMessageId")});
-            if matches!(outcome, NativeOutcome::ReconcileMismatch) {
+            if matches!(outcome, NativeOutcome::ReconcileFound) {
+                let queued_line = item
+                    .pointer("/input/0/text")
+                    .and_then(Value::as_str)
+                    .ok_or("fixture input text missing")?;
+                let label_start = queued_line
+                    .find(" @")
+                    .ok_or("fixture wake line has no machine label")?
+                    + 2;
+                let queued_label_suffix = queued_line
+                    .get(label_start..)
+                    .ok_or("fixture wake label starts outside a UTF-8 boundary")?;
+                let label_end = queued_label_suffix
+                    .find(" · ")
+                    .ok_or("fixture wake line has no label separator")?
+                    + label_start;
+                let line_prefix = queued_line
+                    .get(..label_start)
+                    .ok_or("fixture wake label prefix ends outside a UTF-8 boundary")?;
+                let line_suffix = queued_line
+                    .get(label_end..)
+                    .ok_or("fixture wake label suffix starts outside a UTF-8 boundary")?;
+                let changed_label = format!("{line_prefix}renamed-machine{line_suffix}");
                 *item
                     .pointer_mut("/input/0/text")
-                    .ok_or("fixture input text missing")? = json!("different message");
+                    .ok_or("fixture input text missing")? = json!(changed_label);
+            }
+            if matches!(outcome, NativeOutcome::ReconcileWrongPushId) {
+                *item
+                    .get_mut("clientUserMessageId")
+                    .ok_or("fixture push id missing")? = json!(OperationId::generate().as_str());
             }
             let data = if matches!(outcome, NativeOutcome::ReconcileAbsent) {
                 json!([])
@@ -294,7 +392,7 @@ async fn exercise_delivery(
         NativeOutcome::ResponseLost
         | NativeOutcome::ReconcileFound
         | NativeOutcome::ReconcileAbsent
-        | NativeOutcome::ReconcileMismatch => {
+        | NativeOutcome::ReconcileWrongPushId => {
             let receipt: Value = serde_json::from_str(&receipt.ok_or("missing unknown receipt")?)?;
             if status != "uncertain"
                 || receipt.pointer("/outcome/kind").and_then(Value::as_str) != Some("unknown")
@@ -317,7 +415,7 @@ async fn exercise_delivery(
         outcome,
         NativeOutcome::ReconcileFound
             | NativeOutcome::ReconcileAbsent
-            | NativeOutcome::ReconcileMismatch
+            | NativeOutcome::ReconcileWrongPushId
     ) {
         let (socket, server) = tokio::net::UnixStream::pair()?;
         let service = tokio::spawn(collaboration_service::serve_control_connection(
@@ -326,14 +424,10 @@ async fn exercise_delivery(
         let mut client =
             collaboration_client::ControlClient::initialize(socket, "reconcile-fixture", "1")
                 .await?;
-        let delivery_id = request
-            .pointer("/params/clientUserMessageId")
-            .and_then(Value::as_str)
-            .ok_or("correlation missing")?
-            .to_owned()
-            .try_into()?;
         let result = client
-            .reconcile_delivery(collaboration_protocol::DeliveryShowRequest { delivery_id })
+            .reconcile_delivery(collaboration_protocol::DeliveryShowRequest {
+                delivery_id: delivery_id.clone(),
+            })
             .await?;
         if matches!(outcome, NativeOutcome::ReconcileFound) {
             let collaboration_protocol::DeliveryEvidence::Accepted { receipt, .. } =

@@ -6,7 +6,7 @@ use crate::storage_support::{
     BoardTransaction, current_activity_sequence, identity_key, invalid_record, storage_error,
 };
 use crate::subscription_window_records::load_window;
-use crate::thread_batch_selection::pending_message_count;
+use crate::subscription_window_records::pending_message_count;
 use crate::thread_delivery_position_writer::write_delivered_position_if_valid;
 use crate::thread_subscription_lifecycle_records::get_covering_subscription;
 use crate::thread_subscription_row_decoding::encode_utc_timestamp;
@@ -18,6 +18,37 @@ fn stored_subscription_generation(generation: SubscriptionGeneration) -> Result<
     i64::try_from(generation.get()).map_err(|_| invalid_record())
 }
 impl BoardStore {
+    /// Release an unhanded selection without changing its window or delivery position.
+    /// A newer selection, replacement window, or already-settled fence is left alone.
+    pub async fn release_subscription_batch(
+        &mut self,
+        reader: &Identity,
+        settlement: &SubscriptionBatchSettlement,
+    ) -> Result<(), BoardError> {
+        let mut transaction = self
+            .connection
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(storage_error)?;
+        let reader_key = identity_key(reader);
+        for root in &settlement.roots {
+            let through =
+                i64::try_from(root.delivered_through.get()).map_err(|_| invalid_record())?;
+            sqlx::query!(
+                "UPDATE subscription_windows SET in_flight_through=NULL,residual_opened_at=NULL \
+                 WHERE reader_key=? AND root_id=? AND window_id=? AND in_flight_through=?",
+                reader_key,
+                root.root_message_id.as_str(),
+                root.window_id.as_str(),
+                through,
+            )
+            .execute(&mut *transaction)
+            .await
+            .map_err(storage_error)?;
+        }
+        transaction.commit().await.map_err(storage_error)
+    }
+
     /// Settle accepted, outcome-unknown, or deliberately dropped activity atomically.
     pub async fn settle_subscription_batch(
         &mut self,

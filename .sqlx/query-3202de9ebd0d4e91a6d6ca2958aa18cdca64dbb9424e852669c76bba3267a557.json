@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE router_pushes SET delivery_state='rejected',last_outcome_json=?,settled_at=? WHERE kind=? AND target_service_id=? AND target_endpoint_id=? AND target_session_id=? AND delivery_state='held' AND push_id=? AND (? IS NULL OR created_at<?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 9
+    },
+    "nullable": []
+  },
+  "hash": "3202de9ebd0d4e91a6d6ca2958aa18cdca64dbb9424e852669c76bba3267a557"
+}

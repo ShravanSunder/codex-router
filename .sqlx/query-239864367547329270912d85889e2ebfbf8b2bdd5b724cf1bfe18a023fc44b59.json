@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM operation_receipts WHERE rowid IN (SELECT rowid FROM operation_receipts WHERE committed_at_ms < ? ORDER BY committed_at_ms,operation_id LIMIT ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "239864367547329270912d85889e2ebfbf8b2bdd5b724cf1bfe18a023fc44b59"
+}

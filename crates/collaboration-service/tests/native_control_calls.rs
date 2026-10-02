@@ -1,12 +1,18 @@
-use collaboration_client::{ClientError, ControlClient};
+use collaboration_client::{ClientError, ControlClient, MessageSendRequest, PublicMessageContent};
 use collaboration_protocol::{CodexGeneration, EndpointDescription, SessionRef};
 use collaboration_service::{
-    CodexAppServerDeliveryRoute, NativeControlBackend, NativeGenerationGate, ServiceIdentity,
-    SessionDeliveryRoute, SessionDeliveryRouter, SessionMessageDelivery, serve_control_connection,
+    BoardAvailability, CodexAppServerDeliveryRoute, MachineIdentity, NativeControlBackend,
+    NativeGenerationGate, ServiceIdentity, SessionDeliveryRoute, SessionDeliveryRouter,
+    SessionMessageDelivery, SubscriptionDeliveryService, SubscriptionDeliveryServiceProps,
+    SystemSubscriptionClock, TargetPresenceProbe, serve_control_connection,
 };
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
-use std::{collections::BTreeMap, os::unix::fs::DirBuilderExt, sync::Arc};
+use std::{
+    collections::BTreeMap,
+    os::unix::fs::DirBuilderExt,
+    sync::{Arc, Mutex},
+};
 use tokio_tungstenite::tungstenite::Message;
 
 /// A fixed instant well in the past, so a computed idle time can only be positive.
@@ -15,7 +21,7 @@ const BUSY_THREAD_UPDATED_AT_SECONDS: i64 = 1_700_000_000;
 #[tokio::test]
 async fn sdk_inspection_and_exact_interrupt_use_native_backend_with_generation_guards() {
     // Arrange: isolated Control and backend sockets plus explicitly fixture-only schemas.
-    let root = std::path::PathBuf::from(format!("/tmp/native-control-{}", std::process::id()));
+    let root = std::env::temp_dir().join(format!("native-control-{}", std::process::id()));
     std::fs::DirBuilder::new()
         .mode(0o700)
         .create(&root)
@@ -110,13 +116,18 @@ async fn sdk_inspection_and_exact_interrupt_use_native_backend_with_generation_g
         endpoint: target.endpoint.clone(),
         gate,
     };
+    let automation_store = Arc::new(tokio::sync::Mutex::new(
+        automation_storage::AutomationStore::open(&root.join("automation.sqlite"))
+            .await
+            .unwrap_or_else(|error| panic!("automation store: {error}")),
+    ));
     let identity = ServiceIdentity::new(service_id, epoch, &format!("sha256:{}", "a".repeat(64)))
         .unwrap_or_else(|error| panic!("identity: {error}"))
+        .with_automation_store(Arc::clone(&automation_store))
         .with_endpoints(vec![description.clone()])
         .unwrap_or_else(|error| panic!("endpoints: {error}"))
         .with_native_backend(native_backend.clone())
-        .unwrap_or_else(|error| panic!("binding: {error}"))
-        .with_approval_broker(broker);
+        .unwrap_or_else(|error| panic!("binding: {error}"));
     let route: Arc<dyn SessionDeliveryRoute> = Arc::new(CodexAppServerDeliveryRoute::new(
         service_id
             .to_owned()
@@ -126,15 +137,45 @@ async fn sdk_inspection_and_exact_interrupt_use_native_backend_with_generation_g
         native_backend,
         Arc::new(collaboration_service::UnmaterializedThreadHolder::new()),
     ));
-    let delivery: Arc<dyn SessionMessageDelivery> =
-        Arc::new(SessionDeliveryRouter::new(vec![route]));
-    let identity = identity.with_session_delivery(delivery);
+    let delivery_router = Arc::new(SessionDeliveryRouter::new(vec![route]));
+    let delivery: Arc<dyn SessionMessageDelivery> = delivery_router.clone();
+    let presence: Arc<dyn TargetPresenceProbe> = delivery_router;
+    let machine_identity = MachineIdentity::new(
+        service_id
+            .to_owned()
+            .try_into()
+            .unwrap_or_else(|error| panic!("machine service id: {error}")),
+        None,
+    )
+    .unwrap_or_else(|error| panic!("machine identity: {error}"));
+    let subscription_delivery =
+        SubscriptionDeliveryService::new(SubscriptionDeliveryServiceProps {
+            board_availability: BoardAvailability::Unavailable,
+            push_store: Arc::clone(&automation_store),
+            delivery: Arc::clone(&delivery),
+            presence: Arc::clone(&presence),
+            machine_identity,
+            clock: Arc::new(SystemSubscriptionClock),
+        });
+    subscription_delivery
+        .start()
+        .await
+        .unwrap_or_else(|error| panic!("subscription delivery start: {error}"));
+    broker
+        .install_session_delivery(Arc::clone(&delivery))
+        .unwrap_or_else(|error| panic!("broker delivery: {error}"));
+    let identity = identity
+        .with_session_delivery(delivery)
+        .with_subscription_delivery_service(subscription_delivery.clone(), presence)
+        .with_approval_broker(broker);
     let (client, server) =
         tokio::net::UnixStream::pair().unwrap_or_else(|error| panic!("pair: {error}"));
     let service = tokio::spawn(serve_control_connection(server, identity.clone()));
     // The native Thread schema requires both timestamps as unix seconds.
     let thread_updated_at = chrono::Utc::now().timestamp() - 45;
     let thread_created_at = thread_updated_at - 600;
+    let observed_push_ids = Arc::new(Mutex::new(Vec::<String>::new()));
+    let backend_push_ids = Arc::clone(&observed_push_ids);
     // This is a valid SessionDisplayName if a regression caches title as the name.
     // The identity header must still use the endpoint/session fallback because name is absent.
     let valid_short_title = "Fix the retry path";
@@ -185,6 +226,67 @@ async fn sdk_inspection_and_exact_interrupt_use_native_backend_with_generation_g
                 json!({}),
             ),
         ] {
+            if matches!(method, "turn/start" | "thread/queue/add") {
+                let (presence_stream, _) = listener
+                    .accept()
+                    .await
+                    .unwrap_or_else(|error| panic!("presence accept: {error}"));
+                let mut presence_socket = tokio_tungstenite::accept_async(presence_stream)
+                    .await
+                    .unwrap_or_else(|error| panic!("presence upgrade: {error}"));
+                let initialize = presence_socket
+                    .next()
+                    .await
+                    .unwrap_or_else(|| panic!("presence initialize frame"))
+                    .unwrap_or_else(|error| panic!("presence initialize receive: {error}"));
+                let initialize_request: Value = serde_json::from_str(
+                    initialize
+                        .to_text()
+                        .unwrap_or_else(|error| panic!("presence initialize text: {error}")),
+                )
+                .unwrap_or_else(|error| panic!("presence initialize JSON: {error}"));
+                assert_eq!(initialize_request["method"], "initialize");
+                presence_socket
+                    .send(Message::Text(
+                        json!({"id":initialize_request["id"],"result":{}})
+                            .to_string()
+                            .into(),
+                    ))
+                    .await
+                    .unwrap_or_else(|error| panic!("presence initialize response: {error}"));
+                let initialized = presence_socket
+                    .next()
+                    .await
+                    .unwrap_or_else(|| panic!("presence initialized frame"))
+                    .unwrap_or_else(|error| panic!("presence initialized receive: {error}"));
+                let initialized_request: Value = serde_json::from_str(
+                    initialized
+                        .to_text()
+                        .unwrap_or_else(|error| panic!("presence initialized text: {error}")),
+                )
+                .unwrap_or_else(|error| panic!("presence initialized JSON: {error}"));
+                assert_eq!(initialized_request["method"], "initialized");
+                let read = presence_socket
+                    .next()
+                    .await
+                    .unwrap_or_else(|| panic!("presence thread/read frame"))
+                    .unwrap_or_else(|error| panic!("presence thread/read receive: {error}"));
+                let read_request: Value = serde_json::from_str(
+                    read.to_text()
+                        .unwrap_or_else(|error| panic!("presence thread/read text: {error}")),
+                )
+                .unwrap_or_else(|error| panic!("presence thread/read JSON: {error}"));
+                assert_eq!(read_request["method"], "thread/read");
+                presence_socket
+                    .send(Message::Text(
+                        json!({"id":read_request["id"],"result":{"thread":{"id":"proof-thread","status":{"type":"idle"}}}})
+                            .to_string()
+                            .into(),
+                    ))
+                    .await
+                    .unwrap_or_else(|error| panic!("presence thread/read response: {error}"));
+                drop(presence_socket);
+            }
             let (stream, _) = listener
                 .accept()
                 .await
@@ -241,16 +343,26 @@ async fn sdk_inspection_and_exact_interrupt_use_native_backend_with_generation_g
                     }
                     if matches!(method, "turn/start" | "thread/queue/add") {
                         assert_eq!(request["params"]["threadId"], expected["threadId"]);
-                        assert_eq!(
-                            request["params"]["clientUserMessageId"],
-                            "caller-correlation"
-                        );
+                        let push_id = request["params"]["clientUserMessageId"]
+                            .as_str()
+                            .unwrap_or_else(|| panic!("native request has push id"));
+                        let _: collaboration_protocol::PushId = push_id
+                            .to_owned()
+                            .try_into()
+                            .unwrap_or_else(|error| panic!("native request push id: {error}"));
+                        backend_push_ids
+                            .lock()
+                            .unwrap_or_else(|error| panic!("observed push ids: {error}"))
+                            .push(push_id.to_owned());
                         let text = request["params"]["input"][0]["text"].as_str().unwrap();
-                        assert!(text.starts_with(
-                            "🤖 codex-local/proof-th ← 🤖 codex-local/proof-th\nAgent communication\nSelf-declared sender: "
-                        ));
-                        assert!(text.contains("\nIntended recipient: "));
-                        assert!(text.ends_with("\n\nA checked finding"));
+                        assert!(
+                            text.starts_with("✉️ 🤖 codex-local/proof-th @"),
+                            "stored direct-message header uses the endpoint/session fallback: {text:?}"
+                        );
+                        assert!(text.contains(" → you · \"A checked finding\" · "));
+                        assert!(!text.contains(valid_short_title));
+                        assert!(!text.contains("Self-declared sender:"));
+                        assert!(text.ends_with(&format!("router://{service_id}/push/{push_id}")));
                     } else {
                         assert_eq!(request["params"], expected);
                     }
@@ -320,48 +432,60 @@ async fn sdk_inspection_and_exact_interrupt_use_native_backend_with_generation_g
         }
     ));
     let message = client
-        .send_agent_message(collaboration_protocol::SessionMessageSendParams {
+        .send_message(MessageSendRequest {
             target: target.clone(),
             generation_guard: Some(generation.clone()),
-            message: collaboration_protocol::MessageContent::Agent {
+            message: PublicMessageContent::Agent {
                 sender: target.clone(),
                 text: "A checked finding".to_owned().try_into().unwrap(),
             },
-            mode: collaboration_protocol::MessageDelivery::Auto,
-            correlation: Some("caller-correlation".to_owned().try_into().unwrap()),
-        })
-        .await
-        .unwrap();
-    assert!(matches!(
-        message.client,
-        Some(
-            collaboration_protocol::DeliveryClientReceipt::CodexAppServer(
-                collaboration_protocol::NativeSendReceipt {
-                    acceptance: collaboration_protocol::NativeSendAcceptance::NativeInputAccepted {
-                        disposition:
-                            collaboration_protocol::NativeInputDisposition::StartedOrSteered,
-                        ..
-                    },
-                    ..
-                }
-            )
-        )
-    ));
-    let queued = client
-        .send_agent_message(collaboration_protocol::SessionMessageSendParams {
-            target: target.clone(),
-            generation_guard: Some(generation.clone()),
-            message: collaboration_protocol::MessageContent::Agent {
-                sender: target.clone(),
-                text: "A checked finding".to_owned().try_into().unwrap(),
-            },
-            mode: collaboration_protocol::MessageDelivery::Queue,
-            correlation: Some("caller-correlation".to_owned().try_into().unwrap()),
+            delivery: collaboration_protocol::MessageDelivery::Auto,
         })
         .await
         .unwrap();
     assert!(
-        matches!(queued.client, Some(collaboration_protocol::DeliveryClientReceipt::CodexAppServer(collaboration_protocol::NativeSendReceipt { acceptance: collaboration_protocol::NativeSendAcceptance::QueueAccepted { submission_id }, .. })) if String::from(submission_id.clone()) == "queued-item")
+        matches!(
+            message.receipt.client,
+            Some(
+                collaboration_protocol::DeliveryClientReceipt::CodexAppServer(
+                    collaboration_protocol::NativeSendReceipt {
+                        acceptance:
+                            collaboration_protocol::NativeSendAcceptance::NativeInputAccepted {
+                                disposition:
+                                    collaboration_protocol::NativeInputDisposition::StartedOrSteered,
+                                ..
+                            },
+                        ..
+                    }
+                )
+            )
+        ),
+        "receipt: {:?}",
+        message.receipt
+    );
+    let queued = client
+        .send_message(MessageSendRequest {
+            target: target.clone(),
+            generation_guard: Some(generation.clone()),
+            message: PublicMessageContent::Agent {
+                sender: target.clone(),
+                text: "A checked finding".to_owned().try_into().unwrap(),
+            },
+            delivery: collaboration_protocol::MessageDelivery::Queue,
+        })
+        .await
+        .unwrap();
+    assert!(
+        matches!(queued.receipt.client, Some(collaboration_protocol::DeliveryClientReceipt::CodexAppServer(collaboration_protocol::NativeSendReceipt { acceptance: collaboration_protocol::NativeSendAcceptance::QueueAccepted { submission_id }, .. })) if String::from(submission_id.clone()) == "queued-item")
+    );
+    assert_eq!(
+        *observed_push_ids
+            .lock()
+            .unwrap_or_else(|error| panic!("observed push ids: {error}")),
+        vec![
+            message.push_id.as_str().to_owned(),
+            queued.push_id.as_str().to_owned()
+        ]
     );
     let inventory = client
         .list_sessions(collaboration_protocol::NativeSessionListParams {
@@ -457,6 +581,8 @@ async fn sdk_inspection_and_exact_interrupt_use_native_backend_with_generation_g
     backend
         .await
         .unwrap_or_else(|error| panic!("backend: {error}"));
+    subscription_delivery.shutdown().await;
+    drop(subscription_delivery);
     if let Some(collaboration_protocol::ChannelDescription::NativeCodex { schema_digest, .. }) =
         description.channels.first_mut()
     {
@@ -481,6 +607,14 @@ async fn sdk_inspection_and_exact_interrupt_use_native_backend_with_generation_g
         .await
         .unwrap_or_else(|error| panic!("second service: {error}"))
         .unwrap_or_else(|error| panic!("second serve: {error}"));
+    Arc::try_unwrap(automation_store)
+        .unwrap_or_else(|_| panic!("service retained automation store"))
+        .into_inner()
+        .close()
+        .await
+        .unwrap_or_else(|error| panic!("automation store close: {error}"));
+    std::fs::remove_file(root.join("automation.sqlite"))
+        .unwrap_or_else(|error| panic!("automation database cleanup: {error}"));
     std::fs::remove_file(backend_path).unwrap_or_else(|error| panic!("socket cleanup: {error}"));
     std::fs::remove_file(routes_path).unwrap_or_else(|error| panic!("routes cleanup: {error}"));
     std::fs::remove_dir(root).unwrap_or_else(|error| panic!("directory cleanup: {error}"));
@@ -510,10 +644,8 @@ async fn sdk_inspection_and_exact_interrupt_use_native_backend_with_generation_g
 
 #[tokio::test]
 async fn inspect_control_response_preserves_native_fake_rejection_message() {
-    let root = std::path::PathBuf::from(format!(
-        "/tmp/native-inspect-rejection-{}",
-        std::process::id()
-    ));
+    let root =
+        std::env::temp_dir().join(format!("native-inspect-rejection-{}", std::process::id()));
     std::fs::DirBuilder::new()
         .mode(0o700)
         .create(&root)

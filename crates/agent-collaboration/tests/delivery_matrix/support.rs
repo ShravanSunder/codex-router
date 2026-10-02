@@ -111,13 +111,11 @@ fn prepare_fixture(mode: ProviderFixtureMode) -> ProofResult<()> {
             json!({"action":"expect_request","requestName":"create-target","method":"session/new","params":{}}),
             json!({"action":"respond","requestName":"create-target","result":{"sessionId":"matrix-acp-target"}}),
         ];
-        // Board Listen emits a batch and then a separate listenEnd notice.
-        const LISTEN_END_PROMPT_INDEX: usize = 5;
-        const HELD_PROMPT_INDEX: usize = 7;
+        // Board subscriptions emit one neutral notice, with no lifecycle heartbeat.
+        const HELD_PROMPT_INDEX: usize = 6;
         for index in 0..super::ACP_TARGET_EXPECTED_PROMPTS {
             let request_name = format!("target-prompt-{index}");
-            let expected_lifecycle = (index == LISTEN_END_PROMPT_INDEX).then_some("listenEnd");
-            target_steps.push(json!({"action":"expect_request","requestName":request_name,"method":"session/prompt","params":{"sessionId":"matrix-acp-target"},"recordPath":receipt_path,"promptTextContains":expected_lifecycle}));
+            target_steps.push(json!({"action":"expect_request","requestName":request_name,"method":"session/prompt","params":{"sessionId":"matrix-acp-target"},"recordPath":receipt_path}));
             if index == HELD_PROMPT_INDEX {
                 target_steps
                     .push(json!({"action":"wait_for_socket_signal","socketPath":gate_path}));
@@ -250,11 +248,22 @@ impl ConfigHashGuard {
         );
         let marker: Value =
             serde_json::from_slice(&std::fs::read(root.join("debug-host-context.json"))?)?;
-        let owner_home = PathBuf::from(
-            marker["ownerHome"]
-                .as_str()
-                .ok_or("Matrix marker omitted owner home")?,
-        );
+        let owner_home = match marker.get("kind").and_then(Value::as_str) {
+            Some("isolatedDeliveryMatrix") => PathBuf::from(
+                marker
+                    .get("ownerHome")
+                    .and_then(Value::as_str)
+                    .ok_or("Isolated matrix marker omitted owner home")?,
+            ),
+            Some("debugHostPrepared") => PathBuf::from(
+                std::env::var_os("HOME")
+                    .ok_or("Normal HOME missing for the documented debug Host context")?,
+            ),
+            _ => return Err(
+                "Config hash capture requires a supported isolated matrix or debug Host context"
+                    .into(),
+            ),
+        };
         let files = [
             owner_home.join(".codex/config.toml"),
             owner_home.join(".claude/settings.json"),
@@ -361,13 +370,21 @@ impl PeerFixture {
         marker: &str,
         timeout: Duration,
     ) -> ProofResult<()> {
+        self.expect_text_with_timeout(marker, timeout).await?;
+        Ok(())
+    }
+    pub(super) async fn expect_text_with_timeout(
+        &mut self,
+        marker: &str,
+        timeout: Duration,
+    ) -> ProofResult<String> {
         let deadline = tokio::time::Instant::now() + timeout;
         loop {
             let received = tokio::time::timeout_at(deadline, self.received.recv())
                 .await?
                 .ok_or("peer fixture stopped before message")?;
             if super::user_text_contains_marker(&received, marker) {
-                return Ok(());
+                return Ok(received);
             }
         }
     }

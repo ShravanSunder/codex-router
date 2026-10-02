@@ -1,8 +1,5 @@
 //! Service-owned routing for client-exposed Codex approval callbacks.
-use crate::{
-    DeliveryPrecondition, DeliveryRequest, LoadPolicy, NativeControlBackend,
-    SessionMessageDelivery, session_delivery_contract::UnstoredAttemptEvidenceSink,
-};
+use crate::{NativeControlBackend, SessionMessageDelivery};
 use codex_acp_adapter::{
     ApprovalBroker, ApprovalBrokerError, ApprovalRoute, BrokeredApprovalOutcome,
     BrokeredApprovalRequest,
@@ -11,8 +8,7 @@ use collaboration_protocol::{
     ApprovalDecideParams, ApprovalDecideResult, ApprovalDecision, ApprovalDetailedListResult,
     ApprovalDetailedRecord, ApprovalListResult, ApprovalOfferedOption, ApprovalOptionEffect,
     ApprovalOptionScope, ApprovalOptionView, ApprovalOptionViewScope, ApprovalPresentation,
-    ApprovalRequestRecord, ApprovalState, DeliveryOutcome, EndpointRef, MessageContent,
-    MessageDelivery, MessageHeaderContext, MessageHeaderOrigin, OperationId, SessionRef,
+    ApprovalRequestRecord, ApprovalState, DeliveryOutcome, EndpointRef, OperationId, SessionRef,
     UuidIdentity,
 };
 use serde_json::Value;
@@ -165,6 +161,7 @@ pub struct ServiceInteractionBroker {
     backend: NativeControlBackend,
     session_delivery: OnceLock<Arc<dyn SessionMessageDelivery>>,
     display_names: OnceLock<crate::SessionDisplayNameCache>,
+    push_context: OnceLock<InteractionPushContext>,
     routes_path: PathBuf,
     routes: Mutex<BTreeMap<String, ApprovalRoute>>,
     pending: Arc<Mutex<BTreeMap<String, PendingApproval>>>,
@@ -178,6 +175,12 @@ pub struct ServiceInteractionBroker {
     typed_after_record: Mutex<Option<TypedAdmissionPause>>,
     #[cfg(test)]
     question_before_send: Mutex<Option<TypedAdmissionPause>>,
+}
+
+#[derive(Clone)]
+pub(crate) struct InteractionPushContext {
+    pub store: Arc<Mutex<automation_storage::AutomationStore>>,
+    pub machine_identity: crate::MachineIdentity,
 }
 
 struct TypedPendingApproval {
@@ -246,6 +249,16 @@ pub enum TypedInteractionDecisionOutcome {
 }
 
 impl ServiceInteractionBroker {
+    pub(crate) async fn prune_interaction_history(
+        &self,
+        now: chrono::DateTime<chrono::Utc>,
+        batch_size: usize,
+    ) -> Result<u64, InteractionHistoryError> {
+        self.interaction_history
+            .prune_expired(now, batch_size)
+            .await
+    }
+
     fn participants_belong_to_service(
         &self,
         requester: &message_board::SessionRef,
@@ -293,6 +306,7 @@ impl ServiceInteractionBroker {
             backend,
             session_delivery: OnceLock::new(),
             display_names: OnceLock::new(),
+            push_context: OnceLock::new(),
             routes_path,
             routes: Mutex::new(routes),
             pending: Arc::new(Mutex::new(BTreeMap::new())),
@@ -320,6 +334,21 @@ impl ServiceInteractionBroker {
 
     pub(crate) fn install_display_names(&self, display_names: crate::SessionDisplayNameCache) {
         let _already_installed = self.display_names.set(display_names);
+    }
+
+    pub(crate) fn install_push_context(
+        &self,
+        store: Arc<Mutex<automation_storage::AutomationStore>>,
+        machine_identity: crate::MachineIdentity,
+    ) {
+        if machine_identity.service_id() != &self.service_id {
+            tracing::error!("approval push identity belongs to another service");
+            return;
+        }
+        let _already_installed = self.push_context.set(InteractionPushContext {
+            store,
+            machine_identity,
+        });
     }
 
     async fn persist_routes(&self) -> Result<(), ApprovalBrokerError> {
@@ -797,17 +826,6 @@ impl ServiceInteractionBroker {
     }
 
     async fn deliver(&self, record: &ApprovalRequestRecord) -> Result<(), ApprovalBrokerError> {
-        let text = serde_json::to_string(record).map_err(|_| ApprovalBrokerError::Unavailable)?;
-        self.deliver_message(record.requester.clone(), record.approver.clone(), text)
-            .await
-    }
-
-    async fn deliver_message(
-        &self,
-        requester: SessionRef,
-        approver: SessionRef,
-        text: String,
-    ) -> Result<(), ApprovalBrokerError> {
         let delivery = self
             .session_delivery
             .get()
@@ -815,52 +833,28 @@ impl ServiceInteractionBroker {
         let display_names = self
             .display_names
             .get_or_init(crate::SessionDisplayNameCache::default);
-        deliver_message_via(delivery.as_ref(), display_names, requester, approver, text).await
-    }
-}
-
-async fn deliver_message_via(
-    delivery: &dyn SessionMessageDelivery,
-    display_names: &crate::SessionDisplayNameCache,
-    requester: SessionRef,
-    approver: SessionRef,
-    text: String,
-) -> Result<(), ApprovalBrokerError> {
-    let message = MessageContent::Agent {
-        sender: requester,
-        text: text
-            .try_into()
-            .map_err(|_| ApprovalBrokerError::Unavailable)?,
-    };
-    let header_context = MessageHeaderContext::resolve(
-        &approver,
-        &message,
-        display_names,
-        MessageHeaderOrigin::Agent,
-    );
-    let request = DeliveryRequest {
-        target: approver,
-        message,
-        header_context,
-        mode: MessageDelivery::Auto,
-        load_policy: LoadPolicy::MayLoad,
-        precondition: DeliveryPrecondition::Unpinned,
-        correlation: collaboration_protocol::DeliveryCorrelationId::generate(),
-        attempt: agent_automation::AttemptId::generate(),
-    };
-    let receipt = delivery
-        .deliver(request, &UnstoredAttemptEvidenceSink)
+        let push_context = self
+            .push_context
+            .get()
+            .ok_or(ApprovalBrokerError::Unavailable)?;
+        let outcome = typed_interaction_notice::deliver_legacy_approval_record_notice(
+            delivery.as_ref(),
+            display_names,
+            push_context,
+            record,
+        )
         .await
         .map_err(|_| ApprovalBrokerError::Unavailable)?;
-    match receipt.outcome {
-        DeliveryOutcome::Started
-        | DeliveryOutcome::Steered
-        | DeliveryOutcome::StartedOrSteered
-        | DeliveryOutcome::Queued
-        | DeliveryOutcome::PeerMessageWritten
-        | DeliveryOutcome::Unknown => Ok(()),
-        DeliveryOutcome::NotSubmitted { .. } | DeliveryOutcome::Rejected(_) => {
-            Err(ApprovalBrokerError::RouteUnavailable)
+        match outcome {
+            DeliveryOutcome::Started
+            | DeliveryOutcome::Steered
+            | DeliveryOutcome::StartedOrSteered
+            | DeliveryOutcome::Queued
+            | DeliveryOutcome::PeerMessageWritten
+            | DeliveryOutcome::Unknown => Ok(()),
+            DeliveryOutcome::NotSubmitted { .. } | DeliveryOutcome::Rejected(_) => {
+                Err(ApprovalBrokerError::RouteUnavailable)
+            }
         }
     }
 }

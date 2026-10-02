@@ -20,14 +20,22 @@ impl SessionDeliveryRouter {
             .await
             .into_iter()
             .collect::<Result<Vec<_>, _>>()?;
+        if claims
+            .iter()
+            .any(|claim| matches!(claim, RouteClaim::Rejected { .. }))
+        {
+            return Err(DeliveryContractError::ClientOperation);
+        }
         let selected = claims
             .iter()
             .position(|claim| matches!(claim, RouteClaim::Holds))
             .or_else(|| {
-                if claims
-                    .iter()
-                    .any(|claim| matches!(claim, RouteClaim::LiveElsewhere { .. }))
-                {
+                if claims.iter().any(|claim| {
+                    matches!(
+                        claim,
+                        RouteClaim::LiveElsewhere { .. } | RouteClaim::Rejected { .. }
+                    )
+                }) {
                     None
                 } else {
                     claims

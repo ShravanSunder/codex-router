@@ -4,13 +4,30 @@ use super::{failure, failure_with_provider_code};
 use crate::ExternalProviderRuntimeError;
 use collaboration_protocol::{
     ConversationOperationFailure, ConversationOperationFailureKind,
-    ConversationOperationFailureStage, InvalidProviderSetting, InvalidSettingSessionDisposition,
-    NonEmptyText, OperationId, ProviderOperationEffect, SessionRef,
+    ConversationOperationFailureStage, DeliveryCorrelationId, InvalidProviderSetting,
+    InvalidSettingSessionDisposition, NonEmptyText, OperationId, ProviderOperationEffect,
+    SessionRef,
 };
 
 const MAX_ADVERTISED_CHOICES: usize = 32;
 const MAX_ADVERTISED_SUMMARY_BYTES: usize = 2048;
 const MAX_SETTING_VALUE_DISPLAY_CHARS: usize = 120;
+
+#[derive(Clone, Copy, Debug)]
+struct ProviderErrorReference {
+    provider_code: i64,
+    correlation_id: acp_client_runtime::ProviderErrorCorrelationId,
+}
+
+struct CorrelatedProviderFailureProps {
+    kind: ConversationOperationFailureKind,
+    stage: ConversationOperationFailureStage,
+    effect: ProviderOperationEffect,
+    explanation: &'static str,
+    operation_id: OperationId,
+    target: Option<SessionRef>,
+    provider_error: ProviderErrorReference,
+}
 
 pub(super) fn invalid_setting_failure(
     operation_id: OperationId,
@@ -177,73 +194,111 @@ pub(super) fn runtime_failure(
             operation_id,
             target,
         ),
-        ExternalProviderRuntimeError::AuthenticationRequired { code } => {
-            failure_with_provider_code(
-                ConversationOperationFailureKind::AuthenticationRequired,
-                ConversationOperationFailureStage::Binding,
-                ProviderOperationEffect::None,
-                "provider authentication is required",
-                operation_id,
-                target,
-                Some(code),
-            )
-        }
-        ExternalProviderRuntimeError::ProviderSessionNotFound { code } => {
-            failure_with_provider_code(
-                ConversationOperationFailureKind::ProviderSessionNotFound,
-                ConversationOperationFailureStage::Binding,
-                ProviderOperationEffect::None,
-                "this session never started a turn and did not survive the provider restart; create a new conversation",
-                operation_id,
-                target,
-                Some(code),
-            )
-        }
-        ExternalProviderRuntimeError::ResourceNotFound { code } => failure_with_provider_code(
-            ConversationOperationFailureKind::NotFound,
-            ConversationOperationFailureStage::Binding,
-            ProviderOperationEffect::None,
-            "provider resource was not found",
+        ExternalProviderRuntimeError::AuthenticationRequired {
+            code,
+            correlation_id,
+        } => correlated_provider_failure(CorrelatedProviderFailureProps {
+            kind: ConversationOperationFailureKind::AuthenticationRequired,
+            stage: ConversationOperationFailureStage::Binding,
+            effect: ProviderOperationEffect::None,
+            explanation: "provider authentication is required",
             operation_id,
             target,
-            Some(code),
-        ),
-        ExternalProviderRuntimeError::UnsupportedMethod { code } => failure_with_provider_code(
-            ConversationOperationFailureKind::UnsupportedCapability,
-            ConversationOperationFailureStage::Validation,
-            ProviderOperationEffect::None,
-            "provider ACP method is unsupported",
+            provider_error: ProviderErrorReference {
+                provider_code: code,
+                correlation_id,
+            },
+        }),
+        ExternalProviderRuntimeError::ProviderSessionNotFound {
+            code,
+            correlation_id,
+        } => correlated_provider_failure(CorrelatedProviderFailureProps {
+            kind: ConversationOperationFailureKind::ProviderSessionNotFound,
+            stage: ConversationOperationFailureStage::Binding,
+            effect: ProviderOperationEffect::None,
+            explanation: "this session never started a turn and did not survive the provider restart; create a new conversation",
             operation_id,
             target,
-            Some(code),
-        ),
-        ExternalProviderRuntimeError::InvalidParams { code } => failure_with_provider_code(
-            ConversationOperationFailureKind::InvalidRequest,
-            ConversationOperationFailureStage::Validation,
-            ProviderOperationEffect::None,
-            "provider ACP parameters are invalid",
+            provider_error: ProviderErrorReference {
+                provider_code: code,
+                correlation_id,
+            },
+        }),
+        ExternalProviderRuntimeError::ResourceNotFound {
+            code,
+            correlation_id,
+        } => correlated_provider_failure(CorrelatedProviderFailureProps {
+            kind: ConversationOperationFailureKind::NotFound,
+            stage: ConversationOperationFailureStage::Binding,
+            effect: ProviderOperationEffect::None,
+            explanation: "provider resource was not found",
             operation_id,
             target,
-            Some(code),
-        ),
-        ExternalProviderRuntimeError::RequestCancelled { code } => failure_with_provider_code(
-            ConversationOperationFailureKind::ProviderRejected,
-            ConversationOperationFailureStage::Settlement,
-            ProviderOperationEffect::Unknown,
-            "provider ACP request was cancelled",
+            provider_error: ProviderErrorReference {
+                provider_code: code,
+                correlation_id,
+            },
+        }),
+        ExternalProviderRuntimeError::UnsupportedMethod {
+            code,
+            correlation_id,
+        } => correlated_provider_failure(CorrelatedProviderFailureProps {
+            kind: ConversationOperationFailureKind::UnsupportedCapability,
+            stage: ConversationOperationFailureStage::Validation,
+            effect: ProviderOperationEffect::None,
+            explanation: "provider ACP method is unsupported",
             operation_id,
             target,
-            Some(code),
-        ),
-        ExternalProviderRuntimeError::ProviderRejected { code } => failure_with_provider_code(
-            ConversationOperationFailureKind::ProviderRejected,
-            ConversationOperationFailureStage::Settlement,
-            ProviderOperationEffect::Unknown,
-            "provider rejected the operation after dispatch",
+            provider_error: ProviderErrorReference {
+                provider_code: code,
+                correlation_id,
+            },
+        }),
+        ExternalProviderRuntimeError::InvalidParams {
+            code,
+            correlation_id,
+        } => correlated_provider_failure(CorrelatedProviderFailureProps {
+            kind: ConversationOperationFailureKind::InvalidRequest,
+            stage: ConversationOperationFailureStage::Validation,
+            effect: ProviderOperationEffect::None,
+            explanation: "provider ACP parameters are invalid",
             operation_id,
             target,
-            Some(code),
-        ),
+            provider_error: ProviderErrorReference {
+                provider_code: code,
+                correlation_id,
+            },
+        }),
+        ExternalProviderRuntimeError::RequestCancelled {
+            code,
+            correlation_id,
+        } => correlated_provider_failure(CorrelatedProviderFailureProps {
+            kind: ConversationOperationFailureKind::ProviderRejected,
+            stage: ConversationOperationFailureStage::Settlement,
+            effect: ProviderOperationEffect::Unknown,
+            explanation: "provider ACP request was cancelled",
+            operation_id,
+            target,
+            provider_error: ProviderErrorReference {
+                provider_code: code,
+                correlation_id,
+            },
+        }),
+        ExternalProviderRuntimeError::ProviderRejected {
+            code,
+            correlation_id,
+        } => correlated_provider_failure(CorrelatedProviderFailureProps {
+            kind: ConversationOperationFailureKind::ProviderRejected,
+            stage: ConversationOperationFailureStage::Settlement,
+            effect: ProviderOperationEffect::Unknown,
+            explanation: "provider rejected the operation after dispatch",
+            operation_id,
+            target,
+            provider_error: ProviderErrorReference {
+                provider_code: code,
+                correlation_id,
+            },
+        }),
         ExternalProviderRuntimeError::PromptOutputLimitExceeded => failure(
             ConversationOperationFailureKind::OutcomeUnknown,
             ConversationOperationFailureStage::Settlement,
@@ -290,6 +345,53 @@ pub(super) fn runtime_failure(
             target,
         ),
     }
+}
+
+fn correlated_provider_failure(
+    props: CorrelatedProviderFailureProps,
+) -> ConversationOperationFailure {
+    let CorrelatedProviderFailureProps {
+        kind,
+        stage,
+        effect,
+        explanation,
+        operation_id,
+        target,
+        provider_error,
+    } = props;
+    let correlation_id = match DeliveryCorrelationId::try_from(
+        provider_error.correlation_id.to_string(),
+    ) {
+        Ok(correlation_id) => correlation_id,
+        Err(_) => {
+            return failure_with_provider_code(
+                kind,
+                stage,
+                effect,
+                "provider failure was classified, but its diagnostic reference could not be represented",
+                operation_id,
+                target,
+                Some(provider_error.provider_code),
+            );
+        }
+    };
+    let mut failure = failure_with_provider_code(
+        kind,
+        stage,
+        effect,
+        explanation,
+        operation_id,
+        target,
+        Some(provider_error.provider_code),
+    );
+    if let Ok(message) = NonEmptyText::try_from(format!(
+        "{explanation} (provider code {}; reference {})",
+        provider_error.provider_code,
+        correlation_id.as_str()
+    )) {
+        failure.message = message;
+    }
+    failure
 }
 
 #[cfg(test)]

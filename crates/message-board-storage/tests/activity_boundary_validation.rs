@@ -157,6 +157,117 @@ async fn watch_status_rejects_negative_and_future_start_boundaries() {
 }
 
 #[tokio::test]
+async fn watch_topic_accepts_an_empty_activity_stream() {
+    let path = database_path("empty-topic-watch-boundary");
+    let mut store = BoardStore::open(&path).await.unwrap();
+    let fixture = create_fixture(&mut store).await;
+    let reader = actor("empty-topic-watcher");
+
+    let watch = store
+        .watch_topic(TopicWatchRequest {
+            topic_id: fixture.topic_id,
+            actor: reader,
+            acting_for: None,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(
+        watch
+            .starts_after_activity_sequence
+            .map(|sequence| sequence.get()),
+        Some(0)
+    );
+    store.close().await.unwrap();
+    std::fs::remove_file(path).unwrap();
+}
+
+#[tokio::test]
+async fn topic_watch_boundary_rejects_negative_and_future_stored_values() {
+    let path = database_path("invalid-topic-watch-boundary");
+    let mut store = BoardStore::open(&path).await.unwrap();
+    let fixture = create_fixture(&mut store).await;
+    let reader = actor("topic-boundary-reader");
+    store
+        .watch_topic(TopicWatchRequest {
+            topic_id: fixture.topic_id.clone(),
+            actor: reader.clone(),
+            acting_for: None,
+        })
+        .await
+        .unwrap();
+    store
+        .fetch_inbox(InboxFetchRequest {
+            scope: message_board::InboxScope::Project {
+                project_id: fixture.project_id.clone(),
+            },
+            read_mode: InboxReadMode::Unread,
+            reader: reader.clone(),
+            page: page(10),
+        })
+        .await
+        .unwrap();
+    store.close().await.unwrap();
+
+    let mut connection = raw_connection(&path).await;
+    sqlx::query("UPDATE topic_watches SET starts_after_activity=-1 WHERE topic_id=?")
+        .bind(fixture.topic_id.as_str())
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    connection.close().await.unwrap();
+
+    let mut store = BoardStore::open(&path).await.unwrap();
+    let negative_boundary = store
+        .fetch_inbox(InboxFetchRequest {
+            scope: message_board::InboxScope::Project {
+                project_id: fixture.project_id.clone(),
+            },
+            read_mode: InboxReadMode::Unread,
+            reader: reader.clone(),
+            page: page(10),
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(negative_boundary.kind, BoardFailureKind::InvalidRecord);
+    assert!(matches!(
+        negative_boundary.details,
+        BoardErrorDetails::FieldConstraint { ref field, .. }
+            if field == "startsAfterActivity"
+    ));
+    store.close().await.unwrap();
+
+    let mut connection = raw_connection(&path).await;
+    sqlx::query("UPDATE topic_watches SET starts_after_activity=(SELECT last_sequence+1 FROM activity_checkpoint WHERE singleton=1) WHERE topic_id=?")
+        .bind(fixture.topic_id.as_str())
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    connection.close().await.unwrap();
+
+    let mut store = BoardStore::open(&path).await.unwrap();
+    let future_boundary = store
+        .fetch_inbox(InboxFetchRequest {
+            scope: message_board::InboxScope::Project {
+                project_id: fixture.project_id,
+            },
+            read_mode: InboxReadMode::Unread,
+            reader,
+            page: page(10),
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(future_boundary.kind, BoardFailureKind::InvalidRecord);
+    assert!(matches!(
+        future_boundary.details,
+        BoardErrorDetails::FieldConstraint { ref field, .. }
+            if field == "startsAfterActivity"
+    ));
+    store.close().await.unwrap();
+    std::fs::remove_file(path).unwrap();
+}
+
+#[tokio::test]
 async fn scoped_bookmarks_reject_negative_and_future_boundaries() {
     let path = database_path("invalid-bookmark-boundary");
     let mut store = BoardStore::open(&path).await.unwrap();

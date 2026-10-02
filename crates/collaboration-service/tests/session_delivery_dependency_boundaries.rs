@@ -12,16 +12,20 @@ fn message_features_do_not_import_client_routes() {
             include_str!("../src/wakeup_delivery_sender.rs"),
         ),
         (
-            "board listen push",
-            include_str!("../src/session_delivery_sink.rs"),
+            "subscription push",
+            include_str!("../src/subscription_delivery/subscription_push.rs"),
         ),
         (
             "interaction notice",
             include_str!("../src/interaction_broker.rs"),
         ),
         (
-            "listen admission",
-            include_str!("../src/thread_listen_dispatch.rs"),
+            "subscription admission",
+            include_str!("../src/thread_subscription_dispatch.rs"),
+        ),
+        (
+            "direct message push",
+            include_str!("../src/subscription_delivery/direct_message_push.rs"),
         ),
         (
             "scheduled run worker",

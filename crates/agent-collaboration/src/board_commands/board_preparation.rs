@@ -1,8 +1,13 @@
 use super::board_arguments::*;
+use super::board_thread_subscription_preparation::PendingSubscriptionActor;
+use super::board_thread_wait_preparation::PendingSubscriptionWait;
 use super::board_value_parsing::*;
 use collaboration_client::BoardRepositoryLocation;
 use collaboration_client::ControlClient;
 use collaboration_client::board::*;
+use collaboration_client::protocol::{
+    ThreadSubscribeRequest, ThreadSubscriptionsRequest, ThreadUnsubscribeRequest,
+};
 use std::path::PathBuf;
 
 pub(super) struct CommandContext {
@@ -60,11 +65,12 @@ pub(super) enum PreparedBoardCommand {
     },
     ThreadCreate(Box<PendingThreadCreate>),
     ThreadJoin(Box<PendingThreadJoin>),
+    ThreadSubscribe(PendingSubscriptionActor<ThreadSubscribeRequest>),
+    ThreadUnsubscribe(PendingSubscriptionActor<ThreadUnsubscribeRequest>),
+    ThreadSubscriptions(PendingSubscriptionActor<ThreadSubscriptionsRequest>),
+    ThreadSubscriptionWait(PendingSubscriptionWait),
     ThreadLeave(PendingThreadLeave),
     ThreadParticipantList(ThreadParticipantListRequest),
-    ThreadListen(PendingThreadListen),
-    ThreadListenShow(ThreadListenShowRequest),
-    ThreadListenCancel(ThreadListenCancelRequest),
     InboxFetch(InboxFetchRequest),
     InboxAcknowledge(InboxAcknowledgeRequest),
     InboxProjects(InboxProjectsRequest),
@@ -89,16 +95,10 @@ pub(super) struct PendingMessagePost {
 pub(super) struct PendingThreadJoin {
     pub request: ThreadJoinRequest,
     pub actor: ActorInput,
-    pub listen: Option<PendingThreadListen>,
 }
 
 pub(super) struct PendingThreadLeave {
     pub request: ThreadLeaveRequest,
-    pub actor: ActorInput,
-}
-
-pub(super) struct PendingThreadListen {
-    pub request: ThreadListenRequest,
     pub actor: ActorInput,
 }
 
@@ -222,33 +222,28 @@ pub(super) fn finalize_command(
             pending.request.actor = actor;
         }
         PreparedBoardCommand::ThreadJoin(pending) => {
-            let actor = finalize_actor(&pending.actor, client)?;
-            pending.request.actor = actor.clone();
-            if let Some(listen) = &mut pending.listen {
-                listen.request.reader = actor;
-            }
+            pending.request.actor = finalize_actor(&pending.actor, client)?;
             // --replace self names this session, not a human called "self".
             if let Some(replace) = &mut pending.request.replace {
                 finalize_identity(replace, client)?;
             }
         }
+        PreparedBoardCommand::ThreadSubscribe(pending) => {
+            pending.request.actor = finalize_actor(&pending.actor, client)?;
+        }
+        PreparedBoardCommand::ThreadUnsubscribe(pending) => {
+            pending.request.actor = finalize_actor(&pending.actor, client)?;
+        }
+        PreparedBoardCommand::ThreadSubscriptions(pending) => {
+            pending.request.actor = finalize_actor(&pending.actor, client)?;
+        }
+        PreparedBoardCommand::ThreadSubscriptionWait(pending) => {
+            pending.request.actor = finalize_actor(&pending.actor, client)?;
+        }
         PreparedBoardCommand::ThreadLeave(pending) => {
             pending.request.actor = finalize_actor(&pending.actor, client)?;
             if let Some(handover) = &mut pending.request.to {
                 finalize_identity(handover, client)?;
-            }
-        }
-        PreparedBoardCommand::ThreadListen(pending) => {
-            pending.request.reader = finalize_actor(&pending.actor, client)?;
-            if pending.request.delivery == ThreadListenDelivery::Session {
-                match &pending.request.reader {
-                    Identity::Session { .. } => {}
-                    _ => {
-                        return Err(
-                            "--deliver session requires the calling session identity".into()
-                        );
-                    }
-                }
             }
         }
         _ => {}
@@ -558,6 +553,15 @@ fn prepare_thread(
     match command {
         ThreadCommand::Create(arguments) => prepare_thread_create(arguments),
         ThreadCommand::Join(arguments) => prepare_thread_join(arguments),
+        ThreadCommand::Subscribe(arguments) => {
+            super::board_thread_subscription_preparation::prepare_subscribe(arguments)
+        }
+        ThreadCommand::Unsubscribe(arguments) => {
+            super::board_thread_subscription_preparation::prepare_unsubscribe(arguments)
+        }
+        ThreadCommand::Subscriptions(arguments) => {
+            super::board_thread_subscription_preparation::prepare_subscriptions(arguments)
+        }
         ThreadCommand::Leave(arguments) => prepare_thread_leave(arguments),
         ThreadCommand::Participant { command } => prepare_thread_participant(command),
         ThreadCommand::Show(arguments) => Ok((
@@ -594,8 +598,7 @@ fn prepare_thread(
             super::board_thread_list_preparation::prepare_thread_list(&arguments)?,
             command_context(arguments.common),
         )),
-        ThreadCommand::Listen(arguments) => prepare_thread_listen(arguments),
-        ThreadCommand::Wait(arguments) => prepare_thread_wait(arguments),
+        ThreadCommand::Wait(arguments) => super::board_thread_wait_preparation::prepare(arguments),
     }
 }
 
@@ -647,7 +650,7 @@ fn prepare_thread_participant(
     }
 }
 
-fn parse_actor_input(value: &str) -> Result<ActorInput, String> {
+pub(super) fn parse_actor_input(value: &str) -> Result<ActorInput, String> {
     if value == "self" {
         Ok(ActorInput::Self_)
     } else {
@@ -655,7 +658,7 @@ fn parse_actor_input(value: &str) -> Result<ActorInput, String> {
     }
 }
 
-fn placeholder_identity() -> Result<Identity, String> {
+pub(super) fn placeholder_identity() -> Result<Identity, String> {
     Ok(Identity::Human {
         human_id: HumanId::try_from("pending-actor-finalization".to_owned())
             .map_err(|_| "could not prepare actor identity".to_owned())?,
@@ -748,33 +751,27 @@ fn prepare_thread_join(
         return Err("--replace requires --role orchestrator".into());
     }
     let request = ThreadJoinRequest {
+        mode: arguments
+            .mode
+            .map(super::board_thread_subscription_preparation::subscription_mode),
+        when_idle: arguments
+            .when_idle
+            .map(super::board_thread_subscription_preparation::when_idle),
         root_message_id: parse_uuid_v7(arguments.root_message_id, "--root-message-id")?,
         actor: match &actor {
             ActorInput::Explicit(identity) => identity.clone(),
             ActorInput::Self_ => placeholder_identity()?,
         },
         role,
-        watch: watch_choice(arguments.watch, arguments.no_watch)?,
+        watch: !arguments.no_watch,
         replace,
         note: arguments
             .note
             .map(|value| parse_bounded_text(value, "--note"))
             .transpose()?,
     };
-    let listen = prepare_join_listen(
-        arguments.listen,
-        arguments.max_wait,
-        arguments.acknowledge,
-        arguments.no_acknowledge,
-        request.root_message_id.clone(),
-        actor.clone(),
-    )?;
     Ok((
-        PreparedBoardCommand::ThreadJoin(Box::new(PendingThreadJoin {
-            request,
-            actor,
-            listen,
-        })),
+        PreparedBoardCommand::ThreadJoin(Box::new(PendingThreadJoin { request, actor })),
         command_context(arguments.common),
     ))
 }
@@ -802,301 +799,11 @@ fn prepare_thread_leave(
     ))
 }
 
-fn prepare_join_listen(
-    listen: Option<Vec<String>>,
-    max_wait: Option<String>,
-    acknowledge: bool,
-    no_acknowledge: bool,
-    root_message_id: MessageId,
-    actor: ActorInput,
-) -> Result<Option<PendingThreadListen>, String> {
-    let Some(listen) = listen else {
-        if max_wait.is_some() || acknowledge || no_acknowledge {
-            return Err("--max-wait and acknowledgement choices require --listen".into());
-        }
-        return Ok(None);
-    };
-    let mode = match listen.as_slice() {
-        [kind] if kind == "once" => ThreadListenMode::Once {
-            max_wait_seconds: max_wait
-                .as_deref()
-                .map(|value| parse_duration_seconds(value, "--max-wait"))
-                .transpose()?
-                .unwrap_or(ThreadListenLifetime::Short.seconds()),
-        },
-        [kind] if matches!(kind.as_str(), "short" | "long") => {
-            if max_wait.is_some() {
-                return Err("--listen short|long forbids --max-wait".into());
-            }
-            ThreadListenMode::Repeating {
-                lifetime_seconds: if kind == "short" {
-                    ThreadListenLifetime::Short.seconds()
-                } else {
-                    ThreadListenLifetime::Long.seconds()
-                },
-            }
-        }
-        _ => return Err("--listen must be once, short, or long".into()),
-    };
-    if matches!(&mode, ThreadListenMode::Once { max_wait_seconds } if *max_wait_seconds > ThreadListenLifetime::Short.seconds())
-    {
-        return Err("--max-wait may shorten but not exceed the 25 minute Once lifetime".into());
-    }
-    let acknowledge = match (acknowledge, no_acknowledge) {
-        (true, false) => true,
-        (false, true) => false,
-        _ => {
-            return Err(
-                "Choose exactly one acknowledgement mode: --acknowledge or --no-acknowledge".into(),
-            );
-        }
-    };
-    let reader = match &actor {
-        ActorInput::Explicit(identity) => identity.clone(),
-        ActorInput::Self_ => placeholder_identity()?,
-    };
-    Ok(Some(PendingThreadListen {
-        request: ThreadListenRequest {
-            reader,
-            selection: ThreadListenSelection::Roots {
-                root_message_ids: vec![root_message_id],
-            },
-            mode,
-            from_activity_sequence: None,
-            acknowledge,
-            delivery: ThreadListenDelivery::Stdout,
-        },
-        actor,
-    }))
-}
-
-fn prepare_thread_listen(
-    arguments: ThreadListenArguments,
-) -> Result<(PreparedBoardCommand, CommandContext), String> {
-    if let Some(control) = arguments.control {
-        return match control {
-            ThreadListenControlCommand::Show(control) => {
-                require_thread_listen_json(&control.common)?;
-                Ok((
-                    PreparedBoardCommand::ThreadListenShow(ThreadListenShowRequest {
-                        listen_id: parse_uuid_v7(control.listen_id, "--listen-id")?,
-                    }),
-                    command_context(control.common),
-                ))
-            }
-            ThreadListenControlCommand::Cancel(control) => {
-                require_thread_listen_json(&control.common)?;
-                Ok((
-                    PreparedBoardCommand::ThreadListenCancel(ThreadListenCancelRequest {
-                        listen_id: parse_uuid_v7(control.listen_id, "--listen-id")?,
-                    }),
-                    command_context(control.common),
-                ))
-            }
-        };
-    }
-    require_thread_listen_json(&arguments.common)?;
-    let selection_count = usize::from(arguments.watched)
-        + usize::from(!arguments.root_message_id.is_empty())
-        + usize::from(arguments.topic_id.is_some());
-    let selection = match selection_count {
-        1 if arguments.watched => ThreadListenSelection::Watched,
-        1 if !arguments.root_message_id.is_empty() => ThreadListenSelection::Roots {
-            root_message_ids: arguments
-                .root_message_id
-                .into_iter()
-                .map(|value| parse_uuid_v7(value, "--root-message-id"))
-                .collect::<Result<Vec<_>, _>>()?,
-        },
-        1 => ThreadListenSelection::Topic {
-            topic_id: parse_uuid_v7(
-                arguments.topic_id.ok_or("--topic-id is required")?,
-                "--topic-id",
-            )?,
-        },
-        _ => {
-            return Err(
-                "Choose exactly one Thread selection: --watched, repeated --root-message-id, or --topic-id".into(),
-            );
-        }
-    };
-    let delivery = match arguments.deliver {
-        ThreadListenDeliveryKind::Stdout => ThreadListenDelivery::Stdout,
-        ThreadListenDeliveryKind::Session => ThreadListenDelivery::Session,
-    };
-    let mode = match (arguments.once, arguments.lifetime) {
-        (true, None) => {
-            if arguments.shorten_for.is_some() {
-                return Err("--for applies only with --lifetime short|long".into());
-            }
-            if delivery == ThreadListenDelivery::Session && arguments.max_wait.is_some() {
-                return Err("--deliver session with --once uses the fixed 25 minute lifetime and forbids --max-wait".into());
-            }
-            let seconds = arguments
-                .max_wait
-                .as_deref()
-                .map(|value| parse_duration_seconds(value, "--max-wait"))
-                .transpose()?
-                .unwrap_or(ThreadListenLifetime::Short.seconds());
-            if seconds > ThreadListenLifetime::Short.seconds() {
-                return Err(
-                    "--max-wait may shorten but not exceed the 25 minute Once lifetime".into(),
-                );
-            }
-            ThreadListenMode::Once {
-                max_wait_seconds: seconds,
-            }
-        }
-        (false, Some(lifetime)) => {
-            let lifetime = match lifetime {
-                ThreadListenLifetimeKind::Short => ThreadListenLifetime::Short,
-                ThreadListenLifetimeKind::Long => ThreadListenLifetime::Long,
-            };
-            if delivery == ThreadListenDelivery::Session && arguments.shorten_for.is_some() {
-                return Err("--deliver session uses its fixed lifetime and forbids --for; choose --lifetime short (25 minutes) or --lifetime long (75 minutes)".into());
-            }
-            let seconds = arguments
-                .shorten_for
-                .as_deref()
-                .map(|value| parse_duration_seconds(value, "--for"))
-                .transpose()?
-                .unwrap_or(lifetime.seconds());
-            if seconds > lifetime.seconds() {
-                return Err("--for may shorten but not extend the selected lifetime".into());
-            }
-            ThreadListenMode::Repeating {
-                lifetime_seconds: seconds,
-            }
-        }
-        _ => return Err("Choose exactly one Listen mode: --once (25 minutes) or --lifetime short (25 minutes) or --lifetime long (75 minutes)".into()),
-    };
-    let actor = arguments.actor.as_deref().ok_or_else(|| {
-        "Thread Listen requires --actor; use --actor self or pass an explicit Reader Identity JSON".to_owned()
-    }).and_then(parse_actor_input)?;
-    if delivery == ThreadListenDelivery::Session
-        && let ActorInput::Explicit(identity) = &actor
-        && !is_session_identity(identity)
-    {
-        return Err("--deliver session requires the calling session identity".into());
-    }
-    let acknowledge = match (arguments.acknowledge, arguments.no_acknowledge) {
-        (true, false) => true,
-        (false, true) => false,
-        _ => {
-            return Err(
-                "Choose exactly one acknowledgement mode: --acknowledge or --no-acknowledge"
-                    .to_owned(),
-            );
-        }
-    };
-    let request = ThreadListenRequest {
-        reader: match &actor {
-            ActorInput::Explicit(identity) => identity.clone(),
-            ActorInput::Self_ => placeholder_identity()?,
-        },
-        selection,
-        mode,
-        from_activity_sequence: arguments
-            .from_activity_sequence
-            .map(|value| activity_sequence(value, "--from"))
-            .transpose()?,
-        acknowledge,
-        delivery,
-    };
-    Ok((
-        PreparedBoardCommand::ThreadListen(PendingThreadListen { request, actor }),
-        command_context(arguments.common),
-    ))
-}
-
-pub(super) fn is_session_identity(identity: &Identity) -> bool {
-    matches!(identity, Identity::Session { .. })
-}
-
-fn prepare_thread_wait(
-    arguments: ThreadWaitArguments,
-) -> Result<(PreparedBoardCommand, CommandContext), String> {
-    require_thread_wait_json(&arguments.common)?;
-    let selection = match (arguments.watched, arguments.root_message_id.is_empty()) {
-        (true, true) => ThreadListenSelection::Watched,
-        (false, false) => ThreadListenSelection::Roots {
-            root_message_ids: arguments
-                .root_message_id
-                .into_iter()
-                .map(|value| parse_uuid_v7(value, "--root-message-id"))
-                .collect::<Result<Vec<_>, _>>()?,
-        },
-        _ => {
-            return Err(
-                "Choose exactly one Thread selection: --watched or repeated --root-message-id"
-                    .into(),
-            );
-        }
-    };
-    let actor = arguments
-        .actor
-        .as_deref()
-        .ok_or_else(|| "Thread Wait requires --actor".to_owned())
-        .and_then(parse_actor_input)?;
-    let acknowledge = match (arguments.acknowledge, arguments.no_acknowledge) {
-        (true, false) => true,
-        (false, true) => false,
-        _ => {
-            return Err(
-                "Choose exactly one acknowledgement mode: --acknowledge or --no-acknowledge"
-                    .to_owned(),
-            );
-        }
-    };
-    let request = ThreadListenRequest {
-        reader: match &actor {
-            ActorInput::Explicit(identity) => identity.clone(),
-            ActorInput::Self_ => placeholder_identity()?,
-        },
-        selection,
-        mode: ThreadListenMode::Once {
-            max_wait_seconds: parse_duration_seconds(
-                arguments
-                    .max_wait
-                    .as_deref()
-                    .ok_or_else(|| "Thread Wait requires --max-wait <duration>".to_owned())?,
-                "--max-wait",
-            )?,
-        },
-        from_activity_sequence: arguments
-            .from_activity_sequence
-            .map(|value| activity_sequence(value, "--from"))
-            .transpose()?,
-        acknowledge,
-        delivery: ThreadListenDelivery::Stdout,
-    };
-    Ok((
-        PreparedBoardCommand::ThreadListen(PendingThreadListen { request, actor }),
-        command_context(arguments.common),
-    ))
-}
-
 fn require_thread_json(common: &CommonArguments, command: &str) -> Result<(), String> {
     if common.json {
         Ok(())
     } else {
         Err(format!("{command} requires --json"))
-    }
-}
-
-fn require_thread_listen_json(common: &CommonArguments) -> Result<(), String> {
-    if common.json {
-        Ok(())
-    } else {
-        Err("Thread Listen requires --json because stdout is its Delivery target".into())
-    }
-}
-
-fn require_thread_wait_json(common: &CommonArguments) -> Result<(), String> {
-    if common.json {
-        Ok(())
-    } else {
-        Err("Thread Wait requires --json".into())
     }
 }
 

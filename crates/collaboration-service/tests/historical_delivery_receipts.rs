@@ -11,6 +11,8 @@ use collaboration_service::{ServiceIdentity, serve_control_connection};
 use serde_json::json;
 use sqlx::Connection;
 use std::sync::Arc;
+#[path = "support/wake_push_draft.rs"]
+mod wake_push_test_support;
 
 #[tokio::test]
 async fn retried_wake_retains_both_receipts_in_attempt_and_event_history()
@@ -52,7 +54,11 @@ async fn retried_wake_retains_both_receipts_in_attempt_and_event_history()
     let WakeEvaluation::Fired { delivery_id, .. } = store
         .lock()
         .await
-        .evaluate_wakeup::<SavedMessage>(&wake.definition.wakeup_id, now_ms)
+        .evaluate_wakeup::<SavedMessage>(
+            &wake.definition.wakeup_id,
+            now_ms,
+            wake_push_test_support::build_test_wake_push_draft,
+        )
         .await?
     else {
         return Err("wake did not fire".into());

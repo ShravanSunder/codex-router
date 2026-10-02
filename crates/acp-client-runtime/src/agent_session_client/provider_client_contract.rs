@@ -1,6 +1,23 @@
 //! Provider admission, prompt result, and safe ACP error contracts.
 
 use super::*;
+use std::fmt::{Display, Formatter};
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ProviderErrorCorrelationId(uuid::Uuid);
+
+impl ProviderErrorCorrelationId {
+    #[must_use]
+    pub fn generate() -> Self {
+        Self(uuid::Uuid::now_v7())
+    }
+}
+
+impl Display for ProviderErrorCorrelationId {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{}", self.0.hyphenated())
+    }
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExternalProviderLaunch {
@@ -167,19 +184,40 @@ pub enum ExternalProviderRuntimeError {
     #[error("provider cancellation target is no longer active")]
     LocalCancelTargetMismatch,
     #[error("provider authentication is required (ACP code {code})")]
-    AuthenticationRequired { code: i64 },
+    AuthenticationRequired {
+        code: i64,
+        correlation_id: ProviderErrorCorrelationId,
+    },
     #[error("provider session was not found (ACP code {code})")]
-    ProviderSessionNotFound { code: i64 },
+    ProviderSessionNotFound {
+        code: i64,
+        correlation_id: ProviderErrorCorrelationId,
+    },
     #[error("provider resource was not found (ACP code {code})")]
-    ResourceNotFound { code: i64 },
+    ResourceNotFound {
+        code: i64,
+        correlation_id: ProviderErrorCorrelationId,
+    },
     #[error("provider ACP method is unsupported (ACP code {code})")]
-    UnsupportedMethod { code: i64 },
+    UnsupportedMethod {
+        code: i64,
+        correlation_id: ProviderErrorCorrelationId,
+    },
     #[error("provider ACP parameters are invalid (ACP code {code})")]
-    InvalidParams { code: i64 },
+    InvalidParams {
+        code: i64,
+        correlation_id: ProviderErrorCorrelationId,
+    },
     #[error("provider ACP request was cancelled (ACP code {code})")]
-    RequestCancelled { code: i64 },
+    RequestCancelled {
+        code: i64,
+        correlation_id: ProviderErrorCorrelationId,
+    },
     #[error("provider rejected the ACP operation (ACP code {code})")]
-    ProviderRejected { code: i64 },
+    ProviderRejected {
+        code: i64,
+        correlation_id: ProviderErrorCorrelationId,
+    },
     #[error("provider operation response was unavailable")]
     TransportFailure,
     #[error("session event consumer closed")]

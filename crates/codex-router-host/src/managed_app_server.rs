@@ -20,6 +20,8 @@ pub enum AppServerReadiness {
     Ready {
         /// Version reported by native initialize.
         running_version: String,
+        /// Validated Remote Control machine display name, when supplied.
+        remote_control_server_name: Option<RemoteControlServerName>,
     },
     /// Native initialize converged while Remote Control remained degraded.
     LocalReadyRemoteDegraded {
@@ -27,7 +29,52 @@ pub enum AppServerReadiness {
         running_version: String,
         /// Low-cardinality upstream Remote Control condition.
         remote_control: crate::RemoteControlCondition,
+        /// Validated Remote Control machine display name, when supplied.
+        remote_control_server_name: Option<RemoteControlServerName>,
     },
+}
+
+/// Upstream Remote Control server name validated at the Host boundary.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RemoteControlServerName(String);
+
+const MAX_REMOTE_CONTROL_SERVER_NAME_BYTES: usize = 4096;
+
+impl TryFrom<String> for RemoteControlServerName {
+    type Error = &'static str;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        if value.trim().is_empty()
+            || value.len() > MAX_REMOTE_CONTROL_SERVER_NAME_BYTES
+            || value.contains('\0')
+        {
+            return Err("invalid Remote Control server name");
+        }
+        Ok(Self(value))
+    }
+}
+
+impl RemoteControlServerName {
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl AppServerReadiness {
+    #[must_use]
+    pub const fn remote_control_server_name(&self) -> Option<&RemoteControlServerName> {
+        match self {
+            Self::Ready {
+                remote_control_server_name,
+                ..
+            }
+            | Self::LocalReadyRemoteDegraded {
+                remote_control_server_name,
+                ..
+            } => remote_control_server_name.as_ref(),
+        }
+    }
 }
 
 /// Retained app-server child and its spawn identity.
@@ -225,26 +272,32 @@ impl AppServerChild {
                         return Err(AppServerReadinessError::VersionMismatch);
                     }
                     let running_version = observation.running_version().to_owned();
+                    let remote_control_server_name =
+                        remote_control_server_name(observation.remote_control());
                     return Ok(match observation.remote_control() {
-                        RemoteControlObservation::Connected { .. } => {
-                            AppServerReadiness::Ready { running_version }
-                        }
+                        RemoteControlObservation::Connected { .. } => AppServerReadiness::Ready {
+                            running_version,
+                            remote_control_server_name,
+                        },
                         RemoteControlObservation::Connecting { .. } => {
                             AppServerReadiness::LocalReadyRemoteDegraded {
                                 running_version,
                                 remote_control: crate::RemoteControlCondition::Connecting,
+                                remote_control_server_name,
                             }
                         }
                         RemoteControlObservation::Errored { .. } => {
                             AppServerReadiness::LocalReadyRemoteDegraded {
                                 running_version,
                                 remote_control: crate::RemoteControlCondition::Errored,
+                                remote_control_server_name,
                             }
                         }
                         RemoteControlObservation::Disabled { .. } => {
                             AppServerReadiness::LocalReadyRemoteDegraded {
                                 running_version,
                                 remote_control: crate::RemoteControlCondition::Disabled,
+                                remote_control_server_name,
                             }
                         }
                     });
@@ -261,6 +314,18 @@ impl AppServerChild {
             }
         }
     }
+}
+
+fn remote_control_server_name(
+    observation: &RemoteControlObservation,
+) -> Option<RemoteControlServerName> {
+    let name = match observation {
+        RemoteControlObservation::Connected { server_name, .. }
+        | RemoteControlObservation::Connecting { server_name, .. }
+        | RemoteControlObservation::Errored { server_name, .. }
+        | RemoteControlObservation::Disabled { server_name, .. } => server_name,
+    };
+    RemoteControlServerName::try_from(name.clone()).ok()
 }
 
 /// Spawned child failed to reach the pinned native readiness contract.
@@ -360,5 +425,70 @@ mod tests {
             return Err("refreshed launch plan retained the previous executable version".into());
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod remote_control_server_name_tests {
+    use super::{AppServerReadiness, RemoteControlServerName, remote_control_server_name};
+    use codex_native_integration::RemoteControlObservation;
+
+    #[test]
+    fn app_server_startup_name_survives_host_validation_and_readiness() {
+        let observation = RemoteControlObservation::Connected {
+            server_name: "Sunbook-Pro-M4".to_owned(),
+            environment_id: Some("remote-environment".to_owned()),
+        };
+        let server_name = remote_control_server_name(&observation).expect("validated name");
+        let readiness = AppServerReadiness::Ready {
+            running_version: "1.2.3".to_owned(),
+            remote_control_server_name: Some(server_name),
+        };
+
+        assert_eq!(
+            readiness
+                .remote_control_server_name()
+                .map(RemoteControlServerName::as_str),
+            Some("Sunbook-Pro-M4")
+        );
+    }
+
+    #[test]
+    fn host_rejects_empty_oversized_and_nul_remote_names_but_preserves_display_characters() {
+        for invalid in [
+            String::new(),
+            "   ".to_owned(),
+            "name\0with-nul".to_owned(),
+            "x".repeat(4097),
+        ] {
+            assert!(RemoteControlServerName::try_from(invalid).is_err());
+        }
+        let unusual_name = RemoteControlServerName::try_from("Remote\n\"Name\"".to_owned())
+            .expect("valid source name for service display escaping");
+        assert_eq!(unusual_name.as_str(), "Remote\n\"Name\"");
+    }
+
+    #[test]
+    fn host_extracts_server_names_from_connected_and_degraded_observations() {
+        let connected = RemoteControlObservation::Connected {
+            server_name: "connected-host".to_owned(),
+            environment_id: None,
+        };
+        let connecting = RemoteControlObservation::Connecting {
+            server_name: "connecting-host".to_owned(),
+            environment_id: None,
+        };
+        assert_eq!(
+            remote_control_server_name(&connected)
+                .as_ref()
+                .map(RemoteControlServerName::as_str),
+            Some("connected-host")
+        );
+        assert_eq!(
+            remote_control_server_name(&connecting)
+                .as_ref()
+                .map(RemoteControlServerName::as_str),
+            Some("connecting-host")
+        );
     }
 }

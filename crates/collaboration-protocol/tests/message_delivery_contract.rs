@@ -39,16 +39,22 @@ fn message_result_schema_preserves_closed_rejection_diagnostics() {
     schema["$ref"] = json!("#/$defs/message-send-response");
     let validator = jsonschema::validator_for(&schema).unwrap();
     let mut response = json!({"jsonrpc":"2.0","id":"send","result":{
+        "pushId":"01900000-0000-7000-8000-000000000003",
+        "link":"router://00000000-0000-4000-8000-000000000001/push/01900000-0000-7000-8000-000000000003",
+        "target":request()["target"],
+        "targetIdentity":"fixture",
+        "deliveryState":"rejected",
+        "receipt":{
         "outcome":{"kind":"rejected","reason":"childThread","nextAction":"inspectTarget","clientCode":-32000,"detail":null},
         "reachability":"codexAppServer","client":null
-    }});
+    }}});
     assert!(validator.is_valid(&response));
-    response["result"]["outcome"]
+    response["result"]["receipt"]["outcome"]
         .as_object_mut()
         .unwrap()
         .remove("nextAction");
     assert!(!validator.is_valid(&response));
-    response["result"]["outcome"]["nextAction"] = json!("inspectTarget");
-    response["result"]["outcome"]["reason"] = json!("inventedReason");
+    response["result"]["receipt"]["outcome"]["nextAction"] = json!("inspectTarget");
+    response["result"]["receipt"]["outcome"]["reason"] = json!("inventedReason");
     assert!(!validator.is_valid(&response));
 }

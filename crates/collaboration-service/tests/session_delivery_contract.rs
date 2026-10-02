@@ -1,3 +1,6 @@
+use collaboration_protocol::{
+    DeliveryNextAction, DeliveryPeerClaim, DeliveryRejection, DeliveryRejectionReason,
+};
 use collaboration_service::{
     DeliveryPrecondition, RouteClaim, RouteUnavailableReason, RunSettlement, RunSubmission,
     RunSummarySource,
@@ -31,6 +34,29 @@ fn route_claims_and_preconditions_keep_tagged_meaning() -> Result<(), Box<dyn st
         }
     ) {
         return Err("unavailable claim changed variant".into());
+    }
+    let rejected = RouteClaim::Rejected {
+        rejection: DeliveryRejection {
+            reason: DeliveryRejectionReason::LiveElsewhere,
+            next_action: DeliveryNextAction::InspectTarget,
+            client_code: None,
+            detail: Some("two live terminals claim this session".into()),
+            claims: Some(vec![DeliveryPeerClaim {
+                pid: 52304,
+                name: None,
+                cwd: None,
+            }]),
+        },
+    };
+    let encoded = to_value(&rejected)?;
+    if encoded.pointer("/kind") != Some(&json!("rejected"))
+        || encoded.pointer("/rejection/claims/0/pid") != Some(&json!(52304))
+    {
+        return Err("terminal rejection claim lost its typed payload".into());
+    }
+    let decoded: RouteClaim = serde_json::from_value(encoded)?;
+    if !matches!(decoded, RouteClaim::Rejected { .. }) {
+        return Err("terminal rejection claim changed variant".into());
     }
     let generation = json!({"serviceEpoch":"00000000-0000-4000-8000-000000000001","generation":1});
     let decoded: DeliveryPrecondition = serde_json::from_value(json!({
@@ -84,6 +110,7 @@ fn scheduled_submission_and_settlement_keep_distinct_recovery_outcomes()
             next_action: collaboration_protocol::DeliveryNextAction::RetryLater,
             client_code: None,
             detail: Some("worker still active".into()),
+            claims: None,
         }),
         RunSubmission::Unknown,
     ] {

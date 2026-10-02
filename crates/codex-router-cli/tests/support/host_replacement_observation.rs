@@ -4,9 +4,12 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::time::Duration;
 
+// A cold launch of the copied ad-hoc-signed debug CLI can spend over 10 seconds in macOS dyld.
+const COPIED_CLI_VERSION_TIMEOUT: Duration = Duration::from_secs(30);
+
 pub async fn binary_version(binary: &Path) -> Result<String, Box<dyn std::error::Error>> {
     let result = tokio::time::timeout(
-        Duration::from_secs(5),
+        COPIED_CLI_VERSION_TIMEOUT,
         tokio::process::Command::new(binary)
             .arg("--version")
             .kill_on_drop(true)
@@ -14,7 +17,14 @@ pub async fn binary_version(binary: &Path) -> Result<String, Box<dyn std::error:
     )
     .await??;
     if !result.status.success() {
-        return Err("candidate binary did not report its version".into());
+        return Err(format!(
+            "binary {} did not report its version: status={}, stdout={:?}, stderr={:?}",
+            binary.display(),
+            result.status,
+            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr),
+        )
+        .into());
     }
     Ok(String::from_utf8(result.stdout)?.trim().to_owned())
 }

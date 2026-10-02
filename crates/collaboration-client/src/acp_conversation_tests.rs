@@ -10,25 +10,20 @@ fn endpoint(service_id: &str) -> EndpointRef {
 }
 
 #[test]
-fn acp_prompt_rendering_uses_endpoint_fallback_identities() {
-    let target = SessionRef {
-        endpoint: endpoint("018f47d2-24d5-7a68-b9ec-6f759c39458f"),
-        session_id: collaboration_protocol::SessionId::try_from("codex-thread".to_owned())
-            .expect("target session"),
-    };
+fn acp_prompt_forwarding_preserves_exact_caller_text_without_envelope() {
     let sender = SessionRef {
         endpoint: endpoint("018f47d2-24d5-7a68-b9ec-6f759c39458f"),
         session_id: collaboration_protocol::SessionId::try_from("claude-session".to_owned())
             .expect("sender session"),
     };
-    let message = MessageContent::Agent {
+    let line = "Review the implementation exactly as written.";
+    let prompt = PublicPromptContent::Agent {
         sender,
-        text: MessageText::try_from("Check the implementation.".to_owned()).expect("message text"),
+        text: MessageText::try_from(line.to_owned()).expect("message text"),
     };
-    let rendered =
-        super::render_conversation_prompt(&target, &message).expect("rendered ACP prompt");
+    let forwarded = super::conversation_prompt_text(&prompt);
 
-    assert!(rendered.starts_with("🤖 codex-local/codex-th ← 🤖 codex-local/claude-s\n"));
+    assert_eq!(forwarded, line);
 }
 
 #[test]

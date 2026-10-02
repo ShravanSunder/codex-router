@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO router_pushes (push_id,kind,origin_kind,origin_service_id,origin_endpoint_id,origin_session_id,origin_router_ref,target_service_id,target_endpoint_id,target_session_id,reply_to_push_id,header_facts_json,body,ranges_json,delivery_state,last_outcome_json,created_at,settled_at,read_at,dm_delivery_mode,dm_generation_guard_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,'pending',NULL,?,NULL,NULL,?,?) ON CONFLICT(push_id) DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 17
+    },
+    "nullable": []
+  },
+  "hash": "f3bdfd0a513cb68c6ced0d41e1cae5f79c86012285b215da83b3ebdad36af62f"
+}

@@ -60,6 +60,7 @@ impl ClientError {
 pub struct ControlClient {
     pub(crate) connection: ClientConnection,
     identity: ControlInitializationResult,
+    machine_label: Option<collaboration_protocol::MachineLabel>,
     notification_state: EndpointNotificationState,
 }
 
@@ -114,11 +115,23 @@ impl ControlClient {
             connection,
             notification_state: EndpointNotificationState::new(&identity),
             identity,
+            machine_label: None,
         })
     }
     #[must_use]
     pub fn identity(&self) -> &ControlInitializationResult {
         &self.identity
+    }
+    /// Machine label read from the same manifest used to discover this service.
+    #[must_use]
+    pub fn machine_label(&self) -> Option<&collaboration_protocol::MachineLabel> {
+        self.machine_label.as_ref()
+    }
+    pub(crate) fn set_machine_label_from_manifest(
+        &mut self,
+        machine_label: collaboration_protocol::MachineLabel,
+    ) {
+        self.machine_label = Some(machine_label);
     }
     /// Agent-originated communication; delivery defaults are carried by the typed request.
     pub async fn send_agent_message(
@@ -131,7 +144,9 @@ impl ControlClient {
         ) {
             return Err(ClientError::InvalidRequest("agent message required"));
         }
-        self.submit_message(params).await
+        self.submit_message_with_push(params)
+            .await
+            .map(|result| result.receipt)
     }
     /// Explicit human input; does not manufacture an authenticated human identity.
     pub async fn send_human_input(
@@ -144,9 +159,11 @@ impl ControlClient {
         ) {
             return Err(ClientError::InvalidRequest("human input required"));
         }
-        self.submit_message(params).await
+        self.submit_message_with_push(params)
+            .await
+            .map(|result| result.receipt)
     }
-    /// Replies to the latest accepted Agent message delivered to the supplied caller session.
+    /// Replies to one stored direct message using its push id or Router link.
     pub async fn message_reply(
         &mut self,
         params: collaboration_protocol::SessionMessageReplyParams,
@@ -162,103 +179,110 @@ impl ControlClient {
             ClientError::Protocol("invalid message reply result; acceptance unknown")
         })
     }
-    async fn submit_message(
+    pub(crate) async fn submit_message_with_push(
         &mut self,
         params: collaboration_protocol::SessionMessageSendParams,
-    ) -> Result<collaboration_protocol::DeliveryReceipt, ClientError> {
+    ) -> Result<collaboration_protocol::PushMessageSendResult, ClientError> {
         use collaboration_protocol::{
-            AcceptedResumeEffect, DeliveryClientReceipt, DeliveryOutcome, MessageContent,
-            MessageDelivery, MessageInputKind, MessageRepresentation, NativeInputOperation,
-            NativeSendAcceptance, SessionReachability,
+            AcceptedResumeEffect, DeliveryClientReceipt, DeliveryOutcome, MessageDelivery,
+            MessageInputKind, MessageRepresentation, NativeInputOperation, NativeSendAcceptance,
+            SessionReachability,
         };
         let value = self.connection.call("message/send", json!(params)).await?;
-        let decoded = serde_json::from_value::<collaboration_protocol::DeliveryReceipt>(value);
+        let decoded =
+            serde_json::from_value::<collaboration_protocol::PushMessageSendResult>(value);
         let Ok(receipt) = decoded else {
             self.connection.failed = true;
             return Err(ClientError::Protocol(
                 "invalid message receipt; acceptance unknown",
             ));
         };
-        let (kind, representation) = match params.message {
-            MessageContent::Agent { .. } | MessageContent::Router { .. } => (
-                MessageInputKind::Agent,
-                MessageRepresentation::DeclaredAgentText,
-            ),
-            MessageContent::HumanUser { .. } => (
-                MessageInputKind::HumanUser,
-                MessageRepresentation::HumanUserText,
-            ),
-        };
-        let consistent = match (&receipt.reachability, &receipt.client) {
-            (None, None) => true,
-            (
-                Some(SessionReachability::CodexAppServer),
-                Some(DeliveryClientReceipt::CodexAppServer(native)),
-            ) => {
-                let acceptance_matches = matches!(
-                    (&params.mode, &receipt.outcome, &native.acceptance),
-                    (
-                        MessageDelivery::Auto,
-                        DeliveryOutcome::Started,
-                        NativeSendAcceptance::NativeInputAccepted {
-                            operation: NativeInputOperation::TurnStart,
-                            ..
-                        }
-                    ) | (
-                        MessageDelivery::Auto,
-                        DeliveryOutcome::StartedOrSteered,
-                        NativeSendAcceptance::NativeInputAccepted { .. }
-                    ) | (
-                        MessageDelivery::Auto,
-                        DeliveryOutcome::Steered,
-                        NativeSendAcceptance::SteerAccepted { .. }
-                    ) | (
-                        MessageDelivery::Queue,
-                        DeliveryOutcome::Queued,
-                        NativeSendAcceptance::QueueAccepted { .. }
-                    ) | (
-                        MessageDelivery::Steer,
-                        DeliveryOutcome::Steered,
-                        NativeSendAcceptance::SteerAccepted { .. }
+        // The service turns either caller input kind into a Router-authored
+        // push line. Native delivery renders that line as declared agent text.
+        let kind = MessageInputKind::Agent;
+        let representation = MessageRepresentation::DeclaredAgentText;
+        let delivery_receipt = &receipt.receipt;
+        let expected_link = collaboration_protocol::RouterLink::new(
+            collaboration_protocol::MachineId::from(self.identity.service_id.clone()),
+            receipt.push_id.clone(),
+        )
+        .to_string();
+        let consistent = receipt.target == params.target
+            && receipt.link == expected_link
+            && match (&delivery_receipt.reachability, &delivery_receipt.client) {
+                (None, None) => true,
+                (
+                    Some(SessionReachability::CodexAppServer),
+                    Some(DeliveryClientReceipt::CodexAppServer(native)),
+                ) => {
+                    let acceptance_matches = matches!(
+                        (&params.mode, &delivery_receipt.outcome, &native.acceptance),
+                        (
+                            MessageDelivery::Auto,
+                            DeliveryOutcome::Started,
+                            NativeSendAcceptance::NativeInputAccepted {
+                                operation: NativeInputOperation::TurnStart,
+                                ..
+                            }
+                        ) | (
+                            MessageDelivery::Auto,
+                            DeliveryOutcome::StartedOrSteered,
+                            NativeSendAcceptance::NativeInputAccepted { .. }
+                        ) | (
+                            MessageDelivery::Auto,
+                            DeliveryOutcome::Steered,
+                            NativeSendAcceptance::SteerAccepted { .. }
+                        ) | (
+                            MessageDelivery::Queue,
+                            DeliveryOutcome::Queued,
+                            NativeSendAcceptance::QueueAccepted { .. }
+                        ) | (
+                            MessageDelivery::Steer,
+                            DeliveryOutcome::Steered,
+                            NativeSendAcceptance::SteerAccepted { .. }
+                        )
+                    );
+                    native.target == params.target
+                        && params
+                            .generation_guard
+                            .as_ref()
+                            .is_none_or(|guard| guard == &native.generation)
+                        && native.input_kind == kind
+                        && native.representation == representation
+                        && acceptance_matches
+                        && (params.mode == MessageDelivery::Auto
+                            || native.resume_effect == AcceptedResumeEffect::NotRequested)
+                        && String::from(native.client_user_message_id.clone())
+                            == receipt.push_id.as_str()
+                }
+                (
+                    Some(SessionReachability::ProviderAcp),
+                    Some(DeliveryClientReceipt::ProviderAcp { .. }),
+                ) => {
+                    matches!(
+                        delivery_receipt.outcome,
+                        DeliveryOutcome::Started
+                            | DeliveryOutcome::Steered
+                            | DeliveryOutcome::Queued
                     )
-                );
-                native.target == params.target
-                    && params
-                        .generation_guard
-                        .as_ref()
-                        .is_none_or(|guard| guard == &native.generation)
-                    && native.input_kind == kind
-                    && native.representation == representation
-                    && acceptance_matches
-                    && (params.mode == MessageDelivery::Auto
-                        || native.resume_effect == AcceptedResumeEffect::NotRequested)
-                    && params.correlation.as_ref().is_none_or(|correlation| {
-                        correlation.as_str() == String::from(native.client_user_message_id.clone())
-                    })
-            }
-            (
-                Some(SessionReachability::ProviderAcp),
-                Some(DeliveryClientReceipt::ProviderAcp { .. }),
-            ) => {
-                matches!(
-                    receipt.outcome,
-                    DeliveryOutcome::Started | DeliveryOutcome::Steered | DeliveryOutcome::Queued
-                )
-            }
-            (
-                Some(SessionReachability::ClaudeCodePeer),
-                Some(DeliveryClientReceipt::ClaudeCodePeer),
-            ) => {
-                matches!(receipt.outcome, DeliveryOutcome::PeerMessageWritten)
-            }
-            (Some(_), None) => matches!(
-                receipt.outcome,
-                DeliveryOutcome::NotSubmitted { .. }
-                    | DeliveryOutcome::Rejected(_)
-                    | DeliveryOutcome::Unknown
-            ),
-            _ => false,
-        };
+                }
+                (
+                    Some(SessionReachability::ClaudeCodePeer),
+                    Some(DeliveryClientReceipt::ClaudeCodePeer),
+                ) => {
+                    matches!(
+                        delivery_receipt.outcome,
+                        DeliveryOutcome::PeerMessageWritten
+                    )
+                }
+                (Some(_), None) => matches!(
+                    delivery_receipt.outcome,
+                    DeliveryOutcome::NotSubmitted { .. }
+                        | DeliveryOutcome::Rejected(_)
+                        | DeliveryOutcome::Unknown
+                ),
+                _ => false,
+            };
         if !consistent {
             self.connection.failed = true;
             return Err(ClientError::Protocol(

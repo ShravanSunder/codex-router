@@ -1,18 +1,17 @@
-//! ACP, peer, wake, listen, and approval fixtures for Host composition proof.
+//! ACP, peer, wake, subscription, and approval fixtures for Host composition proof.
 use collaboration_client::{ControlClient, MessageSendRequest, PublicMessageContent};
 use collaboration_protocol::{
-    ApprovalDecideParams, ConversationCreateRequest, ConversationOperationSettlement,
-    ConversationOperationWaitOutput, ConversationOperationWaitRequest, ConversationPromptRequest,
-    DeliveryDisposition, DeliveryEvidence, DeliveryOutcome, DeliveryShowRequest, EndpointRef,
-    MessageContent, MessageDelivery, MessageText, OperationId, PositiveSeconds,
-    ProviderRequestedPolicy, ProviderWorkingDirectory, RouterAccess, SessionId, SessionRef,
-    WakeSendRequest, WakeShowRequest,
+    ConversationCreateRequest, ConversationLoadRequest, ConversationOperationSettlement,
+    ConversationOperationWaitOutput, ConversationOperationWaitRequest, DeliveryDisposition,
+    DeliveryEvidence, DeliveryOutcome, DeliveryShowRequest, EndpointRef, MessageDelivery,
+    MessageText, OperationId, PositiveSeconds, ProviderRequestedPolicy, ProviderWorkingDirectory,
+    RouterAccess, SessionId, SessionRef, ThreadSubscribeRequest, WakeSendRequest, WakeShowRequest,
 };
 use message_board::{
     BoardCreateRequest, BoardId, Description, HumanId, Identity, MessageId, MessagePostRequest,
     MessageReferences, ParticipantRole, Placement, ProjectCreateRequest, ProjectId, ResourceName,
-    ThreadJoinRequest, ThreadListenDelivery, ThreadListenMode, ThreadListenRequest,
-    ThreadListenSelection, TopicCreateRequest, TopicId,
+    SubscriptionMode, SubscriptionPolicyPatch, SubscriptionScope, SubscriptionTimingPatch,
+    ThreadJoinRequest, TopicCreateRequest, TopicId,
 };
 use serde_json::json;
 use sha2::{Digest as _, Sha256};
@@ -45,6 +44,8 @@ for line in sys.stdin:
    decision=json.loads(sys.stdin.readline())
    assert decision['id']==91
    assert decision['result']['outcome']['outcome']=='selected'
+   assert decision['result']['outcome']['optionId']=='allow-once'
+   open(prompt_log,'a').write(json.dumps({'fixturePermissionDecision':decision})+'\n')
   result={'stopReason':'end_turn'}
  else:
   raise RuntimeError(method)
@@ -65,15 +66,31 @@ pub(super) fn message(target: SessionRef) -> MessageSendRequest {
         },
         delivery: MessageDelivery::Auto,
         generation_guard: None,
-        correlation: None,
     }
 }
 
-pub(super) async fn wait_for_prompt_text(path: &Path, text: &str) {
+pub(super) async fn wait_for_prompt_text(path: &Path, text: &str) -> String {
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
-            if std::fs::read_to_string(path).is_ok_and(|log| log.contains(text)) {
-                break;
+            if let Some(observed_text) = std::fs::read_to_string(path).ok().and_then(|log| {
+                log.lines()
+                    .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+                    .find(|entry| provider_prompt_contains(entry, text))
+                    .and_then(|entry| {
+                        entry
+                            .get("params")?
+                            .get("prompt")?
+                            .as_array()?
+                            .iter()
+                            .find_map(|part| {
+                                part.get("text")?
+                                    .as_str()
+                                    .filter(|value| value.contains(text))
+                                    .map(str::to_owned)
+                            })
+                    })
+            }) {
+                break observed_text;
             }
             tokio::task::yield_now().await;
         }
@@ -84,7 +101,22 @@ pub(super) async fn wait_for_prompt_text(path: &Path, text: &str) {
             "provider prompt log deadline; log: {}",
             std::fs::read_to_string(path).unwrap_or_default()
         )
-    });
+    })
+}
+
+fn provider_prompt_contains(entry: &serde_json::Value, text: &str) -> bool {
+    entry.get("method").and_then(serde_json::Value::as_str) == Some("session/prompt")
+        && entry
+            .get("params")
+            .and_then(|params| params.get("prompt"))
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|parts| {
+                parts.iter().any(|part| {
+                    part.get("text")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(|value| value.contains(text))
+                })
+            })
 }
 
 pub(super) async fn wait_for_completed_provider_prompts(path: &Path, expected_count: usize) {
@@ -171,6 +203,8 @@ pub(super) async fn post_thread_activity_for_sessions(
         .expect("session reader");
         client
             .board_thread_join(ThreadJoinRequest {
+                mode: None,
+                when_idle: None,
                 root_message_id: root_message_id.clone(),
                 actor: reader.clone(),
                 role: ParticipantRole::Participant,
@@ -181,20 +215,20 @@ pub(super) async fn post_thread_activity_for_sessions(
             .await
             .expect("reader joined");
         client
-            .board_thread_listen(ThreadListenRequest {
-                reader,
-                selection: ThreadListenSelection::Roots {
-                    root_message_ids: vec![root_message_id.clone()],
+            .board_thread_subscribe(ThreadSubscribeRequest {
+                actor: reader,
+                scope: SubscriptionScope::thread(root_message_id.clone()),
+                policy: SubscriptionPolicyPatch {
+                    mode: Some(SubscriptionMode::Deliver),
+                    timing: SubscriptionTimingPatch {
+                        quiet_seconds: Some(0),
+                        cap_seconds: Some(0),
+                    },
+                    ..SubscriptionPolicyPatch::default()
                 },
-                mode: ThreadListenMode::Once {
-                    max_wait_seconds: 25 * 60,
-                },
-                from_activity_sequence: None,
-                acknowledge: false,
-                delivery: ThreadListenDelivery::Session,
             })
             .await
-            .expect("session listen");
+            .expect("session subscription");
     }
     client
         .board_message_post(MessagePostRequest {
@@ -208,10 +242,6 @@ pub(super) async fn post_thread_activity_for_sessions(
         })
         .await
         .expect("reply post");
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    tokio::time::pause();
-    tokio::time::advance(std::time::Duration::from_secs(5 * 60 + 2)).await;
-    tokio::time::resume();
 }
 
 pub(super) fn publish_peer(registry: &Path, session_id: &SessionId, protocol: u64, socket: &Path) {
@@ -300,6 +330,66 @@ pub(super) async fn create_provider_target(
     }
 }
 
+pub(super) async fn load_provider_target(
+    client: &mut ControlClient,
+    target: SessionRef,
+    actor: SessionRef,
+    working_directory: &Path,
+) {
+    let generation = client
+        .list_endpoints()
+        .await
+        .expect("catalog")
+        .endpoints
+        .into_iter()
+        .find(|entry| entry.endpoint == target.endpoint)
+        .expect("provider endpoint")
+        .channels
+        .into_iter()
+        .find_map(|channel| match channel {
+            collaboration_protocol::ChannelDescription::ExternalProvider {
+                binding_generation,
+                ..
+            } => Some(binding_generation),
+            _ => None,
+        })
+        .expect("binding generation");
+    let operation_id = OperationId::generate();
+    client
+        .load_provider_conversation(ConversationLoadRequest {
+            operation_id: operation_id.clone(),
+            target,
+            generation: Some(collaboration_protocol::CodexGeneration {
+                service_epoch: client.identity().service_epoch.clone(),
+                generation,
+            }),
+            working_directory: ProviderWorkingDirectory::try_from(
+                working_directory.display().to_string(),
+            )
+            .expect("working directory"),
+            requested_by: actor.clone().into(),
+            approver: actor.into(),
+            requested_policy: ProviderRequestedPolicy {
+                access: RouterAccess::WriteRestricted,
+            },
+        })
+        .await
+        .expect("explicit provider load admitted");
+    let waited = client
+        .wait_for_provider_conversation_operation(ConversationOperationWaitRequest {
+            operation_id,
+            timeout_seconds: PositiveSeconds::try_from(3).expect("timeout"),
+        })
+        .await
+        .expect("provider load settled");
+    assert!(matches!(
+        waited.output,
+        ConversationOperationWaitOutput::Available {
+            settlement: ConversationOperationSettlement::Loaded { .. }
+        }
+    ));
+}
+
 pub(super) async fn send_and_wait_wake(client: &mut ControlClient, target: SessionRef) {
     let request: WakeSendRequest = serde_json::from_value(json!({
         "operationId": OperationId::generate(),
@@ -352,129 +442,6 @@ pub(super) async fn send_and_wait_wake(client: &mut ControlClient, target: Sessi
     .expect("wake delivery deadline");
 }
 
-pub(super) async fn prompt_and_approve_from_peer_provider(
-    client: &mut ControlClient,
-    requester: SessionRef,
-    approver: SessionRef,
-    approver_prompt_log: &Path,
-) {
-    let inventory = client.list_endpoints().await.expect("catalog");
-    let generation_number = inventory
-        .endpoints
-        .iter()
-        .find(|entry| entry.endpoint == requester.endpoint)
-        .expect("requester endpoint")
-        .channels
-        .iter()
-        .find_map(|channel| match channel {
-            collaboration_protocol::ChannelDescription::ExternalProvider {
-                binding_generation,
-                ..
-            } => Some(*binding_generation),
-            _ => None,
-        })
-        .expect("requester generation");
-    let operation_id = OperationId::generate();
-    client
-        .prompt_provider_conversation(ConversationPromptRequest {
-            input_id: None,
-            operation_id: operation_id.clone(),
-            target: requester.clone(),
-            generation: Some(collaboration_protocol::CodexGeneration {
-                service_epoch: inventory.service_epoch,
-                generation: generation_number,
-            }),
-            requested_by: (requester).into(),
-            approver: (approver.clone()).into(),
-            prompt: MessageContent::HumanUser {
-                text: MessageText::try_from("request permission".to_owned())
-                    .expect("permission prompt"),
-            },
-        })
-        .await
-        .expect("permission prompt admitted");
-    wait_for_prompt_text(approver_prompt_log, "externalProviderPermission").await;
-    let pending = client
-        .list_approvals_with_options(true)
-        .await
-        .expect("pending approvals")
-        .approvals
-        .into_iter()
-        .find(|record| {
-            serde_json::to_value(&record.approver).ok()
-                == Some(json!({"kind":"session","session":approver.clone()}))
-        })
-        .expect("approval for other provider");
-    assert!(
-        pending
-            .options
-            .iter()
-            .any(|option| option.option_id == "allow-once")
-    );
-    client
-        .decide_approval(ApprovalDecideParams {
-            request_id: pending.request_id,
-            decision: None,
-            option_id: Some("allow-once".to_owned()),
-            acknowledge_persistent: false,
-            note: None,
-            actor: serde_json::from_value(json!({"kind":"session","session":approver.clone()}))
-                .expect("approver identity"),
-        })
-        .await
-        .expect("approval decision");
-    let settled = client
-        .wait_for_provider_conversation_operation(ConversationOperationWaitRequest {
-            operation_id,
-            timeout_seconds: PositiveSeconds::try_from(3).expect("timeout"),
-        })
-        .await
-        .expect("permission prompt settled");
-    assert!(matches!(
-        settled.output,
-        ConversationOperationWaitOutput::Available {
-            settlement: ConversationOperationSettlement::PromptCompleted { .. }
-        }
-    ));
-    tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        loop {
-            let log = std::fs::read_to_string(approver_prompt_log).unwrap_or_default();
-            let notice_id = log
-                .lines()
-                .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
-                .find(|entry| {
-                    entry["method"] == "session/prompt"
-                        && entry["params"]["prompt"][0]["text"]
-                            .as_str()
-                            .is_some_and(|text| text.contains("externalProviderPermission"))
-                })
-                .and_then(|entry| entry["id"].as_str().map(str::to_owned));
-            if notice_id
-                .is_some_and(|id| log.contains(&format!("\"fixturePromptCompleted\": \"{id}\"")))
-            {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("approver notice turn settled before later board activity");
-    tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        loop {
-            if client
-                .inspect_provider_session(collaboration_protocol::ProviderSessionInspectRequest {
-                    target: approver.clone(),
-                })
-                .await
-                .is_ok_and(|session| {
-                    session.state == collaboration_protocol::ProviderSessionState::Idle
-                })
-            {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("approver Session idle before later board activity");
-}
+#[path = "session_message_approval_fixture.rs"]
+mod approval_fixture;
+pub(super) use approval_fixture::prompt_and_approve_from_peer_provider;

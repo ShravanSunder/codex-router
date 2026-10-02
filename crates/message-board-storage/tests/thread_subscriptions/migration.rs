@@ -95,6 +95,8 @@ async fn backfill_requires_open_session_unresolved_thread_and_active_watch() {
         .store
         .join_thread(
             ThreadJoinRequest {
+                mode: None,
+                when_idle: None,
                 root_message_id: resolved_root.clone(),
                 actor: resolved_reader.clone(),
                 role: ParticipantRole::Participant,
@@ -341,7 +343,12 @@ async fn p1_backfill_delivered_stays_at_message_activity_when_join_is_latest() {
     assert_eq!(due, vec![fixture.root_message_id.clone()]);
     let (notice, _) = fixture
         .store
-        .select_subscription_notice(&reader, &due, fixture.now + chrono::Duration::seconds(200))
+        .select_subscription_notice(
+            &reader,
+            &due,
+            fixture.now + chrono::Duration::seconds(200),
+            usize::MAX,
+        )
         .await
         .unwrap();
     assert_eq!(notice.roots[0].message_count, 1);

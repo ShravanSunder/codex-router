@@ -2,10 +2,10 @@
 use crate::BoardStore;
 use crate::storage_support::{
     BoardTransaction, current_activity_sequence, identity_key, invalid_record, storage_error,
+    validate_topic_watch_boundary,
 };
-use crate::thread_batch_selection::{
-    ThreadBatchSelectionRoot, pending_message_count, select_pending_root_notices,
-};
+#[path = "subscription_window_records/root_activity_selection.rs"]
+mod root_activity_selection;
 use crate::thread_subscription_lifecycle_records::{
     CoveringSubscription, ensure_topic_root_watch, get_covering_subscription,
     renew_covering_subscription,
@@ -15,6 +15,8 @@ use crate::thread_subscription_row_decoding::{
 };
 use chrono::{DateTime, Duration, Utc};
 use message_board::*;
+pub(crate) use root_activity_selection::pending_message_count;
+use root_activity_selection::{SubscriptionRootSelection, select_pending_root_notices};
 use sqlx::Connection;
 use std::collections::HashMap;
 
@@ -166,6 +168,7 @@ pub(crate) async fn rescan_missing_windows_in_transaction(
                 .await
                 .map_err(storage_error)?
                 .ok_or_else(|| corrupt_subscription("topicWatch"))?;
+                validate_topic_watch_boundary(topic_watch_start, latest, &topic_id)?;
                 let topic =
                     crate::board_topic_records::require_topic(transaction, &topic_id).await?;
                 let board =
@@ -302,14 +305,15 @@ impl BoardStore {
         Ok(due_roots)
     }
 
-    /// Mark up to 20 selected roots in flight and return their bodyless locators.
+    /// Mark the largest fitting prefix of up to 20 roots in flight and return bodyless locators.
     ///
-    /// Roots omitted by the cap remain unchanged and due for the next selection cycle.
+    /// Roots omitted by either cap remain unchanged and due for the next selection cycle.
     pub async fn select_subscription_notice(
         &mut self,
         reader: &Identity,
         roots: &[MessageId],
         now: DateTime<Utc>,
+        maximum_root_notice_bytes: usize,
     ) -> Result<(SubscriptionBatch, SubscriptionBatchSettlement), BoardError> {
         let mut transaction = self
             .connection
@@ -356,18 +360,42 @@ impl BoardStore {
                     "a selected root is already in flight",
                 ));
             }
-            selection_roots.push(ThreadBatchSelectionRoot {
+            selection_roots.push(SubscriptionRootSelection {
                 root_message_id: root_message_id.clone(),
-                initial_delivered_position: None,
             });
             window_facts.insert(
                 root_message_id.clone(),
                 (window.window_id, window.held_since, subscription),
             );
         }
-        let root_notices =
+        let mut root_notices =
             select_pending_root_notices(&mut transaction, &reader_key, &selection_roots, latest)
                 .await?;
+        if serde_json::to_vec(&Vec::<PendingRootNotice>::new())
+            .map_err(|_| BoardError::board_unavailable())?
+            .len()
+            > maximum_root_notice_bytes
+        {
+            return Err(BoardError::board_unavailable());
+        }
+        let mut selected_root_count = root_notices.len();
+        while selected_root_count > 0 {
+            let selected_prefix = root_notices
+                .iter()
+                .take(selected_root_count)
+                .collect::<Vec<_>>();
+            let selected_prefix_bytes = serde_json::to_vec(&selected_prefix)
+                .map_err(|_| BoardError::board_unavailable())?
+                .len();
+            if selected_prefix_bytes <= maximum_root_notice_bytes {
+                break;
+            }
+            selected_root_count -= 1;
+        }
+        if !root_notices.is_empty() && selected_root_count == 0 {
+            return Err(BoardError::board_unavailable());
+        }
+        root_notices.truncate(selected_root_count);
         let mut batch_held_since: Option<DateTime<Utc>> = None;
         let mut batch_draining = false;
         let mut settlements = Vec::with_capacity(root_notices.len());
