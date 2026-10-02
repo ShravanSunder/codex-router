@@ -379,4 +379,16 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git commit -m "codex-router ${RELEASE_VERSION}"
-          git push origin HEAD:main
+          if git push origin HEAD:main; then
+            exit 0
+          fi
+          # scripts/publish_homebrew_tap_local.py may have pushed this release
+          # first. The formula is deterministic, so identical content on the tap
+          # means the release is already published.
+          git fetch origin main
+          if git diff --quiet FETCH_HEAD HEAD -- Formula/codex-router.rb; then
+            echo "Homebrew formula already published for this release"
+            exit 0
+          fi
+          echo "push rejected and the tap holds a different formula" >&2
+          exit 1
