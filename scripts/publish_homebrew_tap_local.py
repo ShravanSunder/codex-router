@@ -32,6 +32,10 @@ TAP_NAME = "shravansunder/taps"
 FORMULA_NAME = f"{TAP_NAME}/codex-router"
 FORMULA_RELATIVE_PATH = Path("Formula/codex-router.rb")
 INSTALLED_EXECUTABLES = ("codex-router", "agent-collaboration", "agent-sessions")
+# Released executables carry a fixed Developer ID identity so Keychain approvals
+# survive upgrades; it must match the release workflow's signing step.
+DEVELOPER_ID_TEAM = "974QD84WVC"
+CODE_IDENTIFIER_PREFIX = "dev.shravansunder"
 WORKSPACE_VERSION_PATTERN = re.compile(
     r'^\[workspace\.package\]\s*$(?:\n(?!\[).*)*?\nversion = "([0-9]+\.[0-9]+\.[0-9]+)"',
     re.MULTILINE,
@@ -134,6 +138,17 @@ def prepare_tap(tap_path: Path) -> None:
         raise PublishError(f"tap checkout {tap_path} is not at origin/main")
 
 
+def release_signature_problem(signature_details: str, executable: str) -> str | None:
+    """Return why `codesign -dv` output is not the release identity, or None when it is."""
+    lines = set(signature_details.splitlines())
+    expected_identifier = f"Identifier={CODE_IDENTIFIER_PREFIX}.{executable}"
+    if expected_identifier not in lines:
+        return f"{executable} is not signed as {CODE_IDENTIFIER_PREFIX}.{executable}"
+    if f"TeamIdentifier={DEVELOPER_ID_TEAM}" not in lines:
+        return f"{executable} is not signed by team {DEVELOPER_ID_TEAM}"
+    return None
+
+
 def install_action(installed_versions: str, version: str) -> str:
     """Return the brew command that installs `version` fresh, as CI does."""
     if not installed_versions:
@@ -167,9 +182,19 @@ def validate_installation(version: str) -> None:
     binary = prefix / "bin" / "codex-router"
     if "Mach-O 64-bit executable arm64" not in run(["file", str(binary)]):
         raise PublishError("Homebrew installed a non-arm64 binary")
-    _ = run(["codesign", "--verify", "--verbose=2", str(binary)])
     for executable in INSTALLED_EXECUTABLES:
-        reported = run([str(prefix / "bin" / executable), "--version"])
+        installed = prefix / "bin" / executable
+        _ = run(["codesign", "--verify", "--strict", "--verbose=2", str(installed)])
+        details = subprocess.run(
+            ["codesign", "-dv", "--verbose=2", str(installed)],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        problem = release_signature_problem(details.stderr, executable)
+        if problem is not None:
+            raise PublishError(f"Homebrew installed a binary with the wrong signature: {problem}")
+        reported = run([str(installed), "--version"])
         if reported != f"{executable} {version}":
             raise PublishError(f"Homebrew installed {reported!r}, expected {executable} {version}")
 

@@ -20,6 +20,10 @@ concurrency:
 
 env:
   RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+  # Keychain approvals belong to a code identity; a fixed identifier and team keep
+  # one identity across releases. Debug builds use "<identifier>.debug".
+  DEVELOPER_ID_TEAM: 974QD84WVC
+  CODE_IDENTIFIER_PREFIX: dev.shravansunder
 
 jobs:
   release:
@@ -123,6 +127,41 @@ jobs:
             target/protocol-schemas/acp-protocol/
           cp protocol-schemas/schema-packaging.md target/protocol-schemas/
 
+      - name: Require the Developer ID certificate
+        env:
+          APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: |
+          if [[ -z "${APPLE_CERTIFICATE_BASE64}" || -z "${APPLE_CERTIFICATE_PASSWORD}" ]]; then
+            echo "APPLE_CERTIFICATE_BASE64 and APPLE_CERTIFICATE_PASSWORD are required to sign the release" >&2
+            exit 1
+          fi
+
+      - name: Import the Developer ID certificate
+        uses: apple-actions/import-codesign-certs@5142e029c445c10ffc7149d172e540235a065466 # v7.0.0
+        with:
+          p12-file-base64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
+          p12-password: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+
+      - name: Sign release binaries with the Developer ID identity
+        working-directory: release-source
+        run: |
+          set -euo pipefail
+          signing_identity="$(
+            security find-identity -v -p codesigning |
+              awk -v team="(${DEVELOPER_ID_TEAM})\"" 'index($0, "Developer ID Application") && index($0, team) { print $2; exit }'
+          )"
+          if [[ -z "${signing_identity}" ]]; then
+            echo "no Developer ID Application identity for team ${DEVELOPER_ID_TEAM}" >&2
+            exit 1
+          fi
+          for executable in codex-router agent-collaboration agent-sessions; do
+            codesign --force --sign "${signing_identity}" \
+              --identifier "${CODE_IDENTIFIER_PREFIX}.${executable}" \
+              --options runtime --timestamp \
+              "target/release/${executable}"
+          done
+
       - name: Verify and package release binary
         id: artifact
         env:
@@ -131,13 +170,26 @@ jobs:
         run: |
           set -euo pipefail
 
+          verify_release_signature() {
+            local binary="$1"
+            local signature
+            codesign --verify --strict --verbose=2 "${binary}"
+            signature="$(codesign -dv --verbose=2 "${binary}" 2>&1)"
+            if ! grep -qx "Identifier=${CODE_IDENTIFIER_PREFIX}.$(basename "${binary}")" <<<"${signature}" ||
+              ! grep -qx "TeamIdentifier=${DEVELOPER_ID_TEAM}" <<<"${signature}" ||
+              ! grep -q "flags=.*runtime" <<<"${signature}"; then
+              echo "${binary} is not signed as ${CODE_IDENTIFIER_PREFIX}.$(basename "${binary}") by team ${DEVELOPER_ID_TEAM} with the hardened runtime" >&2
+              exit 1
+            fi
+          }
+
           release_binary="target/release/codex-router"
           file_description="$(file "${release_binary}")"
           if [[ "${file_description}" != *"Mach-O 64-bit executable arm64"* ]]; then
             echo "release binary is not Mach-O arm64" >&2
             exit 1
           fi
-          codesign --verify --verbose=2 "${release_binary}"
+          verify_release_signature "${release_binary}"
           if [[ "$("${release_binary}" --version)" != "codex-router ${RELEASE_VERSION}" ]]; then
             echo "release binary version does not match the release tag" >&2
             exit 1
@@ -148,7 +200,7 @@ jobs:
             echo "agent-collaboration binary is not Mach-O arm64" >&2
             exit 1
           fi
-          codesign --verify --verbose=2 "${collaboration_binary}"
+          verify_release_signature "${collaboration_binary}"
           if [[ "$("${collaboration_binary}" --version)" != "agent-collaboration ${RELEASE_VERSION}" ]]; then
             echo "agent-collaboration version does not match release tag" >&2
             exit 1
@@ -159,7 +211,7 @@ jobs:
             echo "agent-sessions binary is not Mach-O arm64" >&2
             exit 1
           fi
-          codesign --verify --verbose=2 "${session_binary}"
+          verify_release_signature "${session_binary}"
           if [[ "$("${session_binary}" --version)" != "agent-sessions ${RELEASE_VERSION}" ]]; then
             echo "agent-sessions version does not match release tag" >&2
             exit 1
@@ -336,13 +388,25 @@ jobs:
           brew test shravansunder/taps/codex-router
           brew linkage --test codex-router
 
+          verify_installed_signature() {
+            local binary="$1"
+            local signature
+            codesign --verify --strict --verbose=2 "${binary}"
+            signature="$(codesign -dv --verbose=2 "${binary}" 2>&1)"
+            if ! grep -qx "Identifier=${CODE_IDENTIFIER_PREFIX}.$(basename "${binary}")" <<<"${signature}" ||
+              ! grep -qx "TeamIdentifier=${DEVELOPER_ID_TEAM}" <<<"${signature}"; then
+              echo "Homebrew installed ${binary} without the ${CODE_IDENTIFIER_PREFIX} Developer ID signature" >&2
+              exit 1
+            fi
+          }
+
           installed_binary="$(brew --prefix codex-router)/bin/codex-router"
           installed_description="$(file "${installed_binary}")"
           if [[ "${installed_description}" != *"Mach-O 64-bit executable arm64"* ]]; then
             echo "Homebrew installed a non-arm64 binary" >&2
             exit 1
           fi
-          codesign --verify --verbose=2 "${installed_binary}"
+          verify_installed_signature "${installed_binary}"
           if [[ "$("${installed_binary}" --version)" != "codex-router ${RELEASE_VERSION}" ]]; then
             echo "Homebrew installed an unexpected codex-router version" >&2
             exit 1
@@ -354,6 +418,7 @@ jobs:
               echo "Homebrew did not install ${executable}" >&2
               exit 1
             fi
+            verify_installed_signature "${installed_executable}"
             if [[ "$("${installed_executable}" --version)" != "${executable} ${RELEASE_VERSION}" ]]; then
               echo "Homebrew installed an unexpected ${executable} version" >&2
               exit 1

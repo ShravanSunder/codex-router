@@ -1,3 +1,8 @@
 [env]
 # Ordinary builds use committed query descriptions, never a live account database.
 SQLX_OFFLINE = "true"
+
+# Signs Router's debug executables with a stable debug code identity so Keychain
+# approvals survive rebuilds (see scripts/cargo_debug_signing_runner.sh).
+[target.aarch64-apple-darwin]
+runner = "scripts/cargo_debug_signing_runner.sh"
