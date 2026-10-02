@@ -256,6 +256,13 @@ async fn cursor_queue_drains_after_control_prompt_settles() {
         .expect("first bytes");
     let evidence = RecordedEvidence(tokio::sync::Mutex::new(Vec::new()));
     let queued_request = request(target.clone(), "second");
+    let expected_push_preview = queued_request
+        .payload
+        .line
+        .as_str()
+        .chars()
+        .take(80)
+        .collect::<String>();
     let queued_operation_id =
         collaboration_protocol::OperationId::try_from(queued_request.attempt.as_str().to_owned())
             .expect("queue operation ID");
@@ -280,7 +287,7 @@ async fn cursor_queue_drains_after_control_prompt_settles() {
     let listed = route.queue_list(&target);
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0].input_id, queued_input_id);
-    assert_eq!(listed[0].preview, "second");
+    assert_eq!(listed[0].preview, expected_push_preview);
 
     let blocker_id = collaboration_protocol::OperationId::generate();
     {

@@ -81,6 +81,7 @@ pub use managed_app_server::AppServerChild;
 pub use managed_app_server::AppServerLaunchPlan;
 pub use managed_app_server::AppServerReadiness;
 pub use managed_app_server::AppServerReadinessError;
+pub use managed_app_server::RemoteControlServerName;
 
 pub use codex_update_preparation::UpdateDeadlineError;
 pub use codex_update_preparation::UpdateDeadlines;

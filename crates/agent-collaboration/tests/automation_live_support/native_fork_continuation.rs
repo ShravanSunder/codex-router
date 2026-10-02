@@ -15,7 +15,7 @@ pub async fn exercise() -> ProofResult<()> {
     let receipt = proof.client.send_agent_message(SessionMessageSendParams {
         target: source.clone(), generation_guard: Some(proof.generation.clone()),
         message: MessageContent::Agent { sender: source.clone(), text: format!("Remember this context token: {token}. Output exactly {token}. Do not call tools or spawn agents.").try_into()? },
-        mode: MessageDelivery::Auto, correlation: None,
+        mode: MessageDelivery::Auto,
     }).await?;
     let Some(DeliveryClientReceipt::CodexAppServer(native)) = receipt.client else {
         return Err("Fresh source lacked the native client receipt".into());

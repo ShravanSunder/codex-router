@@ -1,7 +1,8 @@
 use crate::proof_context::{ProofContext, ProofResult, agent_text};
 use collaboration_client::protocol::{
-    MessageContent, MessageText, NativeSendReceipt, SessionRef, parse_agent_message_envelope,
-    render_message, session_identity,
+    DeliveryOutcome, MachineId, MachineLabel, PushDeliveryState, PushHeaderFacts, PushId,
+    PushLineInput, PushMessageSendResult, PushOrigin, RouterLink, SessionRef,
+    parse_push_line_header, render_push_line, session_identity,
 };
 use serde_json::{Value, json};
 use std::{path::Path, time::Duration};
@@ -61,7 +62,7 @@ fn terminal_with_text(turns: &[Value], required_text: Option<&str>) -> bool {
     })
 }
 
-pub(super) fn successful_cli_receipts(turns: &[Value]) -> Vec<NativeSendReceipt> {
+pub(super) fn successful_cli_receipts(turns: &[Value]) -> Vec<PushMessageSendResult> {
     command_items(turns)
         .filter(|item| item.get("exitCode").and_then(Value::as_i64) == Some(0))
         .filter_map(|item| item.get("aggregatedOutput").and_then(Value::as_str))
@@ -98,19 +99,53 @@ pub(super) fn has_incoming_message_followed_by_agent_text(
     turns: &[Value],
     sender: &SessionRef,
     recipient: &SessionRef,
+    expected: &PushMessageSendResult,
     marker: &str,
 ) -> bool {
+    let expected_sender = session_identity(sender, None);
+    let sender_session_prefix: String = String::from(sender.session_id.clone())
+        .chars()
+        .take(8)
+        .collect();
+    let sender_reference = format!(
+        "{}/{}",
+        String::from(sender.endpoint.endpoint_id.clone()),
+        sender_session_prefix
+    );
+    if expected.target != *recipient
+        || expected.delivery_state != PushDeliveryState::Delivered
+        || !matches!(
+            &expected.receipt.outcome,
+            DeliveryOutcome::PeerMessageWritten
+        )
+    {
+        return false;
+    }
     turns.iter().any(|turn| {
         turn.get("items")
             .and_then(Value::as_array)
             .is_some_and(|items| {
                 items.iter().enumerate().any(|(index, item)| {
                     user_text(item).is_some_and(|text| {
-                        parse_agent_message_envelope(text).is_some_and(|envelope| {
-                            envelope.sender == *sender
-                                && envelope.recipient == *recipient
-                                && envelope.body.contains(marker)
-                        })
+                        let Some(header) = parse_push_line_header(text) else {
+                            return false;
+                        };
+                        let Some((_, link_text)) = text.rsplit_once(" · ") else {
+                            return false;
+                        };
+                        let Ok(link) = RouterLink::parse(link_text) else {
+                            return false;
+                        };
+                        let sender_matches =
+                            header.title.starts_with(&format!("✉️ {expected_sender}"))
+                                || header.title.contains(&sender_reference);
+                        header.kind == collaboration_client::protocol::PushKind::DirectMessage
+                            && sender_matches
+                            && String::from(recipient.endpoint.service_id.clone())
+                                == link.machine_id().as_str()
+                            && link.push_id() == &expected.push_id
+                            && expected.link == link.to_string()
+                            && text.contains(marker)
                     }) && items.iter().skip(index + 1).any(|later| {
                         later.get("type").and_then(Value::as_str) == Some("agentMessage")
                     })
@@ -194,42 +229,34 @@ mod tests {
     fn grades_cli_receipt_and_actual_incoming_message_from_history() {
         let sender = session("00000000-0000-4000-8000-000000000002");
         let recipient = session("00000000-0000-4000-8000-000000000003");
+        let push_id =
+            PushId::try_from("018f47d2-24d5-7a68-b9ec-6f759c39458f".to_owned()).expect("push id");
+        let link = RouterLink::new(
+            MachineId::from(recipient.endpoint.service_id.clone()),
+            push_id.clone(),
+        );
         let receipt = json!({
             "kind":"result",
             "result":{
+                "pushId":push_id,
+                "link":link.to_string(),
                 "target":recipient,
-                "generation":{
-                    "serviceEpoch":"00000000-0000-4000-8000-000000000004",
-                    "generation":1
-                },
-                "inputKind":"agent",
-                "representation":"declaredAgentText",
-                "clientUserMessageId":"fixture-message",
-                "resumeEffect":"accepted",
-                "acceptance":{
-                    "kind":"nativeInputAccepted",
-                    "operation":"turnStart",
-                    "disposition":"startedOrSteered",
-                    "turnId":"fixture-turn"
-                }
+                "targetIdentity":"🤖 codex-local/recipient",
+                "deliveryState":"delivered",
+                "receipt":{"outcome":{"kind":"peerMessageWritten"},"reachability":"claudeCodePeer","client":{"kind":"claudeCodePeer"}}
             }
         });
-        let incoming = render_message(
-            &recipient,
-            &MessageContent::Agent {
-                sender: sender.clone(),
-                text: MessageText::try_from("FIXTURE_MARKER".to_owned())
-                    .expect("fixture message text"),
+        let incoming = render_push_line(&PushLineInput {
+            link,
+            machine_label: MachineLabel::try_from("fixture-host".to_owned())
+                .expect("machine label"),
+            origin: PushOrigin::Session(sender.clone()),
+            header_facts: PushHeaderFacts::DirectMessage {
+                sender_display_name: None,
             },
-        )
-        .expect("render agent envelope")
-        .text;
-        let expected_identity_line = format!(
-            "{} ← {}\nAgent communication\n",
-            session_identity(&recipient, None),
-            session_identity(&sender, None),
-        );
-        assert!(incoming.starts_with(&expected_identity_line));
+            body: Some("FIXTURE_MARKER".to_owned()),
+        })
+        .expect("render prepared push line");
         let turns = vec![json!({
             "status":"completed",
             "items":[
@@ -240,11 +267,15 @@ mod tests {
         })];
 
         assert!(used_messaging_cli(&turns));
-        assert_eq!(successful_cli_receipts(&turns).len(), 1);
+        let send_result = successful_cli_receipts(&turns)
+            .into_iter()
+            .next()
+            .expect("successful prepared-send result");
         assert!(has_incoming_message_followed_by_agent_text(
             &turns,
             &sender,
             &recipient,
+            &send_result,
             "FIXTURE_MARKER"
         ));
         require_terminal(&turns, "fixture").expect("completed terminal evidence");

@@ -71,19 +71,17 @@ pub(super) fn display_title_from_session_fields(
 ) -> Option<String> {
     let explicit_name = name.and_then(normalize_plain_display_title);
     let title_sources = [title, preview, first_user_message];
-    let derived_title = title_sources
-        .iter()
-        .flatten()
-        .find_map(|value| {
-            collaboration_client::protocol::title_from_agent_message_envelope(value)
-                .and_then(|title| normalize_plain_display_title(&title))
-        })
-        .or_else(|| {
-            title_sources
-                .into_iter()
-                .flatten()
-                .find_map(normalize_plain_display_title)
-        });
+    // A preview may contain a complete push line, but plain preview text is never a title.
+    let push_header_title = title_sources.iter().flatten().find_map(|value| {
+        collaboration_client::protocol::parse_push_line_header(value)
+            .and_then(|header| normalize_plain_display_title(&header.title))
+    });
+    let derived_title = push_header_title.or_else(|| {
+        [title, first_user_message]
+            .into_iter()
+            .flatten()
+            .find_map(normalize_plain_display_title)
+    });
     match (explicit_name, derived_title) {
         (Some(name), Some(derived_title)) => Some(truncate_end(
             &format!("{name} | {derived_title}"),

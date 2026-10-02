@@ -372,7 +372,7 @@ async fn hosted_refresh_keeps_equal_provider_and_codex_ids_as_two_rows() {
         LocalControlService::bind(&root.path().join("control.sock"), identity).expect("listener");
     let manifest = serde_json::from_value(json!({
         "version":2,"serviceId":SERVICE,"serviceEpoch":EPOCH,
-        "control":{"transport":"unixJsonLines","path":"control.sock"},
+        "machineLabel":"fixture-host","control":{"transport":"unixJsonLines","path":"control.sock"},
         "controlSchemaDigest":digest,
         "mcp":{"transport":"streamableHttp","url":"http://127.0.0.1:0/mcp"}
     }))

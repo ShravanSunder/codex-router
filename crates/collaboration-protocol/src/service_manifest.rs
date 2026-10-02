@@ -1,5 +1,5 @@
 //! Versioned owner-local service discovery contract.
-use crate::{SchemaDigest, UuidIdentity};
+use crate::{MachineLabel, SchemaDigest, UuidIdentity};
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 
@@ -37,6 +37,7 @@ pub struct ServiceManifest {
     #[schemars(range(min = 2, max = 2))]
     pub version: u8,
     pub service_id: UuidIdentity,
+    pub machine_label: MachineLabel,
     pub service_epoch: UuidIdentity,
     pub control: ControlSelector,
     pub control_schema_digest: SchemaDigest,
@@ -62,6 +63,7 @@ mod tests {
         let mut value = json!({
             "version":version,
             "serviceId":"00000000-0000-4000-8000-000000000001",
+            "machineLabel":"test-machine",
             "serviceEpoch":"00000000-0000-4000-8000-000000000002",
             "control":{"transport":"unixJsonLines","path":"control.sock"},
             "controlSchemaDigest":format!("sha256:{}", "a".repeat(64)),

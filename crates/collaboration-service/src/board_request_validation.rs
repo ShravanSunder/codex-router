@@ -59,6 +59,10 @@ fn validate_required_identities(
         "board/topicWatch",
         "board/topicUnwatch",
         "board/inboxAcknowledge",
+        "board/threadSubscribe",
+        "board/threadUnsubscribe",
+        "board/threadSubscriptions",
+        "board/threadWait",
     ];
     const READER_METHODS: &[&str] = &[
         "board/threadList",
@@ -374,6 +378,32 @@ fn validate_closed_variants(method: &str, fields: &Map<String, Value>) -> Result
             fields,
             "scope",
             "must be topic or thread with its required UUIDv7 field",
+        )?;
+    } else if method == "board/threadSubscribe" {
+        if !fields.contains_key("scope") {
+            return Err(invalid_field("scope", "is required"));
+        }
+        validate_variant::<SubscriptionScope>(
+            fields,
+            "scope",
+            "must select thread or topic with its required UUIDv7 field",
+        )?;
+        if !fields.contains_key("policy") {
+            return Err(invalid_field("policy", "is required"));
+        }
+        validate_variant::<SubscriptionPolicyPatch>(
+            fields,
+            "policy",
+            "must contain supported optional mode, idle, timing and lifetime fields",
+        )?;
+    } else if method == "board/threadUnsubscribe" {
+        if !fields.contains_key("scope") {
+            return Err(invalid_field("scope", "is required"));
+        }
+        validate_variant::<SubscriptionScope>(
+            fields,
+            "scope",
+            "must select thread or topic with its required UUIDv7 field",
         )?;
     }
     if let Some(references) = fields.get("references")

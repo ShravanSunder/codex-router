@@ -3,6 +3,8 @@ use collaboration_protocol::{OperationId, WakeMutationRequest, WakeSendRequest, 
 use collaboration_service::{ServiceIdentity, serve_control_connection};
 use serde_json::json;
 use std::sync::Arc;
+#[path = "support/wake_push_draft.rs"]
+mod wake_push_test_support;
 #[tokio::test]
 async fn dedicated_wait_observes_pause_after_immediate_resume()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -61,6 +63,7 @@ async fn dedicated_wait_observes_pause_after_immediate_resume()
         .evaluate_wakeup::<collaboration_protocol::SavedMessage>(
             &wake.definition.wakeup_id,
             chrono::Utc::now().timestamp_millis() + 60000,
+            wake_push_test_support::build_test_wake_push_draft,
         )
         .await?;
     client

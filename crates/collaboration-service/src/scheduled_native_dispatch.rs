@@ -1,6 +1,7 @@
 //! Native scheduled submission waits for idleness and records intent before starting a turn.
+use crate::scheduled_run_contract::ScheduledRunPayload;
 use crate::{
-    DeliveryContractError, DeliveryPrecondition, NativeControlBackend, RunAcceptance,
+    DeliveryContractError, DeliveryPrecondition, LoadPolicy, NativeControlBackend, RunAcceptance,
     RunEvidenceDisposition, RunEvidenceSink, RunSubmission, ScheduledRunSubmission,
 };
 use agent_automation::{
@@ -9,9 +10,8 @@ use agent_automation::{
 use codex_native_integration::{NativeConnectionError, NativeOperation, NativeProtocolConnection};
 use collaboration_protocol::{
     AcceptedResumeEffect, DeliveryNextAction, DeliveryRejection, DeliveryRejectionReason,
-    MessageContent, MessageInputKind, MessageRepresentation, NativeExecution,
-    NativeInputDisposition, NativeInputOperation, NativeSendAcceptance, NativeSendReceipt,
-    RunExecution,
+    MessageInputKind, MessageRepresentation, NativeExecution, NativeInputDisposition,
+    NativeInputOperation, NativeSendAcceptance, NativeSendReceipt, RunExecution,
 };
 use serde_json::{Value, json};
 
@@ -21,6 +21,17 @@ pub(crate) async fn dispatch(
     sink: &dyn RunEvidenceSink,
     held_connection: Option<&mut NativeProtocolConnection>,
 ) -> Result<RunSubmission, DeliveryContractError> {
+    let run_id = run.run_id.clone();
+    let (message_text, client_user_message_id, load_policy) = match run.payload {
+        ScheduledRunPayload::Existing { prepared } => (
+            prepared.line,
+            prepared.push_id.as_str().to_owned(),
+            prepared.load_policy,
+        ),
+        ScheduledRunPayload::Fresh { task_input } => {
+            (task_input, run_id.as_str().to_owned(), LoadPolicy::MayLoad)
+        }
+    };
     let RouteEffectEvidence::CodexAppServer(mut effects) = run.recorded else {
         return Err(DeliveryContractError::InvalidEvidence);
     };
@@ -39,20 +50,12 @@ pub(crate) async fn dispatch(
             next_action: DeliveryNextAction::InspectTarget,
             client_code: None,
             detail: Some("Scheduled target generation changed before submission".into()),
+            claims: None,
         }));
     }
     let schemas = admission
         .schemas()
         .ok_or(DeliveryContractError::ClientOperation)?;
-    let scheduled_message = MessageContent::Router {
-        text: run.message.clone(),
-    };
-    let rendered_message = collaboration_protocol::render_message_with_context(
-        &run.target,
-        &scheduled_message,
-        &run.header_context,
-    )
-    .map_err(|_| DeliveryContractError::ClientOperation)?;
     let held_unmaterialized = held_connection.is_some();
     let mut opened_connection = None;
     if held_connection.is_none() {
@@ -86,6 +89,9 @@ pub(crate) async fn dispatch(
         match read.pointer("/thread/status/type").and_then(Value::as_str) {
             Some("active") => return Ok(RunSubmission::NotStartedBusy),
             Some("notLoaded") => {
+                if load_policy == LoadPolicy::LoadedOnly {
+                    return Ok(RunSubmission::NotStartedBusy);
+                }
                 effects.resume = PreparationEffect::Unknown;
                 if matches!(
                     sink.record(RouteEffectEvidence::CodexAppServer(effects.clone()))
@@ -125,7 +131,7 @@ pub(crate) async fn dispatch(
     }
     effects.generation = Some(admission.generation().clone());
     effects.submission = SubmissionEffect::Dispatching;
-    effects.client_user_message_id = Some(run.run_id.as_str().into());
+    effects.client_user_message_id = Some(client_user_message_id.clone());
     effects.cessation = CessationEvidence::Unconfirmed;
     let timing = match sink
         .record(RouteEffectEvidence::CodexAppServer(effects.clone()))
@@ -146,8 +152,8 @@ pub(crate) async fn dispatch(
             result = connection.request_validated(
                 &schemas,
                 NativeOperation::StartTurn,
-                json!({"threadId":thread_id,"input":[{"type":"text","text":rendered_message.text}],
-                    "clientUserMessageId":run.run_id.as_str(),
+                json!({"threadId":thread_id,"input":[{"type":"text","text":message_text.as_str()}],
+                    "clientUserMessageId":client_user_message_id.as_str(),
                     "effort":run.inputs.execution_configuration.effort.as_deref().unwrap_or_default()}),
             ) => result,
             _ = retired.cancelled() => Err(NativeConnectionError::OutcomeUnknown),
@@ -174,10 +180,8 @@ pub(crate) async fn dispatch(
                 generation: admission.generation().clone(),
                 input_kind: MessageInputKind::Agent,
                 representation: MessageRepresentation::DeclaredAgentText,
-                client_user_message_id: run
-                    .run_id
-                    .as_str()
-                    .to_owned()
+                client_user_message_id: client_user_message_id
+                    .clone()
                     .try_into()
                     .map_err(|_| DeliveryContractError::InvalidEvidence)?,
                 resume_effect: if effects.resume == PreparationEffect::Accepted {
@@ -218,6 +222,7 @@ pub(crate) async fn dispatch(
                 next_action: DeliveryNextAction::InspectTarget,
                 client_code: None,
                 detail: Some("Native scheduled start was rejected.".into()),
+                claims: None,
             })
         }
         Err(NativeConnectionError::InvalidInput | NativeConnectionError::Unavailable) => {
@@ -227,6 +232,7 @@ pub(crate) async fn dispatch(
                 next_action: DeliveryNextAction::RetryLater,
                 client_code: None,
                 detail: Some("Native scheduled start was not dispatched.".into()),
+                claims: None,
             })
         }
         Err(_) => {

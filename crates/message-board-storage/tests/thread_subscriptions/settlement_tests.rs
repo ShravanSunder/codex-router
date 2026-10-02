@@ -112,7 +112,7 @@ async fn arrivals_during_hold_do_not_restart_the_original_window_cap() {
         .unwrap();
     let (_, settlement) = fixture
         .store
-        .select_subscription_notice(&fixture.reader, &due, selection_at)
+        .select_subscription_notice(&fixture.reader, &due, selection_at, usize::MAX)
         .await
         .unwrap();
     fixture
@@ -258,32 +258,16 @@ async fn late_lower_settlement_never_moves_delivered_backwards() {
         .due_subscription_roots(&fixture.reader, selection_time)
         .await
         .unwrap();
-    let (_, mut settlement) = fixture
+    let (_, settlement) = fixture
         .store
-        .select_subscription_notice(&fixture.reader, &due_roots, selection_time)
+        .select_subscription_notice(&fixture.reader, &due_roots, selection_time, usize::MAX)
         .await
         .unwrap();
-    settlement.roots[0].delivered_through = first.message.activity_sequence;
-
-    let listen_context = fixture
-        .store
-        .prepare_thread_listen(&fixture.listen_request())
-        .await
-        .unwrap();
-    let listen_batch = fixture
-        .store
-        .select_pending_thread_listen_batch_set(ListenId::generate(), &listen_context, 32_000)
-        .await
-        .unwrap();
-    assert_eq!(
-        listen_batch.batches[0].delivered_through,
-        second.message.activity_sequence
-    );
-    fixture
-        .store
-        .record_thread_listen_batch_delivery(&listen_context, &listen_batch)
-        .await
-        .unwrap();
+    let mut older_settlement = settlement.clone();
+    assert_eq!(older_settlement.roots.len(), 1);
+    if let Some(root_settlement) = older_settlement.roots.first_mut() {
+        root_settlement.delivered_through = first.message.activity_sequence;
+    }
     fixture
         .store
         .settle_subscription_batch(
@@ -293,13 +277,25 @@ async fn late_lower_settlement_never_moves_delivered_backwards() {
         )
         .await
         .unwrap();
-
-    let pending = fixture
+    fixture
         .store
-        .select_pending_thread_listen_batch_set(ListenId::generate(), &listen_context, 32_000)
+        .settle_subscription_batch(
+            &fixture.reader,
+            &older_settlement,
+            SubscriptionDeliveryOutcome::Accepted,
+        )
         .await
         .unwrap();
-    assert!(pending.batches.is_empty());
+
+    let due_after_lower_settlement = fixture
+        .store
+        .due_subscription_roots(&fixture.reader, selection_time)
+        .await
+        .unwrap();
+    assert!(
+        due_after_lower_settlement.is_empty(),
+        "a late lower settlement must not make the already-delivered newer reply selectable again"
+    );
     let mut connection = raw_connection(&fixture.path).await;
     let delivered: i64 = sqlx::query_scalar(
         "SELECT delivered_through FROM thread_delivery_positions WHERE root_id=?",
@@ -331,7 +327,7 @@ async fn old_settlement_after_cancel_and_resubscribe_preserves_replacement_windo
         .unwrap();
     let (_, old_settlement) = fixture
         .store
-        .select_subscription_notice(&fixture.reader, &old_due, old_selection_time)
+        .select_subscription_notice(&fixture.reader, &old_due, old_selection_time, usize::MAX)
         .await
         .unwrap();
 
@@ -373,7 +369,12 @@ async fn old_settlement_after_cancel_and_resubscribe_preserves_replacement_windo
         .unwrap();
     let (_, replacement_settlement) = fixture
         .store
-        .select_subscription_notice(&fixture.reader, &replacement_due, replacement_select_time)
+        .select_subscription_notice(
+            &fixture.reader,
+            &replacement_due,
+            replacement_select_time,
+            usize::MAX,
+        )
         .await
         .unwrap();
     let retry_at = replacement_select_time + chrono::Duration::seconds(30);
@@ -491,7 +492,7 @@ async fn settlement_failure_rolls_back_delivered_window_and_outcome_together() {
         .unwrap();
     let (_, settlement) = fixture
         .store
-        .select_subscription_notice(&fixture.reader, &due_roots, due_at)
+        .select_subscription_notice(&fixture.reader, &due_roots, due_at, usize::MAX)
         .await
         .unwrap();
     let before = record(&mut fixture.store, &fixture.reader, &scope).await;

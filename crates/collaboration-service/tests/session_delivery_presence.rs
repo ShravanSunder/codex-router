@@ -3,14 +3,15 @@
 
 use agent_automation::RouteEffectEvidence;
 use collaboration_protocol::{
-    CodexGeneration, DeliveryCorrelationId, DeliveryOutcome, EndpointDescription, MessageContent,
-    MessageDelivery, SessionRef, UuidIdentity,
+    CodexGeneration, DeliveryCorrelationId, DeliveryOutcome, EndpointDescription, MessageDelivery,
+    MessageText, PushId, SessionRef, UuidIdentity,
 };
 use collaboration_service::{
     AttemptEvidenceSink, CodexAppServerDeliveryRoute, DeliveryContractError, DeliveryFuture,
-    DeliveryPrecondition, DeliveryRequest, EndpointDirectory, LoadPolicy, NativeControlBackend,
+    DeliveryPrecondition, EndpointDirectory, LoadPolicy, NativeControlBackend,
     NativeGenerationGate, RoutePresence, SessionDeliveryRoute, SessionDeliveryRouter,
     SessionMessageDelivery,
+    layer_zero::{DeliveryRequest, PreparedPush},
 };
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
@@ -265,19 +266,27 @@ async fn loaded_only_refuses_not_loaded_codex_thread_without_resuming_it()
         Ok(())
     });
 
+    let target = fixture.target;
+    let push_id = PushId::try_from(agent_automation::AttemptId::generate().as_str().to_owned())?;
+    let correlation = DeliveryCorrelationId::try_from(push_id.as_str().to_owned())?;
+    let line = MessageText::try_from(format!(
+        "✉️ sender · \"held notification\" · router://{}/push/{}",
+        String::from(target.endpoint.service_id.clone()),
+        push_id.as_str()
+    ))?;
     let receipt = fixture
         .route
         .deliver(
             DeliveryRequest {
-                target: fixture.target,
-                message: MessageContent::Router {
-                    text: "held notification".to_owned().try_into()?,
+                payload: PreparedPush {
+                    push_id,
+                    line,
+                    load_policy: LoadPolicy::LoadedOnly,
                 },
-                header_context: collaboration_protocol::MessageHeaderContext::default(),
+                target,
                 mode: MessageDelivery::Auto,
-                load_policy: LoadPolicy::LoadedOnly,
                 precondition: DeliveryPrecondition::Unpinned,
-                correlation: DeliveryCorrelationId::generate(),
+                correlation,
                 attempt: agent_automation::AttemptId::generate(),
             },
             &sink,
@@ -341,18 +350,25 @@ async fn may_load_still_resumes_not_loaded_codex_thread_for_message_send()
         Ok(())
     });
 
+    let push_id = PushId::try_from(agent_automation::AttemptId::generate().as_str().to_owned())?;
+    let correlation = DeliveryCorrelationId::try_from(push_id.as_str().to_owned())?;
+    let line = MessageText::try_from(format!(
+        "✉️ sender · \"hello\" · router://{}/push/{}",
+        String::from(target.endpoint.service_id.clone()),
+        push_id.as_str()
+    ))?;
     let receipt = router
         .deliver(
             DeliveryRequest {
-                target,
-                message: MessageContent::HumanUser {
-                    text: "hello".to_owned().try_into()?,
+                payload: PreparedPush {
+                    push_id,
+                    line,
+                    load_policy: LoadPolicy::MayLoad,
                 },
-                header_context: collaboration_protocol::MessageHeaderContext::default(),
+                target,
                 mode: MessageDelivery::Auto,
-                load_policy: LoadPolicy::MayLoad,
                 precondition: DeliveryPrecondition::Unpinned,
-                correlation: DeliveryCorrelationId::generate(),
+                correlation,
                 attempt: agent_automation::AttemptId::generate(),
             },
             &RecordingEvidenceSink(Mutex::new(Vec::new())),

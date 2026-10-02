@@ -115,11 +115,13 @@ impl ServiceInteractionBroker {
             .display_names
             .get_or_init(crate::SessionDisplayNameCache::default)
             .clone();
+        let push_context = self.push_context.get().cloned();
         let request_id_for_notice = request_id.clone();
         let notice_task = tokio::spawn(async move {
             if typed_interaction_notice::deliver_approval_notice(
                 delivery.as_ref(),
                 &display_names,
+                push_context.as_ref(),
                 &notice_requester,
                 &notice_approver,
                 &notice_request,
@@ -214,11 +216,13 @@ impl ServiceInteractionBroker {
             .display_names
             .get_or_init(crate::SessionDisplayNameCache::default)
             .clone();
+        let push_context = self.push_context.get().cloned();
         let request_id_for_notice = request_id.clone();
         let notice_task = tokio::spawn(async move {
             if typed_interaction_notice::deliver_question_notice(
                 delivery.as_ref(),
                 &display_names,
+                push_context.as_ref(),
                 &notice_requester,
                 &notice_approver,
                 &notice_request,

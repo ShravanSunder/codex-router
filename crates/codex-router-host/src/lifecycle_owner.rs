@@ -331,6 +331,7 @@ impl HostRuntime {
         let mut collaboration = match collaboration_lifecycle::CollaborationLifecycle::start(
             &config,
             &app_server,
+            readiness.remote_control_server_name().cloned(),
             router_executable_relation,
         )
         .await

@@ -835,6 +835,8 @@ async fn control_participant_operations_preserve_typed_state_and_authorization()
     }
     let joined = client
         .board_thread_join(ThreadJoinRequest {
+            mode: None,
+            when_idle: None,
             root_message_id: root_message_id.clone(),
             actor: reviewer.clone(),
             role: ParticipantRole::Reviewer,

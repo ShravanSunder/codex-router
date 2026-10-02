@@ -1,3 +1,5 @@
+> listen was replaced by thread subscriptions in #112; see docs/specs/2026-09-28-thread-subscriptions/.
+
 # Thread participants: who is on a thread, as what
 
 Date: 2026-09-14 (amended 2026-09-14: role-less human creator, CHECK constraints). Status: owner-accepted requirements and observable contract; structural design to be produced through `orchestrator-design` before implementation. Depends on `2026-09-14-thread-listen.md` landing first. Author: Fable design session on the owner's behalf. Owner decisions are marked **(owner)**.

@@ -24,7 +24,7 @@ async fn create_and_first_prompt_share_one_connection_and_return_correlated_sett
     let endpoint = json!({"serviceId":service_id,"endpointId":"codex-local"});
     let identity=ServiceIdentity::new(service_id,service_id,&digest).unwrap().with_endpoints(vec![serde_json::from_value(json!({"endpoint":endpoint,"label":"ACP fixture","availability":{"state":"available","observedAt":"2026-09-06T00:00:00Z"},"channels":[{"kind":"acp","transport":"unixJsonLines","path":"acp.sock","schemaDigest":format!("sha256:{}",collaboration_protocol::ACP_SCHEMA_DIGEST)}]})).unwrap()]).unwrap();
     let listener = LocalControlService::bind(&root.join("control.sock"), identity).unwrap();
-    let manifest:collaboration_protocol::ServiceManifest=serde_json::from_value(json!({"version":2,"serviceId":service_id,"serviceEpoch":service_id,"control":{"transport":"unixJsonLines","path":"control.sock"},"controlSchemaDigest":digest,"mcp":{"transport":"streamableHttp","url":"http://127.0.0.1:0/mcp"}})).unwrap();
+    let manifest:collaboration_protocol::ServiceManifest=serde_json::from_value(json!({"version":2,"serviceId":service_id,"serviceEpoch":service_id,"machineLabel":"fixture-host","control":{"transport":"unixJsonLines","path":"control.sock"},"controlSchemaDigest":digest,"mcp":{"transport":"streamableHttp","url":"http://127.0.0.1:0/mcp"}})).unwrap();
     let manifest = ManifestPublication::publish(&root, &manifest).unwrap();
     let stop = CancellationToken::new();
     let service = tokio::spawn(listener.run(stop.clone()));
@@ -53,12 +53,16 @@ async fn create_and_first_prompt_share_one_connection_and_return_correlated_sett
         let prompt: Value =
             serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
         assert_eq!(prompt["method"], "session/prompt");
-        let text = prompt
-            .pointer("/params/prompt/0/text")
-            .and_then(Value::as_str)
-            .unwrap();
-        assert!(text.contains("first-sender"));
-        assert!(text.contains("first prompt"));
+        assert_eq!(
+            prompt.pointer("/params/sessionId").and_then(Value::as_str),
+            Some("fresh-thread")
+        );
+        assert_eq!(
+            prompt
+                .pointer("/params/prompt/0/text")
+                .and_then(Value::as_str),
+            Some("first prompt")
+        );
         writer.write_all(format!("{}\n",json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"fresh-thread","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"FIRST_RESULT"}}}})).as_bytes()).await.unwrap();
         writer
             .write_all(
@@ -138,7 +142,7 @@ async fn create_and_first_prompt_backend_rejection_retains_created_target() {
     let endpoint = json!({"serviceId":service_id,"endpointId":"codex-local"});
     let identity=ServiceIdentity::new(service_id,service_id,&digest).unwrap().with_endpoints(vec![serde_json::from_value(json!({"endpoint":endpoint,"label":"ACP rejection fixture","availability":{"state":"available","observedAt":"2026-09-06T00:00:00Z"},"channels":[{"kind":"acp","transport":"unixJsonLines","path":"acp.sock","schemaDigest":format!("sha256:{}",collaboration_protocol::ACP_SCHEMA_DIGEST)}]})).unwrap()]).unwrap();
     let listener = LocalControlService::bind(&root.join("control.sock"), identity).unwrap();
-    let manifest:collaboration_protocol::ServiceManifest=serde_json::from_value(json!({"version":2,"serviceId":service_id,"serviceEpoch":service_id,"control":{"transport":"unixJsonLines","path":"control.sock"},"controlSchemaDigest":digest,"mcp":{"transport":"streamableHttp","url":"http://127.0.0.1:0/mcp"}})).unwrap();
+    let manifest:collaboration_protocol::ServiceManifest=serde_json::from_value(json!({"version":2,"serviceId":service_id,"serviceEpoch":service_id,"machineLabel":"fixture-host","control":{"transport":"unixJsonLines","path":"control.sock"},"controlSchemaDigest":digest,"mcp":{"transport":"streamableHttp","url":"http://127.0.0.1:0/mcp"}})).unwrap();
     let publication = ManifestPublication::publish(&root, &manifest).unwrap();
     let stop = CancellationToken::new();
     let service = tokio::spawn(listener.run(stop.clone()));
@@ -157,6 +161,16 @@ async fn create_and_first_prompt_backend_rejection_retains_created_target() {
         let prompt: Value =
             serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
         assert_eq!(prompt["method"], "session/prompt");
+        assert_eq!(
+            prompt.pointer("/params/sessionId").and_then(Value::as_str),
+            Some("created-before-rejection")
+        );
+        assert_eq!(
+            prompt
+                .pointer("/params/prompt/0/text")
+                .and_then(Value::as_str),
+            Some("valid first prompt")
+        );
         writer.write_all(format!("{}\n",json!({"jsonrpc":"2.0","id":prompt["id"],"error":{"code":-32603,"message":"backend rejected first prompt","data":{"phase":"prompt"}}})).as_bytes()).await.unwrap();
     });
     let endpoint_ref: collaboration_protocol::EndpointRef =
@@ -227,7 +241,7 @@ async fn streamed_prompt_updates_hit_aggregate_count_bound_and_retain_target() {
     let endpoint = json!({"serviceId":service_id,"endpointId":"codex-local"});
     let identity=ServiceIdentity::new(service_id,service_id,&digest).unwrap().with_endpoints(vec![serde_json::from_value(json!({"endpoint":endpoint,"label":"ACP aggregate fixture","availability":{"state":"available","observedAt":"2026-09-06T00:00:00Z"},"channels":[{"kind":"acp","transport":"unixJsonLines","path":"acp.sock","schemaDigest":format!("sha256:{}",collaboration_protocol::ACP_SCHEMA_DIGEST)}]})).unwrap()]).unwrap();
     let listener = LocalControlService::bind(&root.join("control.sock"), identity).unwrap();
-    let manifest:collaboration_protocol::ServiceManifest=serde_json::from_value(json!({"version":2,"serviceId":service_id,"serviceEpoch":service_id,"control":{"transport":"unixJsonLines","path":"control.sock"},"controlSchemaDigest":digest,"mcp":{"transport":"streamableHttp","url":"http://127.0.0.1:0/mcp"}})).unwrap();
+    let manifest:collaboration_protocol::ServiceManifest=serde_json::from_value(json!({"version":2,"serviceId":service_id,"serviceEpoch":service_id,"machineLabel":"fixture-host","control":{"transport":"unixJsonLines","path":"control.sock"},"controlSchemaDigest":digest,"mcp":{"transport":"streamableHttp","url":"http://127.0.0.1:0/mcp"}})).unwrap();
     let publication = ManifestPublication::publish(&root, &manifest).unwrap();
     let stop = CancellationToken::new();
     let service = tokio::spawn(listener.run(stop.clone()));
@@ -330,7 +344,7 @@ async fn reusable_acp_client_orders_load_updates_and_detaches_on_caller_cancel()
     let endpoint = json!({"serviceId":id,"endpointId":"codex-local"});
     let identity=ServiceIdentity::new(id,id,&digest).unwrap().with_endpoints(vec![serde_json::from_value(json!({"endpoint":endpoint,"label":"ACP fixture","availability":{"state":"available","observedAt":"2026-09-06T00:00:00Z"},"channels":[{"kind":"acp","transport":"unixJsonLines","path":"acp.sock","schemaDigest":format!("sha256:{}",collaboration_protocol::ACP_SCHEMA_DIGEST)}]})).unwrap()]).unwrap();
     let listener = LocalControlService::bind(&root.join("control.sock"), identity).unwrap();
-    let manifest:collaboration_protocol::ServiceManifest=serde_json::from_value(json!({"version":2,"serviceId":id,"serviceEpoch":id,"control":{"transport":"unixJsonLines","path":"control.sock"},"controlSchemaDigest":digest,"mcp":{"transport":"streamableHttp","url":"http://127.0.0.1:0/mcp"}})).unwrap();
+    let manifest:collaboration_protocol::ServiceManifest=serde_json::from_value(json!({"version":2,"serviceId":id,"serviceEpoch":id,"machineLabel":"fixture-host","control":{"transport":"unixJsonLines","path":"control.sock"},"controlSchemaDigest":digest,"mcp":{"transport":"streamableHttp","url":"http://127.0.0.1:0/mcp"}})).unwrap();
     let manifest = ManifestPublication::publish(&root, &manifest).unwrap();
     let stop = CancellationToken::new();
     let service = tokio::spawn(listener.run(stop.clone()));

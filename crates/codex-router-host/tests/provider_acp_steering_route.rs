@@ -14,12 +14,13 @@ use collaboration_protocol::{
     ProviderBindingId, ProviderBindingIdentity, ProviderCapabilities, ProviderCapability,
     ProviderCapabilityEvidence, ProviderCapabilityName, ProviderCapabilityStatus, ProviderKind,
     ProviderRequestedPolicy, ProviderRuntimeIdentity, ProviderTransport, ProviderWorkingDirectory,
-    RouterAccess, SessionId, SessionRef, UuidIdentity,
+    PushId, RouterAccess, SessionId, SessionRef, UuidIdentity,
 };
 use collaboration_service::{
     AttemptEvidenceSink, AttemptReconciliation, AttemptReconciliationContext, DeliveryFuture,
-    DeliveryPrecondition, DeliveryRequest, EndpointDirectory, ProviderConversationBackend,
-    ProviderOperationStore, ProviderSessionRecord, SessionDeliveryRoute,
+    DeliveryPrecondition, EndpointDirectory, ProviderConversationBackend, ProviderOperationStore,
+    ProviderSessionRecord, SessionDeliveryRoute,
+    layer_zero::{DeliveryRequest, PreparedPush},
 };
 use std::{
     path::{Path, PathBuf},
@@ -112,8 +113,8 @@ with socket.socket(socket.AF_UNIX,socket.SOCK_STREAM) as event:
   steer=json.loads(sys.stdin.readline())
   assert steer['method']=='_session/steering'
   if index < 2:
-   assert '"sessionId":"other-session"' in steer['params']['prompt'][0]['text']
-   assert steer['params']['prompt'][0]['text'].endswith('follow-up')
+   assert '"follow-up"' in steer['params']['prompt'][0]['text']
+   assert 'router://' in steer['params']['prompt'][0]['text']
   else:
    assert steer['params']['prompt']==[{{'type':'text','text':'follow-up'}}]
   print(json.dumps({{'jsonrpc':'2.0','id':steer['id'],'result':{{'outcome':'injected'}}}})); sys.stdout.flush()
@@ -295,7 +296,8 @@ create=json.loads(sys.stdin.readline())
 print(json.dumps({{'jsonrpc':'2.0','id':create['id'],'result':{{'sessionId':'fixture-session'}}}})); sys.stdout.flush()
 first=json.loads(sys.stdin.readline())
 assert first['method']=='session/prompt'
-assert '"sessionId":"other-session"' in first['params']['prompt'][0]['text']
+assert '"follow-up"' in first['params']['prompt'][0]['text']
+assert 'router://' in first['params']['prompt'][0]['text']
 with socket.socket(socket.AF_UNIX,socket.SOCK_STREAM) as event:
  event.connect({event_socket:?})
  event.sendall(b'first')
@@ -303,7 +305,8 @@ with socket.socket(socket.AF_UNIX,socket.SOCK_STREAM) as event:
 print(json.dumps({{'jsonrpc':'2.0','id':first['id'],'result':{{'stopReason':'end_turn'}}}})); sys.stdout.flush()
 second=json.loads(sys.stdin.readline())
 assert second['method']=='session/prompt'
-assert '"sessionId":"other-session"' in second['params']['prompt'][0]['text']
+assert '"follow-up"' in second['params']['prompt'][0]['text']
+assert 'router://' in second['params']['prompt'][0]['text']
 with socket.socket(socket.AF_UNIX,socket.SOCK_STREAM) as event:
  event.connect({event_socket:?})
  event.sendall(b'second')
@@ -400,17 +403,26 @@ async fn unadvertised_steering_is_rejected_on_any_provider_endpoint() {
 }
 
 fn request(target: SessionRef, mode: MessageDelivery) -> DeliveryRequest {
+    let push_id =
+        PushId::try_from(AttemptId::generate().as_str().to_owned()).expect("UUIDv7 push id");
+    let correlation =
+        DeliveryCorrelationId::try_from(push_id.as_str().to_owned()).expect("push id correlation");
+    let line = MessageText::try_from(format!(
+        "✉️ sender · \"follow-up\" · router://{}/push/{}",
+        String::from(target.endpoint.service_id.clone()),
+        push_id.as_str()
+    ))
+    .expect("prepared push line");
     DeliveryRequest {
-        message: MessageContent::Agent {
-            sender: non_creator_agent(&target),
-            text: MessageText::try_from("follow-up".to_owned()).expect("message"),
+        payload: PreparedPush {
+            push_id,
+            line,
+            load_policy: collaboration_service::LoadPolicy::MayLoad,
         },
-        header_context: collaboration_protocol::MessageHeaderContext::default(),
         target,
         mode,
-        load_policy: collaboration_service::LoadPolicy::MayLoad,
         precondition: DeliveryPrecondition::Unpinned,
-        correlation: DeliveryCorrelationId::generate(),
+        correlation,
         attempt: AttemptId::generate(),
     }
 }
@@ -449,22 +461,7 @@ async fn running_claude_auto_and_steer_name_the_running_operation() {
     for mode in [MessageDelivery::Auto, MessageDelivery::Steer] {
         let evidence = RecordedEvidence(tokio::sync::Mutex::new(Vec::new()));
         let receipt = route
-            .deliver(
-                DeliveryRequest {
-                    target: target.clone(),
-                    message: MessageContent::Agent {
-                        sender: non_creator_agent(&target),
-                        text: MessageText::try_from("follow-up".to_owned()).expect("message"),
-                    },
-                    header_context: collaboration_protocol::MessageHeaderContext::default(),
-                    mode,
-                    load_policy: collaboration_service::LoadPolicy::MayLoad,
-                    precondition: DeliveryPrecondition::Unpinned,
-                    correlation: DeliveryCorrelationId::generate(),
-                    attempt: AttemptId::generate(),
-                },
-                &evidence,
-            )
+            .deliver(request(target.clone(), mode), &evidence)
             .await
             .expect("steer delivery");
 
@@ -630,7 +627,8 @@ async fn dropped_steering_reply_remains_unknown() {
     let reconciliation = route
         .reconcile_attempt(AttemptReconciliationContext {
             target: sent.target,
-            message: sent.message,
+            prepared_push_id: PushId::try_from("018f47d2-24d5-7a68-b9ec-6f759c3945a1".to_owned())
+                .expect("UUIDv7 push id"),
             mode: sent.mode,
             recorded,
         })

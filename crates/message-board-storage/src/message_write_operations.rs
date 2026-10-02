@@ -306,11 +306,13 @@ impl BoardStore {
         )
         .await?;
         if request.role.is_some() && request.watch {
+            let policy_patch = SubscriptionPolicyPatch::default();
             upsert_join_subscription(
                 &mut transaction,
                 &actor_key,
                 &request.actor,
                 &request.message_id,
+                &policy_patch,
                 now,
             )
             .await?;

@@ -1,9 +1,9 @@
 use crate::{
     ActivitySequence, BatchTiming, EndpointId, HumanId, Identity, MessageId, PendingRootNotice,
     ServiceId, SessionEndpointRef, SessionId, SessionRef, SubscriptionGeneration,
-    SubscriptionLifetime, SubscriptionMode, SubscriptionPolicy, SubscriptionRootRecord,
-    SubscriptionRootRecordProps, SubscriptionState, ThreadSubscriptionRecord,
-    ThreadSubscriptionRecordProps, TopicId, WhenIdle,
+    SubscriptionLifetime, SubscriptionMode, SubscriptionPolicy, SubscriptionPolicyPatch,
+    SubscriptionRootRecord, SubscriptionRootRecordProps, SubscriptionState,
+    ThreadSubscriptionRecord, ThreadSubscriptionRecordProps, TopicId, WhenIdle,
 };
 
 fn session_reader() -> Identity {
@@ -49,6 +49,85 @@ fn policy_bounds_and_human_delivery_rule_are_validated_by_constructors() {
         )
         .is_ok()
     );
+}
+
+#[test]
+fn subscription_cap_above_sixty_minutes_reports_its_allowed_range() {
+    let cap_range = "must be at least quietSeconds and at most 3600 seconds";
+    let constructor_error = BatchTiming::new(30 * 60, 3601).unwrap_err();
+    assert_eq!(constructor_error.field, "capSeconds");
+    assert_eq!(constructor_error.requirement, cap_range);
+
+    let timing_deserialization_error = serde_json::from_value::<BatchTiming>(serde_json::json!({
+        "quietSeconds": 1800,
+        "capSeconds": 3601
+    }))
+    .unwrap_err()
+    .to_string();
+    assert!(timing_deserialization_error.contains(cap_range));
+
+    let policy_deserialization_error =
+        serde_json::from_value::<SubscriptionPolicy>(serde_json::json!({
+            "mode": "deliver",
+            "whenIdle": "hold",
+            "timing": { "quietSeconds": 1800, "capSeconds": 3601 },
+            "lifetime": 86400
+        }))
+        .unwrap_err()
+        .to_string();
+    assert!(policy_deserialization_error.contains(cap_range));
+
+    let policy_patch_error = SubscriptionPolicy::defaults_for(&session_reader())
+        .apply_patch(
+            &session_reader(),
+            &SubscriptionPolicyPatch {
+                timing: crate::SubscriptionTimingPatch {
+                    quiet_seconds: Some(1800),
+                    cap_seconds: Some(3601),
+                },
+                ..SubscriptionPolicyPatch::default()
+            },
+        )
+        .unwrap_err();
+    assert_eq!(policy_patch_error.field, "capSeconds");
+    assert_eq!(policy_patch_error.requirement, cap_range);
+}
+
+#[test]
+fn subscription_lifetime_above_seven_days_reports_its_allowed_range() {
+    let lifetime_range = "must be between 600 seconds and 604800 seconds";
+    let constructor_error = SubscriptionLifetime::new(604801).unwrap_err();
+    assert_eq!(constructor_error.field, "forSeconds");
+    assert_eq!(constructor_error.requirement, lifetime_range);
+
+    let lifetime_deserialization_error =
+        serde_json::from_value::<SubscriptionLifetime>(serde_json::json!(604801))
+            .unwrap_err()
+            .to_string();
+    assert!(lifetime_deserialization_error.contains(lifetime_range));
+
+    let policy_deserialization_error =
+        serde_json::from_value::<SubscriptionPolicy>(serde_json::json!({
+            "mode": "deliver",
+            "whenIdle": "hold",
+            "timing": { "quietSeconds": 120, "capSeconds": 600 },
+            "lifetime": 604801
+        }))
+        .unwrap_err()
+        .to_string();
+    assert!(policy_deserialization_error.contains(lifetime_range));
+
+    let policy_patch_error = SubscriptionPolicy::defaults_for(&session_reader())
+        .apply_patch(
+            &session_reader(),
+            &SubscriptionPolicyPatch {
+                lifetime_seconds: Some(604801),
+                ..SubscriptionPolicyPatch::default()
+            },
+        )
+        .unwrap_err();
+    assert_eq!(policy_patch_error.field, "forSeconds");
+    assert_eq!(policy_patch_error.requirement, lifetime_range);
 }
 
 #[test]

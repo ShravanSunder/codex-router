@@ -273,7 +273,6 @@ async fn send_agent_probe(input: MessageProbeInput<'_>) -> Result<DeliveryReceip
                     .map_err(|_| ClientError::Protocol("invalid proof text"))?,
             },
             mode: input.delivery,
-            correlation: None,
         })
         .await;
     let _closed = client.close().await;

@@ -2,9 +2,8 @@
 
 use collaboration_protocol::{
     ConversationBindingIdentity, ConversationOperationQueueState, ConversationOperationSnapshot,
-    MessageContent, ObservationTimestamp, OperationId, ProviderBindingIdentity,
-    ProviderOperationEffect, ProviderOperationKind, ProviderOperationStage,
-    ProviderReconciliationState, SessionRef,
+    ObservationTimestamp, OperationId, ProviderBindingIdentity, ProviderOperationEffect,
+    ProviderOperationKind, ProviderOperationStage, ProviderReconciliationState, SessionRef,
 };
 use std::{
     collections::HashMap,
@@ -51,23 +50,6 @@ struct QueuedProviderOperation {
 }
 
 impl ProviderQueueOperationRegistry {
-    pub(crate) fn record_queued(
-        &self,
-        operation_id: OperationId,
-        target: SessionRef,
-        binding: ProviderBindingIdentity,
-        input_id: session_event_model::InputId,
-        message: &MessageContent,
-    ) {
-        let _queued = self.record_queued_with_preview(
-            operation_id,
-            target,
-            binding,
-            input_id,
-            sanitized_preview(message),
-        );
-    }
-
     pub(crate) fn record_queued_contents(
         &self,
         operation_id: OperationId,
@@ -280,15 +262,6 @@ impl ProviderQueueOperationRegistry {
     }
 }
 
-fn sanitized_preview(message: &MessageContent) -> String {
-    let text = match message {
-        MessageContent::Agent { text, .. }
-        | MessageContent::HumanUser { text }
-        | MessageContent::Router { text } => text.as_str(),
-    };
-    sanitized_text_preview(text)
-}
-
 fn sanitized_text_preview(text: &str) -> String {
     text.split_whitespace()
         .collect::<Vec<_>>()
@@ -330,12 +303,6 @@ mod tests {
         (target, binding)
     }
 
-    fn message(text: &str) -> MessageContent {
-        MessageContent::Router {
-            text: text.to_owned().try_into().expect("message"),
-        }
-    }
-
     #[test]
     fn list_keeps_admission_order_and_cancel_excludes_only_one_input() {
         let registry = ProviderQueueOperationRegistry::default();
@@ -348,19 +315,23 @@ mod tests {
             OperationId::generate(),
             session_event_model::InputId::generate(),
         );
-        registry.record_queued(
+        let first_contents =
+            [session_event_model::PromptContent::text("first\n  item".into()).expect("text")];
+        registry.record_queued_contents(
             first.0.clone(),
             target.clone(),
             binding.clone(),
             first.1.clone(),
-            &message("first\n  item"),
+            &first_contents,
         );
-        registry.record_queued(
+        let second_contents =
+            [session_event_model::PromptContent::text("second item".into()).expect("text")];
+        registry.record_queued_contents(
             second.0.clone(),
             target.clone(),
             binding,
             second.1.clone(),
-            &message("second item"),
+            &second_contents,
         );
         let listed = registry.list(&target);
         assert_eq!(
@@ -412,12 +383,14 @@ mod tests {
         let (target, binding) = fixture();
         let operation_id = OperationId::generate();
         let input_id = session_event_model::InputId::generate();
-        registry.record_queued(
+        let contents =
+            [session_event_model::PromptContent::text("racing input".into()).expect("text")];
+        registry.record_queued_contents(
             operation_id.clone(),
             target.clone(),
             binding,
             input_id.clone(),
-            &message("racing input"),
+            &contents,
         );
         let barrier = Arc::new(Barrier::new(3));
         let started = {

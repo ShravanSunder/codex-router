@@ -3,12 +3,10 @@ use crate::conversation_contract::{
     ConversationCreatePromptError, ConversationCreatePromptRequest, ConversationCreatePromptResult,
     ConversationCreateRequest, ConversationCreateResult, ConversationEnd, ConversationEvent,
     ConversationPromptRequest, ExistingConversationPromptError, ExistingConversationPromptRequest,
-    ExistingConversationPromptResult,
+    ExistingConversationPromptResult, PublicPromptContent,
 };
 use crate::{AcpTransportConnection, ClientError};
-use collaboration_protocol::{
-    AcpSchemaCatalog, EndpointId, EndpointRef, MessageContent, SessionRef, render_message,
-};
+use collaboration_protocol::{AcpSchemaCatalog, EndpointId, EndpointRef, SessionRef};
 use serde_json::{Value, json};
 use std::{collections::BTreeSet, path::Path, time::Duration};
 use tokio::{
@@ -535,8 +533,7 @@ impl AcpConversation {
             return Ok(ConversationEnd::Completed);
         }
     }
-    /// Renders caller-declared public content once, then waits for the ACP
-    /// response on the selected conversation connection.
+    /// Forwards caller text without an envelope, then waits for the ACP response.
     pub async fn prompt_and_wait(
         &mut self,
         request: ConversationPromptRequest,
@@ -544,14 +541,11 @@ impl AcpConversation {
         emit: &mut impl FnMut(ConversationEvent) -> Result<(), ClientError>,
     ) -> Result<ConversationEnd, ClientError> {
         request.validate()?;
-        let target = self
-            .target
-            .as_ref()
-            .ok_or(ClientError::Protocol("ACP session not opened"))?;
-        let message = MessageContent::from(request.message);
-        let rendered = render_conversation_prompt(target, &message)?;
+        if self.target.is_none() {
+            return Err(ClientError::Protocol("ACP session not opened"));
+        }
         self.prompt(
-            &rendered,
+            conversation_prompt_text(&request.message),
             request.effort.as_deref(),
             Duration::from_secs(request.timeout_seconds),
             cancel,
@@ -735,13 +729,12 @@ impl AcpConversation {
     }
 }
 
-fn render_conversation_prompt(
-    target: &SessionRef,
-    message: &MessageContent,
-) -> Result<String, ClientError> {
-    render_message(target, message)
-        .map(|rendered| rendered.text)
-        .map_err(|_| ClientError::Protocol("conversation message rendering failed"))
+fn conversation_prompt_text(message: &PublicPromptContent) -> &str {
+    match message {
+        PublicPromptContent::Agent { text, .. } | PublicPromptContent::HumanUser { text } => {
+            text.as_str()
+        }
+    }
 }
 
 fn validate_conversation_endpoint(

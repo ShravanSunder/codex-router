@@ -7,8 +7,13 @@ replacing globally installed tools:
 scripts/tooling/bootstrap-tools.sh ci
 export PATH="$PWD/tmp/rust-tools/bin:$PATH"
 cargo nextest run -p collaboration-protocol
-cargo nextest run --profile ci --workspace
+cargo nextest run --profile ci --workspace --features codex-router-cli/keychain-test-support
 ```
+
+Enable `keychain-test-support` for both compilation and execution. The compiled
+CLI acceptance child is a normal binary rather than a `cfg(test)` target, so
+without this feature it can reach the production macOS Keychain despite using a
+temporary router root.
 
 The CI profile reports all failures, disables retries and reports tests exceeding
 60 seconds. It does not terminate valid long-running integration tests; their

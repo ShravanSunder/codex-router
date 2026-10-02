@@ -23,6 +23,7 @@ async fn collaboration_runtime_binds_a_fixed_mcp_port_once() {
         mcp_bind,
         native_schema: None,
         peer_registry_directory: None,
+        remote_control_server_name: None,
         owner_human_id: None,
     })
     .await

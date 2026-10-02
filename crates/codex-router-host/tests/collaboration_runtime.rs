@@ -15,6 +15,7 @@ async fn host_without_provider_faces_does_not_require_owner_lookup()
         mcp_bind: std::net::SocketAddr::from(([127, 0, 0, 1], 0)),
         native_schema: None,
         peer_registry_directory: None,
+        remote_control_server_name: None,
         owner_human_id: None,
     })
     .await?;
@@ -42,6 +43,7 @@ async fn post_bind_manifest_failure_releases_mcp_port() {
         mcp_bind,
         native_schema: None,
         peer_registry_directory: None,
+        remote_control_server_name: None,
         owner_human_id: None,
     })
     .await;
@@ -67,6 +69,12 @@ async fn host_composes_discovery_and_retires_only_owned_communication_sockets() 
         mcp_bind: std::net::SocketAddr::from(([127, 0, 0, 1], 0)),
         native_schema: None,
         peer_registry_directory: None,
+        remote_control_server_name: Some(
+            "remote-control-fixture"
+                .to_owned()
+                .try_into()
+                .expect("valid fixture Remote Control name"),
+        ),
         owner_human_id: Some(
             "test-owner"
                 .to_owned()
@@ -87,6 +95,7 @@ async fn host_composes_discovery_and_retires_only_owned_communication_sockets() 
     )
     .unwrap_or_else(|e| panic!("manifest decode: {e}"));
     assert_eq!(&manifest.service_id, runtime.service_id());
+    assert_eq!(manifest.machine_label.as_str(), "remote-control-fixture");
     assert_eq!(manifest.version, 2);
     assert_eq!(
         manifest.mcp.transport,
@@ -357,6 +366,7 @@ async fn occupied_mcp_port_is_a_visible_startup_failure_without_fallback() {
         mcp_bind,
         native_schema: None,
         peer_registry_directory: None,
+        remote_control_server_name: None,
         owner_human_id: None,
     })
     .await;

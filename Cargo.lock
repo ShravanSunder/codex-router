@@ -160,6 +160,7 @@ dependencies = [
  "tokio",
  "tokio-tungstenite",
  "tokio-util",
+ "tracing-subscriber",
  "unicode-width 0.2.2",
  "uuid",
 ]
@@ -424,11 +425,13 @@ dependencies = [
  "agent-automation",
  "chrono",
  "collaboration-protocol",
+ "message-board",
  "serde",
  "serde_json",
  "sqlx",
  "thiserror 2.0.18",
  "tokio",
+ "tracing",
  "uuid",
 ]
 
@@ -861,6 +864,8 @@ dependencies = [
  "tokio-util",
  "toml",
  "tracing",
+ "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]
@@ -1022,6 +1027,7 @@ name = "collaboration-mcp"
 version = "0.1.59"
 dependencies = [
  "agent-collaboration",
+ "automation-storage",
  "bytes",
  "codex-acp-adapter",
  "codex-native-integration",
@@ -1036,6 +1042,7 @@ dependencies = [
  "hyper-util",
  "jsonschema",
  "message-board",
+ "message-board-storage",
  "reqwest",
  "rmcp",
  "schemars 1.2.2",
@@ -1088,6 +1095,7 @@ dependencies = [
  "lifecycle-observation",
  "message-board",
  "message-board-storage",
+ "nix",
  "serde",
  "serde_json",
  "session-event-model",
@@ -2742,6 +2750,7 @@ dependencies = [
  "sqlx",
  "thiserror 2.0.18",
  "tokio",
+ "tracing",
  "uuid",
 ]
 

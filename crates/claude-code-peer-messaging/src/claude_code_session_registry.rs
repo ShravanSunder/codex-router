@@ -68,6 +68,7 @@ pub struct PeerSessionInventory {
 struct PeerSessionCandidate {
     session_id: SessionId,
     lookup: PeerSessionLookup,
+    claim: PeerClaim,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -79,9 +80,18 @@ pub struct PeerSessionRecord {
     pub socket_path: PathBuf,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PeerClaim {
+    pub pid: u32,
+    pub name: Option<String>,
+    pub cwd: Option<PathBuf>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PeerSessionLookup {
     Absent,
+    Ambiguous { claims: Vec<PeerClaim> },
     Writable(PeerSessionRecord),
     LiveUnsupported { reason: String },
 }
@@ -121,21 +131,21 @@ impl ClaudeCodeSessionRegistry {
         is_process_live: impl FnMut(u32) -> Result<bool, PeerRegistryError>,
     ) -> Result<PeerSessionLookup, PeerRegistryError> {
         let inventory = self.live_sessions_with_probe(is_process_live, Some(target))?;
-        let mut matched = None;
-        for candidate in inventory.candidates {
-            if candidate.session_id != *target {
-                continue;
-            }
-            if matched.is_some() {
-                return Ok(PeerSessionLookup::LiveUnsupported {
-                    reason: "multiple live Claude Code registry records claim this session"
-                        .to_owned(),
-                });
-            }
-            matched = Some(candidate.lookup);
+        let mut matched = inventory
+            .candidates
+            .into_iter()
+            .filter(|candidate| candidate.session_id == *target)
+            .collect::<Vec<_>>();
+        if matched.len() > 1 {
+            return Ok(PeerSessionLookup::Ambiguous {
+                claims: matched
+                    .into_iter()
+                    .map(|candidate| candidate.claim)
+                    .collect(),
+            });
         }
-        match matched {
-            Some(candidate) => Ok(candidate),
+        match matched.pop() {
+            Some(candidate) => Ok(candidate.lookup),
             None if inventory.has_unreadable_live_record => Err(PeerRegistryError::LiveUnreadable),
             None => Ok(PeerSessionLookup::Absent),
         }
@@ -260,7 +270,21 @@ impl ClaudeCodeSessionRegistry {
             } else {
                 skipped_records = skipped_records.saturating_add(1);
             }
-            candidates.push(PeerSessionCandidate { session_id, lookup });
+            candidates.push(PeerSessionCandidate {
+                session_id,
+                lookup,
+                claim: PeerClaim {
+                    pid: process_id,
+                    name: envelope
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned),
+                    cwd: envelope
+                        .get("cwd")
+                        .and_then(Value::as_str)
+                        .map(PathBuf::from),
+                },
+            });
         }
         let mut claims_by_session = HashMap::<SessionId, usize>::new();
         for candidate in &candidates {
@@ -412,10 +436,159 @@ fn unsupported(reason: &str) -> PeerSessionLookup {
 
 #[cfg(test)]
 mod tests {
-    use super::{ClaudeCodeSessionRegistry, PeerRegistryError, PeerSessionLookup};
+    use super::{ClaudeCodeSessionRegistry, PeerClaim, PeerRegistryError, PeerSessionLookup};
     use collaboration_protocol::SessionId;
     use rustix::io::Errno;
     use serde_json::json;
+
+    #[test]
+    fn lookup_returns_all_live_duplicate_claims_including_an_incomplete_claim() {
+        let root = tempfile::tempdir().expect("registry directory");
+        for (process_id, record) in [
+            (
+                501,
+                json!({
+                    "pid": 501,
+                    "sessionId": "fixture-target",
+                    "name": "target-terminal-one",
+                    "cwd": "/workspace/one",
+                    "peerProtocol": 1,
+                    "messagingSocketPath": "/private/tmp/peer-one.sock"
+                }),
+            ),
+            (
+                502,
+                json!({
+                    "pid": 502,
+                    "sessionId": "fixture-target",
+                    "peerProtocol": 99
+                }),
+            ),
+            (
+                503,
+                json!({
+                    "pid": 503,
+                    "sessionId": "other-session",
+                    "name": "unrelated-terminal",
+                    "cwd": "/workspace/other",
+                    "peerProtocol": 1,
+                    "messagingSocketPath": "/private/tmp/peer-other.sock"
+                }),
+            ),
+            (
+                504,
+                json!({
+                    "pid": 504,
+                    "sessionId": "fixture-target",
+                    "name": "stale-terminal",
+                    "cwd": "/workspace/stale",
+                    "peerProtocol": 1,
+                    "messagingSocketPath": "/private/tmp/peer-stale.sock"
+                }),
+            ),
+        ] {
+            std::fs::write(
+                root.path().join(format!("{process_id}.json")),
+                record.to_string(),
+            )
+            .expect("registry record");
+        }
+        let target = SessionId::try_from("fixture-target".to_owned()).expect("target ID");
+        let registry = ClaudeCodeSessionRegistry::new(root.path().to_owned());
+
+        let lookup = registry
+            .lookup_with_probe(&target, |process_id| Ok(matches!(process_id, 501..=503)))
+            .expect("ambiguous target lookup");
+        let PeerSessionLookup::Ambiguous { claims } = lookup else {
+            panic!("two live records must remain ambiguous: {lookup:?}");
+        };
+
+        let mut claims_by_pid = claims
+            .into_iter()
+            .map(|claim| (claim.pid, claim))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        assert_eq!(
+            claims_by_pid.remove(&501),
+            Some(PeerClaim {
+                pid: 501,
+                name: Some("target-terminal-one".to_owned()),
+                cwd: Some("/workspace/one".into()),
+            })
+        );
+        assert_eq!(
+            claims_by_pid.remove(&502),
+            Some(PeerClaim {
+                pid: 502,
+                name: None,
+                cwd: None,
+            })
+        );
+        assert!(claims_by_pid.is_empty());
+    }
+
+    #[test]
+    fn lookup_returns_every_long_named_claim_for_five_live_duplicates() {
+        let root = tempfile::tempdir().expect("registry directory");
+        for process_id in 600_u32..605 {
+            let name = format!(
+                "long-terminal-name-for-peer-claim-{process_id}-with-a-full-workspace-label"
+            );
+            let cwd = format!("/workspace/terminal-{process_id}");
+            std::fs::write(
+                root.path().join(format!("{process_id}.json")),
+                json!({
+                    "pid": process_id,
+                    "sessionId": "fixture-target",
+                    "name": name,
+                    "cwd": cwd,
+                    "peerProtocol": 99
+                })
+                .to_string(),
+            )
+            .expect("duplicate registry record");
+        }
+        let target = SessionId::try_from("fixture-target".to_owned()).expect("target ID");
+        let registry = ClaudeCodeSessionRegistry::new(root.path().to_owned());
+
+        let lookup = registry
+            .lookup_with_probe(&target, |process_id| {
+                Ok((600_u32..605).contains(&process_id))
+            })
+            .expect("ambiguous target lookup");
+        let PeerSessionLookup::Ambiguous { claims } = lookup else {
+            panic!("five live records must remain ambiguous: {lookup:?}");
+        };
+        let claims_by_pid = claims
+            .into_iter()
+            .map(|claim| (claim.pid, claim))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        assert_eq!(claims_by_pid.len(), 5);
+        for process_id in 600_u32..605 {
+            let claim = claims_by_pid
+                .get(&process_id)
+                .expect("each live process remains in the ambiguity result");
+            assert!(claim.name.as_deref().is_some_and(|name| name.len() > 24));
+            assert_eq!(
+                claim.cwd.as_deref(),
+                Some(std::path::Path::new(&format!(
+                    "/workspace/terminal-{process_id}"
+                )))
+            );
+        }
+    }
+
+    #[test]
+    fn lookup_reports_live_unreadable_registry_records() {
+        let root = tempfile::tempdir().expect("registry directory");
+        std::fs::write(root.path().join("501.json"), "not json")
+            .expect("unreadable registry record");
+        let target = SessionId::try_from("fixture-target".to_owned()).expect("target ID");
+        let registry = ClaudeCodeSessionRegistry::new(root.path().to_owned());
+
+        let result = registry.lookup_with_probe(&target, |_| Ok(true));
+
+        assert!(matches!(result, Err(PeerRegistryError::LiveUnreadable)));
+    }
 
     #[test]
     fn liveness_probe_error_is_preserved_for_the_target() {

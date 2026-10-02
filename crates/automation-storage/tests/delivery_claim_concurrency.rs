@@ -1,6 +1,8 @@
 use agent_automation::{DurableMessage, ExpiryRule, OperationId, TimingRule};
 use automation_storage::{AutomationStore, WakeCreate, WakeEvaluation};
 use serde::{Deserialize, Serialize};
+#[path = "support/wake_push_draft.rs"]
+mod wake_push_test_support;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Message {
     target: String,
@@ -45,7 +47,11 @@ async fn two_workers_claim_one_delivery_and_reopen_never_reclaims_dispatching()
         })
         .await?;
     let id = match first
-        .evaluate_wakeup::<Message>(&wake.definition.wakeup_id, 1000)
+        .evaluate_wakeup::<Message>(
+            &wake.definition.wakeup_id,
+            1000,
+            wake_push_test_support::build_test_wake_push_draft,
+        )
         .await?
     {
         WakeEvaluation::Fired { delivery_id, .. } => delivery_id,

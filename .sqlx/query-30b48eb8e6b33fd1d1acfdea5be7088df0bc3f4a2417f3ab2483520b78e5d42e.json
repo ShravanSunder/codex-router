@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO topic_watches(reader_key,topic_id,starts_after_activity,active) VALUES(?,?,?,1) ON CONFLICT(reader_key,topic_id) DO UPDATE SET starts_after_activity=CASE WHEN topic_watches.active=0 THEN excluded.starts_after_activity ELSE topic_watches.starts_after_activity END,active=1 RETURNING starts_after_activity",
+  "describe": {
+    "columns": [
+      {
+        "name": "starts_after_activity",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "topic_watches",
+            "name": "starts_after_activity"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "30b48eb8e6b33fd1d1acfdea5be7088df0bc3f4a2417f3ab2483520b78e5d42e"
+}

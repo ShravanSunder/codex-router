@@ -103,28 +103,44 @@ fn valid_session_ref_shape_reaches_discovery() {
 }
 
 #[test]
-fn human_user_and_from_remain_mutually_exclusive() {
-    let address = session_ref();
+fn message_help_uses_the_harness_identity_and_removes_sender_overrides() {
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_agent-collaboration"))
-        .args([
-            "message",
-            "send",
-            "--human-user",
-            "--to",
-            &address,
-            "--from",
-            &address,
-            "--text",
-            "fixture",
-            "--json",
-        ])
+        .args(["message", "send", "--help"])
         .output()
-        .unwrap_or_else(|error| panic!("message command: {error}"));
+        .unwrap_or_else(|error| panic!("message help: {error}"));
 
-    assert_eq!(output.status.code(), Some(2));
-    let record: serde_json::Value = serde_json::from_slice(&output.stdout)
-        .unwrap_or_else(|error| panic!("JSON conflict error: {error}"));
-    assert_eq!(record["error"]["kind"], "invalidField");
+    assert!(output.status.success());
+    let help = String::from_utf8(output.stdout)
+        .unwrap_or_else(|error| panic!("message help text: {error}"));
+    assert!(!help.contains("--from"));
+    assert!(help.contains("harness"));
+}
+
+#[test]
+fn wake_help_uses_the_harness_identity_and_removes_sender_overrides() {
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_agent-collaboration"))
+        .args(["wake", "send", "--help"])
+        .output()
+        .unwrap_or_else(|error| panic!("wake help: {error}"));
+
+    assert!(output.status.success());
+    let help =
+        String::from_utf8(output.stdout).unwrap_or_else(|error| panic!("wake help text: {error}"));
+    assert!(!help.contains("--from"));
+}
+
+#[test]
+fn reply_help_requires_a_push_reference_and_removes_latest_sender_options() {
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_agent-collaboration"))
+        .args(["message", "reply", "--help"])
+        .output()
+        .unwrap_or_else(|error| panic!("reply help: {error}"));
+
+    assert!(output.status.success());
+    let help =
+        String::from_utf8(output.stdout).unwrap_or_else(|error| panic!("reply help text: {error}"));
+    assert!(help.contains("PUSH_ID_OR_LINK"));
+    assert!(!help.contains("--expect-sender"));
 }
 
 #[test]
@@ -137,7 +153,7 @@ fn help_distinguishes_message_targets_from_lifecycle_addresses() {
         .unwrap_or_else(|error| panic!("message help text: {error}"));
     assert!(message_help.contains("sessions list"));
     assert!(message_help.contains(".target"));
-    assert!(message_help.contains("supplied self address"));
+    assert!(message_help.contains("harness"));
 
     let addresses = std::process::Command::new(env!("CARGO_BIN_EXE_agent-collaboration"))
         .args(["addresses", "list", "--help"])

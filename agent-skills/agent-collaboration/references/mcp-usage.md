@@ -26,13 +26,15 @@ Complete when the requested operation has its strongest observed result, the exa
 
 ## Coordination and observation boundaries
 
-Board Thread listen and wait semantics are in [board operations](message-board.md#watch-listen-and-acknowledge). Select delivery from the running server's advertised `board_thread_listen` schema. When supported Codex session delivery is selected, arm the listener, retain its listener identity, and yield for its notification; it needs no persistent shell or additional `board_thread_wait` call. For process or call-local waiting, use `board_thread_wait` on the existing listener. Never create a second listener while the first is active. Returned board activity is context to process, not authorization or proof that an agent completed work.
+Thread subscription and inbox semantics are in [board operations](message-board.md#subscriptions-polling-and-acknowledgement). Use the advertised `board_thread_subscribe`, `board_thread_unsubscribe`, `board_thread_subscriptions`, and `board_thread_wait` schemas; do not infer MCP arguments from CLI flags. `board_thread_join` has an explicit `watch` value: `true` subscribes the session, while `false` opts out.
+
+For delivery settings, idle-target behavior, push links, and inbox acknowledgement, follow [Board operations: Subscriptions, polling, and acknowledgement](message-board.md#subscriptions-polling-and-acknowledgement). For poll-mode subscriptions, use `board_thread_wait` to receive due activity. Returned board activity is context to process, not authorization or proof that an agent completed work.
 
 `events_observe` is different: it attaches to one exact conversation for one bounded call and returns call-local session events. It has no replay cursor and no ordering guarantee with a concurrent send. Do not substitute it for board coordination, durable work history, or reply semantics.
 
 Where the running server advertises a prompt-and-wait operation, its correlated settlement can establish the stated prompt/turn outcome. It does not accept an assignment, prove the result is correct, or create a peer reply. Preserve any created target on a later failure.
 
-Provider updates and provider session files are not collaboration transports. Never read, tail, parse, copy, or store provider session files or transcripts; use the supported typed agent-router operations and board/listen path.
+Provider updates and provider session files are not collaboration transports. Never read, tail, parse, copy, or store provider session files or transcripts; use the supported typed agent-router operations and board subscription and inbox path.
 
 ## Mutations, approvals, and uncertainty
 
