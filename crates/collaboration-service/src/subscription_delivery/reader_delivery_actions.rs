@@ -1,6 +1,20 @@
 //! Subscription lifecycle, policy decisions, and durable board settlement.
 use super::*;
 
+/// Each selected batch keeps ownership until its durable disposition is written.
+enum SubscriptionBatchWrite {
+    Settle(SubscriptionDeliveryOutcome),
+    Hold {
+        now: chrono::DateTime<chrono::Utc>,
+        outcome: SubscriptionDeliveryOutcome,
+    },
+    Retry {
+        now: chrono::DateTime<chrono::Utc>,
+        retry_at: chrono::DateTime<chrono::Utc>,
+        outcome: SubscriptionDeliveryOutcome,
+    },
+}
+
 impl ReaderDeliveryOwner {
     pub(super) async fn expiry_notices(&self, records: &[ThreadSubscriptionRecord]) {
         let Ok(store) = self.board_store() else {
@@ -234,11 +248,15 @@ impl ReaderDeliveryOwner {
                     }
                     _ => SubscriptionDeliveryOutcome::Rejected { evidence },
                 };
-                self.board_store()?
-                    .lock()
-                    .await
-                    .mark_subscription_batch_retry(&self.reader, settlement, now, retry_at, outcome)
-                    .await?;
+                self.complete_batch_write(
+                    settlement,
+                    SubscriptionBatchWrite::Retry {
+                        now,
+                        retry_at,
+                        outcome,
+                    },
+                )
+                .await?;
                 #[cfg(test)]
                 self.observe(OwnerObservation::RetryScheduled);
                 Ok(())
@@ -251,19 +269,81 @@ impl ReaderDeliveryOwner {
         settlement: &SubscriptionBatchSettlement,
         outcome: SubscriptionDeliveryOutcome,
     ) -> Result<(), BoardError> {
+        self.complete_batch_write(settlement, SubscriptionBatchWrite::Settle(outcome))
+            .await?;
+        #[cfg(test)]
+        self.observe(OwnerObservation::Settled);
+        Ok(())
+    }
+
+    pub(super) async fn hold(
+        &self,
+        settlement: &SubscriptionBatchSettlement,
+        reason: &str,
+    ) -> Result<(), BoardError> {
+        self.complete_batch_write(
+            settlement,
+            SubscriptionBatchWrite::Hold {
+                now: self.clock.now(),
+                outcome: SubscriptionDeliveryOutcome::NotSubmitted {
+                    reason: reason.to_owned(),
+                    retryable: true,
+                },
+            },
+        )
+        .await?;
+        #[cfg(test)]
+        self.observe(OwnerObservation::Held);
+        Ok(())
+    }
+
+    async fn complete_batch_write(
+        &self,
+        settlement: &SubscriptionBatchSettlement,
+        write: SubscriptionBatchWrite,
+    ) -> Result<(), BoardError> {
         let mut delay = Duration::from_secs(1);
         loop {
-            if self
-                .board_store()?
-                .lock()
-                .await
-                .settle_subscription_batch(&self.reader, settlement, outcome.clone())
-                .await
-                .is_ok()
-            {
-                #[cfg(test)]
-                self.observe(OwnerObservation::Settled);
-                return Ok(());
+            let result = {
+                let mut store = self.board_store()?.lock().await;
+                match &write {
+                    SubscriptionBatchWrite::Settle(outcome) => {
+                        store
+                            .settle_subscription_batch(&self.reader, settlement, outcome.clone())
+                            .await
+                    }
+                    SubscriptionBatchWrite::Hold { now, outcome } => {
+                        store
+                            .mark_subscription_batch_held(
+                                &self.reader,
+                                settlement,
+                                *now,
+                                outcome.clone(),
+                            )
+                            .await
+                    }
+                    SubscriptionBatchWrite::Retry {
+                        now,
+                        retry_at,
+                        outcome,
+                    } => {
+                        store
+                            .mark_subscription_batch_retry(
+                                &self.reader,
+                                settlement,
+                                *now,
+                                *retry_at,
+                                outcome.clone(),
+                            )
+                            .await
+                    }
+                }
+            };
+            match result {
+                Ok(()) => return Ok(()),
+                Err(error) => {
+                    tracing::warn!(%error, "selected subscription batch write failed; retaining selection for retry")
+                }
             }
             #[cfg(test)]
             self.observe(OwnerObservation::SettlementRetry);
@@ -272,32 +352,15 @@ impl ReaderDeliveryOwner {
                 .monotonic_now()
                 .checked_add(delay)
                 .ok_or_else(BoardError::board_unavailable)?;
-            tokio::select! { () = self.shutdown.cancelled() => return Err(BoardError::board_unavailable()), () = self.clock.sleep_until(deadline) => {} }
+            tokio::select! {
+                () = self.shutdown.cancelled() => {
+                    self.release(settlement).await;
+                    return Err(BoardError::board_unavailable());
+                },
+                () = self.clock.sleep_until(deadline) => {}
+            }
             delay = delay.saturating_mul(2).min(Duration::from_secs(30));
         }
-    }
-
-    pub(super) async fn hold(
-        &self,
-        settlement: &SubscriptionBatchSettlement,
-        reason: &str,
-    ) -> Result<(), BoardError> {
-        self.board_store()?
-            .lock()
-            .await
-            .mark_subscription_batch_held(
-                &self.reader,
-                settlement,
-                self.clock.now(),
-                SubscriptionDeliveryOutcome::NotSubmitted {
-                    reason: reason.to_owned(),
-                    retryable: true,
-                },
-            )
-            .await?;
-        #[cfg(test)]
-        self.observe(OwnerObservation::Held);
-        Ok(())
     }
 
     pub(super) async fn release(&self, settlement: &SubscriptionBatchSettlement) {

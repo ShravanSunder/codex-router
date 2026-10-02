@@ -1,4 +1,5 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
+mod control_view_proofs;
 mod direct_message_proofs;
 mod flight_proofs;
 mod lifecycle_proofs;
@@ -8,6 +9,7 @@ mod queued_proofs;
 mod stall_diagnosis;
 mod timing_proofs;
 mod wait_proofs;
+mod write_retry_proofs;
 use owner_fixture::*;
 
 #[tokio::test(start_paused = true)]
