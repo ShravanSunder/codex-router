@@ -113,7 +113,7 @@ impl ClaudeCodePeerDeliveryRoute {
         if mode == MessageDelivery::Queue {
             return Ok(PeerDeliveryPreparation::Finished(peer_rejection(
                 DeliveryRejectionReason::QueueUnsupported,
-                "queue unsupported for Claude Code sessions",
+                "Queue delivery isn't supported for Claude Code terminals",
             )));
         }
         Ok(match self.lookup(target).await {

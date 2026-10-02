@@ -6,11 +6,13 @@ use crate::{
     session_delivery_contract::UnstoredAttemptEvidenceSink,
 };
 use collaboration_protocol::{
-    AttemptId, DeliveryCorrelationId, DeliveryOutcome, DeliveryReceipt, MachineId, MessageDelivery,
-    MessageText, PushId, PushKind, PushLineInput, PushRecord, RouterLink, SessionRef,
-    render_push_line,
+    AttemptId, DeliveryCorrelationId, DeliveryNextAction, DeliveryOutcome, DeliveryReceipt,
+    DeliveryRejection, DeliveryRejectionReason, MachineId, MessageDelivery, MessageText, PushId,
+    PushKind, PushLineInput, PushRecord, RouterLink, SessionRef, render_push_line,
 };
 use message_board::BoardError;
+
+const CLAUDE_CODE_PEER_ENDPOINT_ID: &str = "claude-local";
 
 impl SubscriptionPushStore {
     pub(super) async fn restore_direct_messages(
@@ -141,11 +143,53 @@ impl SubscriptionPushStore {
             attempt: AttemptId::generate(),
         };
         self.mark_attempted(&prepared).await?;
-        let receipt = tokio::select! {
+        let allow_hold = mode != MessageDelivery::Steer && record.guard.is_none();
+        let mut receipt = tokio::select! {
             () = self.shutdown.cancelled() => return Err(BoardError::board_unavailable()),
             receipt = self.delivery.deliver(request, &UnstoredAttemptEvidenceSink) => receipt.unwrap_or(DeliveryReceipt { outcome: DeliveryOutcome::Unknown, reachability: None, client: None }),
         };
-        let allow_hold = mode != MessageDelivery::Steer && record.guard.is_none();
+
+        let no_route = matches!(
+            &receipt.outcome,
+            DeliveryOutcome::Rejected(rejection)
+                if rejection.reason == DeliveryRejectionReason::NoRoute
+        );
+        let queue_to_closed_claude_peer = mode == MessageDelivery::Queue
+            && record.guard.is_none()
+            && record.target.endpoint.service_id == self.machine.service_id().clone()
+            && String::from(record.target.endpoint.endpoint_id.clone())
+                == CLAUDE_CODE_PEER_ENDPOINT_ID
+            && no_route;
+        if queue_to_closed_claude_peer {
+            receipt = DeliveryReceipt {
+                outcome: DeliveryOutcome::Rejected(DeliveryRejection {
+                    reason: DeliveryRejectionReason::QueueUnsupported,
+                    next_action: DeliveryNextAction::CorrectRequest,
+                    client_code: None,
+                    detail: Some(
+                        "Queue delivery isn't supported for Claude Code terminals".to_owned(),
+                    ),
+                    claims: None,
+                }),
+                reachability: None,
+                client: None,
+            };
+        } else if allow_hold
+            && matches!(
+                &receipt.outcome,
+                DeliveryOutcome::Rejected(rejection)
+                    if rejection.reason == DeliveryRejectionReason::NoRoute
+            )
+        {
+            receipt = DeliveryReceipt {
+                outcome: DeliveryOutcome::NotSubmitted {
+                    retryable: true,
+                    reason: "no route currently claims the session; direct message held".to_owned(),
+                },
+                reachability: None,
+                client: None,
+            };
+        }
         self.record_receipt(&prepared, &receipt, allow_hold).await?;
         self.direct_message(&record.push_id).await
     }
