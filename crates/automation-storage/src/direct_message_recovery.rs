@@ -2,7 +2,8 @@
 use crate::{AutomationStore, StorageError, push_record_rows};
 use chrono::{DateTime, Utc};
 use collaboration_protocol::{
-    DeliveryOutcome, DeliveryReceipt, MessageDelivery, PushId, PushKind, PushRecord, SessionRef,
+    DeliveryOutcome, DeliveryReceipt, EndpointId, EndpointRef, MessageDelivery, PushId, PushKind,
+    PushRecord, SessionId, SessionRef, UuidIdentity,
 };
 use sqlx::FromRow;
 
@@ -26,15 +27,19 @@ impl AutomationStore {
         )
         .fetch_all(&mut self.connection)
         .await?;
-        rows.into_iter()
-            .map(|row| {
-                push_record_rows::session_from_parts(
-                    row.target_service_id,
-                    row.target_endpoint_id,
-                    row.target_session_id,
-                )
-            })
-            .collect()
+        let mut targets = Vec::with_capacity(rows.len());
+        for row in rows {
+            match direct_message_recovery_target(row) {
+                Ok(target) => targets.push(target),
+                Err(field) => {
+                    tracing::warn!(
+                        record_field = field,
+                        "direct-message recovery target has invalid stored field"
+                    );
+                }
+            }
+        }
+        Ok(targets)
     }
 
     pub async fn list_unsent_direct_messages(
@@ -69,9 +74,16 @@ impl AutomationStore {
         };
         let outcome_json = push_record_rows::serialize_json(&receipt)?;
         let settled_at = push_record_rows::serialize_timestamp(now);
+        let direct_message = push_record_rows::serialize_kind(PushKind::DirectMessage)?;
+        let subscription_activity =
+            push_record_rows::serialize_kind(PushKind::SubscriptionActivity)?;
+        let subscription_expiry = push_record_rows::serialize_kind(PushKind::SubscriptionExpiry)?;
+        let approval = push_record_rows::serialize_kind(PushKind::Approval)?;
+        let question = push_record_rows::serialize_kind(PushKind::Question)?;
         let result = sqlx::query!(
-            "UPDATE router_pushes SET delivery_state='outcome_unknown',last_outcome_json=?,settled_at=? WHERE delivery_state='attempted' AND last_outcome_json IS NULL",
-            outcome_json, settled_at
+            "UPDATE router_pushes SET delivery_state='outcome_unknown',last_outcome_json=?,settled_at=? WHERE delivery_state='attempted' AND last_outcome_json IS NULL AND kind IN (?, ?, ?, ?, ?)",
+            outcome_json, settled_at, direct_message, subscription_activity, subscription_expiry,
+            approval, question
         ).execute(&mut self.connection).await?;
         Ok(result.rows_affected())
     }
@@ -143,4 +155,19 @@ impl AutomationStore {
             .await?
             .ok_or(StorageError::PushNotFound)
     }
+}
+
+fn direct_message_recovery_target(row: DirectMessageTargetRow) -> Result<SessionRef, &'static str> {
+    let service_id =
+        UuidIdentity::try_from(row.target_service_id).map_err(|_| "target_service_id")?;
+    let endpoint_id =
+        EndpointId::try_from(row.target_endpoint_id).map_err(|_| "target_endpoint_id")?;
+    let session_id = SessionId::try_from(row.target_session_id).map_err(|_| "target_session_id")?;
+    Ok(SessionRef {
+        endpoint: EndpointRef {
+            service_id,
+            endpoint_id,
+        },
+        session_id,
+    })
 }

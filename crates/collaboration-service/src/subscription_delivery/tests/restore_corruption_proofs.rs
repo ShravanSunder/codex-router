@@ -1,8 +1,49 @@
 //! One corrupt recovery row must not suppress healthy readers at Host startup.
-use super::super::SubscriptionClock;
+use super::super::{
+    SubscriptionClock, subscription_push::target_session, subscription_service::OwnerObservation,
+};
 use super::owner_fixture::*;
+use collaboration_protocol::{
+    MessageDelivery, PushDeliveryState, PushHeaderFacts, PushId, PushKind, PushOrigin, PushRecord,
+    PushRecordDraft, SessionId, SessionRef,
+};
 use message_board::*;
 use sqlx::Connection;
+use std::time::Duration;
+
+fn direct_message_draft(
+    target: &SessionRef,
+    push_body: &str,
+    created_at: chrono::DateTime<chrono::Utc>,
+) -> PushRecordDraft {
+    PushRecordDraft {
+        push_id: PushId::try_from(uuid::Uuid::now_v7().to_string()).unwrap(),
+        kind: PushKind::DirectMessage,
+        origin: PushOrigin::OwnerUnverified,
+        origin_router_ref: None,
+        target: target.clone(),
+        mode: Some(MessageDelivery::Auto),
+        guard: None,
+        reply_to_push_id: None,
+        header_facts: PushHeaderFacts::DirectMessage {
+            sender_display_name: None,
+        },
+        body: Some(push_body.to_owned()),
+        activity: None,
+        created_at,
+    }
+}
+
+async fn stored_push(fixture: &OwnerFixture, push_id: &PushId) -> PushRecord {
+    fixture
+        .push_store
+        .lock()
+        .await
+        .get_push_record(push_id)
+        .await
+        .unwrap()
+        .unwrap()
+}
 
 #[tokio::test(start_paused = true)]
 async fn corrupt_subscription_mode_is_skipped_while_valid_reader_restores_and_delivers() {
@@ -131,4 +172,109 @@ async fn failed_direct_message_recovery_query_does_not_stop_valid_subscription_r
     runtime.await_settled().await;
     observer.close().await.unwrap();
     runtime.close().await;
+}
+
+#[tokio::test]
+async fn corrupt_recovery_target_row_does_not_strand_held_dm_after_restart() {
+    let fixture = OwnerFixture::new().await;
+    let target = target_session(&fixture.reader).unwrap();
+    let held_draft = direct_message_draft(&target, "held DM survives restart", fixture.clock.now());
+    let held_push_id = held_draft.push_id.clone();
+    fixture
+        .push_store
+        .lock()
+        .await
+        .insert_push_record(held_draft)
+        .await
+        .unwrap();
+    *fixture.presence.0.lock().unwrap() = crate::TargetPresence::Wakeable;
+    let first_runtime = fixture.runtime_without_board().await;
+    first_runtime
+        .observe(|event| matches!(event, OwnerObservation::DirectMessageHeld))
+        .await;
+    assert_eq!(
+        stored_push(&fixture, &held_push_id).await.delivery_state,
+        PushDeliveryState::Held
+    );
+    first_runtime.close().await;
+
+    let mut corrupt_target = target.clone();
+    corrupt_target.session_id = SessionId::try_from("corrupt-recovery-target".to_owned()).unwrap();
+    let corrupt_draft =
+        direct_message_draft(&corrupt_target, "invalid target row", fixture.clock.now());
+    let corrupt_push_id = corrupt_draft.push_id.clone();
+    fixture
+        .push_store
+        .lock()
+        .await
+        .insert_push_record(corrupt_draft)
+        .await
+        .unwrap();
+    let mut observer = sqlx::SqliteConnection::connect_with(
+        &sqlx::sqlite::SqliteConnectOptions::new()
+            .filename(fixture.directory.path().join("automation.sqlite")),
+    )
+    .await
+    .unwrap();
+    sqlx::query("UPDATE router_pushes SET target_session_id='' WHERE push_id=?")
+        .bind(corrupt_push_id.as_str())
+        .execute(&mut observer)
+        .await
+        .unwrap();
+
+    let recovery_targets = fixture
+        .push_store
+        .lock()
+        .await
+        .direct_message_recovery_targets()
+        .await
+        .unwrap();
+    assert_eq!(recovery_targets, vec![target.clone()]);
+
+    *fixture.presence.0.lock().unwrap() = crate::TargetPresence::Running;
+    let recovered_runtime = fixture.runtime_without_board().await;
+    let request = tokio::time::timeout(Duration::from_secs(5), async {
+        recovered_runtime
+            .requests
+            .lock()
+            .await
+            .recv()
+            .await
+            .unwrap()
+    })
+    .await
+    .unwrap();
+    assert_eq!(request.target, target);
+    assert_eq!(request.payload.push_id, held_push_id);
+    assert!(
+        request
+            .payload
+            .line
+            .as_str()
+            .contains("held DM survives restart")
+    );
+    recovered_runtime
+        .completions
+        .send(collaboration_protocol::DeliveryOutcome::Started)
+        .unwrap();
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        recovered_runtime.observe(|event| matches!(event, OwnerObservation::DirectMessageSettled)),
+    )
+    .await
+    .expect("restarted held DM should settle");
+    assert_eq!(
+        stored_push(&fixture, &held_push_id).await.delivery_state,
+        PushDeliveryState::Delivered
+    );
+    let invalid_target_session: String =
+        sqlx::query_scalar("SELECT target_session_id FROM router_pushes WHERE push_id=?")
+            .bind(corrupt_push_id.as_str())
+            .fetch_one(&mut observer)
+            .await
+            .unwrap();
+    assert_eq!(invalid_target_session, "", "corrupt row stays unchanged");
+
+    observer.close().await.unwrap();
+    recovered_runtime.close().await;
 }

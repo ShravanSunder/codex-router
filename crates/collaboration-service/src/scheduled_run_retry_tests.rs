@@ -120,6 +120,9 @@ async fn fake_provider_submission_and_settlement_variants_preserve_run_state() -
             FakeSubmissionPlan::Accept | FakeSubmissionPlan::RejectOnceThenAccept => {
                 (PushDeliveryState::Delivered, Some(DeliveryOutcome::Started))
             }
+            FakeSubmissionPlan::CrashAfterDispatchIntent => {
+                return Err("crash fixture must stop before submission settlement".into());
+            }
         };
         if push.delivery_state != expected_push_state
             || push
@@ -211,6 +214,117 @@ async fn fake_provider_submission_and_settlement_variants_preserve_run_state() -
         }
         std::fs::remove_dir(root)?;
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn shared_restore_preserves_attempted_schedule_push_for_worker_settlement() -> TestResult<()>
+{
+    let (root, store, worker, run_id, observed_push_ids) = provider_worker_fixture(
+        FakeSubmissionPlan::CrashAfterDispatchIntent,
+        FakeSettlementPlan::Pending,
+    )
+    .await?;
+    worker.step(run_id.clone()).await?;
+    worker.step(run_id.clone()).await?;
+    if !matches!(
+        worker.step(run_id.clone()).await,
+        Err(StorageError::InvalidRecord)
+    ) {
+        return Err("fixture did not stop after persisting schedule dispatch intent".into());
+    }
+
+    let push_ids = observed_push_ids
+        .lock()
+        .map_err(|_| "schedule push id observation lock poisoned")?
+        .clone();
+    if push_ids.len() != 2 || push_ids[0] != push_ids[1] {
+        return Err("interrupted run did not retain one schedule push identity".into());
+    }
+    let interrupted_push = store
+        .lock()
+        .await
+        .get_push_record(&push_ids[0])
+        .await?
+        .ok_or("interrupted schedule push missing")?;
+    let interrupted_run = store
+        .lock()
+        .await
+        .read_run::<
+            SessionRef,
+            EndpointRef,
+            CodexGeneration,
+            crate::stored_run_receipt::StoredRunReceipt,
+        >(&run_id)
+        .await?;
+    if interrupted_push.delivery_state != PushDeliveryState::Attempted
+        || interrupted_run.phase != RunPhase::Preparing
+        || interrupted_run.evidence.timing.is_none()
+    {
+        return Err("fixture did not retain attempted push and dispatch evidence".into());
+    }
+
+    let settled_by_shared_restore = store
+        .lock()
+        .await
+        .settle_interrupted_pushes(chrono::Utc::now())
+        .await?;
+    if settled_by_shared_restore != 0 {
+        return Err("shared restore settled a ScheduleRun-owned attempt".into());
+    }
+    let still_attempted = store
+        .lock()
+        .await
+        .get_push_record(&push_ids[0])
+        .await?
+        .ok_or("schedule push missing after shared restore")?;
+    if still_attempted.delivery_state != PushDeliveryState::Attempted {
+        return Err("shared restore removed the attempt from schedule recovery".into());
+    }
+
+    worker.step(run_id.clone()).await?;
+    let recovered_run = store
+        .lock()
+        .await
+        .read_run::<
+            SessionRef,
+            EndpointRef,
+            CodexGeneration,
+            crate::stored_run_receipt::StoredRunReceipt,
+        >(&run_id)
+        .await?;
+    let recovered_push = store
+        .lock()
+        .await
+        .get_push_record(&push_ids[0])
+        .await?
+        .ok_or("schedule push missing after owner recovery")?;
+    if recovered_run.phase != RunPhase::Uncertain
+        || recovered_push.delivery_state != PushDeliveryState::OutcomeUnknown
+        || recovered_push
+            .last_outcome
+            .as_ref()
+            .map(|receipt| &receipt.outcome)
+            != Some(&DeliveryOutcome::Unknown)
+    {
+        return Err("schedule worker did not settle the original interrupted attempt".into());
+    }
+    if observed_push_ids
+        .lock()
+        .map_err(|_| "schedule push id observation lock poisoned")?
+        .len()
+        != 2
+    {
+        return Err("schedule worker replayed the interrupted start".into());
+    }
+
+    drop(worker);
+    let unique_store = Arc::try_unwrap(store).map_err(|_| "store still referenced")?;
+    unique_store.into_inner().close().await?;
+    for entry in std::fs::read_dir(&root)? {
+        std::fs::remove_file(entry?.path())?;
+    }
+    std::fs::remove_dir(root)?;
     Ok(())
 }
 

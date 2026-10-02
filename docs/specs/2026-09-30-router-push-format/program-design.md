@@ -134,8 +134,10 @@ sequenceDiagram
   D-->>C: sent ✉️ id → T · delivered | held
 ```
 
-- **Restart:** the owner restores targets that have pending or held records and resubmits only those.
-  `attempted` rows with no outcome settle as `outcome_unknown` and are not re-sent (R15).
+- **Restart:** the owner restores targets that have pending or held records. The shared startup sweep settles
+  attempted records only for kinds without an owning recovery worker; wake and scheduled-run workers use their
+  durable mailbox or run state to decide whether an undispatched delivery may be retried or an uncertain outcome
+  must be settled. A DM attempt with no outcome settles as `outcome_unknown` and is not re-sent (R15).
 - **Wake firing:** insert the push record and the mailbox row in one transaction, then deliver through
   Layer 0 with the wake's **own** mode and `MayLoad`. It is not held (R14).
 - **Schedule to an existing session:** record, then Layer 0 with the schedule's existing mode. Fresh or fork
@@ -227,8 +229,14 @@ Slice C is the largest. If it proves too big for one Luna xhigh, split it inside
 - **DMs do not depend on the board.** The `ReaderDeliveryOwner` service starts whenever automation storage opens and
   takes the board as `BoardAvailability::{Available, Unavailable}`; with the board unavailable, DM holds still work
   and subscription operations return a board-unavailable error.
-- **Restart discovery.** Restore finds targets with pending or held DM-kind records; DM-kind `attempted` records
-  without an outcome settle `outcome_unknown` and are not re-sent.
+- **Restart recovery ownership.** Restore finds targets with pending or held DM-kind records. The shared
+  `settle_interrupted_pushes` sweep settles attempted records only for `DirectMessage`, `SubscriptionActivity`,
+  `SubscriptionExpiry`, `Approval` and `Question`, which have no separate recovery worker. It leaves `Wake` and
+  `ScheduleRun` attempted for their owner workers: the wake worker checks the durable mailbox attempt before
+  retrying a known-undispatched firing with the same push id, while the scheduled-run worker settles an uncertain
+  start from its stored run evidence without replaying it. DM attempts without an outcome settle
+  `outcome_unknown` and are not re-sent. Recovery target decoding is per row: a malformed target is field-tagged
+  and skipped while storage/query failures remain errors, so one corrupt row does not suppress healthy DM owners.
 - **Fresh-run envelope remains task input (R16, owner decision).**
   `crates/collaboration-service/src/scheduled_run_worker.rs:836-844` continues to prepend the existing task-input
   context to a fresh schedule run. That envelope is not a push, creates no push record, and stays unchanged.

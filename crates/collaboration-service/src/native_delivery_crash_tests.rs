@@ -168,7 +168,8 @@ async fn native_delivery_process_loss_preserves_uncertainty_without_resend() -> 
 }
 
 #[tokio::test]
-async fn fire_commit_process_loss_dispatches_the_same_push_after_restart() -> TestResult<()> {
+async fn interrupted_wake_attempt_survives_shared_restore_and_worker_delivers_once()
+-> TestResult<()> {
     let fixture_id = OperationId::generate();
     let root = native_delivery_crash_root(&fixture_id);
     std::fs::DirBuilder::new().mode(0o700).create(&root)?;
@@ -209,6 +210,14 @@ async fn fire_commit_process_loss_dispatches_the_same_push_after_restart() -> Te
     let store = Arc::new(Mutex::new(
         AutomationStore::open(&root.join("automation.sqlite")).await?,
     ));
+    let globally_settled = store
+        .lock()
+        .await
+        .settle_interrupted_pushes(chrono::Utc::now())
+        .await?;
+    if globally_settled != 0 {
+        return Err("shared startup recovery settled the Wake-owned attempt".into());
+    }
     let before = store
         .lock()
         .await
@@ -225,8 +234,8 @@ async fn fire_commit_process_loss_dispatches_the_same_push_after_restart() -> Te
         .get_push_record(&expected_push_id)
         .await?
         .ok_or("committed wake push missing after restart")?;
-    if push_before.delivery_state != automation_storage::PushDeliveryState::Pending {
-        return Err("committed wake push was already attempted before restart".into());
+    if push_before.delivery_state != automation_storage::PushDeliveryState::Attempted {
+        return Err("Wake-owned attempt did not remain available to its worker".into());
     }
 
     let listener = tokio::net::UnixListener::bind(root.join("native.sock"))?;
@@ -397,6 +406,13 @@ async fn native_delivery_crash_child() -> TestResult<()> {
         root.join("push-id.json"),
         serde_json::to_vec(&push.push_id)?,
     )?;
+    if std::env::var(STAGE_ENV).as_deref() == Ok("fire-committed") {
+        store
+            .lock()
+            .await
+            .mark_push_attempted(&push.push_id)
+            .await?;
+    }
     checkpoint("fire-committed");
     let listener = tokio::net::UnixListener::bind(root.join("native.sock"))?;
     let witness = root.join("native-receipt.json");

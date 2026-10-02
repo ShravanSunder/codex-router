@@ -37,6 +37,7 @@ pub(super) enum FakeSubmissionPlan {
     Reject,
     RejectOnceThenAccept,
     Unknown,
+    CrashAfterDispatchIntent,
 }
 
 #[derive(Clone, Copy)]
@@ -302,6 +303,9 @@ impl ScheduledRunExecution for FakeScheduledExecution {
                     }
                     sink.record(evidence).await?;
                     return Ok(RunSubmission::Unknown);
+                }
+                (FakeSubmissionPlan::CrashAfterDispatchIntent, _) => {
+                    return Err(DeliveryContractError::EvidencePersistence);
                 }
                 (FakeSubmissionPlan::Accept, _) | (FakeSubmissionPlan::RejectOnceThenAccept, _) => {
                 }

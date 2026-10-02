@@ -170,7 +170,7 @@ async fn corrupt_direct_message_mode_and_guard_fail_closed() -> TestResult {
 }
 
 #[tokio::test]
-async fn restart_discovers_unsent_dm_targets_and_settles_every_attempted_push() -> TestResult {
+async fn restart_discovers_unsent_dm_targets_and_preserves_owner_recovery_attempts() -> TestResult {
     let database = TestDatabase::new();
     let mut store = AutomationStore::open(&database.path).await?;
     let first = direct_message_draft(MessageDelivery::Auto, None)?;
@@ -301,17 +301,26 @@ async fn restart_discovers_unsent_dm_targets_and_settles_every_attempted_push() 
             None,
         )?,
     ];
-    let mut attempted_ids = vec![attempted_id.clone()];
+    let mut settleable_attempted_ids = vec![attempted_id.clone()];
+    let mut owner_recovery_attempted_ids = Vec::new();
     for draft in router_attempts {
         let push_id = draft.push_id.clone();
+        let kind = draft.kind;
         store.insert_push_record(draft).await?;
         store.mark_push_attempted(&push_id).await?;
-        attempted_ids.push(push_id);
+        match kind {
+            PushKind::Wake | PushKind::ScheduleRun => owner_recovery_attempted_ids.push(push_id),
+            PushKind::Approval
+            | PushKind::Question
+            | PushKind::SubscriptionActivity
+            | PushKind::SubscriptionExpiry => settleable_attempted_ids.push(push_id),
+            PushKind::DirectMessage => return Err("unexpected DM fixture kind".into()),
+        }
     }
     store.close().await?;
 
     let mut restored = AutomationStore::open(&database.path).await?;
-    let attempted_count = u64::try_from(attempted_ids.len())?;
+    let attempted_count = u64::try_from(settleable_attempted_ids.len())?;
     ensure(
         restored.settle_interrupted_pushes(Utc::now()).await? == attempted_count,
         "recovery touched the wrong attempts",
@@ -339,7 +348,7 @@ async fn restart_discovers_unsent_dm_targets_and_settles_every_attempted_push() 
         held.delivery_state == PushDeliveryState::Held && held.mode == Some(MessageDelivery::Queue),
         "unsubmitted hold did not survive crash",
     )?;
-    for push_id in &attempted_ids {
+    for push_id in &settleable_attempted_ids {
         let unknown = restored
             .get_push_record(push_id)
             .await?
@@ -350,6 +359,17 @@ async fn restart_discovers_unsent_dm_targets_and_settles_every_attempted_push() 
                     .last_outcome
                     .is_some_and(|receipt| receipt.outcome == DeliveryOutcome::Unknown),
             "attempted push was replayable",
+        )?;
+    }
+    for push_id in &owner_recovery_attempted_ids {
+        let attempted = restored
+            .get_push_record(push_id)
+            .await?
+            .ok_or("owner-recovery push missing")?;
+        ensure(
+            attempted.delivery_state == PushDeliveryState::Attempted
+                && attempted.last_outcome.is_none(),
+            "owner-recovery push was settled before its worker could recover it",
         )?;
     }
     ensure(
