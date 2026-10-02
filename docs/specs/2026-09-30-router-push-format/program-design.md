@@ -216,9 +216,14 @@ Slice C is the largest. If it proves too big for one Luna xhigh, split it inside
   types and fail closed. A steer or guarded DM to a target that is not running is rejected at send time (steer needs
   a running turn; a guard names a generation that cannot be satisfied later) and nothing is held. On restore the
   owner delivers with the stored mode and pinned precondition; a steer or guarded record that meets not-running, a
-  generation mismatch or a race settles `rejected`, never `held`. Auto and queue DMs follow the hold rules.
+  generation mismatch or a race settles `rejected`, never `held`. Auto DMs may be held. Claude Code peer endpoints
+  reject Queue with `QueueUnsupported` whether the terminal is open or closed, and the CLI recommends resending
+  with `--delivery auto`; other endpoints retain their Queue support and hold behavior.
 - **DMs do not depend on the board.** The `ReaderDeliveryOwner` service starts whenever automation storage opens and
   takes the board as `BoardAvailability::{Available, Unavailable}`; with the board unavailable, DM holds still work
   and subscription operations return a board-unavailable error.
 - **Restart discovery.** Restore finds targets with pending or held DM-kind records; DM-kind `attempted` records
   without an outcome settle `outcome_unknown` and are not re-sent.
+- **Fresh-run envelope remains task input (R16, owner decision).**
+  `crates/collaboration-service/src/scheduled_run_worker.rs:836-844` continues to prepend the existing task-input
+  context to a fresh schedule run. That envelope is not a push, creates no push record, and stays unchanged.
