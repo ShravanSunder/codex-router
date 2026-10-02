@@ -40,8 +40,8 @@ async fn load_message_unattributed(
         "SELECT m.message_id,m.board_id,m.topic_id,m.root_id,m.actor_key,m.acting_for_key,m.text, \
                 a.activity_sequence,a.actor_key AS activity_actor_key,a.kind AS activity_kind, \
                 a.root_id AS activity_root_id, m.posted_from_activity, \
-                pa.activity_sequence AS participant_activity_sequence, pa.root_id AS participant_root_id, \
-                pa.kind AS participant_kind, pa.participant_key, pa.participant_role \
+                pa.activity_sequence AS \"participant_activity_sequence?\", pa.root_id AS participant_root_id, \
+                pa.kind AS \"participant_kind?\", pa.participant_key, pa.participant_role \
          FROM board_messages m \
          JOIN board_activity a ON a.message_id=m.message_id \
          LEFT JOIN board_activity pa ON pa.activity_sequence=m.posted_from_activity \

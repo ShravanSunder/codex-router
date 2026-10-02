@@ -541,6 +541,9 @@ async fn publish_message_unread(
 }
 
 /// Select a barrier first; accepting only known grants prevents stale attribution.
+///
+/// Same rule as step 4 of migration `202610020001_participant_history.sql`, which is
+/// frozen once applied; the live/backfill agreement test keeps the two in step.
 async fn latest_role_barrier(
     transaction: &mut BoardTransaction<'_>,
     root: Option<&str>,
@@ -548,7 +551,7 @@ async fn latest_role_barrier(
     reply_boundary: i64,
 ) -> Result<Option<i64>, BoardError> {
     let latest_role_barrier = sqlx::query!(
-        "SELECT activity_sequence, participant_key, participant_role, kind \
+        "SELECT activity_sequence, participant_key, participant_role \
          FROM board_activity WHERE root_id = ? AND activity_sequence < ? AND ( \
            (kind IN ('participantJoined', 'participantLeft') AND actor_key = ?) \
            OR (kind IN ('orchestratorReplaced', 'implementerReplaced') AND ( \

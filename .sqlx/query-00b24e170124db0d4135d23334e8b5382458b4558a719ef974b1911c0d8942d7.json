@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT m.message_id,m.board_id,m.topic_id,m.root_id,m.actor_key,m.acting_for_key,m.text, a.activity_sequence,a.actor_key AS activity_actor_key,a.kind AS activity_kind, a.root_id AS activity_root_id, m.posted_from_activity, pa.activity_sequence AS participant_activity_sequence, pa.root_id AS participant_root_id, pa.kind AS participant_kind, pa.participant_key, pa.participant_role FROM board_messages m JOIN board_activity a ON a.message_id=m.message_id LEFT JOIN board_activity pa ON pa.activity_sequence=m.posted_from_activity WHERE m.message_id=?",
+  "query": "SELECT m.message_id,m.board_id,m.topic_id,m.root_id,m.actor_key,m.acting_for_key,m.text, a.activity_sequence,a.actor_key AS activity_actor_key,a.kind AS activity_kind, a.root_id AS activity_root_id, m.posted_from_activity, pa.activity_sequence AS \"participant_activity_sequence?\", pa.root_id AS participant_root_id, pa.kind AS \"participant_kind?\", pa.participant_key, pa.participant_role FROM board_messages m JOIN board_activity a ON a.message_id=m.message_id LEFT JOIN board_activity pa ON pa.activity_sequence=m.posted_from_activity WHERE m.message_id=?",
   "describe": {
     "columns": [
       {
@@ -136,7 +136,7 @@
         }
       },
       {
-        "name": "participant_activity_sequence",
+        "name": "participant_activity_sequence?",
         "ordinal": 12,
         "type_info": "Integer",
         "origin": {
@@ -158,7 +158,7 @@
         }
       },
       {
-        "name": "participant_kind",
+        "name": "participant_kind?",
         "ordinal": 14,
         "type_info": "Text",
         "origin": {
@@ -214,5 +214,5 @@
       true
     ]
   },
-  "hash": "a796973fc706ee936a7ec7e95f653744193224625ff8fafd3b3528df7ae980e9"
+  "hash": "00b24e170124db0d4135d23334e8b5382458b4558a719ef974b1911c0d8942d7"
 }

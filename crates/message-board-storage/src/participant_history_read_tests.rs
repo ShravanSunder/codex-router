@@ -135,6 +135,7 @@ enum AttributionCorruption {
     LaterSequence,
     NoRole,
     MainWrongKind,
+    HumanWithPointer,
 }
 
 #[tokio::test]
@@ -145,6 +146,7 @@ async fn participant_history_reads_fail_closed_for_corrupt_attribution_relations
         AttributionCorruption::WrongRoot,
         AttributionCorruption::LaterSequence,
         AttributionCorruption::NoRole,
+        AttributionCorruption::HumanWithPointer,
         AttributionCorruption::MainWrongKind,
     ] {
         let mut fixture = HistoryFixture::open().await;
@@ -153,10 +155,11 @@ async fn participant_history_reads_fail_closed_for_corrupt_attribution_relations
             .join(&root.message_id, session("A"), Reviewer, None)
             .await;
         let reply = fixture.post(&root.message_id, session("A")).await;
-        let message = if corruption == AttributionCorruption::MainWrongKind {
-            &root
-        } else {
-            &reply
+        let human_reply = fixture.post(&root.message_id, human("H")).await;
+        let message = match corruption {
+            AttributionCorruption::MainWrongKind => &root,
+            AttributionCorruption::HumanWithPointer => &human_reply,
+            _ => &reply,
         };
         match corruption {
             AttributionCorruption::InvalidRole => {
@@ -169,7 +172,7 @@ async fn participant_history_reads_fail_closed_for_corrupt_attribution_relations
                 .unwrap();
             }
             AttributionCorruption::WrongAuthor => {
-                sqlx::query("UPDATE board_activity SET participant_key=actor_key WHERE activity_sequence=(SELECT posted_from_activity FROM board_messages WHERE message_id=?)").bind(root.message_id.as_str()).execute(&mut fixture.store.connection).await.unwrap();
+                // Point A's reply at O's create join: a real grant, but another author's.
                 sqlx::query("UPDATE board_messages SET posted_from_activity=(SELECT posted_from_activity FROM board_messages WHERE message_id=?) WHERE message_id=?").bind(root.message_id.as_str()).bind(reply.message_id.as_str()).execute(&mut fixture.store.connection).await.unwrap();
             }
             AttributionCorruption::WrongRoot => {
@@ -200,6 +203,14 @@ async fn participant_history_reads_fail_closed_for_corrupt_attribution_relations
                 .execute(&mut fixture.store.connection)
                 .await
                 .unwrap();
+            }
+            AttributionCorruption::HumanWithPointer => {
+                sqlx::query("UPDATE board_messages SET posted_from_activity=? WHERE message_id=?")
+                    .bind(grant)
+                    .bind(human_reply.message_id.as_str())
+                    .execute(&mut fixture.store.connection)
+                    .await
+                    .unwrap();
             }
             AttributionCorruption::MainWrongKind => {
                 sqlx::query("UPDATE board_activity SET kind='orchestratorReplaced' WHERE activity_sequence=(SELECT posted_from_activity FROM board_messages WHERE message_id=?)").bind(root.message_id.as_str()).execute(&mut fixture.store.connection).await.unwrap();

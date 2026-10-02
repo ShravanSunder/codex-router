@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT activity_sequence, participant_key, participant_role, kind FROM board_activity WHERE root_id = ? AND activity_sequence < ? AND ( (kind IN ('participantJoined', 'participantLeft') AND actor_key = ?) OR (kind IN ('orchestratorReplaced', 'implementerReplaced') AND ( participant_key = ? OR replaced_participant_key = ? OR participant_key IS NULL)) OR kind = 'threadResolved') ORDER BY activity_sequence DESC LIMIT 1",
+  "query": "SELECT activity_sequence, participant_key, participant_role FROM board_activity WHERE root_id = ? AND activity_sequence < ? AND ( (kind IN ('participantJoined', 'participantLeft') AND actor_key = ?) OR (kind IN ('orchestratorReplaced', 'implementerReplaced') AND ( participant_key = ? OR replaced_participant_key = ? OR participant_key IS NULL)) OR kind = 'threadResolved') ORDER BY activity_sequence DESC LIMIT 1",
   "describe": {
     "columns": [
       {
@@ -35,17 +35,6 @@
             "name": "participant_role"
           }
         }
-      },
-      {
-        "name": "kind",
-        "ordinal": 3,
-        "type_info": "Text",
-        "origin": {
-          "Table": {
-            "table": "board_activity",
-            "name": "kind"
-          }
-        }
       }
     ],
     "parameters": {
@@ -54,9 +43,8 @@
     "nullable": [
       false,
       true,
-      true,
-      false
+      true
     ]
   },
-  "hash": "9033dfaabd232e11aa4e8661124a2735831eac47df160e7d8399b86f4f78ece1"
+  "hash": "afcc83e75d652bb4844f169e47419b5fa2ff6516cff5a0555eff39f92f4985e0"
 }
