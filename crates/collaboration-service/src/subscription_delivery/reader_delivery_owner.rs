@@ -62,6 +62,18 @@ pub(super) struct ReaderDeliveryOwnerProps {
     pub observations: broadcast::Sender<OwnerObservation>,
 }
 
+#[derive(Default)]
+struct PendingHeldPushCleanup {
+    superseded: Option<(PushId, String)>,
+    ended_reason: Option<String>,
+}
+
+impl PendingHeldPushCleanup {
+    fn is_pending(&self) -> bool {
+        self.superseded.is_some() || self.ended_reason.is_some()
+    }
+}
+
 pub(super) struct ReaderDeliveryOwner {
     reader: Identity,
     board_availability: BoardAvailability,
@@ -74,6 +86,7 @@ pub(super) struct ReaderDeliveryOwner {
     waiters: VecDeque<PollWaiter>,
     checked_presence: HashMap<MessageId, Instant>,
     prior_records: Vec<ThreadSubscriptionRecord>,
+    pending_held_cleanup: PendingHeldPushCleanup,
     rescan: bool,
     dm_checked_presence: HashMap<PushId, Instant>,
     dm_replies: HashMap<PushId, Vec<DirectMessageReply>>,
@@ -109,6 +122,7 @@ impl ReaderDeliveryOwner {
             waiters: VecDeque::new(),
             checked_presence: HashMap::new(),
             prior_records: Vec::new(),
+            pending_held_cleanup: PendingHeldPushCleanup::default(),
             rescan: true,
             dm_checked_presence: HashMap::new(),
             dm_replies: HashMap::new(),
@@ -127,6 +141,7 @@ impl ReaderDeliveryOwner {
             while let Ok(command) = self.commands.try_recv() {
                 self.handle_command(command).await;
             }
+            self.try_pending_held_push_cleanup().await;
             let pending_dms = match self.deliver_direct_messages().await {
                 Ok(pending) => pending,
                 Err(error) => {
@@ -181,7 +196,11 @@ impl ReaderDeliveryOwner {
             self.observe(OwnerObservation::RowsLoaded(records.len()));
             self.expiry_notices(&records).await;
             self.prior_records = records.clone();
-            if records.is_empty() && self.waiters.is_empty() && !pending_dms {
+            if records.is_empty()
+                && self.waiters.is_empty()
+                && !pending_dms
+                && !self.pending_held_cleanup.is_pending()
+            {
                 // Closing makes a concurrent sender retry with a new owner. Commands accepted
                 // before this close lose their response and retry through the service.
                 self.commands.close();
@@ -287,6 +306,14 @@ impl ReaderDeliveryOwner {
                     .map(|record| wall_deadline(record.expires_at(), now, monotonic)),
             )
             .min();
+        if self.pending_held_cleanup.is_pending() {
+            let cleanup_deadline = monotonic
+                .checked_add(PRESENCE_INTERVAL)
+                .unwrap_or(monotonic);
+            next_deadline = Some(
+                next_deadline.map_or(cleanup_deadline, |current| current.min(cleanup_deadline)),
+            );
+        }
         let mut include_deadline = |deadline: Instant| {
             next_deadline = Some(next_deadline.map_or(deadline, |current| current.min(deadline)));
         };

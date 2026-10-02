@@ -9,36 +9,57 @@ pub(super) enum HeldPushCleanup {
 }
 
 impl ReaderDeliveryOwner {
-    pub(super) async fn complete_held_push_cleanup(
-        &self,
-        cleanup: HeldPushCleanup,
-        reason: String,
-    ) -> Result<(), BoardError> {
-        let mut delay = Duration::from_secs(1);
-        loop {
-            if self.shutdown.is_cancelled() {
-                return Err(BoardError::board_unavailable());
+    pub(super) fn queue_held_push_cleanup(&mut self, cleanup: HeldPushCleanup, reason: String) {
+        match cleanup {
+            HeldPushCleanup::Superseded(push_id) => {
+                self.pending_held_cleanup.superseded = Some((push_id, reason))
             }
-            match self.settle_selected_held_pushes(&cleanup, &reason).await {
-                Ok(_settled) => {
-                    #[cfg(test)]
-                    self.observe(OwnerObservation::HeldSubscriptionPushesSettled(_settled));
-                    return Ok(());
-                }
-                Err(error) => {
-                    tracing::warn!(%error, %reason, "retrying held subscription-push cleanup inline")
-                }
+            HeldPushCleanup::Ended => self.pending_held_cleanup.ended_reason = Some(reason),
+        }
+    }
+
+    /// One attempt per trigger/pass. Failure only retains a small marker; it
+    /// never parks the Reader in a retry loop or carries a stale selection.
+    pub(in super::super) async fn try_pending_held_push_cleanup(&mut self) {
+        if !self.pending_held_cleanup.is_pending() {
+            return;
+        }
+        if matches!(self.reader, Identity::Human { .. }) {
+            self.pending_held_cleanup = PendingHeldPushCleanup::default();
+            return;
+        }
+        if let Err(error) = target_session(&self.reader) {
+            tracing::warn!(%error, field = "reader", "held-push cleanup has no target session; dropping marker");
+            self.pending_held_cleanup = PendingHeldPushCleanup::default();
+            return;
+        }
+        if let Some((push_id, reason)) = self.pending_held_cleanup.superseded.clone()
+            && self
+                .try_held_push_cleanup(&HeldPushCleanup::Superseded(push_id), &reason)
+                .await
+        {
+            self.pending_held_cleanup.superseded = None;
+        }
+        if let Some(reason) = self.pending_held_cleanup.ended_reason.clone()
+            && self
+                .try_held_push_cleanup(&HeldPushCleanup::Ended, &reason)
+                .await
+        {
+            self.pending_held_cleanup.ended_reason = None;
+        }
+    }
+
+    async fn try_held_push_cleanup(&self, cleanup: &HeldPushCleanup, reason: &str) -> bool {
+        match self.settle_selected_held_pushes(cleanup, reason).await {
+            Ok(_settled) => {
+                #[cfg(test)]
+                self.observe(OwnerObservation::HeldSubscriptionPushesSettled(_settled));
+                true
             }
-            let deadline = self
-                .clock
-                .monotonic_now()
-                .checked_add(delay)
-                .ok_or_else(BoardError::board_unavailable)?;
-            tokio::select! {
-                () = self.shutdown.cancelled() => return Err(BoardError::board_unavailable()),
-                () = self.clock.sleep_until(deadline) => {}
+            Err(error) => {
+                tracing::warn!(%error, %reason, field = "heldSubscriptionPushes", "held-push cleanup deferred to next owner pass");
+                false
             }
-            delay = delay.saturating_mul(2).min(Duration::from_secs(30));
         }
     }
 

@@ -19,7 +19,7 @@ enum SubscriptionBatchWrite {
 }
 
 impl ReaderDeliveryOwner {
-    pub(super) async fn expiry_notices(&self, records: &[ThreadSubscriptionRecord]) {
+    pub(super) async fn expiry_notices(&mut self, records: &[ThreadSubscriptionRecord]) {
         let Ok(store) = self.board_store() else {
             return;
         };
@@ -62,15 +62,12 @@ impl ReaderDeliveryOwner {
                 let _ = self.push.deliver(&target, prepared).await;
             }
         }
-        if let Some(end_reason) = ended_reason
-            && let Err(error) = self
-                .complete_held_push_cleanup(
-                    HeldPushCleanup::Ended,
-                    format!("subscription ended: {}", end_reason.as_str()),
-                )
-                .await
-        {
-            tracing::warn!(%error, "ended subscription-push cleanup interrupted");
+        if let Some(end_reason) = ended_reason {
+            self.queue_held_push_cleanup(
+                HeldPushCleanup::Ended,
+                format!("subscription ended: {}", end_reason.as_str()),
+            );
+            self.try_pending_held_push_cleanup().await;
         }
     }
 
@@ -217,7 +214,7 @@ impl ReaderDeliveryOwner {
     }
 
     pub(super) async fn handle_receipt(
-        &self,
+        &mut self,
         settlement: &SubscriptionBatchSettlement,
         delivered: &super::super::subscription_push::SubscriptionPushReceipt,
         facts: &HashMap<MessageId, RootSubscriptionFacts>,
@@ -285,11 +282,11 @@ impl ReaderDeliveryOwner {
             collaboration_protocol::MachineId::from(self.push.machine.service_id().clone()),
             delivered.push_id.clone(),
         );
-        self.complete_held_push_cleanup(
+        self.queue_held_push_cleanup(
             HeldPushCleanup::Superseded(delivered.push_id.clone()),
             format!("superseded by {link}"),
-        )
-        .await?;
+        );
+        self.try_pending_held_push_cleanup().await;
         Ok(())
     }
 

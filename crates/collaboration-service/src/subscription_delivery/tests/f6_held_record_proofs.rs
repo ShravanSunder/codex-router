@@ -6,46 +6,92 @@ use collaboration_protocol::{DeliveryOutcome, PushId, UuidIdentity};
 use message_board::{SubscriptionScope, ThreadSubscriptionUnsubscribeRequest};
 use serde_json::{Value, json};
 use sqlx::Connection;
-use std::{sync::Arc, time::Duration};
+use std::time::Duration;
 
-struct CleanupRetryClock {
-    clock: Arc<TestClock>,
-    retries: tokio::sync::mpsc::UnboundedSender<()>,
-}
-
-impl SubscriptionClock for CleanupRetryClock {
-    fn now(&self) -> chrono::DateTime<chrono::Utc> {
-        self.clock.now()
-    }
-    fn monotonic_now(&self) -> tokio::time::Instant {
-        self.clock.monotonic_now()
-    }
-    fn sleep_until(
-        &self,
-        deadline: tokio::time::Instant,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
-        if deadline.duration_since(self.monotonic_now()) == Duration::from_secs(1) {
-            let _ = self.retries.send(());
-        }
-        self.clock.sleep_until(deadline)
-    }
+#[tokio::test(start_paused = true)]
+async fn cleanup_write_retry_does_not_block_reader_reconcile() {
+    let fixture = OwnerFixture::new().await;
+    let runtime = fixture.runtime().await;
+    fixture
+        .post(&fixture.root, "Held before ending scope")
+        .await;
+    let held_id = hold_next_push(&runtime).await;
+    runtime
+        .observe(|event| matches!(event, OwnerObservation::HeldSubscriptionPushesSettled(0)))
+        .await;
+    runtime.synchronize(&fixture.reader).await;
+    while runtime.observations.lock().await.try_recv().is_ok() {}
+    let mut observer = sqlx::SqliteConnection::connect_with(
+        &sqlx::sqlite::SqliteConnectOptions::new()
+            .filename(fixture.directory.path().join("automation.sqlite")),
+    )
+    .await
+    .unwrap();
+    sqlx::query("CREATE TRIGGER fail_held_cleanup BEFORE UPDATE OF delivery_state ON router_pushes WHEN OLD.delivery_state='held' AND NEW.delivery_state='rejected' BEGIN SELECT RAISE(FAIL, 'injected cleanup write failure'); END").execute(&mut observer).await.unwrap();
+    fixture
+        .store
+        .lock()
+        .await
+        .unsubscribe_thread_subscription(
+            ThreadSubscriptionUnsubscribeRequest {
+                reader: fixture.reader.clone(),
+                scope: SubscriptionScope::thread(fixture.root.clone()),
+            },
+            fixture.clock.now(),
+        )
+        .await
+        .unwrap();
+    runtime.reconcile(&fixture.reader).await;
+    runtime
+        .observe(|event| matches!(event, OwnerObservation::Sleeping(Some(_))))
+        .await;
+    let acknowledged = tokio::time::timeout(
+        Duration::from_secs(1),
+        runtime.service.reconcile_reader(fixture.reader.clone()),
+    )
+    .await;
+    assert!(
+        matches!(acknowledged, Ok(Ok(()))),
+        "cleanup write retry blocked a queued reconcile command"
+    );
+    runtime.synchronize(&fixture.reader).await;
+    // A command acknowledges before the failed cleanup has been repaired.
+    // The marker remains pending, and the next regular pass retries it.
+    assert_eq!(
+        fixture
+            .push_store
+            .lock()
+            .await
+            .get_push_record(&held_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .delivery_state,
+        collaboration_protocol::PushDeliveryState::Held
+    );
+    sqlx::query("DROP TRIGGER fail_held_cleanup")
+        .execute(&mut observer)
+        .await
+        .unwrap();
+    fixture.clock.advance(30).await;
+    runtime
+        .observe(|event| matches!(event, OwnerObservation::HeldSubscriptionPushesSettled(1)))
+        .await;
+    observer.close().await.unwrap();
+    runtime.close().await;
 }
 
 #[tokio::test(start_paused = true)]
 async fn delayed_batch_cleanup_never_supersedes_a_newer_held_push() {
     let fixture = OwnerFixture::new().await;
-    let (retries, mut retry_observations) = tokio::sync::mpsc::unbounded_channel();
-    let runtime = fixture
-        .runtime_with_clock(Arc::new(CleanupRetryClock {
-            clock: Arc::clone(&fixture.clock),
-            retries,
-        }))
-        .await;
+    let runtime = fixture.runtime().await;
     fixture.post(&fixture.root, "Batch before N").await;
     let old_id = hold_next_push(&runtime).await;
     runtime
         .observe(|event| matches!(event, OwnerObservation::HeldSubscriptionPushesSettled(0)))
         .await;
+    runtime.synchronize(&fixture.reader).await;
+    while runtime.observations.lock().await.try_recv().is_ok() {}
     let mut observer = sqlx::SqliteConnection::connect_with(
         &sqlx::sqlite::SqliteConnectOptions::new()
             .filename(fixture.directory.path().join("automation.sqlite")),
@@ -56,10 +102,12 @@ async fn delayed_batch_cleanup_never_supersedes_a_newer_held_push() {
     fixture.clock.advance(30).await;
     let batch_n = runtime.requests.lock().await.recv().await.unwrap();
     runtime.completions.send(DeliveryOutcome::Started).unwrap();
-    retry_observations.recv().await.unwrap();
+    runtime
+        .observe(|event| matches!(event, OwnerObservation::Sleeping(Some(_))))
+        .await;
 
-    // Persist the N+1 held state while N's cleanup is sleeping. This is the
-    // SQLite boundary the old detached task could observe from the next turn.
+    // Persist the N+1 held state while N's pending cleanup waits for another
+    // owner pass. Eligibility must be recomputed without touching newer data.
     fixture.clock.advance(1).await;
     let mut store = fixture.push_store.lock().await;
     let old_record = store.get_push_record(&old_id).await.unwrap().unwrap();
@@ -108,7 +156,7 @@ async fn delayed_batch_cleanup_never_supersedes_a_newer_held_push() {
         .execute(&mut observer)
         .await
         .unwrap();
-    fixture.clock.advance(2).await;
+    runtime.reconcile(&fixture.reader).await;
     runtime
         .observe(|event| matches!(event, OwnerObservation::HeldSubscriptionPushesSettled(_)))
         .await;
