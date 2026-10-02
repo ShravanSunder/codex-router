@@ -310,12 +310,12 @@ fn render_policy_row(
         View(width: width as u32, flex_direction: FlexDirection::Row, column_gap: 2) {
             View(width: 14) { Text(content: "Usage", color: Color::Grey, wrap: TextWrap::NoWrap) }
             View(flex_direction: FlexDirection::Row, column_gap: 1) {
-                Text(content: if allow_active { "›" } else { " " }, color: if allow_active { Color::Yellow } else { Color::Grey }, weight: Weight::Bold, wrap: TextWrap::NoWrap)
-                Text(content: "Allow", color: if allow_active { Color::Yellow } else { Color::Grey }, weight: if allow_active { Weight::Bold } else { Weight::Normal }, wrap: TextWrap::NoWrap)
-            }
-            View(flex_direction: FlexDirection::Row, column_gap: 1) {
                 Text(content: if disallow_active { "›" } else { " " }, color: if disallow_active { Color::Yellow } else { Color::Grey }, weight: Weight::Bold, wrap: TextWrap::NoWrap)
                 Text(content: "Disallow", color: if disallow_active { Color::Yellow } else { Color::Grey }, weight: if disallow_active { Weight::Bold } else { Weight::Normal }, wrap: TextWrap::NoWrap)
+            }
+            View(flex_direction: FlexDirection::Row, column_gap: 1) {
+                Text(content: if allow_active { "›" } else { " " }, color: if allow_active { Color::Yellow } else { Color::Grey }, weight: Weight::Bold, wrap: TextWrap::NoWrap)
+                Text(content: "Allow", color: if allow_active { Color::Yellow } else { Color::Grey }, weight: if allow_active { Weight::Bold } else { Weight::Normal }, wrap: TextWrap::NoWrap)
             }
         }
     }

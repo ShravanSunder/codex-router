@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use futures_util::StreamExt;
 use iocraft::prelude::*;
@@ -56,6 +57,159 @@ fn account_options_render_explicit_tabs_and_unchecked_observation() {
     .render(None)
     .to_string();
     assert!(reset_frame.contains("[ Resets ]  Credits"), "{reset_frame}");
+}
+
+#[test]
+fn credit_policy_options_render_in_keyboard_selection_order() {
+    let view_model = quota_two_account_view_model();
+    let mut options = AccountOptionsState::new(&view_model.rows[0], 1);
+    options.tab = AccountOptionsTab::Credits;
+    let editing = account_options_key_action(
+        &options,
+        WorkflowPhase::Browse,
+        KeyCode::Enter,
+        KeyModifiers::empty(),
+    );
+    update_credit_policy_editor(&mut options, editing, None);
+
+    let left_action = account_options_key_action(
+        &options,
+        WorkflowPhase::Browse,
+        KeyCode::Left,
+        KeyModifiers::empty(),
+    );
+    assert_eq!(left_action, AccountOptionsKeyAction::SelectDisallow);
+    update_credit_policy_editor(&mut options, left_action, None);
+    let disallow_frame = render_account_options_panel(AccountOptionsPanelProps {
+        options: &options,
+        reset_snapshot: None,
+        reset_target: None,
+        width: 100,
+        height: 24,
+        inventory_page_start: 0,
+        spinner_tick: 0,
+    })
+    .render(None)
+    .to_string();
+    let disallow_line = disallow_frame
+        .lines()
+        .find(|line| line.contains("Usage") && line.contains("Allow") && line.contains("Disallow"))
+        .expect("editing should render both credit policies on the Usage row");
+    let disallow_position = disallow_line
+        .find("Disallow")
+        .expect("Disallow should be visible");
+    let allow_position = disallow_line
+        .find("Allow")
+        .expect("Allow should be visible");
+    let selected_position = disallow_line
+        .find('›')
+        .expect("selection marker should be visible");
+    assert!(
+        disallow_position < allow_position && selected_position < disallow_position,
+        "Left selects the visually left Disallow option, but the row was:\n{disallow_line}"
+    );
+
+    let right_action = account_options_key_action(
+        &options,
+        WorkflowPhase::Browse,
+        KeyCode::Right,
+        KeyModifiers::empty(),
+    );
+    assert_eq!(right_action, AccountOptionsKeyAction::SelectAllow);
+    update_credit_policy_editor(&mut options, right_action, None);
+    let allow_frame = render_account_options_panel(AccountOptionsPanelProps {
+        options: &options,
+        reset_snapshot: None,
+        reset_target: None,
+        width: 100,
+        height: 24,
+        inventory_page_start: 0,
+        spinner_tick: 0,
+    })
+    .render(None)
+    .to_string();
+    let allow_line = allow_frame
+        .lines()
+        .find(|line| line.contains("Usage") && line.contains("Allow") && line.contains("Disallow"))
+        .expect("editing should continue to render both credit policies");
+    let disallow_position = allow_line
+        .find("Disallow")
+        .expect("Disallow should remain visible");
+    let allow_position = allow_line
+        .find("Allow")
+        .expect("Allow should remain visible");
+    let selected_position = allow_line
+        .find('›')
+        .expect("selection marker should be visible");
+    assert!(
+        disallow_position < selected_position && selected_position < allow_position,
+        "Right selects the visually right Allow option, but the row was:\n{allow_line}"
+    );
+}
+
+#[tokio::test]
+async fn control_c_in_credit_browsing_exits_the_component() {
+    assert_credit_control_c_exits_the_component(false).await;
+}
+
+#[tokio::test]
+async fn control_c_in_credit_editor_exits_the_component() {
+    assert_credit_control_c_exits_the_component(true).await;
+}
+
+#[test]
+fn protected_reset_phases_keep_forced_keys_with_the_reset_owner() {
+    let view_model = quota_two_account_view_model();
+    let mut options = AccountOptionsState::new(&view_model.rows[0], 1);
+    options.tab = AccountOptionsTab::Credits;
+
+    for phase in [
+        WorkflowPhase::Confirming,
+        WorkflowPhase::Revalidating,
+        WorkflowPhase::Committing,
+        WorkflowPhase::Result,
+    ] {
+        for (code, modifiers) in [
+            (KeyCode::Char('c'), KeyModifiers::CONTROL),
+            (KeyCode::Char('d'), KeyModifiers::CONTROL),
+        ] {
+            let credit_action = account_options_key_action(&options, phase, code, modifiers);
+            assert_eq!(credit_action, AccountOptionsKeyAction::Ignore, "{phase:?}");
+            assert_eq!(
+                update_credit_policy_editor(&mut options, credit_action, None),
+                None,
+                "{phase:?} input must not emit a credit mutation"
+            );
+
+            options.tab = AccountOptionsTab::Resets;
+            assert_eq!(
+                account_options_key_action(&options, phase, code, modifiers),
+                AccountOptionsKeyAction::ResetWorkflow,
+                "the reset workflow retains control during {phase:?}"
+            );
+            let reset_action = super::super::quota_reset_keyboard_interaction::reset_key_action(
+                phase,
+                crate::quota_reset::reset_session_supervisor::ConfirmationSelection::No,
+                false,
+                code,
+                modifiers,
+            );
+            if phase == WorkflowPhase::Committing {
+                assert_eq!(
+                    reset_action,
+                    super::super::quota_reset_keyboard_interaction::ResetKeyAction::None,
+                    "Committing cannot be canceled or force-exited by a key"
+                );
+            } else {
+                assert_eq!(
+                    reset_action,
+                    super::super::quota_reset_keyboard_interaction::ResetKeyAction::ExitPrecommit,
+                    "{phase:?} keeps its existing reset shutdown path"
+                );
+            }
+            options.tab = AccountOptionsTab::Credits;
+        }
+    }
 }
 
 #[test]
@@ -510,6 +664,59 @@ async fn acknowledged_event_stream_fails_when_expected_frame_is_missing() {
 
     let _ = events.next().await;
     let _ = events.next().await;
+}
+
+async fn assert_credit_control_c_exits_the_component(editing: bool) {
+    let mut ordered_events = vec![
+        (TerminalEvent::Key(control_key('r')), Some("Reset credits")),
+        (
+            TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Tab)),
+            Some("Credit usage"),
+        ),
+    ];
+    if editing {
+        ordered_events.push((
+            TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Enter)),
+            Some("enter save"),
+        ));
+    }
+    ordered_events.push((
+        TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Char('\u{3}'))),
+        Some(if editing {
+            "enter save"
+        } else {
+            "Credit usage"
+        }),
+    ));
+
+    let (acknowledged_events, acknowledgement_sender) = acknowledged_event_stream(ordered_events);
+    let events = acknowledged_events.chain(futures_util::stream::pending());
+    let view_model = quota_two_account_view_model();
+    let width = 100usize;
+    let height = 36usize;
+    let credit_policy_saver = None;
+    let mut terminal = element! {
+        QuotaStatusComponent(view_model, width, height, credit_policy_saver)
+    };
+    let component = terminal
+        .mock_terminal_render_loop(MockTerminalConfig::with_events(events))
+        .map(|canvas| canvas.to_string())
+        .inspect(move |frame| {
+            for marker in ["Reset credits", "Credit usage", "enter save"] {
+                if frame.contains(marker) {
+                    let _ = acknowledgement_sender.send(marker);
+                }
+            }
+        })
+        .collect::<Vec<_>>();
+
+    let frames = tokio::time::timeout(Duration::from_secs(2), component)
+        .await
+        .expect("Ctrl-C in Credits should return control to the terminal host");
+    assert!(
+        frames.iter().any(|frame| frame.contains("[ Credits ]")),
+        "the component should enter Credits before handling Ctrl-C"
+    );
 }
 
 fn control_key(character: char) -> KeyEvent {

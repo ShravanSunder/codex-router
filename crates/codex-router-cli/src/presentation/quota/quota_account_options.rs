@@ -374,6 +374,14 @@ pub(super) fn account_options_key_action(
         }
         return AccountOptionsKeyAction::Ignore;
     }
+    if super::quota_status_component::forced_quota_exit_key(&code, modifiers) {
+        return if reset_phase == crate::quota_reset::reset_session_supervisor::WorkflowPhase::Browse
+        {
+            AccountOptionsKeyAction::ExitPending
+        } else {
+            AccountOptionsKeyAction::ResetWorkflow
+        };
+    }
     if let Some(editor) = state.editor.as_ref() {
         return match (editor.phase, code) {
             (

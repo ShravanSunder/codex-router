@@ -10015,6 +10015,56 @@ mod tests {
         observed_unix_seconds: u64,
         allow_credit_usage: bool,
     ) {
+        persist_credit_account_with_availability_async(
+            database_path,
+            secrets,
+            account,
+            upstream_token,
+            observed_unix_seconds,
+            allow_credit_usage,
+            codex_router_core::credit_usage::CreditAvailability::Available {
+                balance: Some(
+                    codex_router_core::credit_usage::CreditBalance::new("2.75")
+                        .expect("fixture credit balance should be valid"),
+                ),
+            },
+        )
+        .await;
+    }
+
+    fn persist_credit_account_with_availability(
+        database_path: &Path,
+        secrets: &EncryptedCredentialStore,
+        account: &AccountRecord,
+        upstream_token: &str,
+        observed_unix_seconds: u64,
+        allow_credit_usage: bool,
+        availability: codex_router_core::credit_usage::CreditAvailability,
+    ) {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap_or_else(|error| panic!("credit fixture runtime should build: {error}"));
+        runtime.block_on(persist_credit_account_with_availability_async(
+            database_path,
+            secrets,
+            account,
+            upstream_token,
+            observed_unix_seconds,
+            allow_credit_usage,
+            availability,
+        ));
+    }
+
+    async fn persist_credit_account_with_availability_async(
+        database_path: &Path,
+        secrets: &EncryptedCredentialStore,
+        account: &AccountRecord,
+        upstream_token: &str,
+        observed_unix_seconds: u64,
+        allow_credit_usage: bool,
+        availability: codex_router_core::credit_usage::CreditAvailability,
+    ) {
         let account_with_generation = account.clone().with_active_credential_generation(1);
         let sync_state = SqliteStateStore::open(database_path)
             .unwrap_or_else(|error| panic!("state should open for credit account: {error}"));
@@ -10092,12 +10142,7 @@ mod tests {
         .with_reset_unix_seconds(observed_unix_seconds + 18_000)
         .with_stale_penalty(false);
         let observation = codex_router_core::credit_usage::CreditProviderObservation::new(
-            codex_router_core::credit_usage::CreditAvailability::Available {
-                balance: Some(
-                    codex_router_core::credit_usage::CreditBalance::new("2.75")
-                        .expect("fixture credit balance should be valid"),
-                ),
-            },
+            availability,
             codex_router_core::credit_usage::CreditSpendControl::Clear,
             Some(codex_router_core::credit_usage::CreditProviderLimitReason::RateLimitReached),
         );
@@ -13451,4 +13496,7 @@ mod tests {
             Err(error) => panic!("mock websocket upstream thread panicked: {error:?}"),
         }
     }
+
+    #[path = "credit_transport_proof.rs"]
+    mod credit_transport_proof;
 }
