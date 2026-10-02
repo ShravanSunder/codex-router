@@ -256,11 +256,12 @@ impl AutomationStore {
             .collect()
     }
 
-    /// Give replaced Reader batches a terminal, known-not-submitted outcome.
-    pub async fn settle_held_subscription_pushes(
+    /// Terminalize one selected held Reader batch, bounded by its replacement age.
+    pub async fn settle_held_subscription_push(
         &mut self,
         target: &SessionRef,
-        except_push_id: Option<&PushId>,
+        push_id: &PushId,
+        created_before: Option<DateTime<Utc>>,
         reason: &str,
         settled_at: DateTime<Utc>,
     ) -> Result<u64, StorageError> {
@@ -276,18 +277,20 @@ impl AutomationStore {
         let outcome_json = push_record_rows::serialize_json(&outcome)?;
         let settled_at = push_record_rows::serialize_timestamp(settled_at);
         let (service_id, endpoint_id, session_id) = session_key(target);
-        let excluded_push_id = except_push_id.map(|push_id| push_id.as_str());
+        let created_before = created_before.map(push_record_rows::serialize_timestamp);
         let result = sqlx::query!(
             "UPDATE router_pushes SET delivery_state='rejected',last_outcome_json=?,settled_at=? \
              WHERE kind=? AND target_service_id=? AND target_endpoint_id=? AND target_session_id=? \
-               AND delivery_state='held' AND push_id<>COALESCE(?, '')",
+               AND delivery_state='held' AND push_id=? AND (? IS NULL OR created_at<?)",
             outcome_json,
             settled_at,
             kind,
             service_id,
             endpoint_id,
             session_id,
-            excluded_push_id,
+            push_id.as_str(),
+            created_before,
+            created_before,
         )
         .execute(&mut self.connection)
         .await?;

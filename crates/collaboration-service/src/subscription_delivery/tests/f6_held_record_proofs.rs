@@ -5,6 +5,190 @@ use crate::control_service_context::subscription_delivery::subscription_service:
 use collaboration_protocol::{DeliveryOutcome, PushId, UuidIdentity};
 use message_board::{SubscriptionScope, ThreadSubscriptionUnsubscribeRequest};
 use serde_json::{Value, json};
+use sqlx::Connection;
+use std::{sync::Arc, time::Duration};
+
+struct CleanupRetryClock {
+    clock: Arc<TestClock>,
+    retries: tokio::sync::mpsc::UnboundedSender<()>,
+}
+
+impl SubscriptionClock for CleanupRetryClock {
+    fn now(&self) -> chrono::DateTime<chrono::Utc> {
+        self.clock.now()
+    }
+    fn monotonic_now(&self) -> tokio::time::Instant {
+        self.clock.monotonic_now()
+    }
+    fn sleep_until(
+        &self,
+        deadline: tokio::time::Instant,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+        if deadline.duration_since(self.monotonic_now()) == Duration::from_secs(1) {
+            let _ = self.retries.send(());
+        }
+        self.clock.sleep_until(deadline)
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn delayed_batch_cleanup_never_supersedes_a_newer_held_push() {
+    let fixture = OwnerFixture::new().await;
+    let (retries, mut retry_observations) = tokio::sync::mpsc::unbounded_channel();
+    let runtime = fixture
+        .runtime_with_clock(Arc::new(CleanupRetryClock {
+            clock: Arc::clone(&fixture.clock),
+            retries,
+        }))
+        .await;
+    fixture.post(&fixture.root, "Batch before N").await;
+    let old_id = hold_next_push(&runtime).await;
+    runtime
+        .observe(|event| matches!(event, OwnerObservation::HeldSubscriptionPushesSettled(0)))
+        .await;
+    let mut observer = sqlx::SqliteConnection::connect_with(
+        &sqlx::sqlite::SqliteConnectOptions::new()
+            .filename(fixture.directory.path().join("automation.sqlite")),
+    )
+    .await
+    .unwrap();
+    sqlx::query("CREATE TRIGGER fail_held_cleanup BEFORE UPDATE OF delivery_state ON router_pushes WHEN OLD.delivery_state='held' AND NEW.delivery_state='rejected' BEGIN SELECT RAISE(FAIL, 'injected cleanup write failure'); END").execute(&mut observer).await.unwrap();
+    fixture.clock.advance(30).await;
+    let batch_n = runtime.requests.lock().await.recv().await.unwrap();
+    runtime.completions.send(DeliveryOutcome::Started).unwrap();
+    retry_observations.recv().await.unwrap();
+
+    // Persist the N+1 held state while N's cleanup is sleeping. This is the
+    // SQLite boundary the old detached task could observe from the next turn.
+    fixture.clock.advance(1).await;
+    let mut store = fixture.push_store.lock().await;
+    let old_record = store.get_push_record(&old_id).await.unwrap().unwrap();
+    let newer_id = PushId::try_from(uuid::Uuid::now_v7().to_string()).unwrap();
+    store
+        .insert_push_record(collaboration_protocol::PushRecordDraft {
+            push_id: newer_id.clone(),
+            kind: old_record.kind,
+            origin: old_record.origin,
+            origin_router_ref: Some(
+                collaboration_protocol::RouterOriginRef::SubscriptionActivity {
+                    target: old_record.target.clone(),
+                    batch_id: message_board::BatchId::generate(),
+                }
+                .canonical_string()
+                .unwrap(),
+            ),
+            target: old_record.target,
+            reply_to_push_id: None,
+            header_facts: old_record.header_facts,
+            body: None,
+            activity: old_record.activity,
+            mode: None,
+            guard: None,
+            created_at: fixture.clock.now(),
+        })
+        .await
+        .unwrap();
+    store.mark_push_attempted(&newer_id).await.unwrap();
+    store
+        .hold_push_record(
+            &newer_id,
+            collaboration_protocol::DeliveryReceipt {
+                outcome: DeliveryOutcome::NotSubmitted {
+                    retryable: true,
+                    reason: "N+1 held".to_owned(),
+                },
+                reachability: None,
+                client: None,
+            },
+        )
+        .await
+        .unwrap();
+    drop(store);
+    sqlx::query("DROP TRIGGER fail_held_cleanup")
+        .execute(&mut observer)
+        .await
+        .unwrap();
+    fixture.clock.advance(2).await;
+    runtime
+        .observe(|event| matches!(event, OwnerObservation::HeldSubscriptionPushesSettled(_)))
+        .await;
+    let mut store = fixture.push_store.lock().await;
+    assert_eq!(
+        store
+            .get_push_record(&newer_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .delivery_state,
+        collaboration_protocol::PushDeliveryState::Held,
+        "N's delayed cleanup mislabeled N+1 as superseded"
+    );
+    assert_eq!(
+        store
+            .get_push_record(&old_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .delivery_state,
+        collaboration_protocol::PushDeliveryState::Rejected
+    );
+    assert_eq!(
+        store
+            .get_push_record(&batch_n.payload.push_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .delivery_state,
+        collaboration_protocol::PushDeliveryState::Delivered
+    );
+    drop(store);
+    observer.close().await.unwrap();
+    runtime.close().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn ending_one_scope_preserves_a_held_batch_with_another_active_root() {
+    let fixture = OwnerFixture::new().await;
+    let active_root = fixture.add_root().await;
+    fixture.post(&fixture.root, "Ending root").await;
+    fixture.post(&active_root, "Active root").await;
+    let runtime = fixture.runtime().await;
+    let push_id = hold_next_push(&runtime).await;
+    runtime
+        .observe(|event| matches!(event, OwnerObservation::HeldSubscriptionPushesSettled(0)))
+        .await;
+    fixture
+        .store
+        .lock()
+        .await
+        .unsubscribe_thread_subscription(
+            ThreadSubscriptionUnsubscribeRequest {
+                reader: fixture.reader.clone(),
+                scope: SubscriptionScope::thread(fixture.root.clone()),
+            },
+            fixture.clock.now(),
+        )
+        .await
+        .unwrap();
+    runtime.reconcile(&fixture.reader).await;
+    runtime
+        .observe(|event| matches!(event, OwnerObservation::HeldSubscriptionPushesSettled(_)))
+        .await;
+    assert_eq!(
+        fixture
+            .push_store
+            .lock()
+            .await
+            .get_push_record(&push_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .delivery_state,
+        collaboration_protocol::PushDeliveryState::Held,
+        "one ended scope must not settle activity for a live root"
+    );
+    runtime.close().await;
+}
 
 #[tokio::test(start_paused = true)]
 async fn next_reader_batch_rejects_prior_held_push_with_current_link() {

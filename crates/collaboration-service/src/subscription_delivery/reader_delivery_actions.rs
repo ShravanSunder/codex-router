@@ -1,5 +1,8 @@
 //! Subscription lifecycle, policy decisions, and durable board settlement.
 use super::*;
+#[path = "reader_held_push_settlement.rs"]
+mod reader_held_push_settlement;
+use reader_held_push_settlement::HeldPushCleanup;
 
 /// Each selected batch keeps ownership until its durable disposition is written.
 enum SubscriptionBatchWrite {
@@ -59,11 +62,15 @@ impl ReaderDeliveryOwner {
                 let _ = self.push.deliver(&target, prepared).await;
             }
         }
-        if let Some(end_reason) = ended_reason {
-            self.settle_held_subscription_pushes_in_background(
-                None,
-                format!("subscription ended: {}", end_reason.as_str()),
-            );
+        if let Some(end_reason) = ended_reason
+            && let Err(error) = self
+                .complete_held_push_cleanup(
+                    HeldPushCleanup::Ended,
+                    format!("subscription ended: {}", end_reason.as_str()),
+                )
+                .await
+        {
+            tracing::warn!(%error, "ended subscription-push cleanup interrupted");
         }
     }
 
@@ -278,64 +285,12 @@ impl ReaderDeliveryOwner {
             collaboration_protocol::MachineId::from(self.push.machine.service_id().clone()),
             delivered.push_id.clone(),
         );
-        self.settle_held_subscription_pushes_in_background(
-            Some(delivered.push_id.clone()),
+        self.complete_held_push_cleanup(
+            HeldPushCleanup::Superseded(delivered.push_id.clone()),
             format!("superseded by {link}"),
-        );
+        )
+        .await?;
         Ok(())
-    }
-
-    /// Retry stale held-record settlement without delaying the current delivery.
-    fn settle_held_subscription_pushes_in_background(
-        &self,
-        except_push_id: Option<PushId>,
-        reason: String,
-    ) {
-        let Ok(target) = target_session(&self.reader) else {
-            return;
-        };
-        let store = Arc::clone(&self.push.store);
-        let clock = Arc::clone(&self.clock);
-        let shutdown = self.shutdown.clone();
-        #[cfg(test)]
-        let observations = self.observations.clone();
-        tokio::spawn(async move {
-            let mut delay = Duration::from_secs(1);
-            loop {
-                let result = store
-                    .lock()
-                    .await
-                    .settle_held_subscription_pushes(
-                        &target,
-                        except_push_id.as_ref(),
-                        &reason,
-                        clock.now(),
-                    )
-                    .await;
-                match result {
-                    Ok(_settled) => {
-                        #[cfg(test)]
-                        let _ = observations
-                            .send(OwnerObservation::HeldSubscriptionPushesSettled(_settled));
-                        break;
-                    }
-                    Err(error) => tracing::warn!(
-                        %error,
-                        %reason,
-                        "retrying stale held subscription-push settlement"
-                    ),
-                }
-                let Some(deadline) = clock.monotonic_now().checked_add(delay) else {
-                    tracing::warn!("subscription-push settlement retry deadline overflowed");
-                    break;
-                };
-                tokio::select! {
-                    () = shutdown.cancelled() => break,
-                    () = clock.sleep_until(deadline) => {}
-                }
-                delay = delay.saturating_mul(2).min(Duration::from_secs(30));
-            }
-        });
     }
 
     pub(super) async fn settle(
