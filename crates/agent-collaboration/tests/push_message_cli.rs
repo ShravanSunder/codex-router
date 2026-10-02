@@ -324,6 +324,47 @@ async fn unknown_message_send_points_to_show_before_retrying_and_exits_five() {
     );
 }
 
+#[tokio::test]
+async fn stored_message_send_outcome_unknown_keeps_the_push_link_and_exits_five() {
+    let target = session_ref(TARGET_SESSION_ID, "claude-local");
+    let message = format!(
+        "Push was stored; delivery outcome is unknown. Inspect {PUSH_LINK} before retrying."
+    );
+    let error = json!({
+        "code": -32050,
+        "message": message,
+        "data": {
+            "kind": "outcomeUnknown",
+            "stage": "inspect",
+            "message": message
+        }
+    });
+    let (output, _) = invoke_with_reply(
+        vec![
+            "message".into(),
+            "send".into(),
+            "--to".into(),
+            serde_json::to_string(&target)
+                .expect("serialize target SessionRef")
+                .into(),
+            "--text".into(),
+            "hello recipient".into(),
+        ],
+        MockReply::Error(error),
+    )
+    .await
+    .expect("message send completes against the Control fixture");
+
+    assert_eq!(output.status.code(), Some(5));
+    assert!(output.stdout.is_empty());
+    assert_eq!(
+        String::from_utf8(output.stderr).expect("CLI stderr is UTF-8"),
+        format!(
+            "error: Delivery to {TARGET_SESSION_ID}: {message} — inspect the target before retrying\n"
+        )
+    );
+}
+
 #[test]
 fn invalid_message_target_prints_one_line_with_a_session_ref_example() {
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_agent-collaboration"))

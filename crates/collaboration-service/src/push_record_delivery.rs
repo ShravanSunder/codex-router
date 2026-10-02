@@ -14,6 +14,7 @@ pub(crate) enum PushDeliveryFailure {
     DeliveryUnavailable,
     InvalidRecord(PushRecordValidationError),
     StoreFailed,
+    DeliveryUnknown(PushId),
 }
 
 pub(crate) async fn dispatch_message(
@@ -107,7 +108,7 @@ pub(crate) async fn dispatch_message(
                 ),
             }
         }
-        Err(error) => delivery_failure(id, error),
+        Err(error) => delivery_failure(id, error, identity),
     }
 }
 
@@ -199,7 +200,7 @@ pub(crate) async fn dispatch_reply(
             };
             json!({"jsonrpc":"2.0","id":id,"result":result})
         }
-        Err(error) => delivery_failure(id, error),
+        Err(error) => delivery_failure(id, error, identity),
     }
 }
 
@@ -236,9 +237,9 @@ pub(crate) async fn store_first_and_deliver(
             _ => PushDeliveryFailure::StoreFailed,
         })?;
     service
-        .deliver_direct_message(target, push_id)
+        .deliver_direct_message(target, push_id.clone())
         .await
-        .map_err(|_| PushDeliveryFailure::StoreFailed)
+        .map_err(|_| PushDeliveryFailure::DeliveryUnknown(push_id))
 }
 
 fn next_push_id() -> Result<PushId, PushIdError> {
@@ -254,7 +255,7 @@ fn target_identity(target: &SessionRef, identity: &ServiceIdentity) -> String {
     session_identity(target, display_name.as_ref())
 }
 
-fn delivery_failure(id: Value, failure: PushDeliveryFailure) -> Value {
+fn delivery_failure(id: Value, failure: PushDeliveryFailure, identity: &ServiceIdentity) -> Value {
     match failure {
         PushDeliveryFailure::StoreUnavailable => crate::push_record_resolver::failure(
             id,
@@ -281,8 +282,163 @@ fn delivery_failure(id: Value, failure: PushDeliveryFailure) -> Value {
             id,
             -32050,
             "unavailable",
-            "discovery",
-            "Push record could not be stored or settled",
+            "store",
+            "Push record could not be stored",
         ),
+        PushDeliveryFailure::DeliveryUnknown(push_id) => {
+            let link = collaboration_protocol::RouterLink::new(
+                collaboration_protocol::MachineId::from(
+                    identity.machine_identity.service_id().clone(),
+                ),
+                push_id,
+            );
+            crate::push_record_resolver::failure(
+                id,
+                -32050,
+                "outcomeUnknown",
+                "inspect",
+                &format!(
+                    "Push was stored; delivery outcome is unknown. Inspect {link} before retrying."
+                ),
+            )
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::dispatch_message;
+    use crate::{
+        BoardAvailability, MachineIdentity, ServiceIdentity, SessionDeliveryRouter,
+        SessionMessageDelivery, SubscriptionDeliveryService, SubscriptionDeliveryServiceProps,
+        SystemSubscriptionClock, TargetPresenceProbe,
+    };
+    use automation_storage::AutomationStore;
+    use collaboration_protocol::{
+        EndpointId, EndpointRef, MessageContent, MessageDelivery, PushDeliveryState, RouterLink,
+        SessionId, SessionMessageSendParams, SessionRef, UuidIdentity,
+    };
+    use serde_json::{Value, json};
+    use std::{path::Path, sync::Arc};
+    use tokio::sync::Mutex;
+
+    const SERVICE_ID: &str = "00000000-0000-4000-8000-000000000001";
+
+    fn session(service_id: &UuidIdentity) -> SessionRef {
+        SessionRef {
+            endpoint: EndpointRef {
+                service_id: service_id.clone(),
+                endpoint_id: EndpointId::try_from("codex-local".to_owned()).expect("endpoint id"),
+            },
+            session_id: SessionId::try_from("target-session".to_owned()).expect("session id"),
+        }
+    }
+
+    async fn automation_store(directory: &Path) -> Arc<Mutex<AutomationStore>> {
+        Arc::new(Mutex::new(
+            AutomationStore::open(&directory.join("automation.sqlite"))
+                .await
+                .expect("automation store"),
+        ))
+    }
+
+    #[tokio::test]
+    async fn committed_push_delivery_error_returns_outcome_unknown_with_its_link() {
+        let directory = tempfile::tempdir().expect("isolated service directory");
+        let automation = automation_store(directory.path()).await;
+        let router = Arc::new(SessionDeliveryRouter::new(Vec::new()));
+        let delivery: Arc<dyn SessionMessageDelivery> = router.clone();
+        let presence: Arc<dyn TargetPresenceProbe> = router;
+        let machine_identity = MachineIdentity::new(
+            UuidIdentity::try_from(SERVICE_ID.to_owned()).expect("service id"),
+            Some("delivery-error-test"),
+        )
+        .expect("machine identity");
+        let subscription_service =
+            SubscriptionDeliveryService::new(SubscriptionDeliveryServiceProps {
+                board_availability: BoardAvailability::Unavailable,
+                push_store: Arc::clone(&automation),
+                delivery,
+                presence: Arc::clone(&presence),
+                machine_identity,
+                clock: Arc::new(SystemSubscriptionClock),
+            });
+        subscription_service
+            .start()
+            .await
+            .expect("delivery owner starts");
+        subscription_service.shutdown().await;
+
+        let identity = ServiceIdentity::new(
+            SERVICE_ID,
+            SERVICE_ID,
+            &format!("sha256:{}", "a".repeat(64)),
+        )
+        .expect("service identity")
+        .with_automation_store(Arc::clone(&automation))
+        .with_subscription_delivery_service(subscription_service, presence);
+        let target = session(&identity.service_id);
+        let response = dispatch_message(
+            json!("client-1"),
+            SessionMessageSendParams {
+                target: target.clone(),
+                message: MessageContent::HumanUser {
+                    text: "stored before delivery"
+                        .to_owned()
+                        .try_into()
+                        .expect("message text"),
+                },
+                mode: MessageDelivery::Auto,
+                generation_guard: None,
+            },
+            &identity,
+        )
+        .await;
+
+        let response_message = response
+            .pointer("/error/data/message")
+            .and_then(Value::as_str)
+            .expect("unknown outcome message");
+        let link_start = response_message
+            .find(&format!("router://{SERVICE_ID}/push/"))
+            .expect("unknown outcome message includes a local push link");
+        let link_suffix = response_message
+            .get(link_start..)
+            .expect("push link begins at a UTF-8 boundary");
+        let link_end = link_suffix
+            .find(" before retrying")
+            .expect("push link has an actionable suffix");
+        let link_text = link_suffix
+            .get(..link_end)
+            .expect("push link ends at a UTF-8 boundary");
+        let link = RouterLink::parse(link_text).expect("stored push link parses");
+        let record = automation
+            .lock()
+            .await
+            .get_push_record(link.push_id())
+            .await
+            .expect("read committed direct message")
+            .expect("push link names the committed record");
+        assert_eq!(record.delivery_state, PushDeliveryState::Pending);
+        assert!(record.last_outcome.is_none());
+        let expected_link = crate::push_record_resolver::link_for(&record, &identity);
+        assert_eq!(
+            response.pointer("/error/data/kind"),
+            Some(&json!("outcomeUnknown"))
+        );
+        assert_eq!(
+            response.pointer("/error/data/stage"),
+            Some(&json!("inspect"))
+        );
+        assert_eq!(
+            response.pointer("/error/data/message"),
+            Some(&Value::String(format!(
+                "Push was stored; delivery outcome is unknown. Inspect {expected_link} before retrying."
+            )))
+        );
+        assert!(collaboration_protocol::control_error_is_valid(
+            "message/send",
+            &response
+        ));
     }
 }
