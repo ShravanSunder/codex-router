@@ -32,14 +32,18 @@
   imports the certificate from the `APPLE_CERTIFICATE_BASE64` and
   `APPLE_CERTIFICATE_PASSWORD` secrets and fails without them; it does not
   notarize, because Homebrew installs the tarball without quarantine.
-- Local Apple Silicon `cargo run` and `cargo test` go through
-  `scripts/cargo_debug_signing_runner.sh`, which signs `codex-router`,
+- Local Apple Silicon `cargo run` and `cargo test`, in any profile, go
+  through `scripts/cargo_debug_signing_runner.sh`, which signs `codex-router`,
   `agent-collaboration` and `agent-sessions` with the same certificate under
-  `dev.shravansunder.<executable>.debug`. Debug and released builds are
-  different code identities on purpose: the debug Router keeps its own
-  Keychain item, and approvals given to one never apply to the other. Without
-  the certificate in the login keychain the runner runs the build
-  linker-signed and says so.
+  `dev.shravansunder.<executable>.debug`, without a secure timestamp so it
+  works offline. Debug and released builds are different code identities on
+  purpose: the debug Router keeps its own Keychain item, and approvals given
+  to one never apply to the other. A debug build another process starts
+  directly, such as the `--router-binary` a debug-host example launches,
+  bypasses the runner; sign it first with
+  `scripts/cargo_debug_signing_runner.sh --sign-only target/debug/codex-router`.
+  When signing cannot happen (no certificate in the login keychain, a locked
+  keychain) the runner runs the build linker-signed and says so.
 - Keep release publication separate from production process replacement.
   Publishing or installing a new binary never authorizes restarting the
   running production router.
