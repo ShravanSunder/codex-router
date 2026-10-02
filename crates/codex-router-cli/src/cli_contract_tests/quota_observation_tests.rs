@@ -58,45 +58,34 @@ fn quota_status_projects_held_switch_and_distinct_saved_floor_thresholds() {
     }
     drop(state);
     migrate_test_state_database(&state_path);
-    let mutation = must_ok(
-        test_async_runtime().block_on(AsyncWeeklyQuotaFloorMutationStore::open(&state_path)),
+    // Keep SQLx connection-return tasks alive through the whole fixture mutation.
+    test_async_runtime().block_on(async {
+        let mutation = must_ok(AsyncWeeklyQuotaFloorMutationStore::open(&state_path).await);
+        must_ok(
+            mutation
+                .set_weekly_quota_floor_by_account_id(
+                    &protected_id,
+                    Some(must_ok(WeeklyQuotaFloorBasisPoints::new(500))),
+                )
+                .await,
+        );
+        mutation.close().await;
+    });
+    let status = run_cli(
+        [
+            "codex-router",
+            "quota",
+            "status",
+            "--router-root",
+            path_to_str(&router_root),
+            "--format",
+            "json",
+            "--no-refresh",
+            "--now-unix-seconds",
+            "1100",
+        ],
+        CliContext::new(Vec::new()),
     );
-    must_ok(
-        test_async_runtime().block_on(mutation.set_weekly_quota_floor_by_account_id(
-            &protected_id,
-            Some(must_ok(WeeklyQuotaFloorBasisPoints::new(500))),
-        )),
-    );
-    test_async_runtime().block_on(mutation.close());
-    let status_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        run_cli(
-            [
-                "codex-router",
-                "quota",
-                "status",
-                "--router-root",
-                path_to_str(&router_root),
-                "--format",
-                "json",
-                "--no-refresh",
-                "--now-unix-seconds",
-                "1100",
-            ],
-            CliContext::new(Vec::new()),
-        )
-    }));
-    let status = match status_result {
-        Ok(status) => status,
-        Err(panic_payload) => {
-            eprintln!(
-                "quota_status_sqlite_failure test_pid={} database_path={}\n{}",
-                std::process::id(),
-                state_path.display(),
-                sqlite_file_open_process_observation(&state_path),
-            );
-            std::panic::resume_unwind(panic_payload);
-        }
-    };
     let json: serde_json::Value = must_ok(serde_json::from_str(&status.stdout));
     let accounts = json["accounts"]
         .as_array()

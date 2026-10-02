@@ -29,6 +29,11 @@ use crate::quota_snapshot::SelectorQuotaWindowStatus;
 use crate::sqlite::AsyncSqliteStateStore;
 use crate::sqlite::StateStoreError;
 
+#[path = "observation_read_rejection_tests.rs"]
+mod observation_read_rejection_tests;
+#[path = "suspect_exhausted_credit_suppression_tests.rs"]
+mod suspect_exhausted_credit_suppression_tests;
+
 static NEXT_TEMP_DIRECTORY: AtomicUsize = AtomicUsize::new(0);
 
 struct CreditStoreTempDir {

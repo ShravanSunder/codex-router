@@ -654,6 +654,8 @@ mod tests {
         connection
             .execute_batch(
                 "DROP TABLE IF EXISTS _sqlx_migrations;
+                 DROP TABLE IF EXISTS account_credit_observations;
+                 DROP TABLE IF EXISTS account_credit_policies;
                  DROP TABLE IF EXISTS account_window_observations;
                  DROP TABLE IF EXISTS account_window_rejections;
                  DROP TABLE IF EXISTS credential_maintenance;
@@ -671,6 +673,8 @@ mod tests {
         connection
             .execute_batch(
                 "DROP TABLE IF EXISTS _sqlx_migrations;
+                 DROP TABLE IF EXISTS account_credit_observations;
+                 DROP TABLE IF EXISTS account_credit_policies;
                  DROP TABLE IF EXISTS account_window_observations;
                  DROP TABLE IF EXISTS account_window_rejections;
                  DROP TABLE IF EXISTS credential_maintenance;
@@ -699,6 +703,8 @@ mod tests {
         connection
             .execute_batch(
                 "DROP TABLE IF EXISTS _sqlx_migrations;
+                 DROP TABLE IF EXISTS account_credit_observations;
+                 DROP TABLE IF EXISTS account_credit_policies;
                  DROP TABLE IF EXISTS account_window_observations;
                  DROP TABLE IF EXISTS account_window_rejections;
                  DROP TABLE IF EXISTS credential_maintenance;
@@ -707,6 +713,106 @@ mod tests {
             )
             .unwrap_or_else(|error| panic!("fixture should convert to v12: {error}"));
         remove_account_provider_column_for_legacy_fixture(&connection);
+    }
+
+    fn assert_credit_migration_tables(database_path: &Path, expected_present: bool) {
+        let connection = Connection::open(database_path).unwrap_or_else(|error| {
+            panic!("fixture should reopen for credit-table assertion: {error}")
+        });
+        for table_name in ["account_credit_observations", "account_credit_policies"] {
+            let table_count: i64 = connection
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                    [table_name],
+                    |row| row.get(0),
+                )
+                .unwrap_or_else(|error| panic!("{table_name} schema should query: {error}"));
+            assert_eq!(
+                table_count,
+                if expected_present { 1 } else { 0 },
+                "{table_name} should be {} at this migration boundary",
+                if expected_present {
+                    "present"
+                } else {
+                    "absent"
+                }
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn v10_v11_v12_native_upgrades_create_credit_tables_and_preserve_account_policy() {
+        type LegacyFixtureConverter = fn(&Path);
+        let legacy_fixtures: [(&str, LegacyFixtureConverter); 3] = [
+            ("v10", convert_current_fixture_to_v10),
+            ("v11", convert_current_fixture_to_v11),
+            ("v12", convert_current_fixture_to_v12),
+        ];
+
+        for (version, convert_fixture) in legacy_fixtures {
+            let temp_dir = TestTempDir::new(&format!("credit_tables_{version}_upgrade"));
+            let database_path = temp_dir.path().join("state.sqlite");
+            let account_id = account_id(&format!("acct_credit_tables_{version}"));
+            let account = AccountRecord::new(
+                Provider::Openai,
+                account_id.clone(),
+                format!("credit-tables-{version}"),
+                AccountStatus::Enabled,
+            )
+            .with_active_credential_generation(1);
+            let current = AsyncSqliteStateStore::open(&database_path)
+                .await
+                .unwrap_or_else(|error| {
+                    panic!("current fixture should open for {version}: {error}")
+                });
+            current
+                .upsert_account(&account)
+                .await
+                .unwrap_or_else(|error| panic!("{version} account should persist: {error}"));
+            current.close().await.unwrap_or_else(|error| {
+                panic!("current fixture should close for {version}: {error}")
+            });
+
+            let preserved_floor = WeeklyQuotaFloorBasisPoints::new(800)
+                .expect("800 basis points should be a valid floor");
+            if version != "v10" {
+                let mutation = AsyncWeeklyQuotaFloorMutationStore::open(&database_path)
+                    .await
+                    .unwrap_or_else(|error| {
+                        panic!("current floor mutation store should open: {error}")
+                    });
+                mutation
+                    .set_weekly_quota_floor_by_account_id(&account_id, Some(preserved_floor))
+                    .await
+                    .unwrap_or_else(|error| panic!("{version} floor should persist: {error}"));
+                mutation.close().await;
+            }
+
+            convert_fixture(&database_path);
+            assert_credit_migration_tables(&database_path, false);
+
+            let migrated = AsyncSqliteStateStore::open(&database_path)
+                .await
+                .unwrap_or_else(|error| {
+                    panic!("{version} native database should upgrade: {error}")
+                });
+            assert_eq!(migrated.schema_version().await, Ok(13));
+            assert_eq!(migrated.list_accounts().await, Ok(vec![account]));
+            let expected_policies = if version == "v10" {
+                Vec::new()
+            } else {
+                vec![AccountRoutingPolicy::new(account_id, preserved_floor)]
+            };
+            assert_eq!(
+                migrated.list_account_routing_policies().await,
+                Ok(expected_policies),
+                "{version} account policy should survive its native upgrade"
+            );
+            migrated.close().await.unwrap_or_else(|error| {
+                panic!("upgraded {version} database should close: {error}")
+            });
+            assert_credit_migration_tables(&database_path, true);
+        }
     }
 
     fn remove_account_provider_column_for_legacy_fixture(connection: &Connection) {

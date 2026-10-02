@@ -914,6 +914,62 @@ impl AsyncSqliteStateStore {
             } else {
                 (Vec::new(), Vec::new())
             };
+            let (credit_usage_policy, credit_observation) =
+                crate::credit_store::load_credit_usage_for_selector(
+                    &mut transaction,
+                    account.account_id(),
+                )
+                .await?;
+            let canonical_responses_windows = if route_band == RouteBand::ResponsesCompact.as_str()
+                && account.provider() == Provider::Openai
+                && credit_usage_policy.allows_credit_usage()
+            {
+                let canonical_route_band = RouteBand::Responses.as_str();
+                let mut canonical_windows = self
+                    .load_selector_windows(
+                        &mut transaction,
+                        account.account_id(),
+                        canonical_route_band,
+                    )
+                    .await?;
+                let canonical_route_band_state = self
+                    .load_route_band_account_state(
+                        &mut transaction,
+                        account.account_id(),
+                        canonical_route_band,
+                    )
+                    .await?;
+                if let Some(state) = canonical_route_band_state.as_ref() {
+                    if state.is_active_suspect_exhausted(now_unix_seconds) {
+                        suspect_exhausted_credit_suppression = true;
+                        canonical_windows = suspect_exhausted_selector_windows(
+                            account.account_id(),
+                            canonical_route_band,
+                            state.observed_unix_seconds,
+                        );
+                    } else if state.is_expired(now_unix_seconds) {
+                        canonical_windows.clear();
+                    }
+                } else {
+                    let canonical_refresh_status = self
+                        .load_quota_refresh_status(
+                            &mut transaction,
+                            account.account_id(),
+                            canonical_route_band,
+                        )
+                        .await?;
+                    if selector_windows_are_stale(
+                        &canonical_windows,
+                        canonical_refresh_status.as_ref(),
+                        now_unix_seconds,
+                    ) {
+                        mark_selector_windows_stale(&mut canonical_windows);
+                    }
+                }
+                Some(canonical_windows)
+            } else {
+                None
+            };
             let credential_maintenance = if account.provider() == Provider::Claude {
                 self.load_credential_maintenance_in_transaction(
                     account.account_id(),
@@ -926,12 +982,6 @@ impl AsyncSqliteStateStore {
             } else {
                 None
             };
-            let (credit_usage_policy, credit_observation) =
-                crate::credit_store::load_credit_usage_for_selector(
-                    &mut transaction,
-                    account.account_id(),
-                )
-                .await?;
             inputs.push(
                 SelectorQuotaInput::new(
                     account.account_id().clone(),
@@ -944,6 +994,7 @@ impl AsyncSqliteStateStore {
                 )
                 .with_credential_maintenance(credential_maintenance)
                 .with_window_state(window_observations, window_rejections)
+                .with_canonical_responses_windows(canonical_responses_windows)
                 .with_credit_usage(
                     credit_usage_policy,
                     credit_observation,

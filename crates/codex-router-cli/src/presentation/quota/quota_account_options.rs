@@ -49,6 +49,41 @@ impl CreditUsagePolicySaveError {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum CreditUsageRefreshError {
     Failed,
+    Unavailable(CreditUsageRefreshUnavailableReason),
+}
+
+impl CreditUsageRefreshError {
+    pub(crate) const ACCOUNT_UNAVAILABLE: Self =
+        Self::Unavailable(CreditUsageRefreshUnavailableReason::AccountUnavailable);
+    pub(crate) const ACCOUNT_DISABLED: Self =
+        Self::Unavailable(CreditUsageRefreshUnavailableReason::AccountDisabled);
+    pub(crate) const CREDENTIALS_UNAVAILABLE: Self =
+        Self::Unavailable(CreditUsageRefreshUnavailableReason::CredentialsUnavailable);
+    pub(crate) const PROVIDER_UNSUPPORTED: Self =
+        Self::Unavailable(CreditUsageRefreshUnavailableReason::ProviderUnsupported);
+    pub(crate) const TARGET_CHANGED: Self =
+        Self::Unavailable(CreditUsageRefreshUnavailableReason::TargetChanged);
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CreditUsageRefreshUnavailableReason {
+    AccountUnavailable,
+    AccountDisabled,
+    CredentialsUnavailable,
+    ProviderUnsupported,
+    TargetChanged,
+}
+
+impl CreditUsageRefreshUnavailableReason {
+    pub(super) const fn message(self) -> &'static str {
+        match self {
+            Self::AccountUnavailable => "Credit refresh unavailable: account removed.",
+            Self::AccountDisabled => "Credit refresh unavailable: account disabled.",
+            Self::CredentialsUnavailable => "Credit refresh unavailable: no credentials.",
+            Self::ProviderUnsupported => "OpenAI accounts only can refresh credits.",
+            Self::TargetChanged => "Credentials changed; reopen options.",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -130,6 +165,7 @@ pub(super) struct CreditPolicyEditorState {
 pub(super) enum AccountOptionsMessage {
     Refreshing,
     RefreshFailed,
+    RefreshUnavailable(CreditUsageRefreshUnavailableReason),
     Refreshed,
     ResetReviewActive,
 }
@@ -225,15 +261,27 @@ impl AccountOptionsState {
         })
     }
 
-    fn start_refresh(&mut self) -> AccountOptionsCommand {
+    fn start_refresh(&mut self) -> Option<AccountOptionsCommand> {
+        if !self.target.enabled {
+            self.message = Some(AccountOptionsMessage::RefreshUnavailable(
+                CreditUsageRefreshUnavailableReason::AccountDisabled,
+            ));
+            return None;
+        }
+        if self.target.credential_generation.is_none() {
+            self.message = Some(AccountOptionsMessage::RefreshUnavailable(
+                CreditUsageRefreshUnavailableReason::CredentialsUnavailable,
+            ));
+            return None;
+        }
         let operation_generation = self.allocate_operation_generation();
         self.message = Some(AccountOptionsMessage::Refreshing);
-        AccountOptionsCommand::RefreshCredits {
+        Some(AccountOptionsCommand::RefreshCredits {
             account_id: self.target.account_id.clone(),
             credential_generation: self.target.credential_generation,
             session_generation: self.session_generation,
             operation_generation,
-        }
+        })
     }
 
     fn request_tab_switch(
@@ -488,7 +536,7 @@ pub(super) fn update_credit_policy_editor(
         AccountOptionsKeyAction::SelectDisallow => state.adjust_policy(false),
         AccountOptionsKeyAction::SavePolicy => return state.start_saving(),
         AccountOptionsKeyAction::RetryReload => return state.retry_saved_reload(),
-        AccountOptionsKeyAction::RefreshCredits => return Some(state.start_refresh()),
+        AccountOptionsKeyAction::RefreshCredits => return state.start_refresh(),
         AccountOptionsKeyAction::CancelEditing => {
             if state
                 .editor
@@ -571,6 +619,7 @@ pub(super) use events::handle_account_options_key_event;
 pub(super) use events::open_account_options_for_account;
 pub(super) use rendering::account_options_content_height;
 pub(super) use rendering::account_options_inspection_footer;
+pub(in crate::presentation::quota) use rendering::account_options_reset_inventory_page_size;
 #[path = "quota_account_options_commands.rs"]
 mod commands;
 #[path = "quota_account_options_events.rs"]

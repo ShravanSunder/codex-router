@@ -166,18 +166,17 @@ impl LiveAccountAdmissionAssessor for RuntimeAccountAdmissionAssessor {
                 Ok(policies) => policies,
                 Err(_) => return AccountSourceAdmission::ReconnectRequired,
             };
-            let runtime_is_rejected = match self.runtime_exhaustions.lock() {
+            let runtime_exhaustions = match self.runtime_exhaustions.lock() {
                 Ok(exhaustions) => exhaustions
                     .get(route_band.as_str())
-                    .into_iter()
-                    .flatten()
-                    .any(|exhaustion| {
-                        exhaustion.account_id == *source_account_id
-                            && now_unix_seconds < exhaustion.expires_unix_seconds
-                    }),
+                    .cloned()
+                    .unwrap_or_default(),
                 Err(_) => return AccountSourceAdmission::ReconnectRequired,
             };
-            if runtime_is_rejected {
+            if runtime_exhaustions.iter().any(|exhaustion| {
+                exhaustion.account_id == *source_account_id
+                    && now_unix_seconds < exhaustion.expires_unix_seconds
+            }) {
                 return AccountSourceAdmission::ReconnectRequired;
             }
             let Some(selector_input) = selector_inputs
@@ -186,25 +185,45 @@ impl LiveAccountAdmissionAssessor for RuntimeAccountAdmissionAssessor {
             else {
                 return AccountSourceAdmission::ReconnectRequired;
             };
-            if selector_input.active_credential_generation() != Some(pinned_credential_generation) {
+            let pinned_credential_generation_matches =
+                selector_input.active_credential_generation() == Some(pinned_credential_generation);
+            if credit_backed_admission_seen && !pinned_credential_generation_matches {
                 return AccountSourceAdmission::ReconnectRequired;
             }
-            let floor_basis_points = policies
+            let account_inputs = selector_inputs
                 .iter()
-                .find(|policy| policy.account_id() == source_account_id)
-                .map(|policy| u32::from(policy.weekly_quota_floor_basis_points().basis_points()));
-            let account_input = account_turn_input_from_selector_input(
-                selector_input,
-                floor_basis_points,
-                now_unix_seconds,
-            );
+                .filter(|input| input.provider() == Provider::Openai)
+                .filter(|input| {
+                    !runtime_exhaustions.iter().any(|exhaustion| {
+                        exhaustion.account_id == *input.account_id()
+                            && now_unix_seconds < exhaustion.expires_unix_seconds
+                    })
+                })
+                .map(|input| {
+                    let floor_basis_points = policies
+                        .iter()
+                        .find(|policy| policy.account_id() == input.account_id())
+                        .map(|policy| {
+                            u32::from(policy.weekly_quota_floor_basis_points().basis_points())
+                        });
+                    account_turn_input_from_selector_input(
+                        input,
+                        floor_basis_points,
+                        now_unix_seconds,
+                    )
+                })
+                .collect();
             let assessment = assess_route_band(BurnDownRouteBandAssessmentInput::new(
                 route_band,
                 now_unix_seconds,
                 RESPONSES_WEBSOCKET.clone(),
-                vec![account_input],
+                account_inputs,
             ));
-            let Some(account) = assessment.accounts().first() else {
+            let Some(account) = assessment
+                .accounts()
+                .iter()
+                .find(|account| account.account_id() == source_account_id)
+            else {
                 return AccountSourceAdmission::ReconnectRequired;
             };
             if account.routing_exclusion() == RoutingExclusion::WeeklyQuotaFloor
@@ -220,11 +239,18 @@ impl LiveAccountAdmissionAssessor for RuntimeAccountAdmissionAssessor {
             match account.availability() {
                 AccountAvailability::Usable => AccountSourceAdmission::Permitted,
                 AccountAvailability::Reserve
-                    if account.quota_evidence_reason() == QuotaEvidenceReason::CreditBacked
-                        && account.routing_reason()
-                            == codex_router_selection::burn_down::RoutingReason::CreditBacked =>
+                    if account.quota_evidence_reason() == QuotaEvidenceReason::CreditBacked =>
                 {
-                    AccountSourceAdmission::PermittedByCreditBackedQuota
+                    if pinned_credential_generation_matches
+                        && assessment
+                            .weighted_candidates()
+                            .iter()
+                            .any(|(account_id, _)| account_id == source_account_id)
+                    {
+                        AccountSourceAdmission::PermittedByCreditBackedQuota
+                    } else {
+                        AccountSourceAdmission::ReconnectRequired
+                    }
                 }
                 AccountAvailability::Reserve => AccountSourceAdmission::Permitted,
                 // Preserve established non-credit fallback sessions. They cannot use this

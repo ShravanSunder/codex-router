@@ -112,12 +112,21 @@ pub(in crate::presentation::quota) fn account_options_content_height(
     }
 }
 
+pub(in crate::presentation::quota) fn account_options_reset_inventory_page_size(
+    body_height: usize,
+) -> usize {
+    // The options body omits the detail title, account line and detail-panel borders.
+    const OMITTED_RESET_DETAIL_ROWS: usize = 4;
+    reset_inventory_page_size(body_height.saturating_add(OMITTED_RESET_DETAIL_ROWS))
+}
+
 pub(super) fn account_options_message_text(message: AccountOptionsMessage) -> &'static str {
     match message {
         AccountOptionsMessage::Refreshing => "Refreshing credit balance…",
         AccountOptionsMessage::RefreshFailed => {
             "Credit refresh failed; cached observation retained."
         }
+        AccountOptionsMessage::RefreshUnavailable(reason) => reason.message(),
         AccountOptionsMessage::Refreshed => "Credit balance refreshed.",
         AccountOptionsMessage::ResetReviewActive => {
             "Finish or cancel the reset review before switching tabs."
@@ -209,7 +218,7 @@ pub(super) fn render_credit_usage_body(
             View(height: 1) {}
             #(usage_heading)
             #(policy_row)
-            Text(content: truncate_account_options_line("Credits may be used only after included quota is exhausted.", text_width), color: Color::Grey, wrap: TextWrap::NoWrap)
+            Text(content: truncate_account_options_line("Included quota on eligible accounts always comes first.", text_width), color: Color::Grey, wrap: TextWrap::NoWrap)
             Text(content: truncate_account_options_line("Allow is limited to eligible OpenAI Responses requests.", text_width), color: Color::Grey, wrap: TextWrap::NoWrap)
             #(floor_note.map(|note| element! { Text(content: truncate_account_options_line(&note, text_width), color: Color::Yellow, wrap: TextWrap::NoWrap) }.into_any()))
             #(provider_note.map(|note| element! { Text(content: truncate_account_options_line(&note, text_width), color: Color::Yellow, wrap: TextWrap::NoWrap) }.into_any()))
@@ -253,7 +262,7 @@ fn render_resets_tab_body(
             width,
             height,
             inventory_page_start,
-            reset_inventory_page_size(height.saturating_sub(4)),
+            account_options_reset_inventory_page_size(height),
             spinner_tick,
         );
     }

@@ -38,28 +38,32 @@ async fn compiled_credit_refresh_reports_focused_responses_failure_despite_parti
         ))
         .into());
     }
+    let options_start = terminal.transcript_len();
     terminal.send(&[0x12])?;
     stage(
-        terminal.wait_for_text("Reset credits", SEMANTIC_WAIT),
+        terminal.wait_for_text_after("Reset credits", options_start, SEMANTIC_WAIT),
         "partial-refresh Reset tab",
     )?;
     stage(
         provider.wait_for_request_count(2, SEMANTIC_WAIT),
         "partial-refresh inspection requests",
     )?;
+    let credits_tab_start = terminal.transcript_len();
     terminal.send(b"\t")?;
     stage(
-        terminal.wait_for_text("[ Credits ]", SEMANTIC_WAIT),
+        terminal.wait_for_text_after("[ Credits ]", credits_tab_start, SEMANTIC_WAIT),
         "partial-refresh tab cancellation acknowledgement",
     )?;
     provider.release_get_responses()?;
+    let refresh_start = terminal.transcript_len();
     terminal.send(b"r")?;
     stage(
         provider.wait_for_request_count(9, SEMANTIC_WAIT),
         "partial-refresh whole-pool provider requests",
     )?;
-    if let Err(error) = terminal.wait_for_text(
+    if let Err(error) = terminal.wait_for_text_after(
         "Credit refresh failed; cached observation retained.",
+        refresh_start,
         SEMANTIC_WAIT,
     ) {
         if terminal
@@ -158,9 +162,10 @@ async fn compiled_pending_refresh_tab_can_return_to_browse_and_exit_before_provi
         terminal.wait_for_text("ctrl-r account options", SEMANTIC_WAIT),
         "pending-refresh initial browse",
     )?;
+    let inspection_start = terminal.transcript_len();
     terminal.send(&[0x12])?;
     stage(
-        terminal.wait_for_text("Reset credits", SEMANTIC_WAIT),
+        terminal.wait_for_text_after("Reset credits", inspection_start, SEMANTIC_WAIT),
         "pending-refresh Resets tab",
     )?;
     stage(
@@ -174,13 +179,14 @@ async fn compiled_pending_refresh_tab_can_return_to_browse_and_exit_before_provi
         "initial switch to Credits",
     )?;
 
+    let refresh_start = terminal.transcript_len();
     terminal.send(b"r")?;
     stage(
         provider.wait_for_request_count(3, SEMANTIC_WAIT),
         "whole-pool refresh starts and blocks on loopback response",
     )?;
     stage(
-        terminal.wait_for_text("Refreshing credit balance", SEMANTIC_WAIT),
+        terminal.wait_for_text_after("Refreshing credit balance", refresh_start, SEMANTIC_WAIT),
         "refresh progress while provider is held",
     )?;
     let pending_switch_start = terminal.transcript_len();
@@ -228,7 +234,7 @@ async fn compiled_pending_refresh_tab_can_return_to_browse_and_exit_before_provi
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn compiled_credit_refresh_does_not_report_success_for_disabled_focused_account()
+async fn compiled_disabled_account_refresh_reports_unavailable_without_provider_io()
 -> TestResult<()> {
     let fixture = QuotaResetFixture::create().await?;
     let peer_account_id = AccountId::new("acct_pty_alpha")?;
@@ -253,75 +259,47 @@ async fn compiled_credit_refresh_does_not_report_success_for_disabled_focused_ac
                 && account.status() == codex_router_state::account::AccountStatus::Enabled
                 && account.active_credential_generation() == Some(7)
         }),
-        "enabled peer with active credentials should remain eligible for the whole-pool refresh",
+        "the unrelated enabled peer should remain available",
     )?;
     state.close().await?;
 
-    let mut provider = HeldLoopbackProvider::bind()?;
+    let provider = HeldLoopbackProvider::bind()?;
     let mut terminal = spawn_fixture_terminal(&fixture, provider.address())?;
     stage(
         terminal.wait_for_text("ctrl-r account options", SEMANTIC_WAIT),
         "ineligible-refresh initial browse",
     )?;
+    let disabled_options_start = terminal.transcript_len();
     terminal.send(b"\x1b[B")?;
     terminal.send(&[0x12])?;
     stage(
-        terminal.wait_for_text(
+        terminal.wait_for_text_after(
             "Resets are unavailable while this account is disabled.",
+            disabled_options_start,
             SEMANTIC_WAIT,
         ),
         "disabled focused account options",
     )?;
+    let credits_tab_start = terminal.transcript_len();
     terminal.send(b"\t")?;
     stage(
-        terminal.wait_for_text("[ Credits ]", SEMANTIC_WAIT),
+        terminal.wait_for_text_after("[ Credits ]", credits_tab_start, SEMANTIC_WAIT),
         "disabled-account tab switch acknowledgement",
     )?;
+    let refresh_start = terminal.transcript_len();
     terminal.send(b"r")?;
-    provider.release_get_responses()?;
-    if let Err(error) = provider
-        .wait_for_request_count(4, SEMANTIC_WAIT)
-        .map(|_| ())
-    {
-        let refresh_failed = terminal
-            .wait_for_text(
-                "Credit refresh failed; cached observation retained.",
-                std::time::Duration::ZERO,
-            )
-            .is_ok();
-        let refresh_succeeded = terminal
-            .wait_for_text("Credit balance refreshed.", std::time::Duration::ZERO)
-            .is_ok();
-        let diagnostics = terminal.safe_semantic_diagnostics(0);
-        let requests = provider.finish()?;
-        return Err(std::io::Error::other(format!(
-            "eligible peer whole-pool requests: {error}; count={}; refresh_failed={refresh_failed}; refresh_succeeded={refresh_succeeded}; {diagnostics}",
-            requests.len()
-        ))
-        .into());
-    }
-    if let Err(error) = terminal.wait_for_text(
-        "Credit refresh failed; cached observation retained.",
-        SEMANTIC_WAIT,
-    ) {
-        if terminal
-            .wait_for_text("Credit balance refreshed.", std::time::Duration::ZERO)
-            .is_ok()
-        {
-            return Err(std::io::Error::other(
-                "zero-eligible focused refresh was reported as successful",
-            )
-            .into());
-        }
-        let diagnostics = terminal.safe_semantic_diagnostics(0);
-        return Err(std::io::Error::other(format!(
-            "zero-eligible focused refresh feedback: {error}; {diagnostics}"
-        ))
-        .into());
-    }
+    stage(
+        terminal.wait_for_text_after(
+            "Credit refresh unavailable: account disabled.",
+            refresh_start,
+            SEMANTIC_WAIT,
+        ),
+        "disabled account refresh availability feedback",
+    )?;
+    let close_options_start = terminal.transcript_len();
     terminal.send(b"\x1b")?;
     stage(
-        terminal.wait_for_text("ctrl-r account options", SEMANTIC_WAIT),
+        terminal.wait_for_text_after("ctrl-r account options", close_options_start, SEMANTIC_WAIT),
         "ineligible-refresh account-options close",
     )?;
     terminal.send(b"q")?;
@@ -332,18 +310,13 @@ async fn compiled_credit_refresh_does_not_report_success_for_disabled_focused_ac
     let requests = stage(provider.finish(), "ineligible-refresh provider shutdown")?;
 
     ensure(
-        requests.len() == 4 && requests.iter().all(|request| request.method == "GET"),
-        "disabled focused account must not add provider calls or consume requests",
+        requests.is_empty(),
+        "an unavailable focused account must not trigger a whole-pool refresh",
     )?;
     ensure(
-        requests
-            .iter()
-            .all(|request| request.routing_account.as_deref() != Some("routing-pty-beta")),
-        "disabled focused account must receive no provider refresh requests",
-    )?;
-    ensure(
-        !String::from_utf8_lossy(&transcript).contains("Credit balance refreshed."),
-        "zero eligible Responses refreshes must not report a new balance",
+        !String::from_utf8_lossy(&transcript)
+            .contains("Credit refresh failed; cached observation retained."),
+        "an unavailable refresh must not be reported as a failed provider refresh",
     )?;
 
     let state = AsyncSqliteStateStore::open_read_only(&fixture.root().join("state.sqlite")).await?;
@@ -353,18 +326,18 @@ async fn compiled_credit_refresh_does_not_report_success_for_disabled_focused_ac
         .ok_or_else(|| std::io::Error::other("disabled cached credit observation disappeared"))?;
     ensure(
         before_observation.observed_unix_seconds() == after_observation.observed_unix_seconds(),
-        "zero-eligible refresh must preserve the disabled account's observation age",
+        "an unavailable refresh must preserve the disabled account's observation age",
     )?;
     ensure(
         before_observation.provider_observation() == after_observation.provider_observation(),
-        "zero-eligible refresh must preserve the disabled account's credit facts",
+        "an unavailable refresh must preserve the disabled account's credit facts",
     )?;
     ensure(
         state
             .load_account_credit_observation(&peer_account_id)
             .await?
-            .is_some(),
-        "enabled peer Responses observation should commit",
+            .is_none(),
+        "an unavailable focused refresh must not refresh an unrelated enabled peer",
     )?;
     state.close().await?;
     fixture.assert_secrets_unchanged()?;

@@ -19,6 +19,7 @@ pub(in crate::quota) fn quota_human_group(row: &QuotaStatusRow) -> QuotaHumanGro
         RoutingReason::AvailableSamePool => QuotaHumanGroup::Available,
         RoutingReason::HeldReserve
         | RoutingReason::HeldUnknown
+        | RoutingReason::HeldForIncludedQuota
         | RoutingReason::HeldShortWindowGuard => QuotaHumanGroup::Held,
         RoutingReason::UnknownFallbackAvailable => QuotaHumanGroup::BlockedOrStale,
         _ => match row.availability {
@@ -435,6 +436,7 @@ pub(in crate::quota) fn format_routing_reason(reason: RoutingReason) -> &'static
         RoutingReason::AvailableSamePool => "available by quota: same pool",
         RoutingReason::HeldReserve => "held by quota: reserve",
         RoutingReason::HeldUnknown => "held by quota: needs refresh",
+        RoutingReason::HeldForIncludedQuota => "held by quota: included quota available",
         RoutingReason::HeldShortWindowGuard => "held by quota: 5h guard",
         RoutingReason::HeldFloorSwitch => "held by quota: healthy peer at floor switch",
         RoutingReason::UnknownFallbackPreferred => "fallback by quota: needs refresh",
@@ -468,6 +470,7 @@ pub(in crate::quota) fn format_next_use_from_routing_reason(reason: RoutingReaso
         RoutingReason::CreditBacked => "uses usage credits",
         RoutingReason::HeldReserve
         | RoutingReason::HeldUnknown
+        | RoutingReason::HeldForIncludedQuota
         | RoutingReason::HeldShortWindowGuard
         | RoutingReason::HeldFloorSwitch => "held by quota",
         RoutingReason::UnknownFallbackPreferred | RoutingReason::UnknownFallbackAvailable => {

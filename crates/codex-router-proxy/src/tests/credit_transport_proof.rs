@@ -38,6 +38,39 @@ fn assembled_loopback_http_rejects_disallowed_zero_and_depleted_credit() {
     }
 }
 
+#[test]
+fn assembled_loopback_http_credits_cover_responses_compact_and_image_routes() {
+    for request_line in [
+        "POST /v1/responses HTTP/1.1\r\n",
+        "POST /v1/responses/compact HTTP/1.1\r\n",
+        "POST /v1/images/generations HTTP/1.1\r\n",
+        "POST /v1/images/edits HTTP/1.1\r\n",
+    ] {
+        assert_assembled_http_credit_route(
+            "whole_responses_credit_family",
+            true,
+            available_credits("2.75"),
+            Some("credit-family-token"),
+            request_line,
+        );
+    }
+}
+
+#[test]
+fn assembled_loopback_http_preserves_provider_authoritative_hidden_and_unlimited_credits() {
+    for availability in [
+        codex_router_core::credit_usage::CreditAvailability::Unlimited,
+        codex_router_core::credit_usage::CreditAvailability::Available { balance: None },
+    ] {
+        assert_assembled_http_credit_case(
+            "provider_authoritative_credits",
+            true,
+            availability,
+            Some("available-credit-token"),
+        );
+    }
+}
+
 fn available_credits(balance: &str) -> codex_router_core::credit_usage::CreditAvailability {
     codex_router_core::credit_usage::CreditAvailability::Available {
         balance: Some(
@@ -52,6 +85,22 @@ fn assert_assembled_http_credit_case(
     allow_credit_usage: bool,
     availability: codex_router_core::credit_usage::CreditAvailability,
     expected_upstream_token: Option<&str>,
+) {
+    assert_assembled_http_credit_route(
+        scenario,
+        allow_credit_usage,
+        availability,
+        expected_upstream_token,
+        "POST /v1/responses HTTP/1.1\r\n",
+    );
+}
+
+fn assert_assembled_http_credit_route(
+    scenario: &str,
+    allow_credit_usage: bool,
+    availability: codex_router_core::credit_usage::CreditAvailability,
+    expected_upstream_token: Option<&str>,
+    request_line: &'static str,
 ) {
     let temp_dir = ProxyTestTempDir::new(&format!("assembled_http_credit_{scenario}"));
     let database_path = temp_dir.path().join("state.sqlite");
@@ -103,7 +152,7 @@ fn assert_assembled_http_credit_case(
         let client_thread = std::thread::spawn(move || {
             send_loopback_request(
                 router_address,
-                "POST /v1/responses HTTP/1.1\r\n",
+                request_line,
                 br#"{"model":"gpt-5","credit_backed":true}"#,
             )
         });
@@ -127,7 +176,8 @@ fn assert_assembled_http_credit_case(
         assert!(response.ends_with("\r\n\r\nok"), "{scenario}: {response}");
         let observed_request = upstream_probe.receive_request();
         assert_eq!(
-            observed_request.request_line, "POST /v1/responses HTTP/1.1",
+            observed_request.request_line,
+            request_line.trim_end(),
             "{scenario} should reach the upstream Responses endpoint"
         );
         assert_eq!(

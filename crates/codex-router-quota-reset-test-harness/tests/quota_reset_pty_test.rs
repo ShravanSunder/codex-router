@@ -50,6 +50,7 @@ mod quota_reset_pty_test {
             terminal.wait_for_text("ctrl-r account options", SEMANTIC_WAIT),
             "initial browse",
         )?;
+        let inspection_start = terminal.transcript_len();
         terminal.send(b"\x1b[B")?;
         terminal.send(&[0x12])?;
         let requests = stage(
@@ -62,15 +63,15 @@ mod quota_reset_pty_test {
             "inspection provider responses",
         )?;
         stage(
-            terminal.wait_for_text("Weekly usage", SEMANTIC_WAIT),
+            terminal.wait_for_text_after("Weekly usage", inspection_start, SEMANTIC_WAIT),
             "inspection weekly usage",
         )?;
         stage(
-            terminal.wait_for_text("Reset credits", SEMANTIC_WAIT),
+            terminal.wait_for_text_after("Reset credits", inspection_start, SEMANTIC_WAIT),
             "inspection reset credits",
         )?;
         stage(
-            terminal.wait_for_text("PTY weekly reset", SEMANTIC_WAIT),
+            terminal.wait_for_text_after("PTY weekly reset", inspection_start, SEMANTIC_WAIT),
             "inspected reset inventory fits the account-options pane",
         )?;
 
@@ -100,7 +101,7 @@ mod quota_reset_pty_test {
         )?;
 
         stage(
-            terminal.wait_for_text("esc/ctrl-r back", SEMANTIC_WAIT),
+            terminal.wait_for_text_after("esc/ctrl-r back", inspection_start, SEMANTIC_WAIT),
             "inspection cancel footer",
         )?;
         let resize_start = terminal.transcript_len();
@@ -215,44 +216,49 @@ mod quota_reset_pty_test {
             terminal.wait_for_text("ctrl-r account options", SEMANTIC_WAIT),
             "account-options initial browse",
         )?;
+        let inspection_start = terminal.transcript_len();
         terminal.send(&[0x12])?;
-        stage(
-            terminal.wait_for_text("Reset credits", SEMANTIC_WAIT),
-            "Resets tab opens for the focused account",
-        )?;
         stage(
             provider.wait_for_request_count(2, SEMANTIC_WAIT),
             "reset inspection loopback requests",
         )?;
+        stage(
+            terminal.wait_for_text_after("Reset credits", inspection_start, SEMANTIC_WAIT),
+            "Resets tab opens for the focused account",
+        )?;
 
+        let credits_tab_start = terminal.transcript_len();
         terminal.send(b"\t")?;
         stage(
-            terminal.wait_for_text("[ Credits ]", SEMANTIC_WAIT),
+            terminal.wait_for_text_after("[ Credits ]", credits_tab_start, SEMANTIC_WAIT),
             "inspection-only cancellation acknowledgement before Credits",
         )?;
         provider.release_get_responses()?;
+        let refresh_start = terminal.transcript_len();
         terminal.send(b"r")?;
         stage(
             provider.wait_for_request_count(10, SEMANTIC_WAIT),
             "explicit quota and credit refresh loopback requests",
         )?;
         stage(
-            terminal.wait_for_text("Credit balance refreshed", SEMANTIC_WAIT),
+            terminal.wait_for_text_after("Credit balance refreshed", refresh_start, SEMANTIC_WAIT),
             "explicit refresh completion",
         )?;
         stage(
-            terminal.wait_for_text("Available · 42.00", SEMANTIC_WAIT),
+            terminal.wait_for_text_after("Available · 42.00", refresh_start, SEMANTIC_WAIT),
             "loopback provider balance display",
         )?;
 
+        let first_edit_start = terminal.transcript_len();
         terminal.send(b"\r")?;
         stage(
-            terminal.wait_for_text("› Disallow", SEMANTIC_WAIT),
+            terminal.wait_for_text_after("› Disallow", first_edit_start, SEMANTIC_WAIT),
             "credit policy editing state",
         )?;
+        let first_allow_start = terminal.transcript_len();
         terminal.send(b"\x1b[C")?;
         stage(
-            terminal.wait_for_text("› Allow", SEMANTIC_WAIT),
+            terminal.wait_for_text_after("› Allow", first_allow_start, SEMANTIC_WAIT),
             "credit policy draft selection",
         )?;
         let cancel_draft_start = terminal.transcript_len();
@@ -272,14 +278,16 @@ mod quota_reset_pty_test {
         )?;
         cancelled_state.close().await?;
 
+        let second_edit_start = terminal.transcript_len();
         terminal.send(b"\r")?;
         stage(
-            terminal.wait_for_text("› Disallow", SEMANTIC_WAIT),
+            terminal.wait_for_text_after("› Disallow", second_edit_start, SEMANTIC_WAIT),
             "second policy edit starts from the saved Disallow value",
         )?;
+        let second_allow_start = terminal.transcript_len();
         terminal.send(b"\x1b[C")?;
         stage(
-            terminal.wait_for_text("› Allow", SEMANTIC_WAIT),
+            terminal.wait_for_text_after("› Allow", second_allow_start, SEMANTIC_WAIT),
             "second Allow draft selection",
         )?;
         let saved_policy_start = terminal.transcript_len();
@@ -315,9 +323,10 @@ mod quota_reset_pty_test {
             .into());
         }
 
+        let reopen_resets_start = terminal.transcript_len();
         terminal.send(&[0x12])?;
         stage(
-            terminal.wait_for_text("Reset credits", SEMANTIC_WAIT),
+            terminal.wait_for_text_after("Reset credits", reopen_resets_start, SEMANTIC_WAIT),
             "reopened Resets pane before saved policy reload",
         )?;
         stage(
@@ -450,6 +459,7 @@ mod quota_reset_pty_test {
             ))
             .into());
         }
+        let inspection_start = terminal.transcript_len();
         terminal.send(b"\x1b[B")?;
         terminal.send(&[0x12])?;
         stage(
@@ -460,23 +470,26 @@ mod quota_reset_pty_test {
         )?;
         provider.release_get_responses()?;
         stage(
-            terminal.wait_for_text("Live eligibility", SEMANTIC_WAIT),
+            terminal.wait_for_text_after("Live eligibility", inspection_start, SEMANTIC_WAIT),
             "inspection completion",
         )?;
         stage(
-            terminal.wait_for_text("9% · eligible", SEMANTIC_WAIT),
+            terminal.wait_for_text_after("9% · eligible", inspection_start, SEMANTIC_WAIT),
             "below-ten weekly eligibility",
         )?;
+        let confirmation_start = terminal.transcript_len();
         terminal.send(b"\r")?;
         stage(
-            terminal.wait_for_text("Confirm reset credit", SEMANTIC_WAIT),
+            terminal.wait_for_text_after("Confirm reset credit", confirmation_start, SEMANTIC_WAIT),
             "confirmation screen",
         )?;
+        let yes_selection_start = terminal.transcript_len();
         terminal.send(b"\x1b[C")?;
         stage(
-            terminal.wait_for_text("[Yes]", SEMANTIC_WAIT),
+            terminal.wait_for_text_after("[Yes]", yes_selection_start, SEMANTIC_WAIT),
             "enabled yes selection",
         )?;
+        let commit_start = terminal.transcript_len();
         terminal.send(b"\r")?;
 
         let requests = provider
@@ -506,7 +519,7 @@ mod quota_reset_pty_test {
             "consume POST method or path did not match the production protocol",
         )?;
         stage(
-            terminal.wait_for_text("Reset request sent", SEMANTIC_WAIT),
+            terminal.wait_for_text_after("Reset request sent", commit_start, SEMANTIC_WAIT),
             "committing screen",
         )?;
         ensure(
@@ -514,9 +527,10 @@ mod quota_reset_pty_test {
             "command exited while the committed POST response was held",
         )?;
 
+        let result_start = terminal.transcript_len();
         provider.release_post_response()?;
         stage(
-            terminal.wait_for_text("Success — reset completed", SEMANTIC_WAIT),
+            terminal.wait_for_text_after("Success — reset completed", result_start, SEMANTIC_WAIT),
             "known reset result",
         )?;
         let browse_restoration_start = terminal.transcript_len();

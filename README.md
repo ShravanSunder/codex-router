@@ -69,10 +69,12 @@ In an interactive terminal, `quota status` lets you browse accounts. Press
 to switch between Resets and Credits. On Credits, press `r` to refresh the
 provider-reported credit observation. Press Enter to edit the saved usage policy
 (`Disallow` by default), use the arrow keys to choose, Enter to save, or Esc to
-cancel. `Allow` only lets the router select an account for OpenAI Responses when
-included quota is exhausted and the current credit observation, credentials,
-floor and provider controls permit it. This preference does not set a spending
-limit; the provider controls the actual credit debit.
+cancel. Credits are the last resort: every eligible account's included quota
+comes first. `Allow` permits credit use for Responses, compact, and image
+generation/edit only with current provider-confirmed credits, matching
+credentials, and no floor or provider rejection. Existing credit-backed
+sessions yield when included quota becomes available. This preference does not
+set a spending limit; the provider controls the actual debit.
 
 ## Shared Codex Host
 

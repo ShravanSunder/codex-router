@@ -176,6 +176,7 @@ pub(super) fn QuotaStatusComponent(
                         command_port: &account_options_command_port,
                         reset_snapshot: current_reset_snapshot.as_ref(),
                         reset_intent_sender: reset_intent_sender.as_ref(),
+                        inventory_page_start: &mut inventory_page_start,
                         now_unix_seconds: current_unix_seconds(),
                     },
                 ) {
@@ -246,12 +247,27 @@ pub(super) fn QuotaStatusComponent(
                                 focused_account_id.read().as_ref(),
                             );
                             let sidecar = width >= SIDECAR_QUOTA_WIDTH;
+                            let current_options = account_options.read().clone();
+                            let current_reset_target = reset_target.read().clone();
+                            let details_content_height = current_options.as_ref().map_or_else(
+                                || selected_detail_height(focused_index.is_some()),
+                                |options| {
+                                    account_options_content_height(
+                                        options,
+                                        current_reset_snapshot.as_ref(),
+                                        current_reset_target.as_ref(),
+                                        inventory_page_start.get(),
+                                    )
+                                },
+                            );
                             let layout_mode = if sidecar {
                                 QuotaBodyLayoutMode::Sidecar
-                            } else if width >= NARROW_QUOTA_WIDTH && focused_index.is_some() {
+                            } else if current_options.is_some()
+                                || (width >= NARROW_QUOTA_WIDTH && focused_index.is_some())
+                            {
                                 QuotaBodyLayoutMode::Stacked {
                                     fill_available_height: false,
-                                    prioritize_details: false,
+                                    prioritize_details: current_options.is_some(),
                                 }
                             } else {
                                 QuotaBodyLayoutMode::Inline
@@ -261,10 +277,23 @@ pub(super) fn QuotaStatusComponent(
                                 layout_mode,
                                 row_count,
                                 focused_index,
-                                selected_detail_height(focused_index.is_some()),
+                                details_content_height,
                             );
-                            let page_size =
-                                reset_inventory_page_size(layout.detail_viewport_height(sidecar));
+                            let detail_height = layout.detail_viewport_height(sidecar);
+                            let options_page_size = current_options
+                                .as_ref()
+                                .filter(|options| options.tab == AccountOptionsTab::Resets)
+                                .and(current_reset_snapshot.as_ref())
+                                .filter(|snapshot| snapshot.phase() != WorkflowPhase::Browse)
+                                .and_then(|_| {
+                                    current_reset_target.as_ref().map(|_| {
+                                        account_options_reset_inventory_page_size(
+                                            detail_height.saturating_sub(7),
+                                        )
+                                    })
+                                });
+                            let page_size = options_page_size
+                                .unwrap_or_else(|| reset_inventory_page_size(detail_height));
                             inventory_page_start.set(credit_page_start(
                                 inventory_page_start.get(),
                                 current_reset_snapshot
@@ -404,6 +433,7 @@ pub(super) fn QuotaStatusComponent(
                 reset_snapshot,
                 reset_snapshot_receiver,
                 reset_target,
+                inventory_page_start,
                 reset_intent_sender,
             })
             .await;

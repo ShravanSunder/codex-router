@@ -566,6 +566,7 @@ pub struct SelectorQuotaInput {
     credential_maintenance: Option<SelectorCredentialMaintenance>,
     route_band: String,
     windows: Vec<PersistedSelectorQuotaWindow>,
+    canonical_responses_windows: Option<Vec<PersistedSelectorQuotaWindow>>,
     window_observations: Vec<WindowObservation>,
     window_rejections: Vec<WindowRejection>,
     credit_usage_policy: CreditUsagePolicy,
@@ -594,6 +595,7 @@ impl SelectorQuotaInput {
             credential_maintenance: None,
             route_band: route_band.into(),
             windows,
+            canonical_responses_windows: None,
             window_observations: Vec::new(),
             window_rejections: Vec::new(),
             credit_usage_policy: CreditUsagePolicy::Disallow,
@@ -621,6 +623,16 @@ impl SelectorQuotaInput {
     ) -> Self {
         self.window_observations = window_observations;
         self.window_rejections = window_rejections;
+        self
+    }
+
+    /// Attaches canonical Responses windows for compact credit assessment.
+    #[must_use]
+    pub fn with_canonical_responses_windows(
+        mut self,
+        windows: Option<Vec<PersistedSelectorQuotaWindow>>,
+    ) -> Self {
+        self.canonical_responses_windows = windows;
         self
     }
 
@@ -687,6 +699,12 @@ impl SelectorQuotaInput {
     #[must_use]
     pub fn windows(&self) -> &[PersistedSelectorQuotaWindow] {
         &self.windows
+    }
+
+    /// Returns the optional canonical Responses quota evidence for compact.
+    #[must_use]
+    pub fn canonical_responses_windows(&self) -> Option<&[PersistedSelectorQuotaWindow]> {
+        self.canonical_responses_windows.as_deref()
     }
 
     /// Returns durable Claude quota observations ordered by window kind.

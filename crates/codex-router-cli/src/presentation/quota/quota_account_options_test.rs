@@ -9,6 +9,7 @@ use crate::quota_reset::reset_session_supervisor::WorkflowPhase;
 use super::super::quota_browse_presentation_test::quota_two_account_view_model;
 use super::super::quota_status_component::QuotaStatusComponent;
 use super::rendering::AccountOptionsPanelProps;
+use super::rendering::account_options_message_text;
 use super::rendering::render_account_options_panel;
 use super::*;
 
@@ -144,6 +145,165 @@ fn credit_policy_options_render_in_keyboard_selection_order() {
     assert!(
         disallow_position < selected_position && selected_position < allow_position,
         "Right selects the visually right Allow option, but the row was:\n{allow_line}"
+    );
+}
+
+#[test]
+fn account_options_inventory_pages_render_every_voucher_once() {
+    use crate::quota_reset::reset_session_supervisor::ConfirmationSelection;
+    use crate::quota_reset::reset_session_supervisor::LiveWeeklyDisplayFacts;
+    use crate::quota_reset::reset_session_supervisor::ResetCreditDisplayRecord;
+    use crate::quota_reset::reset_session_supervisor::ResetCreditDisplayStatusDto;
+    use crate::quota_reset::reset_session_supervisor::ResetValueProvenance;
+    use crate::quota_reset::reset_session_supervisor::ResetWorkflowSnapshot;
+    use crate::quota_reset::reset_session_supervisor::WorkflowPhase;
+
+    let view_model = quota_two_account_view_model();
+    let options = AccountOptionsState::new(&view_model.rows[0], 1);
+    let target = super::super::quota_reset_presentation_model::ResetPaneTarget {
+        account_id: view_model.rows[0].account_id.clone(),
+        active_credential_generation: 7,
+        account_label: view_model.rows[0].account.clone(),
+        account_tag: view_model.rows[0].account_tag.clone(),
+        saved_reset_credits: "5".to_owned(),
+        saved_weekly_window: "weekly".to_owned(),
+    };
+    let inventory = (1..=5)
+        .map(|index| ResetCreditDisplayRecord {
+            id_hint: format!("voucher-{index}"),
+            status: ResetCreditDisplayStatusDto::Available,
+            title: Some(format!("Voucher {index}")),
+            expires_unix_seconds: Some(1_900_000_000 + i64::from(index)),
+            earliest_usable: index == 1,
+        })
+        .collect();
+    let snapshot = ResetWorkflowSnapshot::test_snapshot(
+        WorkflowPhase::Inspected,
+        ConfirmationSelection::No,
+        Default::default(),
+        None,
+        Some(LiveWeeklyDisplayFacts {
+            remaining_percent: 4,
+            provenance: ResetValueProvenance::CurrentLive,
+        }),
+        inventory,
+        None,
+    );
+    let outer_height = account_options_content_height(&options, Some(&snapshot), Some(&target), 0);
+    let body_height = outer_height.saturating_sub(7);
+    let page_size = account_options_reset_inventory_page_size(body_height);
+
+    let mut page_start = 0;
+    let mut visited = Vec::new();
+    loop {
+        let frame = render_account_options_panel(AccountOptionsPanelProps {
+            options: &options,
+            reset_snapshot: Some(&snapshot),
+            reset_target: Some(&target),
+            width: 100,
+            height: outer_height,
+            inventory_page_start: page_start,
+            spinner_tick: 0,
+        })
+        .render(None)
+        .to_string();
+        if page_start == 0 {
+            assert!(frame.contains("1-4 of 5"), "{frame}");
+        } else {
+            assert_eq!(page_start, 4);
+            assert!(frame.contains("5-5 of 5"), "{frame}");
+        }
+        let page_end = page_start.saturating_add(page_size).min(5);
+        for voucher_number in page_start + 1..=page_end {
+            assert!(
+                frame.contains(&format!("[voucher-{voucher_number}]")),
+                "page start {page_start} omitted voucher {voucher_number}:\n{frame}"
+            );
+            visited.push(voucher_number);
+        }
+        let next_page = super::super::quota_reset_presentation_model::credit_page_start(
+            page_start, 5, page_size, true,
+        );
+        if next_page == page_start {
+            break;
+        }
+        page_start = next_page;
+    }
+
+    assert_eq!(page_size, 4);
+    assert_eq!(visited, vec![1, 2, 3, 4, 5]);
+}
+
+#[test]
+fn credit_refresh_is_blocked_locally_for_disabled_or_credentialless_targets() {
+    use crate::quota_reset::reset_session_supervisor::WorkflowPhase;
+
+    let view_model = quota_two_account_view_model();
+    for (enabled, credential_generation, reason) in [
+        (
+            false,
+            Some(7),
+            CreditUsageRefreshUnavailableReason::AccountDisabled,
+        ),
+        (
+            true,
+            None,
+            CreditUsageRefreshUnavailableReason::CredentialsUnavailable,
+        ),
+    ] {
+        let mut options = AccountOptionsState::new(&view_model.rows[0], 1);
+        options.tab = AccountOptionsTab::Credits;
+        options.target.enabled = enabled;
+        options.target.credential_generation = credential_generation;
+        let action = account_options_key_action(
+            &options,
+            WorkflowPhase::Browse,
+            KeyCode::Char('r'),
+            KeyModifiers::empty(),
+        );
+
+        let command = update_credit_policy_editor(&mut options, action, None);
+
+        assert_eq!(command, None);
+        assert_eq!(
+            options.message,
+            Some(AccountOptionsMessage::RefreshUnavailable(reason))
+        );
+        let frame = render_account_options_panel(AccountOptionsPanelProps {
+            options: &options,
+            reset_snapshot: None,
+            reset_target: None,
+            width: 100,
+            height: 24,
+            inventory_page_start: 0,
+            spinner_tick: 0,
+        })
+        .render(None)
+        .to_string();
+        let message = account_options_message_text(options.message.unwrap());
+        assert!(message.contains("unavailable"));
+        assert!(frame.contains(message), "{frame}");
+    }
+
+    let mut unsupported_provider_options = AccountOptionsState::new(&view_model.rows[0], 1);
+    unsupported_provider_options.tab = AccountOptionsTab::Credits;
+    unsupported_provider_options.message = Some(AccountOptionsMessage::RefreshUnavailable(
+        CreditUsageRefreshUnavailableReason::ProviderUnsupported,
+    ));
+    let unsupported_provider_frame = render_account_options_panel(AccountOptionsPanelProps {
+        options: &unsupported_provider_options,
+        reset_snapshot: None,
+        reset_target: None,
+        width: 100,
+        height: 24,
+        inventory_page_start: 0,
+        spinner_tick: 0,
+    })
+    .render(None)
+    .to_string();
+    assert!(
+        unsupported_provider_frame.contains("OpenAI accounts only can refresh credits."),
+        "{unsupported_provider_frame}"
     );
 }
 

@@ -135,6 +135,8 @@ pub(crate) fn interactive_credit_usage_refresher(
         let router_root = router_root.clone();
         let base_url = base_url.clone();
         Box::pin(async move {
+            credit_usage_refresh_target_preflight(&router_root, &account_id, credential_generation)
+                .await?;
             let state_db = router_root.join("state.sqlite");
             let resolver = crate::credential_runtime::AsyncCliCredentialResolver::open(
                 &state_db,
@@ -162,6 +164,42 @@ pub(crate) fn interactive_credit_usage_refresher(
             }
         })
     })
+}
+
+async fn credit_usage_refresh_target_preflight(
+    router_root: &Path,
+    account_id: &AccountId,
+    expected_credential_generation: Option<u64>,
+) -> Result<(), CreditUsageRefreshError> {
+    let state_db = router_root.join("state.sqlite");
+    let store = AsyncSqliteStateStore::open_read_only(&state_db)
+        .await
+        .map_err(|_| CreditUsageRefreshError::Failed)?;
+    let accounts = store.list_accounts().await;
+    let close_result = store.close().await;
+    let accounts = match (accounts, close_result) {
+        (Ok(accounts), Ok(())) => accounts,
+        _ => return Err(CreditUsageRefreshError::Failed),
+    };
+    let Some(account) = accounts
+        .into_iter()
+        .find(|account| account.account_id() == account_id)
+    else {
+        return Err(CreditUsageRefreshError::ACCOUNT_UNAVAILABLE);
+    };
+    if account.status() != AccountStatus::Enabled {
+        return Err(CreditUsageRefreshError::ACCOUNT_DISABLED);
+    }
+    if account.provider() != codex_router_core::provider::Provider::Openai {
+        return Err(CreditUsageRefreshError::PROVIDER_UNSUPPORTED);
+    }
+    let Some(active_credential_generation) = account.active_credential_generation() else {
+        return Err(CreditUsageRefreshError::CREDENTIALS_UNAVAILABLE);
+    };
+    if expected_credential_generation != Some(active_credential_generation) {
+        return Err(CreditUsageRefreshError::TARGET_CHANGED);
+    }
+    Ok(())
 }
 
 fn weekly_quota_floor_saver(database_path: PathBuf) -> WeeklyQuotaFloorSaver {
@@ -399,5 +437,71 @@ mod weekly_floor_save_error_tests {
             .await
             .expect("read-only state should close");
         std::fs::remove_dir_all(root).expect("temporary router root should be removed");
+    }
+}
+
+#[cfg(test)]
+mod credit_usage_refresh_preflight_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn unavailable_refresh_targets_are_rejected_before_secret_access() {
+        let root = tempfile::tempdir().expect("temporary router root should exist");
+        let database_path = root.path().join("state.sqlite");
+        let disabled_id = AccountId::new("refresh-disabled").expect("account id");
+        let credentialless_id = AccountId::new("refresh-credentialless").expect("account id");
+        let claude_id = AccountId::new("refresh-claude").expect("account id");
+        let state = AsyncSqliteStateStore::open(&database_path)
+            .await
+            .expect("state should open");
+        for account in [
+            AccountRecord::new(
+                codex_router_core::provider::Provider::Openai,
+                disabled_id.clone(),
+                "disabled",
+                AccountStatus::Disabled,
+            )
+            .with_active_credential_generation(7),
+            AccountRecord::new(
+                codex_router_core::provider::Provider::Openai,
+                credentialless_id.clone(),
+                "credentialless",
+                AccountStatus::Enabled,
+            ),
+            AccountRecord::new(
+                codex_router_core::provider::Provider::Claude,
+                claude_id.clone(),
+                "Claude",
+                AccountStatus::Enabled,
+            )
+            .with_active_credential_generation(11),
+        ] {
+            state
+                .upsert_account(&account)
+                .await
+                .expect("account should persist");
+        }
+        state.close().await.expect("state should close");
+
+        let refresher = interactive_credit_usage_refresher(
+            root.path().to_path_buf(),
+            "http://127.0.0.1:1".to_owned(),
+        );
+        assert_eq!(
+            refresher(disabled_id, Some(7)).await,
+            Err(CreditUsageRefreshError::ACCOUNT_DISABLED),
+        );
+        assert_eq!(
+            refresher(credentialless_id, None).await,
+            Err(CreditUsageRefreshError::CREDENTIALS_UNAVAILABLE),
+        );
+        assert_eq!(
+            refresher(claude_id, Some(11)).await,
+            Err(CreditUsageRefreshError::PROVIDER_UNSUPPORTED),
+        );
+        assert!(
+            !root.path().join("secrets").exists(),
+            "preflight must not create or open the secrets directory"
+        );
     }
 }

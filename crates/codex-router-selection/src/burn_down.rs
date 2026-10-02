@@ -140,6 +140,7 @@ pub struct BurnDownAccountInput {
     account_label: String,
     provider: Provider,
     windows: Vec<QuotaWindowFact>,
+    canonical_responses_windows: Option<Vec<QuotaWindowFact>>,
     rejected_windows: Vec<QuotaWindowRejectionFact>,
     account_enabled: bool,
     has_active_credential: bool,
@@ -163,6 +164,7 @@ impl BurnDownAccountInput {
             account_label: account_label.into(),
             provider,
             windows,
+            canonical_responses_windows: None,
             rejected_windows: Vec::new(),
             account_enabled: true,
             has_active_credential: true,
@@ -208,6 +210,16 @@ impl BurnDownAccountInput {
         rejected_windows: Vec<QuotaWindowRejectionFact>,
     ) -> Self {
         self.rejected_windows = rejected_windows;
+        self
+    }
+
+    /// Supplies optional canonical Responses windows for compact credit assessment.
+    #[must_use]
+    pub fn with_canonical_responses_windows(
+        mut self,
+        windows: Option<Vec<QuotaWindowFact>>,
+    ) -> Self {
+        self.canonical_responses_windows = windows;
         self
     }
 
@@ -971,6 +983,8 @@ pub enum RoutingReason {
     BlockedWindowIneligible,
     /// Candidate is in Reserve because current usage credits back exhausted Responses quota.
     CreditBacked,
+    /// Held because included quota is available on another account.
+    HeldForIncludedQuota,
 }
 
 impl RoutingReason {
@@ -1000,6 +1014,7 @@ impl RoutingReason {
             Self::BlockedWindowExhausted => "blocked_window_exhausted",
             Self::BlockedWindowIneligible => "blocked_window_ineligible",
             Self::CreditBacked => "credit_backed",
+            Self::HeldForIncludedQuota => "held_for_included_quota",
             Self::HeldShortWindowGuard => "held_short_window_guard",
         }
     }
@@ -1034,6 +1049,7 @@ impl RoutingReason {
             Self::BlockedWindowExhausted => "blocked: quota empty",
             Self::BlockedWindowIneligible => "blocked: quota ineligible",
             Self::CreditBacked => "available: usage credits",
+            Self::HeldForIncludedQuota => "held: included quota available",
             Self::HeldShortWindowGuard => "held: 5h guard",
         }
     }
@@ -1170,6 +1186,7 @@ pub fn assess_route_band(
         })
         .collect::<Vec<_>>();
     accounts.sort_by(|left, right| left.account_id.cmp(&right.account_id));
+    hold_credit_backing_behind_included_quota(&mut accounts);
     let healthy_peer_preference = accounts
         .iter()
         .any(|account| account.weekly_floor_switch_band)
@@ -1193,25 +1210,23 @@ pub fn assess_route_band(
         apply_far_idle_priority(&mut accounts, input.now_unix_seconds);
     }
 
-    let selected_pool = if accounts
-        .iter()
-        .any(|account| account.availability == AccountAvailability::Usable)
-    {
+    let selected_pool = if accounts.iter().any(|account| {
+        account.availability == AccountAvailability::Usable && account.routing_weight.is_some()
+    }) {
         SelectedPool::Usable
-    } else if accounts
-        .iter()
-        .any(|account| account.availability == AccountAvailability::Reserve)
-    {
+    } else if accounts.iter().any(|account| {
+        account.availability == AccountAvailability::Reserve && account.routing_weight.is_some()
+    }) {
         SelectedPool::Reserve
-    } else if accounts
-        .iter()
-        .any(|account| account.availability == AccountAvailability::Unknown)
-    {
+    } else if accounts.iter().any(|account| {
+        account.availability == AccountAvailability::Unknown && account.routing_weight.is_some()
+    }) {
         SelectedPool::Unknown
     } else if legacy_openai_profile
-        && accounts
-            .iter()
-            .any(|account| account.quota_evidence_reason == QuotaEvidenceReason::ShortWindowGuard)
+        && accounts.iter().any(|account| {
+            account.routing_exclusion == RoutingExclusion::None
+                && account.quota_evidence_reason == QuotaEvidenceReason::ShortWindowGuard
+        })
     {
         SelectedPool::LastResort
     } else {
@@ -1220,6 +1235,7 @@ pub fn assess_route_band(
 
     let has_fresh_account_in_selected_pool = accounts.iter().any(|account| {
         account_matches_selected_pool(account, selected_pool)
+            && account.routing_weight.is_some()
             && account.freshness == QuotaEvidenceFreshness::Fresh
     });
 
@@ -1276,6 +1292,7 @@ pub fn assess_route_band(
             {
                 *account = selected.clone();
             } else if account.routing_exclusion == RoutingExclusion::None
+                && account.routing_reason != RoutingReason::HeldForIncludedQuota
                 && matches!(
                     account.availability,
                     AccountAvailability::Usable | AccountAvailability::Reserve
@@ -1294,6 +1311,31 @@ pub fn assess_route_band(
         selected_pool,
         weighted_candidates,
         preferred_next,
+    }
+}
+
+fn hold_credit_backing_behind_included_quota(accounts: &mut [BurnDownAccountAssessment]) {
+    let has_selectable_included_quota = accounts.iter().any(|account| {
+        if account.credit_backed || account.routing_exclusion != RoutingExclusion::None {
+            return false;
+        }
+
+        (matches!(
+            account.availability,
+            AccountAvailability::Usable
+                | AccountAvailability::Reserve
+                | AccountAvailability::Unknown
+        ) && account.routing_weight.is_some())
+            || account.quota_evidence_reason == QuotaEvidenceReason::ShortWindowGuard
+    });
+    if !has_selectable_included_quota {
+        return;
+    }
+
+    for account in accounts.iter_mut().filter(|account| account.credit_backed) {
+        account.routing_weight = None;
+        account.routing_reason = RoutingReason::HeldForIncludedQuota;
+        account.preferred_next = false;
     }
 }
 
@@ -1363,58 +1405,71 @@ fn assess_account(
         };
     }
 
-    let windows = input
+    let own_windows = input
         .windows
         .iter()
         .map(|window| assess_window(window, now_unix_seconds, policy))
         .collect::<Vec<_>>();
-    let has_eligible_credit_backing =
-        credit_backed_candidate_is_eligible(input, route_band, &windows);
+    let canonical_compact_windows =
+        credit_assessment::canonical_responses_compact_window_assessments(
+            input,
+            route_band,
+            &own_windows,
+            now_unix_seconds,
+            policy,
+        );
+    let windows = canonical_compact_windows.as_deref().unwrap_or(&own_windows);
+    let has_eligible_credit_backing = credit_backed_candidate_is_eligible(
+        input,
+        route_band,
+        windows,
+        canonical_compact_windows.is_some(),
+    );
     if input.provider == Provider::Claude && !input.rejected_windows.is_empty() {
         return with_display_metrics(
             BurnDownAccountAssessment {
                 availability: AccountAvailability::Blocked,
-                freshness: freshness_for_windows(&windows),
-                limiting_window: limiting_window(&windows),
+                freshness: freshness_for_windows(windows),
+                limiting_window: limiting_window(windows),
                 quota_evidence_reason: QuotaEvidenceReason::WindowExhausted,
                 routing_reason: RoutingReason::BlockedWindowExhausted,
                 routing_weight: None,
                 ..base
             },
-            account_display_metrics(input, &windows, policy),
+            account_display_metrics(input, windows, policy),
         );
     }
-    if (windows.is_empty() || missing_required_weekly_window(&windows))
+    if (windows.is_empty() || missing_required_weekly_window(windows))
         && input.weekly_quota_floor_basis_points.is_some()
     {
-        let display_metrics = account_display_metrics(input, &windows, policy);
-        if weekly_quota_floor_excludes(input, &windows) {
-            return weekly_quota_floor_exclusion(base, &windows, display_metrics);
+        let display_metrics = account_display_metrics(input, windows, policy);
+        if weekly_quota_floor_excludes(input, windows) {
+            return weekly_quota_floor_exclusion(base, windows, display_metrics);
         }
     }
     if input.provider == Provider::Claude
-        && missing_profile_window(&windows, route_profile.windows.as_ref())
+        && missing_profile_window(windows, route_profile.windows.as_ref())
     {
         return with_display_metrics(
             BurnDownAccountAssessment {
-                limiting_window: limiting_window(&windows),
+                limiting_window: limiting_window(windows),
                 quota_evidence_reason: QuotaEvidenceReason::MissingExpectedWindow,
                 ..base
             },
-            account_display_metrics(input, &windows, policy),
+            account_display_metrics(input, windows, policy),
         );
     }
     if windows.is_empty() {
         return base;
     }
-    if missing_required_weekly_window(&windows) {
+    if missing_required_weekly_window(windows) {
         return BurnDownAccountAssessment {
-            limiting_window: limiting_window(&windows),
+            limiting_window: limiting_window(windows),
             quota_evidence_reason: QuotaEvidenceReason::MissingExpectedWindow,
             ..base
         };
     }
-    let display_metrics = account_display_metrics(input, &windows, policy);
+    let display_metrics = account_display_metrics(input, windows, policy);
     if windows
         .iter()
         .any(|window| window.status == QuotaWindowStatus::Ineligible)
@@ -1423,8 +1478,8 @@ fn assess_account(
         return with_display_metrics(
             BurnDownAccountAssessment {
                 availability: AccountAvailability::Blocked,
-                freshness: freshness_for_windows(&windows),
-                limiting_window: limiting_window(&windows),
+                freshness: freshness_for_windows(windows),
+                limiting_window: limiting_window(windows),
                 quota_evidence_reason: QuotaEvidenceReason::WindowIneligible,
                 routing_reason: RoutingReason::BlockedWindowIneligible,
                 routing_weight: None,
@@ -1441,8 +1496,8 @@ fn assess_account(
         return with_display_metrics(
             BurnDownAccountAssessment {
                 availability: AccountAvailability::Blocked,
-                freshness: freshness_for_windows(&windows),
-                limiting_window: limiting_window(&windows),
+                freshness: freshness_for_windows(windows),
+                limiting_window: limiting_window(windows),
                 quota_evidence_reason: QuotaEvidenceReason::WindowExhausted,
                 routing_reason: RoutingReason::BlockedWindowExhausted,
                 routing_weight: None,
@@ -1452,9 +1507,9 @@ fn assess_account(
         );
     }
     if input.weekly_quota_floor_basis_points.is_some()
-        && weekly_quota_floor_excludes(input, &windows)
+        && weekly_quota_floor_excludes(input, windows)
     {
-        return weekly_quota_floor_exclusion(base, &windows, display_metrics);
+        return weekly_quota_floor_exclusion(base, windows, display_metrics);
     }
     if windows
         .iter()
@@ -1462,7 +1517,7 @@ fn assess_account(
     {
         return with_display_metrics(
             BurnDownAccountAssessment {
-                limiting_window: limiting_window(&windows),
+                limiting_window: limiting_window(windows),
                 quota_evidence_reason: QuotaEvidenceReason::UnknownQuotaWindow,
                 ..base
             },
@@ -1477,7 +1532,7 @@ fn assess_account(
         return with_display_metrics(
             BurnDownAccountAssessment {
                 freshness: QuotaEvidenceFreshness::Stale,
-                limiting_window: limiting_window(&windows),
+                limiting_window: limiting_window(windows),
                 quota_evidence_reason: QuotaEvidenceReason::UnknownQuotaWindow,
                 routing_reason: RoutingReason::UnknownFallbackAvailable,
                 routing_weight: Some(DEFAULT_UNKNOWN_FALLBACK_WEIGHT),
@@ -1495,7 +1550,7 @@ fn assess_account(
                 BurnDownAccountAssessment {
                     availability: AccountAvailability::Reserve,
                     freshness: QuotaEvidenceFreshness::Fresh,
-                    limiting_window: limiting_window(&windows),
+                    limiting_window: limiting_window(windows),
                     quota_evidence_reason: QuotaEvidenceReason::CreditBacked,
                     routing_reason: RoutingReason::CreditBacked,
                     routing_weight: Some(0),
@@ -1508,8 +1563,8 @@ fn assess_account(
         return with_display_metrics(
             BurnDownAccountAssessment {
                 availability: AccountAvailability::Blocked,
-                freshness: freshness_for_windows(&windows),
-                limiting_window: limiting_window(&windows),
+                freshness: freshness_for_windows(windows),
+                limiting_window: limiting_window(windows),
                 quota_evidence_reason: QuotaEvidenceReason::WindowExhausted,
                 routing_reason: RoutingReason::BlockedWindowExhausted,
                 routing_weight: None,
@@ -1524,7 +1579,7 @@ fn assess_account(
     {
         return with_display_metrics(
             BurnDownAccountAssessment {
-                limiting_window: limiting_window(&windows),
+                limiting_window: limiting_window(windows),
                 quota_evidence_reason: QuotaEvidenceReason::MissingResetTime,
                 ..base
             },
@@ -1552,20 +1607,19 @@ fn assess_account(
         policy.selectable_weight_max,
     );
     let availability =
-        if claude_near_full_reserve(input.provider, &windows, route_profile.windows.as_ref())
-            || (input.provider == Provider::Openai
-                && long_window_requires_reserve(&windows, policy))
+        if claude_near_full_reserve(input.provider, windows, route_profile.windows.as_ref())
+            || (input.provider == Provider::Openai && long_window_requires_reserve(windows, policy))
         {
             AccountAvailability::Reserve
         } else {
             AccountAvailability::Usable
         };
-    if input.provider == Provider::Openai && short_window_fails_guard(&windows, policy) {
+    if input.provider == Provider::Openai && short_window_fails_guard(windows, policy) {
         return with_display_metrics(
             BurnDownAccountAssessment {
                 availability: AccountAvailability::Blocked,
-                freshness: freshness_for_windows(&windows),
-                limiting_window: limiting_window(&windows),
+                freshness: freshness_for_windows(windows),
+                limiting_window: limiting_window(windows),
                 quota_evidence_reason: QuotaEvidenceReason::ShortWindowGuard,
                 routing_reason: RoutingReason::HeldShortWindowGuard,
                 routing_weight: None,
@@ -1578,8 +1632,8 @@ fn assess_account(
     with_display_metrics(
         BurnDownAccountAssessment {
             availability,
-            freshness: freshness_for_windows(&windows),
-            limiting_window: limiting_window(&windows),
+            freshness: freshness_for_windows(windows),
+            limiting_window: limiting_window(windows),
             quota_evidence_reason: QuotaEvidenceReason::Ok,
             routing_weight: Some(routing_weight),
             routing_reason: RoutingReason::AvailableSamePool,
@@ -2185,6 +2239,7 @@ impl RoutingReasonContext {
             .map_or(0, |account| account.projected_burn_pressure);
         let has_worse_known_selected_pool_long_pressure = accounts.iter().any(|account| {
             account_matches_selected_pool(account, selected_pool)
+                && account.routing_weight.is_some()
                 && matches!(
                     account.availability,
                     AccountAvailability::Usable | AccountAvailability::Reserve
@@ -2195,6 +2250,7 @@ impl RoutingReasonContext {
         let has_worse_known_selected_pool_projected_burn_pressure =
             accounts.iter().any(|account| {
                 account_matches_selected_pool(account, selected_pool)
+                    && account.routing_weight.is_some()
                     && matches!(
                         account.availability,
                         AccountAvailability::Usable | AccountAvailability::Reserve
@@ -2203,9 +2259,10 @@ impl RoutingReasonContext {
                     && account.projected_burn_pressure > preferred_projected_burn_pressure
             });
         let has_held_reserve_account = selected_pool == SelectedPool::Usable
-            && accounts
-                .iter()
-                .any(|account| account.availability == AccountAvailability::Reserve);
+            && accounts.iter().any(|account| {
+                account.availability == AccountAvailability::Reserve
+                    && account.routing_weight.is_some()
+            });
 
         Self {
             selected_pool,
@@ -2232,6 +2289,9 @@ fn routing_reason_for_account(
     }
 
     match account.quota_evidence_reason {
+        QuotaEvidenceReason::CreditBacked if account.routing_weight.is_none() => {
+            return RoutingReason::HeldForIncludedQuota;
+        }
         QuotaEvidenceReason::CreditBacked => return RoutingReason::CreditBacked,
         QuotaEvidenceReason::WindowExhausted => return RoutingReason::BlockedWindowExhausted,
         QuotaEvidenceReason::WindowIneligible => return RoutingReason::BlockedWindowIneligible,
@@ -3474,7 +3534,7 @@ mod tests {
     }
 
     #[test]
-    fn credit_reserve_counts_as_existing_floor_switch_peer_without_quota_runway() {
+    fn included_quota_keeps_credit_reserve_out_of_floor_switch_peer_selection() {
         let protected = account(
             "acct_protected_credit_peer",
             vec![
@@ -3499,19 +3559,24 @@ mod tests {
         let protected_assessment = account_assessment(&switching, "acct_protected_credit_peer");
         let credit_assessment = account_assessment(&switching, "acct_credit_peer");
 
-        assert_eq!(
+        assert_ne!(
             protected_assessment.routing_reason(),
             RoutingReason::HeldFloorSwitch
         );
         assert_eq!(
             switching.preferred_next().map(AccountId::as_str),
-            Some("acct_credit_peer")
+            Some("acct_protected_credit_peer")
         );
         assert_eq!(
             credit_assessment.availability(),
             AccountAvailability::Reserve
         );
-        assert!(credit_assessment.is_healthy_floor_switch_peer());
+        assert_eq!(
+            credit_assessment.routing_reason(),
+            RoutingReason::HeldForIncludedQuota
+        );
+        assert_eq!(credit_assessment.routing_weight(), None);
+        assert!(!credit_assessment.is_healthy_floor_switch_peer());
         assert_eq!(credit_assessment.projected_weekly_runway_seconds(), None);
     }
 

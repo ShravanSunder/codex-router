@@ -372,23 +372,11 @@ async fn inspection_tab_request_acknowledges_only_after_get_tasks_are_reaped() {
 }
 
 #[tokio::test]
-async fn stale_tab_attempt_does_not_cancel_a_newer_inspection_after_an_unrelated_browse_ack() {
+async fn stale_tab_attempt_mismatch_does_not_cancel_a_newer_inspection() {
     let fixture = session_fixture();
     let mut snapshots = fixture.ports.snapshot_receiver;
     let intents = fixture.ports.intent_sender;
     let session_task = tokio::spawn(fixture.session.run());
-    let earlier_request_id = InspectionTabRequestId::new(3, 1);
-
-    intents
-        .send(ResetSessionIntent::CancelInspectionForTab {
-            request_id: earlier_request_id,
-            expected_inspection_attempt: None,
-        })
-        .await
-        .expect("idle tab request");
-    let unrelated_browse = wait_for_inspection_tab_ack(&mut snapshots, earlier_request_id).await;
-    assert_eq!(unrelated_browse.phase(), WorkflowPhase::Browse);
-
     begin_inspection(&intents).await;
     fixture.control.inspection_usage_started.notified().await;
     fixture
@@ -396,19 +384,44 @@ async fn stale_tab_attempt_does_not_cancel_a_newer_inspection_after_an_unrelated
         .inspection_inventory_started
         .notified()
         .await;
+    let earlier_inspection = wait_for_phase(&mut snapshots, WorkflowPhase::Inspecting).await;
+    let earlier_attempt = earlier_inspection
+        .inspection_attempt_generation()
+        .expect("earlier inspection should have an attempt identity");
+    let delayed_request_id = InspectionTabRequestId::new(3, 1);
+
+    intents
+        .send(ResetSessionIntent::Cancel)
+        .await
+        .expect("cancel earlier inspection");
+    let browse_after_cancel = wait_for_phase(&mut snapshots, WorkflowPhase::Browse).await;
+    assert_ne!(
+        browse_after_cancel.inspection_attempt_generation(),
+        Some(earlier_attempt),
+        "cancellation advances the inspection attempt before a new inspection begins"
+    );
+
+    begin_inspection(&intents).await;
+    // The fake provider labels every call after the first as revalidation.
+    fixture.control.revalidation_usage_started.notified().await;
+    fixture
+        .control
+        .revalidation_inventory_started
+        .notified()
+        .await;
     let newer_inspection = wait_for_phase(&mut snapshots, WorkflowPhase::Inspecting).await;
     let newer_attempt = newer_inspection
         .inspection_attempt_generation()
         .expect("new inspection should have an attempt identity");
-    let delayed_request_id = InspectionTabRequestId::new(3, 2);
+    assert_ne!(newer_attempt, earlier_attempt);
 
     intents
         .send(ResetSessionIntent::CancelInspectionForTab {
             request_id: delayed_request_id,
-            expected_inspection_attempt: unrelated_browse.inspection_attempt_generation(),
+            expected_inspection_attempt: Some(earlier_attempt),
         })
         .await
-        .expect("delayed tab request");
+        .expect("delayed request captured from the earlier attempt");
     let delayed_ack = wait_for_inspection_tab_ack(&mut snapshots, delayed_request_id).await;
 
     assert_eq!(delayed_ack.phase(), WorkflowPhase::Inspecting);

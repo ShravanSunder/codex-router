@@ -97,6 +97,12 @@ impl CreditUsageObservation {
         self.observed_unix_seconds
     }
 
+    /// Returns the last timestamp at which these facts remain current.
+    #[must_use]
+    pub const fn stale_after_unix_seconds(&self) -> Option<u64> {
+        self.stale_after_unix_seconds
+    }
+
     /// Returns the stored provider facts.
     #[must_use]
     pub const fn provider_observation(&self) -> &CreditProviderObservation {

@@ -251,6 +251,23 @@ async fn source_assessment_rejects_pending_or_replaced_credit_generations() {
 }
 
 #[tokio::test]
+async fn source_assessment_rejects_credit_backed_mismatched_pin_before_seen() {
+    let directory = CreditTurnTestDirectory::new();
+    let fixture = CreditTurnFixture::new(&directory).await;
+
+    assert_eq!(
+        fixture
+            .assessor
+            .assess_source_account(&fixture.account_id, 2, RouteBand::Responses, false)
+            .await,
+        AccountSourceAdmission::ReconnectRequired,
+        "a current credit-backed assessment must remain generation-fenced before first credit admission"
+    );
+
+    close_fixture(&fixture).await;
+}
+
+#[tokio::test]
 async fn source_assessment_preserves_included_quota_and_existing_runtime_guards() {
     let directory = CreditTurnTestDirectory::new();
     let fixture = CreditTurnFixture::new(&directory).await;

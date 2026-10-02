@@ -1414,6 +1414,8 @@ mod registry_tests {
 #[cfg(test)]
 #[path = "websocket-tests"]
 mod async_forwarding_tests {
+    #[path = "credit-included-peer-transition-tests.rs"]
+    mod credit_included_peer_transition_tests;
     #[path = "credit-source-assessment-tests.rs"]
     mod credit_source_assessment_tests;
     #[path = "credit-turn-admission-tests.rs"]
@@ -6435,10 +6437,17 @@ where
                 let is_completed = metadata_text
                     .as_ref()
                     .is_some_and(|text| is_response_completed_text(text));
-                let is_terminal = is_completed
-                    || metadata_text
+                let is_terminal_error = !upstream_message.close_after_send
+                    && provider_error_classification
+                        != ProviderErrorClassification::AccountQuotaExhausted
+                    && metadata_text
                         .as_ref()
-                        .is_some_and(|text| is_response_failed_text(text));
+                        .is_some_and(|text| is_response_terminal_error_text(text));
+                let is_terminal = is_completed
+                    || metadata_text.as_ref().is_some_and(|text| {
+                        is_response_failed_text(text) || is_response_incomplete_text(text)
+                    })
+                    || is_terminal_error;
                 if is_terminal {
                     context
                         .account_turn_admission
@@ -6875,6 +6884,14 @@ fn is_response_completed_text(text: &str) -> bool {
 
 fn is_response_failed_text(text: &str) -> bool {
     bounded_top_level_json_string_field_equals(text.as_bytes(), b"type", b"response.failed")
+}
+
+fn is_response_incomplete_text(text: &str) -> bool {
+    bounded_top_level_json_string_field_equals(text.as_bytes(), b"type", b"response.incomplete")
+}
+
+fn is_response_terminal_error_text(text: &str) -> bool {
+    bounded_top_level_json_string_field_equals(text.as_bytes(), b"type", b"error")
 }
 
 fn has_forbidden_top_level_websocket_auth_carrier(body: &[u8]) -> bool {

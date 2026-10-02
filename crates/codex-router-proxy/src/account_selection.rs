@@ -1632,6 +1632,11 @@ fn assessment_account_is_available(
                 account.availability(),
                 AccountAvailability::Usable | AccountAvailability::Reserve
             )
+            && (account.quota_evidence_reason() != QuotaEvidenceReason::CreditBacked
+                || assessment
+                    .weighted_candidates()
+                    .iter()
+                    .any(|(candidate_id, _)| candidate_id == account_id))
     })
 }
 

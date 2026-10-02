@@ -169,9 +169,7 @@ pub(super) async fn apply_activation(context: ActivationContext<'_>) -> Result<(
         crate::inherited_lock_marker(),
     );
     use std::os::unix::process::CommandExt;
-    crate::record_debug_readiness_timing("execBegin", pre_exec_started_at);
     let error = replacement_command.std_command().exec();
-    crate::record_debug_readiness_timing("execReturned", pre_exec_started_at);
     context
         .instance
         .release_prepared_lock_after_exec_failure()?;

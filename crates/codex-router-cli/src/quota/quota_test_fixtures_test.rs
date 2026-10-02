@@ -328,6 +328,7 @@ pub(super) fn format_next_use_for_capture(reason: RoutingReason) -> &'static str
         RoutingReason::CreditBacked => "uses usage credits",
         RoutingReason::HeldReserve
         | RoutingReason::HeldUnknown
+        | RoutingReason::HeldForIncludedQuota
         | RoutingReason::HeldShortWindowGuard
         | RoutingReason::HeldFloorSwitch => "held by quota",
         RoutingReason::UnknownFallbackPreferred | RoutingReason::UnknownFallbackAvailable => {

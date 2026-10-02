@@ -25,6 +25,7 @@ pub(in crate::presentation::quota) struct AccountOptionsKeyEventContext<'a> {
     pub(in crate::presentation::quota) command_port: &'a AccountOptionsCommandPort,
     pub(in crate::presentation::quota) reset_snapshot: Option<&'a ResetWorkflowSnapshot>,
     pub(in crate::presentation::quota) reset_intent_sender: Option<&'a ResetIntentSender>,
+    pub(in crate::presentation::quota) inventory_page_start: &'a mut State<usize>,
     pub(in crate::presentation::quota) now_unix_seconds: u64,
 }
 
@@ -40,6 +41,7 @@ pub(in crate::presentation::quota) fn handle_account_options_key_event(
         command_port,
         reset_snapshot,
         reset_intent_sender,
+        inventory_page_start,
         now_unix_seconds,
     } = context;
     let Some(options) = account_options.read().clone() else {
@@ -76,6 +78,7 @@ pub(in crate::presentation::quota) fn handle_account_options_key_event(
                 && let Some(target) = reset_pane_target_for_account_options(&options)
                 && let Some(sender) = reset_intent_sender
             {
+                inventory_page_start.set(0);
                 reset_target.set(Some(target.clone()));
                 if sender
                     .send_now(ResetSessionIntent::BeginInspection {

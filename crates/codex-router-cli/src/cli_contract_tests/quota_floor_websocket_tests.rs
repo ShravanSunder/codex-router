@@ -128,6 +128,7 @@ fn saved_floor_refresh_reconnects_established_websocket_before_later_response_cr
     let upstream_address = must_ok(upstream_listener.local_addr());
     let (upstream_sender, upstream_receiver) = mpsc::channel();
     let (completion_ack_sender, completion_ack_receiver) = mpsc::channel();
+    let (active_floor_turn_close_sender, active_floor_turn_close_receiver) = mpsc::channel();
     let upstream_thread = thread::spawn(move || {
         for connection_index in 0..2 {
             let (stream, _) = must_ok(upstream_listener.accept());
@@ -158,11 +159,25 @@ fn saved_floor_refresh_reconnects_established_websocket_before_later_response_cr
                     after_failed_refresh.to_string(),
                     r#"{"type":"response.create","turn":2}"#
                 );
+                must_ok(websocket.send(Message::text(
+                    r#"{"type":"response.output_text.delta","turn":2}"#,
+                )));
                 must_ok(websocket.send(Message::text(r#"{"type":"response.completed","turn":2}"#)));
-                let after_successful_floor = websocket.read();
+                let active_floor_turn_create = must_ok(websocket.read());
                 assert!(
-                    !matches!(after_successful_floor, Ok(ref frame) if frame.to_string().contains("response.create"))
+                    active_floor_turn_create.to_string()
+                        == r#"{"type":"response.create","turn":3}"#,
+                    "the floor refresh should interrupt a turn that reached the upstream"
                 );
+                must_ok(websocket.send(Message::text(
+                    r#"{"type":"response.output_text.delta","turn":3}"#,
+                )));
+                let upstream_close = must_ok(websocket.read());
+                assert!(
+                    matches!(upstream_close, Message::Close(_)),
+                    "the hard floor reconnect should close the active upstream socket: {upstream_close:?}"
+                );
+                must_ok(active_floor_turn_close_sender.send(()));
             } else {
                 assert_eq!(
                     first_frame.to_string(),
@@ -173,6 +188,8 @@ fn saved_floor_refresh_reconnects_established_websocket_before_later_response_cr
             }
         }
     });
+    // The successful refresh below is recorded at 1_200; selector observations
+    // are Unknown before their observation time, so evaluate them at 1_201.
     let config = LoopbackRouterRuntimeConfig::new_tokenless(
         must_ok(LoopbackBindAddress::new("127.0.0.1", 0)),
         must_ok(UpstreamEndpoint::new(format!(
@@ -263,6 +280,24 @@ fn saved_floor_refresh_reconnects_established_websocket_before_later_response_cr
     assert!(
         edited_json["accounts"]
             .as_array()
+            .is_some_and(|accounts| accounts.iter().any(|account| {
+                account["safe_account_label"] == "floor-socket"
+                    && account["routing_exclusion"] == "excluded_weekly_quota_floor"
+                    && account["preferred_next"] == false
+            })),
+        "live floor socket selector: {:?}",
+        edited_json["accounts"].as_array().map(|accounts| accounts
+            .iter()
+            .map(|account| (
+                account["safe_account_label"].as_str(),
+                account["routing_exclusion"].as_str(),
+                account["preferred_next"].as_bool(),
+            ))
+            .collect::<Vec<_>>())
+    );
+    assert!(
+        edited_json["accounts"]
+            .as_array()
             .is_some_and(
                 |accounts| accounts.iter().any(|account| account["safe_account_label"]
                     == "floor-excluded-cli"
@@ -315,10 +350,29 @@ fn saved_floor_refresh_reconnects_established_websocket_before_later_response_cr
         first_client
             .read()
             .unwrap_or_else(|error| panic!(
+                "first floor socket post-failure output read failed: {error}"
+            ))
+            .to_string(),
+        r#"{"type":"response.output_text.delta","turn":2}"#
+    );
+    assert_eq!(
+        first_client
+            .read()
+            .unwrap_or_else(|error| panic!(
                 "first floor socket post-failure completion read failed: {error}"
             ))
             .to_string(),
         r#"{"type":"response.completed","turn":2}"#
+    );
+    must_ok(first_client.send(Message::text(r#"{"type":"response.create","turn":3}"#)));
+    assert_eq!(
+        first_client
+            .read()
+            .unwrap_or_else(|error| panic!(
+                "first floor socket active-turn output read failed: {error}"
+            ))
+            .to_string(),
+        r#"{"type":"response.output_text.delta","turn":3}"#
     );
     let options = sqlx::sqlite::SqliteConnectOptions::new()
         .filename(&state_path)
@@ -363,8 +417,7 @@ fn saved_floor_refresh_reconnects_established_websocket_before_later_response_cr
         .unwrap_or_else(|error| panic!("first floor socket reconnect read failed: {error}"))
         .to_string();
     assert!(reconnect.contains("websocket_connection_limit_reached"));
-    let _old_socket_create =
-        first_client.send(Message::text(r#"{"type":"response.create","turn":3}"#));
+    must_ok(active_floor_turn_close_receiver.recv_timeout(Duration::from_secs(2)));
     drop(first_client);
 
     let mut second_client = connect_tokenless_websocket_with_retry(router_port);

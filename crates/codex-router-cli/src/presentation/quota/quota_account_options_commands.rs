@@ -37,6 +37,7 @@ pub(in crate::presentation::quota) struct AccountOptionsCommandContext {
     pub(in crate::presentation::quota) reset_snapshot_receiver:
         Option<watch::Receiver<ResetWorkflowSnapshot>>,
     pub(in crate::presentation::quota) reset_target: State<Option<ResetPaneTarget>>,
+    pub(in crate::presentation::quota) inventory_page_start: State<usize>,
     pub(in crate::presentation::quota) reset_intent_sender: Option<ResetIntentSender>,
 }
 
@@ -54,6 +55,7 @@ pub(in crate::presentation::quota) async fn run_account_options_commands(
         mut reset_snapshot,
         mut reset_snapshot_receiver,
         mut reset_target,
+        mut inventory_page_start,
         reset_intent_sender,
     } = context;
     while let Some(command) = receiver.recv().await {
@@ -134,6 +136,7 @@ pub(in crate::presentation::quota) async fn run_account_options_commands(
                         options.tab = tab;
                         options.message = None;
                         next_reset_target = reset_target_for_options(options);
+                        inventory_page_start.set(0);
                     } else {
                         options.tab = AccountOptionsTab::Resets;
                         options.message = Some(AccountOptionsMessage::ResetReviewActive);
@@ -313,6 +316,20 @@ pub(in crate::presentation::quota) async fn run_account_options_commands(
                     Some(refresher) => refresher(account_id.clone(), credential_generation).await,
                     None => Err(super::CreditUsageRefreshError::Failed),
                 };
+                if let Err(super::CreditUsageRefreshError::Unavailable(reason)) = refresh_result {
+                    if let Some(options) = account_options.write().as_mut()
+                        && refresh_command_is_current(
+                            Some(options),
+                            &account_id,
+                            credential_generation,
+                            session_generation,
+                            operation_generation,
+                        )
+                    {
+                        options.message = Some(AccountOptionsMessage::RefreshUnavailable(reason));
+                    }
+                    continue;
+                }
                 let _reload_guard = reload_lock.lock().await;
                 let refreshed_view_model = match loader.as_ref() {
                     Some(loader) => loader().await,

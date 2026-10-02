@@ -205,7 +205,6 @@ async fn installed_cli_restarts_host_after_atomic_binary_install()
 }
 
 async fn run_host_install_journey(atomic_install: bool) -> Result<(), Box<dyn std::error::Error>> {
-    eprintln!("host_install_journey_setup=temporary_directory");
     let directory = TestDirectory::new()?;
     let router_root = directory.path().join("private-router");
     let codex_home = directory.path().join("codex");
@@ -217,20 +216,15 @@ async fn run_host_install_journey(atomic_install: bool) -> Result<(), Box<dyn st
     let updater_failure_marker = directory.path().join("updater-failure-marker");
     let curl_failure_marker = directory.path().join("curl-failure-marker");
     let process_log = directory.path().join("app-generations.log");
-    eprintln!("host_install_journey_setup=fixture_directory_and_managed_executable");
     std::fs::create_dir_all(
         managed_executable
             .parent()
             .ok_or("managed executable parent is missing")?,
     )?;
     install_managed_fixture(&managed_executable)?;
-    eprintln!("host_install_journey_setup=launchctl_fixture");
     install_launchctl_fixture(&launchctl_executable)?;
-    eprintln!("host_install_journey_setup=curl_fixture");
     install_curl_fixture(&curl_executable)?;
-    eprintln!("host_install_journey_setup=loopback_port_bind");
     let port = reserve_loopback_port()?;
-    eprintln!("host_install_journey_setup=debug_profile");
     install_debug_profile(&codex_home, port)?;
     let candidate_binary = PathBuf::from(env!("CARGO_BIN_EXE_codex-router"));
     let prior_binary = std::env::var_os("CODEX_ROUTER_RESTART_PRIOR_BINARY").map(PathBuf::from);
@@ -241,13 +235,9 @@ async fn run_host_install_journey(atomic_install: bool) -> Result<(), Box<dyn st
             before != after,
             "cross-version proof requires different package versions",
         )?;
-        eprintln!(
-            "cross-version candidate handoff: {before} -> {after}; atomic_install={atomic_install}"
-        );
     }
     let old_install = directory.path().join("old-install");
     let new_install = directory.path().join("new-install");
-    eprintln!("host_install_journey_setup=install_directories_and_binary_copy");
     std::fs::create_dir_all(&old_install)?;
     std::fs::create_dir_all(&new_install)?;
     let binary = old_install.join("codex-router");
@@ -255,10 +245,6 @@ async fn run_host_install_journey(atomic_install: bool) -> Result<(), Box<dyn st
         prior_binary.as_deref().unwrap_or(&candidate_binary),
         &binary,
     )?;
-    let installed_binary_version = binary_version(&binary).await?;
-    eprintln!(
-        "compiled_cli_host_acceptance_installed_binary_warmed version={installed_binary_version}"
-    );
     let replacement_binary = if atomic_install {
         binary.clone()
     } else {
@@ -310,19 +296,8 @@ async fn run_host_install_journey(atomic_install: bool) -> Result<(), Box<dyn st
     .env("CODEX_ROUTER_DEBUG_READINESS_TIMING", "1")
     .stdout(Stdio::from(std::fs::File::create(&host_stdout)?))
     .stderr(Stdio::from(std::fs::File::create(&host_stderr)?));
-    eprintln!("host_install_journey_setup=host_spawn");
     let mut host = host.spawn()?;
     let owned_host_process_id = host.id().ok_or("owned Host PID missing")?;
-    let mut proof_stage = "initial operator socket readiness";
-    eprintln!("host_install_journey_stage={proof_stage}");
-    eprintln!(
-        "compiled_cli_host_acceptance_fixture root={} router_endpoint=127.0.0.1:{} host_pid={:?} binary={} replacement_binary={}",
-        directory.path().display(),
-        port,
-        host.id(),
-        binary.display(),
-        replacement_binary.display(),
-    );
     // Always release owned children, including when an assertion below fails.
     let proof = async {
         wait_for_operator_socket(&mut host, &router_root.join("host.sock"), &host_stderr).await?;
@@ -331,13 +306,16 @@ async fn run_host_install_journey(atomic_install: bool) -> Result<(), Box<dyn st
             timing_output.contains("executableIdentity"),
             &format!("missing executableIdentity timing stage: {timing_output}"),
         )?;
-        eprintln!("compiled_acceptance_readiness_timing={timing_output}");
         check(!launchctl_log.exists(), "isolated Host invoked launchctl")?;
 
-        proof_stage = "initial status command";
-        eprintln!("host_install_journey_stage={proof_stage}");
-        let status =
-            run_host_subcommand(&binary, &router_root, &codex_home, &socket_path, &["status"]).await?;
+        let status = run_host_subcommand(
+            &binary,
+            &router_root,
+            &codex_home,
+            &socket_path,
+            &["status"],
+        )
+        .await?;
         check(
             status.status.success(),
             &format!("status: {}", String::from_utf8_lossy(&status.stderr)),
@@ -367,12 +345,18 @@ async fn run_host_install_journey(atomic_install: bool) -> Result<(), Box<dyn st
 
         let original_host_pid = owned_host_process_id;
         verify_host_image(original_host_pid, &binary)?;
-        check(std::fs::read_to_string(&process_log)?.lines().count() == 1, "initial app-server generation missing")?;
-        proof_stage = "app-server restart command";
-        eprintln!("host_install_journey_stage={proof_stage}");
-        let restart =
-            run_host_subcommand(&binary, &router_root, &codex_home, &socket_path, &["app-server", "restart"])
-                .await?;
+        check(
+            std::fs::read_to_string(&process_log)?.lines().count() == 1,
+            "initial app-server generation missing",
+        )?;
+        let restart = run_host_subcommand(
+            &binary,
+            &router_root,
+            &codex_home,
+            &socket_path,
+            &["app-server", "restart"],
+        )
+        .await?;
         check(
             restart.status.success(),
             &format!("restart: {}", String::from_utf8_lossy(&restart.stderr)),
@@ -382,14 +366,24 @@ async fn run_host_install_journey(atomic_install: bool) -> Result<(), Box<dyn st
             "app-server restart did not report success",
         )?;
 
-        check(!launchctl_log.exists(), "app-server-only restart invoked launchctl")?;
-        check(std::fs::read_to_string(&process_log)?.lines().count() == 2, "app-server restart did not replace exactly one child")?;
+        check(
+            !launchctl_log.exists(),
+            "app-server-only restart invoked launchctl",
+        )?;
+        check(
+            std::fs::read_to_string(&process_log)?.lines().count() == 2,
+            "app-server restart did not replace exactly one child",
+        )?;
         verify_host_image(original_host_pid, &binary)?;
 
-        proof_stage = "successful app-server update command";
-        eprintln!("host_install_journey_stage={proof_stage}");
-        let update =
-            run_host_subcommand(&binary, &router_root, &codex_home, &socket_path, &["app-server", "update"]).await?;
+        let update = run_host_subcommand(
+            &binary,
+            &router_root,
+            &codex_home,
+            &socket_path,
+            &["app-server", "update"],
+        )
+        .await?;
         check(
             update.status.success(),
             &format!("update: {}", String::from_utf8_lossy(&update.stderr)),
@@ -400,31 +394,59 @@ async fn run_host_install_journey(atomic_install: bool) -> Result<(), Box<dyn st
             &update_stdout,
         )?;
 
-        check(!launchctl_log.exists(), "app-server update invoked launchctl")?;
-        check(std::fs::read_to_string(&process_log)?.lines().count() == 3, "changed update child generation missing")?;
-        std::fs::write(&updater_failure_marker, b"fail")?;
-        proof_stage = "failed app-server update command";
-        eprintln!("host_install_journey_stage={proof_stage}");
-        let failed_update =
-            run_host_subcommand(&binary, &router_root, &codex_home, &socket_path, &["app-server", "update"]).await?;
-        check(!failed_update.status.success(), "failed updater returned a successful CLI exit status")?;
         check(
-            String::from_utf8(failed_update.stdout)?.contains("update_result: update failed without restart"),
+            !launchctl_log.exists(),
+            "app-server update invoked launchctl",
+        )?;
+        check(
+            std::fs::read_to_string(&process_log)?.lines().count() == 3,
+            "changed update child generation missing",
+        )?;
+        std::fs::write(&updater_failure_marker, b"fail")?;
+        let failed_update = run_host_subcommand(
+            &binary,
+            &router_root,
+            &codex_home,
+            &socket_path,
+            &["app-server", "update"],
+        )
+        .await?;
+        check(
+            !failed_update.status.success(),
+            "failed updater returned a successful CLI exit status",
+        )?;
+        check(
+            String::from_utf8(failed_update.stdout)?
+                .contains("update_result: update failed without restart"),
             "failed updater was not classified before child replacement",
         )?;
-        check(std::fs::read_to_string(&process_log)?.lines().count() == 3, "failed updater replaced the app-server child")?;
+        check(
+            std::fs::read_to_string(&process_log)?.lines().count() == 3,
+            "failed updater replaced the app-server child",
+        )?;
         std::fs::remove_file(&updater_failure_marker)?;
         std::fs::write(&curl_failure_marker, b"fail")?;
-        proof_stage = "failed installer download command";
-        eprintln!("host_install_journey_stage={proof_stage}");
-        let failed_download =
-            run_host_subcommand(&binary, &router_root, &codex_home, &socket_path, &["app-server", "update"]).await?;
-        check(!failed_download.status.success(), "failed installer download returned a successful CLI exit status")?;
+        let failed_download = run_host_subcommand(
+            &binary,
+            &router_root,
+            &codex_home,
+            &socket_path,
+            &["app-server", "update"],
+        )
+        .await?;
         check(
-            String::from_utf8(failed_download.stdout)?.contains("update_result: update failed without restart"),
+            !failed_download.status.success(),
+            "failed installer download returned a successful CLI exit status",
+        )?;
+        check(
+            String::from_utf8(failed_download.stdout)?
+                .contains("update_result: update failed without restart"),
             "failed installer download was reported as no change",
         )?;
-        check(std::fs::read_to_string(&process_log)?.lines().count() == 3, "failed download replaced the app-server child")?;
+        check(
+            std::fs::read_to_string(&process_log)?.lines().count() == 3,
+            "failed download replaced the app-server child",
+        )?;
         std::fs::remove_file(&curl_failure_marker)?;
         let host_process_id = owned_host_process_id;
         verify_host_image(host_process_id, &binary)?;
@@ -434,46 +456,82 @@ async fn run_host_install_journey(atomic_install: bool) -> Result<(), Box<dyn st
         std::fs::copy(&candidate_binary, &candidate_install)?;
         let old_inode = std::fs::metadata(&binary)?.ino();
         std::fs::rename(&candidate_install, &replacement_binary)?;
-        check(std::fs::metadata(&replacement_binary)?.ino() != old_inode, "replacement must be a distinct executable identity")?;
-        let replacement_version = binary_version(&replacement_binary).await?;
-        eprintln!(
-            "compiled_cli_host_acceptance_replacement_binary_warmed version={replacement_version}"
-        );
+        check(
+            std::fs::metadata(&replacement_binary)?.ino() != old_inode,
+            "replacement must be a distinct executable identity",
+        )?;
 
         let (finish_sender, finish_receiver) = tokio::sync::oneshot::channel();
         let contention = tokio::spawn(observe_continuous_lock(lock_path.clone(), finish_receiver));
-        proof_stage = "whole-host restart command after installed-binary replacement";
-        eprintln!("host_install_journey_stage={proof_stage}");
         let restart_result = run_host_subcommand(
-            &replacement_binary, &router_root, &codex_home, &socket_path, &["restart"],
-        ).await;
+            &replacement_binary,
+            &router_root,
+            &codex_home,
+            &socket_path,
+            &["restart"],
+        )
+        .await;
         let _finished = finish_sender.send(());
         contention.await??;
         let restarted = restart_result?;
-        check(restarted.status.success(), &format!("whole Host restart: {}", String::from_utf8_lossy(&restarted.stderr)))?;
+        check(
+            restarted.status.success(),
+            &format!(
+                "whole Host restart: {}",
+                String::from_utf8_lossy(&restarted.stderr)
+            ),
+        )?;
         let restarted_stdout = String::from_utf8(restarted.stdout)?;
-        check(restarted_stdout.contains("restart_result: host restarted using installed executable"), &restarted_stdout)?;
-        check(restarted_stdout.contains("readiness: ready"), &restarted_stdout)?;
-        check(host.try_wait()?.is_none(), "original Host PID exited instead of replacing its image")?;
+        check(
+            restarted_stdout.contains("restart_result: host restarted using installed executable"),
+            &restarted_stdout,
+        )?;
+        check(
+            restarted_stdout.contains("readiness: ready"),
+            &restarted_stdout,
+        )?;
+        check(
+            host.try_wait()?.is_none(),
+            "original Host PID exited instead of replacing its image",
+        )?;
         verify_host_image(host_process_id, &replacement_binary)?;
-        check(std::fs::metadata(&lock_path)?.ino() == lock_inode, "Host replaced its stable lock artifact")?;
+        check(
+            std::fs::metadata(&lock_path)?.ino() == lock_inode,
+            "Host replaced its stable lock artifact",
+        )?;
         check(
             std::fs::metadata(&host_stdout)?.len() == 0,
             "foreground Host printed startup or re-exec progress to its terminal",
         )?;
-        check(!launchctl_log.exists(), "whole Host restart invoked launchctl")?;
+        check(
+            !launchctl_log.exists(),
+            "whole Host restart invoked launchctl",
+        )?;
         let generations = std::fs::read_to_string(&process_log)?;
-        check(generations.lines().count() == 4, "whole Host restart child generation missing")?;
+        check(
+            generations.lines().count() == 4,
+            "whole Host restart child generation missing",
+        )?;
         for former_pid in generations.lines().take(3) {
-            let former_pid = rustix::process::Pid::from_raw(former_pid.parse()?).ok_or("invalid child PID")?;
-            check(matches!(rustix::process::test_kill_process(former_pid), Err(rustix::io::Errno::SRCH)), "an old app-server child is still present or its absence could not be verified")?;
+            let former_pid =
+                rustix::process::Pid::from_raw(former_pid.parse()?).ok_or("invalid child PID")?;
+            check(
+                matches!(
+                    rustix::process::test_kill_process(former_pid),
+                    Err(rustix::io::Errno::SRCH)
+                ),
+                "an old app-server child is still present or its absence could not be verified",
+            )?;
         }
         let child_environment = std::fs::read_to_string(process_log.with_extension("handoff"))?;
-        check(child_environment.lines().last().is_some_and(|line| line.ends_with(" false")), "replacement app-server inherited the Host-only handoff marker")?;
-        eprintln!("Host PID {host_process_id} now maps installed image {}; stable lock retained; four child generations settled; ordinary child handoff marker absent", replacement_binary.display());
+        check(
+            child_environment
+                .lines()
+                .last()
+                .is_some_and(|line| line.ends_with(" false")),
+            "replacement app-server inherited the Host-only handoff marker",
+        )?;
 
-        proof_stage = "restarted Host native attachment";
-        eprintln!("host_install_journey_stage={proof_stage}");
         let service_directory = router_root.join("agent-communication");
         let native_path = tokio::task::spawn_blocking(move || {
             collaboration_client::resolve_public_native(&service_directory)
@@ -500,22 +558,6 @@ async fn run_host_install_journey(atomic_install: bool) -> Result<(), Box<dyn st
     }
     .await;
 
-    let host_status_before_cleanup = host.try_wait()?;
-    let fixture_child_process_log = std::fs::read_to_string(&process_log).unwrap_or_default();
-    let host_image_observation = if proof.is_err() && host_status_before_cleanup.is_none() {
-        format!(
-            "old_install={:?}; replacement_install={:?}",
-            verify_host_image(owned_host_process_id, &binary),
-            verify_host_image(owned_host_process_id, &replacement_binary),
-        )
-    } else {
-        "not sampled".to_owned()
-    };
-    eprintln!(
-        "host_install_journey_cleanup_begin stage={proof_stage} host_pid={owned_host_process_id} host_status={host_status_before_cleanup:?} host_image={host_image_observation:?} child_process_log={fixture_child_process_log:?} stdout={} stderr={}",
-        std::fs::read_to_string(&host_stdout).unwrap_or_default(),
-        std::fs::read_to_string(&host_stderr).unwrap_or_default(),
-    );
     if let Err(error) = &proof {
         eprintln!(
             "compiled_cli_host_acceptance_failure error={error} root={} router_endpoint=127.0.0.1:{} host_pid={:?} host_status={:?} app_server_generations={} host_stderr={:?}",
@@ -530,7 +572,7 @@ async fn run_host_install_journey(atomic_install: bool) -> Result<(), Box<dyn st
         );
     }
 
-    if host_status_before_cleanup.is_none() {
+    if host.try_wait()?.is_none() {
         rustix::process::kill_process(
             rustix::process::Pid::from_raw(i32::try_from(owned_host_process_id)?)
                 .ok_or("host process ID is zero")?,
@@ -541,12 +583,11 @@ async fn run_host_install_journey(atomic_install: bool) -> Result<(), Box<dyn st
         .await
         .map_err(|_elapsed| {
             std::io::Error::other(format!(
-                "fixture Host did not exit after INT; stage={proof_stage}; host_pid={owned_host_process_id}; host_status_before_cleanup={host_status_before_cleanup:?}; host_image={host_image_observation:?}; child_process_log={fixture_child_process_log:?}; proof={}; stdout={}; stderr={}",
+                "fixture Host did not exit after INT; proof={}; stderr={}",
                 proof
                     .as_ref()
                     .err()
                     .map_or("ok".to_owned(), ToString::to_string),
-                std::fs::read_to_string(&host_stdout).unwrap_or_default(),
                 std::fs::read_to_string(&host_stderr).unwrap_or_default()
             ))
         })??;

@@ -49,6 +49,35 @@ async fn credit_source_assessment_does_not_wait_for_selection_reservation_lock()
 
 #[tokio::test]
 async fn policy_revocation_waits_for_current_terminal_and_never_forwards_the_next_create() {
+    assert_policy_revocation_waits_for_terminal_delivery(
+        r#"{"type":"response.completed","turn":2}"#,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn policy_revocation_rechecks_after_failed_terminal_delivery() {
+    assert_policy_revocation_waits_for_terminal_delivery(r#"{"type":"response.failed","turn":2}"#)
+        .await;
+}
+
+#[tokio::test]
+async fn policy_revocation_rechecks_after_incomplete_terminal_delivery() {
+    assert_policy_revocation_waits_for_terminal_delivery(
+        r#"{"type":"response.incomplete","response":{"id":"resp_2","status":"incomplete"}}"#,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn policy_revocation_rechecks_after_non_quota_error_delivery() {
+    assert_policy_revocation_waits_for_terminal_delivery(
+        r#"{"type":"error","error":{"type":"invalid_request_error","code":"invalid_request_error","message":"terminal request error"}}"#,
+    )
+    .await;
+}
+
+async fn assert_policy_revocation_waits_for_terminal_delivery(terminal_event: &'static str) {
     let directory = CreditTurnTestDirectory::new();
     let fixture = CreditTurnFixture::new(&directory).await;
     assert_eq!(
@@ -198,7 +227,7 @@ async fn policy_revocation_waits_for_current_terminal_and_never_forwards_the_nex
             .await
             .expect("active turn output should send after the later create is queued");
         upstream_websocket
-            .send(Message::text(r#"{"type":"response.completed","turn":2}"#))
+            .send(Message::text(terminal_event))
             .await
             .expect("active turn terminal should send after output");
         assert_eq!(
@@ -207,7 +236,13 @@ async fn policy_revocation_waits_for_current_terminal_and_never_forwards_the_nex
         );
         assert_eq!(
             next_client_text(&mut client_websocket).await,
-            r#"{"type":"response.completed","turn":2}"#
+            terminal_event,
+            "the current terminal event must reach the client before admission rechecks"
+        );
+        assert_eq!(
+            wait_for_source_assessment(&mut source_results).await,
+            AccountSourceAdmission::ReconnectRequired,
+            "source eligibility must be assessed again after terminal delivery"
         );
         let reconnect = tokio::time::timeout(Duration::from_secs(2), client_websocket.next())
             .await

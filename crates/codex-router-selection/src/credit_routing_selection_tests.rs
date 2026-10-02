@@ -89,10 +89,14 @@ fn exhausted_opted_in_account_uses_credit_reserve_after_included_reserve() {
         credit_account.quota_evidence_reason(),
         QuotaEvidenceReason::CreditBacked
     );
-    assert_eq!(credit_account.routing_reason(), RoutingReason::CreditBacked);
+    assert_eq!(
+        credit_account.routing_reason(),
+        RoutingReason::HeldForIncludedQuota
+    );
+    assert_eq!(credit_account.routing_weight(), None);
     assert!(
-        credit_account.is_healthy_floor_switch_peer(),
-        "fresh credit Reserve should remain an eligible existing peer"
+        !credit_account.is_healthy_floor_switch_peer(),
+        "held credit Reserve must not trigger the floor-switch preference"
     );
     assert_eq!(
         credit_account.projected_weekly_runway_seconds(),
@@ -321,4 +325,161 @@ fn opted_out_exhausted_account_keeps_normal_blocked_quota_result() {
         assessment.routing_reason(),
         RoutingReason::BlockedWindowExhausted
     );
+}
+
+#[test]
+fn every_included_fallback_pool_precedes_credit_backing() {
+    let included_cases = [
+        account("included_usable", 80, false),
+        account("included_reserve", 10, false).with_current_active_sessions(1),
+        BurnDownAccountInput::new(
+            account_id("included_unknown"),
+            "included_unknown",
+            Provider::Openai,
+            Vec::new(),
+        ),
+        BurnDownAccountInput::new(
+            account_id("included_stale"),
+            "included_stale",
+            Provider::Openai,
+            vec![weekly_window(QuotaWindowStatus::Stale, 80, true)],
+        ),
+        BurnDownAccountInput::new(
+            account_id("included_guarded"),
+            "included_guarded",
+            Provider::Openai,
+            vec![
+                quota_window(
+                    V1_SHORT_WINDOW_SECONDS,
+                    QuotaWindowStatus::Eligible,
+                    2,
+                    true,
+                )
+                .with_projected_exhaustion_unix_seconds(NOW_UNIX_SECONDS + 600),
+                weekly_window(QuotaWindowStatus::Eligible, 80, true),
+            ],
+        ),
+    ];
+    for included in included_cases {
+        let included_only = assess(vec![included.clone()]);
+        assert!(
+            included_only.preferred_next().is_some(),
+            "included fixture must be selectable"
+        );
+        let mixed = assess(vec![included, account("credit_last", 0, true)]);
+        assert_eq!(mixed.preferred_next(), included_only.preferred_next());
+        assert_eq!(mixed.selected_pool(), included_only.selected_pool());
+        assert_eq!(
+            mixed.weighted_candidates(),
+            included_only.weighted_candidates()
+        );
+        assert!(
+            mixed
+                .weighted_candidates()
+                .iter()
+                .all(|(candidate, _)| candidate != &account_id("credit_last"))
+        );
+        let held_credit = mixed
+            .accounts()
+            .iter()
+            .find(|candidate| candidate.account_id() == &account_id("credit_last"))
+            .expect("held credit remains visible");
+        assert!(
+            !held_credit.is_healthy_floor_switch_peer(),
+            "held credits cannot displace included fallback quota"
+        );
+        assert_eq!(held_credit.availability(), AccountAvailability::Reserve);
+        assert_eq!(held_credit.routing_weight(), None);
+        assert!(!held_credit.preferred_next());
+        assert_eq!(
+            held_credit.routing_reason(),
+            RoutingReason::HeldForIncludedQuota
+        );
+        assert_eq!(
+            held_credit.routing_reason().as_str(),
+            "held_for_included_quota"
+        );
+        assert_eq!(
+            held_credit.routing_reason().human_phrase(),
+            "held: included quota available"
+        );
+    }
+}
+
+#[test]
+fn held_credit_does_not_change_stale_reserve_candidate_weight() {
+    let stale_reserve = BurnDownAccountInput::new(
+        account_id("stale_reserve"),
+        "stale_reserve",
+        Provider::Openai,
+        vec![weekly_window(QuotaWindowStatus::Stale, 10, true)],
+    )
+    .with_current_active_sessions(1);
+    let included_only = assess(vec![stale_reserve.clone()]);
+    let stale_assessment = included_only
+        .accounts()
+        .iter()
+        .find(|candidate| candidate.account_id() == &account_id("stale_reserve"))
+        .expect("stale Reserve candidate remains visible");
+    assert_eq!(
+        stale_assessment.availability(),
+        AccountAvailability::Reserve
+    );
+    assert_eq!(
+        stale_assessment.freshness(),
+        crate::burn_down::QuotaEvidenceFreshness::Stale
+    );
+
+    let mixed = assess(vec![stale_reserve, account("credit_last", 0, true)]);
+    assert_eq!(mixed.selected_pool(), included_only.selected_pool());
+    assert_eq!(
+        mixed.weighted_candidates(),
+        included_only.weighted_candidates()
+    );
+    let held_credit = mixed
+        .accounts()
+        .iter()
+        .find(|candidate| candidate.account_id() == &account_id("credit_last"))
+        .expect("held credit remains visible in assessments");
+    assert_eq!(
+        held_credit.routing_reason(),
+        RoutingReason::HeldForIncludedQuota
+    );
+    assert_eq!(held_credit.routing_weight(), None);
+}
+
+#[test]
+fn credit_peer_never_displaces_floor_band_with_stale_included_peer() {
+    let floor_account = account("floor_band", 6, false).with_weekly_quota_floor_basis_points(500);
+    let stale_account = BurnDownAccountInput::new(
+        account_id("included_stale"),
+        "included_stale",
+        Provider::Openai,
+        vec![weekly_window(QuotaWindowStatus::Stale, 80, true)],
+    );
+    let mixed = assess(vec![
+        floor_account,
+        stale_account,
+        account("credit_last", 0, true),
+    ]);
+    assert!(mixed.preferred_next().is_some());
+    assert_ne!(mixed.preferred_next(), Some(&account_id("credit_last")));
+    assert!(
+        mixed
+            .weighted_candidates()
+            .iter()
+            .all(|(candidate, _)| candidate != &account_id("credit_last"))
+    );
+    let held_credit = mixed
+        .accounts()
+        .iter()
+        .find(|candidate| candidate.account_id() == &account_id("credit_last"))
+        .expect("held credit remains visible in assessments");
+    assert_eq!(
+        held_credit.routing_reason(),
+        RoutingReason::HeldForIncludedQuota
+    );
+    assert_eq!(held_credit.availability(), AccountAvailability::Reserve);
+    assert_eq!(held_credit.routing_weight(), None);
+    assert!(!held_credit.is_healthy_floor_switch_peer());
 }

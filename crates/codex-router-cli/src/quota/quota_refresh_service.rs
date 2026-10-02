@@ -210,77 +210,70 @@ where
         } else {
             DEFAULT_ROUTE_BANDS
         };
-        let mut responses_credit_attempt = if account.provider() == Provider::Openai {
-            let Some(active_credential_generation) = account.active_credential_generation() else {
-                continue;
-            };
-            match begin_credit_refresh_attempt_for_current_generation(
-                &quota_history_state,
-                account.account_id(),
-                active_credential_generation,
-            )
-            .await?
-            {
-                Some(attempt) => Some(attempt),
-                None => {
-                    record_superseded_account_refresh(&mut *stdout, account, &mut failed_count)?;
-                    continue 'accounts;
-                }
-            }
-        } else {
-            None
-        };
         let mut resolved = match credential_resolver
             .resolve_provider_credentials_async(account.account_id(), account.provider())
             .await
         {
-            Ok(resolved) => {
-                if responses_credit_attempt.as_ref().is_some_and(|attempt| {
-                    attempt.credential_generation() != resolved.credential_generation()
-                }) {
-                    responses_credit_attempt =
-                        match begin_credit_refresh_attempt_for_current_generation(
-                            &quota_history_state,
-                            account.account_id(),
-                            resolved.credential_generation(),
-                        )
-                        .await?
-                        {
-                            Some(attempt) => Some(attempt),
-                            None => {
-                                record_superseded_account_refresh(
-                                    &mut *stdout,
-                                    account,
-                                    &mut failed_count,
-                                )?;
-                                continue 'accounts;
-                            }
-                        };
-                }
-                resolved
-            }
+            Ok(resolved) => resolved,
             Err(error) => {
                 failed_count = failed_count.saturating_add(route_bands.len() as u64);
+                let current_account = if account.provider() == Provider::Openai {
+                    quota_history_state
+                        .list_accounts()
+                        .await?
+                        .into_iter()
+                        .find(|current| current.account_id() == account.account_id())
+                } else {
+                    None
+                };
+                let responses_credit_attempt = match current_account
+                    .as_ref()
+                    .and_then(AccountRecord::active_credential_generation)
+                {
+                    Some(generation) => {
+                        begin_credit_refresh_attempt_for_current_generation(
+                            &quota_history_state,
+                            account.account_id(),
+                            generation,
+                        )
+                        .await?
+                    }
+                    None => None,
+                };
                 for route_band in route_bands {
                     if *route_band == USER_QUOTA_ROUTE_BAND {
-                        let Some(attempt) = responses_credit_attempt.as_ref() else {
-                            return Err(QuotaCommandError::ProviderResponse {
-                                message: "Responses refresh attempt was not allocated".to_owned(),
-                            });
-                        };
-                        quota_history_state
-                            .record_responses_refresh_failure(
-                                attempt,
-                                observed_unix_seconds,
-                                QuotaRefreshErrorClass::AuthError,
-                                &failure_quota_history_observations(
-                                    account,
+                        if let Some(attempt) = responses_credit_attempt.as_ref() {
+                            quota_history_state
+                                .record_responses_refresh_failure(
+                                    attempt,
+                                    observed_unix_seconds,
+                                    QuotaRefreshErrorClass::AuthError,
+                                    &failure_quota_history_observations(
+                                        account,
+                                        route_band,
+                                        observed_unix_seconds,
+                                        QuotaRefreshErrorClass::AuthError,
+                                    ),
+                                )
+                                .await?;
+                        } else if current_account.is_some() {
+                            quota_history_state
+                                .record_refresh_failure_preserving_selector_windows(
+                                    account.account_id(),
                                     route_band,
                                     observed_unix_seconds,
                                     QuotaRefreshErrorClass::AuthError,
-                                ),
+                                )
+                                .await?;
+                            append_failure_quota_history_observations(
+                                &quota_history_state,
+                                account,
+                                route_band,
+                                observed_unix_seconds,
+                                QuotaRefreshErrorClass::AuthError,
                             )
                             .await?;
+                        }
                     } else {
                         quota_history_state
                             .record_refresh_failure_preserving_selector_windows(
@@ -467,33 +460,23 @@ where
         }
         for route_band in route_bands {
             let mut credit_refresh_attempt = if *route_band == USER_QUOTA_ROUTE_BAND {
-                let prepared_attempt = responses_credit_attempt.take();
-                Some(match prepared_attempt {
-                    Some(attempt)
-                        if attempt.credential_generation() == resolved.credential_generation() =>
-                    {
-                        attempt
+                match begin_credit_refresh_attempt_for_current_generation(
+                    &quota_history_state,
+                    account.account_id(),
+                    resolved.credential_generation(),
+                )
+                .await?
+                {
+                    Some(attempt) => Some(attempt),
+                    None => {
+                        record_superseded_account_refresh(
+                            &mut *stdout,
+                            account,
+                            &mut failed_count,
+                        )?;
+                        continue 'accounts;
                     }
-                    _ => {
-                        match begin_credit_refresh_attempt_for_current_generation(
-                            &quota_history_state,
-                            account.account_id(),
-                            resolved.credential_generation(),
-                        )
-                        .await?
-                        {
-                            Some(attempt) => attempt,
-                            None => {
-                                record_superseded_account_refresh(
-                                    &mut *stdout,
-                                    account,
-                                    &mut failed_count,
-                                )?;
-                                continue 'accounts;
-                            }
-                        }
-                    }
-                })
+                }
             } else {
                 None
             };
@@ -809,6 +792,39 @@ where
                 true
             };
             if !refresh_was_committed {
+                if *route_band == USER_QUOTA_ROUTE_BAND {
+                    let Some(attempt) = credit_refresh_attempt.as_ref() else {
+                        return Err(QuotaCommandError::ProviderResponse {
+                            message: "Responses refresh attempt was not allocated".to_owned(),
+                        });
+                    };
+                    tracing::info!(
+                        account.hash = telemetry_hash(account.account_id().as_str()),
+                        credential_generation = attempt.credential_generation(),
+                        attempt_sequence = attempt.sequence(),
+                        "codex_router.responses_quota_refresh_superseded"
+                    );
+                    let current_generation = quota_history_state
+                        .list_accounts()
+                        .await?
+                        .into_iter()
+                        .find(|current| current.account_id() == account.account_id())
+                        .and_then(|current| current.active_credential_generation());
+                    if current_generation != Some(attempt.credential_generation()) {
+                        continue 'accounts;
+                    }
+                    if let Some(observer) = weekly_floor_observer {
+                        notify_weekly_floor_from_latest_committed_responses(
+                            &quota_history_state,
+                            account.account_id(),
+                            attempt.credential_generation(),
+                            weekly_quota_floors.get(account.account_id()).copied(),
+                            observed_unix_seconds,
+                            observer,
+                        )
+                        .await?;
+                    }
+                }
                 continue;
             }
             if *route_band == USER_QUOTA_ROUTE_BAND {
@@ -848,21 +864,7 @@ where
                     ),
                     None => None,
                 };
-                let intent = match (floor, weekly_remaining_basis_points) {
-                    (None, _) => Some(WeeklyQuotaFloorIntent::Clear),
-                    (Some(floor), Some(remaining)) if remaining <= floor => {
-                        Some(WeeklyQuotaFloorIntent::HardStop)
-                    }
-                    (Some(floor), Some(remaining))
-                        if remaining
-                            <= weekly_quota_switch_at_basis_points(Some(floor))
-                                .unwrap_or(floor) =>
-                    {
-                        Some(WeeklyQuotaFloorIntent::GracefulSwitch)
-                    }
-                    (Some(_), Some(_)) => Some(WeeklyQuotaFloorIntent::Clear),
-                    (Some(_), None) => None,
-                };
+                let intent = weekly_quota_floor_intent(floor, weekly_remaining_basis_points);
                 if let Some(intent) = intent {
                     observer.weekly_quota_floor_intent(account.account_id(), intent);
                 }
@@ -896,6 +898,92 @@ where
     refresh_result.map(|()| QuotaRefreshReport {
         committed_responses_generations,
     })
+}
+
+async fn notify_weekly_floor_from_latest_committed_responses(
+    state: &AsyncSqliteStateStore,
+    account_id: &AccountId,
+    expected_credential_generation: u64,
+    floor: Option<u32>,
+    now_unix_seconds: u64,
+    observer: &dyn WeeklyQuotaFloorIntentObserver,
+) -> Result<(), QuotaCommandError> {
+    let selector_inputs = state
+        .selector_inputs_for_route_band(USER_QUOTA_ROUTE_BAND, now_unix_seconds)
+        .await?;
+    let Some(selector_input) = selector_inputs
+        .iter()
+        .find(|input| input.account_id() == account_id)
+    else {
+        return Ok(());
+    };
+    if selector_input.provider() != Provider::Openai
+        || selector_input.account_status() != AccountStatus::Enabled
+        || selector_input.active_credential_generation() != Some(expected_credential_generation)
+    {
+        return Ok(());
+    }
+
+    let Some(observation) = selector_input.credit_observation() else {
+        return Ok(());
+    };
+    let Some(observed_unix_seconds) = observation.observed_unix_seconds() else {
+        return Ok(());
+    };
+    let Some(stale_after_unix_seconds) = observation.stale_after_unix_seconds() else {
+        return Ok(());
+    };
+    if observation.credential_generation() != expected_credential_generation
+        || observation.committed_attempt() != Some(observation.latest_started_attempt())
+        || observed_unix_seconds > now_unix_seconds
+        || now_unix_seconds >= stale_after_unix_seconds
+    {
+        return Ok(());
+    }
+
+    let latest_successful_windows = selector_input
+        .windows()
+        .iter()
+        .filter(|window| {
+            window.observed_unix_seconds() == observed_unix_seconds
+                && window.observed_unix_seconds() <= now_unix_seconds
+                && matches!(
+                    window.status(),
+                    SelectorQuotaWindowStatus::Eligible | SelectorQuotaWindowStatus::Ineligible
+                )
+        })
+        .collect::<Vec<_>>();
+    if latest_successful_windows.is_empty() {
+        return Ok(());
+    }
+
+    let weekly_remaining_basis_points = latest_successful_windows
+        .iter()
+        .find(|window| window.limit_window_seconds() == V1_WEEKLY_WINDOW_SECONDS)
+        .map(|window| window.remaining_headroom().saturating_mul(100));
+    if let Some(intent) = weekly_quota_floor_intent(floor, weekly_remaining_basis_points) {
+        observer.weekly_quota_floor_intent(account_id, intent);
+    }
+    Ok(())
+}
+
+fn weekly_quota_floor_intent(
+    floor: Option<u32>,
+    weekly_remaining_basis_points: Option<u32>,
+) -> Option<WeeklyQuotaFloorIntent> {
+    match (floor, weekly_remaining_basis_points) {
+        (None, _) => Some(WeeklyQuotaFloorIntent::Clear),
+        (Some(floor), Some(remaining)) if remaining <= floor => {
+            Some(WeeklyQuotaFloorIntent::HardStop)
+        }
+        (Some(floor), Some(remaining))
+            if remaining <= weekly_quota_switch_at_basis_points(Some(floor)).unwrap_or(floor) =>
+        {
+            Some(WeeklyQuotaFloorIntent::GracefulSwitch)
+        }
+        (Some(_), Some(_)) => Some(WeeklyQuotaFloorIntent::Clear),
+        (Some(_), None) => None,
+    }
 }
 
 async fn begin_credit_refresh_attempt_for_current_generation(

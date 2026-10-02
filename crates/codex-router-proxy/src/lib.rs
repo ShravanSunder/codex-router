@@ -13499,4 +13499,13 @@ mod tests {
 
     #[path = "credit_transport_proof.rs"]
     mod credit_transport_proof;
+
+    #[path = "credit_compact_transport.rs"]
+    mod credit_compact_transport;
+
+    #[path = "credential_generation_websocket.rs"]
+    mod credential_generation_websocket;
+
+    #[path = "credit_affinity_transport.rs"]
+    mod credit_affinity_transport;
 }
