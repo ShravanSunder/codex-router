@@ -141,6 +141,12 @@ impl AttemptEvidenceSink for UnstoredAttemptEvidenceSink {
 }
 
 pub trait SessionMessageDelivery: Send + Sync {
+    /// Reports whether the route serving this target can accept the requested mode.
+    /// Implementations without route-specific mode constraints accept it by default.
+    fn supports_delivery_mode(&self, _target: &SessionRef, _mode: MessageDelivery) -> bool {
+        true
+    }
+
     fn deliver<'a>(
         &'a self,
         request: layer_zero::DeliveryRequest,
@@ -159,6 +165,10 @@ pub trait TargetPresenceProbe: Send + Sync {
 
 pub trait SessionDeliveryRoute: Send + Sync {
     fn reachability(&self) -> SessionReachability;
+    /// Returns false only when this route serves the target and rejects the mode.
+    fn supports_delivery_mode(&self, _target: &SessionRef, _mode: MessageDelivery) -> bool {
+        true
+    }
     fn claim(&self, target: &SessionRef) -> DeliveryFuture<'_, RouteClaim>;
     fn presence(&self, target: &SessionRef) -> DeliveryFuture<'_, RoutePresence>;
     fn deliver<'a>(

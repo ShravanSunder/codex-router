@@ -12,8 +12,6 @@ use collaboration_protocol::{
 };
 use message_board::BoardError;
 
-const CLAUDE_CODE_PEER_ENDPOINT_ID: &str = "claude-local";
-
 impl SubscriptionPushStore {
     pub(super) async fn restore_direct_messages(
         &self,
@@ -152,13 +150,9 @@ impl SubscriptionPushStore {
             DeliveryOutcome::Rejected(rejection)
                 if rejection.reason == DeliveryRejectionReason::NoRoute
         );
-        let queue_to_closed_claude_peer = mode == MessageDelivery::Queue
-            && record.guard.is_none()
-            && record.target.endpoint.service_id == self.machine.service_id().clone()
-            && String::from(record.target.endpoint.endpoint_id.clone())
-                == CLAUDE_CODE_PEER_ENDPOINT_ID
-            && no_route;
-        if queue_to_closed_claude_peer {
+        let unsupported_mode =
+            no_route && !self.delivery.supports_delivery_mode(&record.target, mode);
+        if unsupported_mode {
             receipt = DeliveryReceipt {
                 outcome: DeliveryOutcome::Rejected(DeliveryRejection {
                     reason: DeliveryRejectionReason::QueueUnsupported,

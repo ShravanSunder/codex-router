@@ -7,7 +7,7 @@ use crate::{
 use agent_automation::RouteEffectEvidence;
 use collaboration_protocol::{
     DeliveryNextAction, DeliveryOutcome, DeliveryRejection, DeliveryRejectionReason,
-    SessionReachability, SessionRef,
+    MessageDelivery, SessionReachability, SessionRef,
 };
 use futures_util::future::join_all;
 use std::sync::Arc;
@@ -177,6 +177,12 @@ impl SessionDeliveryRouter {
 }
 
 impl SessionMessageDelivery for SessionDeliveryRouter {
+    fn supports_delivery_mode(&self, target: &SessionRef, mode: MessageDelivery) -> bool {
+        self.routes
+            .iter()
+            .all(|route| route.supports_delivery_mode(target, mode))
+    }
+
     fn deliver<'a>(
         &'a self,
         request: crate::layer_zero::DeliveryRequest,

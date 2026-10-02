@@ -219,6 +219,11 @@ Slice C is the largest. If it proves too big for one Luna xhigh, split it inside
   generation mismatch or a race settles `rejected`, never `held`. Auto DMs may be held. Claude Code peer endpoints
   reject Queue with `QueueUnsupported` whether the terminal is open or closed, and the CLI recommends resending
   with `--delivery auto`; other endpoints retain their Queue support and hold behavior.
+- **Route-owned mode capability.** `SessionDeliveryRoute` reports whether it supports a target/mode pair;
+  the composed `SessionDeliveryRouter` exposes that capability without endpoint-name checks in
+  feature code. Direct-message handling asks after a `NoRoute` result and before deciding to hold, so
+  a closed Claude Queue target is rejected while a closed Auto target is held. This is internal
+  routing behavior and changes no wire or stored record format.
 - **DMs do not depend on the board.** The `ReaderDeliveryOwner` service starts whenever automation storage opens and
   takes the board as `BoardAvailability::{Available, Unavailable}`; with the board unavailable, DM holds still work
   and subscription operations return a board-unavailable error.

@@ -93,6 +93,7 @@ async fn start_peer_delivery_service(
     std::path::PathBuf,
     Arc<Mutex<AutomationStore>>,
     SubscriptionDeliveryService,
+    Arc<SessionDeliveryRouter>,
 ) {
     let registry = root.join("claude-sessions");
     std::fs::create_dir(&registry).expect("peer registry directory");
@@ -108,7 +109,7 @@ async fn start_peer_delivery_service(
     ));
     let router = Arc::new(SessionDeliveryRouter::new(vec![route]));
     let delivery: Arc<dyn SessionMessageDelivery> = router.clone();
-    let presence: Arc<dyn TargetPresenceProbe> = router;
+    let presence: Arc<dyn TargetPresenceProbe> = router.clone();
     let service = SubscriptionDeliveryService::new(SubscriptionDeliveryServiceProps {
         board_availability: BoardAvailability::Unavailable,
         push_store: Arc::clone(&automation),
@@ -122,14 +123,18 @@ async fn start_peer_delivery_service(
         clock: Arc::new(SystemSubscriptionClock),
     });
     service.start().await.expect("reader actor startup");
-    (registry, automation, service)
+    (registry, automation, service, router)
 }
 
 #[tokio::test]
 async fn closed_peer_holds_auto_dm_then_delivers_once_when_writable() {
     let directory = tempfile::tempdir().expect("isolated test directory");
-    let (registry, automation, service) = start_peer_delivery_service(directory.path()).await;
+    let (registry, automation, service, router) =
+        start_peer_delivery_service(directory.path()).await;
     let target = target();
+    assert!(router.supports_delivery_mode(&target, MessageDelivery::Auto));
+    assert!(router.supports_delivery_mode(&target, MessageDelivery::Steer));
+    assert!(!router.supports_delivery_mode(&target, MessageDelivery::Queue));
     let push_draft = draft(&target, MessageDelivery::Auto, None);
     let push_id = push_draft.push_id.clone();
     automation
@@ -231,7 +236,8 @@ async fn closed_peer_holds_auto_dm_then_delivers_once_when_writable() {
 #[tokio::test]
 async fn closed_peer_rejects_queue_steer_and_guarded_dms() {
     let directory = tempfile::tempdir().expect("isolated test directory");
-    let (_registry, automation, service) = start_peer_delivery_service(directory.path()).await;
+    let (_registry, automation, service, _router) =
+        start_peer_delivery_service(directory.path()).await;
     let target = target();
     let cases = [
         (
@@ -294,11 +300,13 @@ async fn closed_peer_rejects_queue_steer_and_guarded_dms() {
 #[tokio::test]
 async fn queue_to_same_endpoint_label_on_another_service_keeps_queue_hold_behavior() {
     let directory = tempfile::tempdir().expect("isolated test directory");
-    let (_registry, automation, service) = start_peer_delivery_service(directory.path()).await;
+    let (_registry, automation, service, router) =
+        start_peer_delivery_service(directory.path()).await;
     let mut target = target();
     target.endpoint.service_id =
         UuidIdentity::try_from("00000000-0000-4000-8000-000000000099".to_owned())
             .expect("foreign router service id");
+    assert!(router.supports_delivery_mode(&target, MessageDelivery::Queue));
     let push_draft = draft(&target, MessageDelivery::Queue, None);
     let push_id = push_draft.push_id.clone();
     automation

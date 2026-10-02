@@ -264,6 +264,10 @@ impl SessionDeliveryRoute for ClaudeCodePeerDeliveryRoute {
         SessionReachability::ClaudeCodePeer
     }
 
+    fn supports_delivery_mode(&self, target: &SessionRef, mode: MessageDelivery) -> bool {
+        !self.serves(target) || mode != MessageDelivery::Queue
+    }
+
     fn claim(&self, target: &SessionRef) -> DeliveryFuture<'_, RouteClaim> {
         let target = target.clone();
         Box::pin(async move {
