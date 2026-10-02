@@ -3,6 +3,7 @@ import unittest
 from scripts.publish_homebrew_tap_local import PublishError
 from scripts.publish_homebrew_tap_local import install_action
 from scripts.publish_homebrew_tap_local import published_asset_sha256
+from scripts.publish_homebrew_tap_local import release_signature_problem
 from scripts.publish_homebrew_tap_local import release_asset_name
 from scripts.publish_homebrew_tap_local import workspace_version
 
@@ -80,6 +81,25 @@ class InstallActionTests(unittest.TestCase):
     def test_reinstalls_a_same_version_so_the_install_proof_still_runs(self) -> None:
         # Act & Assert
         self.assertEqual(install_action("codex-router 0.1.56", "0.1.56"), "reinstall")
+
+
+class ReleaseSignatureTests(unittest.TestCase):
+    def test_accepts_the_release_identifier_signed_by_the_release_team(self) -> None:
+        # Arrange
+        details = "Identifier=dev.shravansunder.agent-sessions\nTeamIdentifier=974QD84WVC\n"
+
+        # Act & Assert
+        self.assertIsNone(release_signature_problem(details, "agent-sessions"))
+
+    def test_rejects_linker_signed_and_debug_identities(self) -> None:
+        # Arrange
+        linker_signed = "Identifier=agent_sessions-349f0fe06f58ee87\nTeamIdentifier=not set\n"
+        debug_signed = "Identifier=dev.shravansunder.agent-sessions.debug\nTeamIdentifier=974QD84WVC\n"
+        other_team = "Identifier=dev.shravansunder.agent-sessions\nTeamIdentifier=AAAAAAAAAA\n"
+
+        # Act & Assert
+        for details in (linker_signed, debug_signed, other_team):
+            self.assertIsNotNone(release_signature_problem(details, "agent-sessions"))
 
 
 if __name__ == "__main__":

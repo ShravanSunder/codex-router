@@ -9,6 +9,12 @@
 - Add state migration `202610020001_credit_usage_state` for saved credit policy and provider observations. Older binaries reject this newer schema, so downgrade is blocked; back up state before upgrading. Quota JSON includes `credit_usage`, and credit admissions report `credit_backed`. Eligible credit accounts held behind included quota report `held_for_included_quota`.
 - Show pool availability and observation freshness across all accounts in the quota header.
 
+## 0.1.61
+
+- Sign `codex-router`, `agent-collaboration` and `agent-sessions` with the Developer ID identity of team `974QD84WVC` under fixed identifiers (`dev.shravansunder.<executable>`), with the hardened runtime and a secure timestamp. Keychain approvals now belong to that identity and survive upgrades instead of prompting after every release. After the first signed install, the next Host restart asks once per Router Keychain item; choose **Always Allow**.
+- Local Apple Silicon `cargo run`/`cargo test` sign the same executables as `dev.shravansunder.<executable>.debug`, a separate identity, so debug rebuilds stop prompting and debug builds never share production Keychain approvals. A debug Router started directly by a debug-host example can be signed with `scripts/cargo_debug_signing_runner.sh --sign-only target/debug/codex-router`.
+- Releases require the `APPLE_CERTIFICATE_BASE64` and `APPLE_CERTIFICATE_PASSWORD` secrets and fail before publishing without them; the tap job and the local tap publisher reject a binary without the release identity.
+
 ## 0.1.60
 
 - Record the Role each board message was posted under (Participant history); messages carry an optional `postedAsRole` when attribution is provable. Unprovable history stays unset and existing messages aren't backfilled.
