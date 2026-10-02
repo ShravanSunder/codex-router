@@ -191,6 +191,36 @@ async fn subscription_tools_roundtrip_through_mcp_control_and_sqlite() {
     );
     let running_server = running_server.expect("MCP server transport");
     let running_client = running_client.expect("MCP test client transport");
+    let tools = running_client
+        .peer()
+        .list_all_tools()
+        .await
+        .expect("MCP tools/list catalog");
+    let tool_names = tools
+        .iter()
+        .map(|tool| tool.name.as_ref())
+        .collect::<Vec<_>>();
+    for removed_tool in [
+        "board_thread_listen",
+        "board_thread_listen_show",
+        "board_thread_listen_cancel",
+    ] {
+        assert!(
+            !tool_names.contains(&removed_tool),
+            "legacy MCP listen tool {removed_tool} must be absent"
+        );
+    }
+    for replacement_tool in [
+        "board_thread_subscribe",
+        "board_thread_unsubscribe",
+        "board_thread_subscriptions",
+        "board_thread_wait",
+    ] {
+        assert!(
+            tool_names.contains(&replacement_tool),
+            "replacement MCP subscription tool {replacement_tool} must be present"
+        );
+    }
     let context_for = |request_id: i64| {
         rmcp::service::RequestContext::new(
             rmcp::model::NumberOrString::Number(request_id),
