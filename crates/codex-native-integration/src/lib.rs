@@ -19,6 +19,7 @@ mod native_protocol_observation;
 mod native_session_launch;
 mod native_state_paths;
 mod remote_control_observation;
+mod remote_resume_permission_keys;
 mod router_profile_projection;
 mod router_tool_locations;
 mod stored_repository_identity;
@@ -47,6 +48,9 @@ pub use native_session_launch::SessionProfile;
 pub use native_session_launch::caller_overrides;
 pub use native_state_paths::CodexPaths;
 pub use remote_control_observation::RemoteControlObservation;
+pub use remote_resume_permission_keys::{
+    REMOTE_RESUME_PERMISSION_KEYS, profile_remote_resume_permission_keys,
+};
 pub use router_profile_projection::CodexRouterProfile;
 pub use router_profile_projection::router_permission_profile_overrides;
 pub use router_tool_locations::{
