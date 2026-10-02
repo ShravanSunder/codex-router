@@ -122,7 +122,7 @@ Rules:
 
 1. Every event that gives a Participant a Role writes that Role; a Participant's Role never changes without such an event.
 2. A reply by a `session` identity stores `posted_from_activity`: the latest event before the reply that could have changed the author's Role (their join or leave, a replacement naming them, an unattributed replacement, or `threadResolved`), when that event grants the author a Role; otherwise NULL, "Role unknown" **(2026-10-02, amended after design review: the latest *granting* event is not provable when an unknown event lies after it)**. A new Thread's main message, posted by a session with `create --role`, stores that create's `participantJoined` event. A `human` post stores NULL; its author kind already says why there is no Role. A Participant whose current Role predates Participant history and cannot be proven posts with a NULL Role until their next join or handover **(owner-deferred, 2026-10-02: no baseline event; see the Program Design)**.
-3. Message reads report `postedAsRole` from that event when it is known, and omit it otherwise. Absent means "human author" or "posted before Participant history".
+3. Message reads report `postedAsRole` from that event when it is known, and omit it otherwise. Absent means "human author", "posted before Participant history", or "Role unknown" (rule 2).
 4. Role names stay validated in Rust like `thread_participants.role`; no SQL `CHECK` (AGENTS.md).
 
 Existing data is backfilled only where provable, in the same migration; everything else stays NULL, meaning "before Participant history":
