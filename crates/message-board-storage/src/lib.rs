@@ -27,3 +27,12 @@ mod repository_records;
 mod discovery_search;
 mod message_history_reads;
 mod message_search;
+
+#[cfg(test)]
+mod participant_history_property_tests;
+#[cfg(test)]
+mod participant_history_read_tests;
+#[cfg(test)]
+mod participant_history_test_support;
+#[cfg(test)]
+mod participant_history_write_tests;

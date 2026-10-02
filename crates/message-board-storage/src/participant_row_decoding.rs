@@ -25,7 +25,7 @@ pub(crate) fn role_name(role: ParticipantRole) -> &'static str {
     }
 }
 
-fn decode_role(role: &str) -> Result<ParticipantRole, BoardError> {
+pub(crate) fn decode_role(role: &str) -> Result<ParticipantRole, BoardError> {
     match role {
         "orchestrator" => Ok(ParticipantRole::Orchestrator),
         "implementer" => Ok(ParticipantRole::Implementer),

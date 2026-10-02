@@ -2,7 +2,9 @@
 use crate::BoardStore;
 use crate::board_topic_records::{require_board, require_topic};
 use crate::message_records::{load_message, load_watch_status, require_thread};
-use crate::participant_records::{advance_participant_last_seen, apply_watch_choice};
+use crate::participant_records::{
+    ParticipantChange, advance_participant_last_seen, apply_watch_choice,
+};
 use crate::participant_row_decoding::{
     load_implementer, load_orchestrator, load_participant, require_open_participant, role_name,
 };
@@ -84,9 +86,21 @@ impl BoardStore {
             enforce_and_record_cooldown(&mut transaction, &actor_key, &board_id).await?;
         }
         let root_id_text = root_id.as_ref().map(MessageId::as_str);
+        let activity_sequence = allocate_activity_sequence(&mut transaction).await?;
+        let posted_from_activity = if matches!(request.actor, Identity::Session { .. }) {
+            latest_role_barrier(
+                &mut transaction,
+                root_id_text,
+                &actor_key,
+                activity_sequence,
+            )
+            .await?
+        } else {
+            None
+        };
         sqlx::query!(
-            "INSERT INTO board_messages(message_id,topic_id,board_id,root_id,actor_key,acting_for_key,text) \
-             VALUES(?,?,?,?,?,?,?)",
+            "INSERT INTO board_messages(message_id,topic_id,board_id,root_id,actor_key,acting_for_key,text,posted_from_activity) \
+             VALUES(?,?,?,?,?,?,?,?)",
             request.message_id.as_str(),
             topic_id.as_str(),
             board_id.as_str(),
@@ -94,6 +108,7 @@ impl BoardStore {
             actor_key,
             acting_for_key,
             request.text.as_str(),
+            posted_from_activity,
         )
         .execute(&mut *transaction)
         .await
@@ -130,7 +145,6 @@ impl BoardStore {
             .await
             .map_err(storage_error)?;
         }
-        let activity_sequence = allocate_activity_sequence(&mut transaction).await?;
         let activity_kind = if root_id.is_some() {
             "threadMessageCreated"
         } else {
@@ -269,19 +283,38 @@ impl BoardStore {
         .map_err(storage_error)?;
         if let Some(role) = request.role {
             let join_activity = allocate_activity_sequence(&mut transaction).await?;
+            let change = ParticipantChange {
+                participant_key: &actor_key,
+                participant_role: Some(role),
+                replaced_participant_key: None,
+            };
+            let participant_role = change.participant_role.map(role_name);
             sqlx::query!(
-                "INSERT INTO board_activity(activity_sequence,project_id,board_id,topic_id,root_id,kind,actor_key,message_id) \
-                 VALUES(?,?,?,?,?,'participantJoined',?,NULL)",
+                "INSERT INTO board_activity(activity_sequence,project_id,board_id,topic_id,root_id,kind,actor_key,message_id,participant_key,participant_role,replaced_participant_key) \
+                 VALUES(?,?,?,?,?,'participantJoined',?,NULL,?,?,?)",
                 join_activity,
                 board.project_id.as_str(),
                 board.board_id.as_str(),
                 topic.topic_id.as_str(),
                 request.message_id.as_str(),
                 actor_key,
+                change.participant_key,
+                participant_role,
+                change.replaced_participant_key,
             )
             .execute(&mut *transaction)
             .await
             .map_err(storage_error)?;
+            if matches!(request.actor, Identity::Session { .. }) {
+                sqlx::query!(
+                    "UPDATE board_messages SET posted_from_activity=? WHERE message_id=?",
+                    join_activity,
+                    request.message_id.as_str()
+                )
+                .execute(&mut *transaction)
+                .await
+                .map_err(storage_error)?;
+            }
             let role = role_name(role);
             sqlx::query!(
                 "INSERT INTO thread_participants(reader_key,root_id,role,note,joined_at_activity,last_seen_activity,closed_at_activity,closed_reason,replaced_by) \
@@ -505,6 +538,39 @@ async fn publish_message_unread(
         .map_err(storage_error)?;
     }
     Ok(())
+}
+
+/// Select a barrier first; accepting only known grants prevents stale attribution.
+///
+/// Same rule as step 4 of migration `202610020001_participant_history.sql`, which is
+/// frozen once applied; the live/backfill agreement test keeps the two in step.
+async fn latest_role_barrier(
+    transaction: &mut BoardTransaction<'_>,
+    root: Option<&str>,
+    author: &str,
+    reply_boundary: i64,
+) -> Result<Option<i64>, BoardError> {
+    let latest_role_barrier = sqlx::query!(
+        "SELECT activity_sequence, participant_key, participant_role \
+         FROM board_activity WHERE root_id = ? AND activity_sequence < ? AND ( \
+           (kind IN ('participantJoined', 'participantLeft') AND actor_key = ?) \
+           OR (kind IN ('orchestratorReplaced', 'implementerReplaced') AND ( \
+             participant_key = ? OR replaced_participant_key = ? OR participant_key IS NULL)) \
+           OR kind = 'threadResolved') ORDER BY activity_sequence DESC LIMIT 1",
+        root,
+        reply_boundary,
+        author,
+        author,
+        author,
+    )
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(storage_error)?;
+    Ok(latest_role_barrier
+        .filter(|event| {
+            event.participant_key.as_deref() == Some(author) && event.participant_role.is_some()
+        })
+        .map(|event| event.activity_sequence))
 }
 
 #[cfg(test)]
