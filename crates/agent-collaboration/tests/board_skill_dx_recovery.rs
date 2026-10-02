@@ -74,7 +74,6 @@ async fn luna_recovers_from_combined_board_argument_diagnostic() -> ProofResult<
                 text: task.try_into()?,
             },
             mode: MessageDelivery::Auto,
-            correlation: None,
         })
         .await?;
     let turns = wait_for_terminal_turn(&mut proof, &agent).await?;

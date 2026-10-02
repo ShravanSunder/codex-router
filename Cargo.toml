@@ -31,7 +31,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.56"
+version = "0.1.59"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 publish = false
@@ -67,7 +67,7 @@ hyper-rustls = { version = "0.27.7", default-features = false, features = ["http
 hyper-util = { version = "0.1.19", features = ["client", "client-legacy", "server", "http1", "http2", "tokio"] }
 indicatif = "0.18.3"
 iocraft = "0.8.3"
-nix = { version = "0.28", features = ["user"] }
+nix = { version = "0.28", features = ["user", "hostname"] }
 opentelemetry = { version = "0.31.0", features = ["logs", "metrics", "trace"] }
 opentelemetry-appender-tracing = "0.31.1"
 opentelemetry-otlp = { version = "0.31.0", features = ["http-proto", "logs", "metrics", "reqwest-blocking-client", "reqwest-rustls", "trace"] }

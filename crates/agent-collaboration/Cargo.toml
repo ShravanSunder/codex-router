@@ -50,3 +50,4 @@ collaboration-protocol = { path = "../collaboration-protocol", version = "0.1.14
 message-board-storage = { path = "../message-board-storage", version = "0.1.20" }
 tokio-util.workspace = true
 futures-util.workspace = true
+tracing-subscriber.workspace = true

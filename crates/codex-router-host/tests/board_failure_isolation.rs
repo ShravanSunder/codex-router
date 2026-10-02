@@ -22,6 +22,7 @@ async fn board_open_failure_keeps_unrelated_control_methods_available()
         mcp_bind: std::net::SocketAddr::from(([127, 0, 0, 1], 0)),
         native_schema: None,
         peer_registry_directory: None,
+        remote_control_server_name: None,
         owner_human_id: None,
     })
     .await?;

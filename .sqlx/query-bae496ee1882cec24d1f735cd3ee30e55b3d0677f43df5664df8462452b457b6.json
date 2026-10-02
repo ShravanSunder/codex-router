@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE subscription_windows SET in_flight_through=NULL,residual_opened_at=NULL WHERE reader_key=? AND root_id=? AND window_id=? AND in_flight_through=?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "bae496ee1882cec24d1f735cd3ee30e55b3d0677f43df5664df8462452b457b6"
+}

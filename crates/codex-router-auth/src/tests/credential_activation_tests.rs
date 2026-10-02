@@ -4,13 +4,17 @@ use std::sync::Mutex;
 use crate::credential_activation::CredentialActivation;
 use crate::credential_activation::CredentialActivationRequest;
 use codex_router_core::provider::Provider;
+use codex_router_secret_store::account_tokens::provider_credential_bundle_key;
 use codex_router_secret_store::encrypted_credential_store::EncryptedCredentialStoreStatus;
 use codex_router_secret_store::keychain_data_key::KeychainAccess;
 use codex_router_secret_store::keychain_data_key::KeychainAccessError;
 use codex_router_secret_store::keychain_data_key::ROUTER_KEYCHAIN_SERVICE;
 
 #[derive(Default)]
-struct LoginTestKeychainAccess(Mutex<Option<Vec<u8>>>);
+struct LoginTestKeychainAccess {
+    key: Mutex<Option<Vec<u8>>>,
+    touched_services: Mutex<Vec<String>>,
+}
 
 impl KeychainAccess for LoginTestKeychainAccess {
     fn read_secret(
@@ -18,10 +22,14 @@ impl KeychainAccess for LoginTestKeychainAccess {
         service: &str,
         _account: &str,
     ) -> Result<Option<Vec<u8>>, KeychainAccessError> {
+        self.touched_services
+            .lock()
+            .expect("test Keychain service log lock")
+            .push(service.to_owned());
         if service != ROUTER_KEYCHAIN_SERVICE {
             return Err(KeychainAccessError::ServiceRejected);
         }
-        Ok(self.0.lock().expect("test Keychain lock").clone())
+        Ok(self.key.lock().expect("test Keychain lock").clone())
     }
 
     fn add_secret(
@@ -30,10 +38,14 @@ impl KeychainAccess for LoginTestKeychainAccess {
         _account: &str,
         secret: &[u8],
     ) -> Result<(), KeychainAccessError> {
+        self.touched_services
+            .lock()
+            .expect("test Keychain service log lock")
+            .push(service.to_owned());
         if service != ROUTER_KEYCHAIN_SERVICE {
             return Err(KeychainAccessError::ServiceRejected);
         }
-        let mut stored_key = self.0.lock().expect("test Keychain lock");
+        let mut stored_key = self.key.lock().expect("test Keychain lock");
         if stored_key.is_some() {
             return Err(KeychainAccessError::Unavailable);
         }
@@ -68,10 +80,18 @@ impl codex_router_secret_store::SecretStore for FailingStagedCredentialStore {
 
     fn write_staged(
         &self,
-        _key: &codex_router_secret_store::model::SecretKey,
-        _secret: &codex_router_core::redaction::SecretString,
+        key: &codex_router_secret_store::model::SecretKey,
+        secret: &codex_router_core::redaction::SecretString,
     ) -> Result<(), codex_router_secret_store::model::SecretStoreError> {
+        self.0.write_staged(key, secret)?;
         Err(codex_router_secret_store::model::SecretStoreError::KeyUnavailable)
+    }
+
+    fn delete_staged(
+        &self,
+        key: &codex_router_secret_store::model::SecretKey,
+    ) -> Result<(), codex_router_secret_store::model::SecretStoreError> {
+        codex_router_secret_store::SecretStore::delete_staged(&self.0, key)
     }
 }
 
@@ -91,6 +111,14 @@ fn production_opener_marks_a_fresh_store_ready_for_login() {
         &keychain,
     ));
     assert_eq!(secrets.status(), EncryptedCredentialStoreStatus::Ready);
+    assert!(
+        keychain
+            .touched_services
+            .lock()
+            .expect("test Keychain service log lock")
+            .iter()
+            .all(|service| service == ROUTER_KEYCHAIN_SERVICE)
+    );
     let account_id = account_id("fresh-production-open-login");
     let request = CredentialActivationRequest::new(
         Provider::Openai,
@@ -99,7 +127,8 @@ fn production_opener_marks_a_fresh_store_ready_for_login() {
         AccountCredentialBundle::imported_codex_auth(
             "fresh-root-access-canary",
             Some("fresh-root-refresh-canary".to_owned()),
-        ),
+        )
+        .into(),
     );
 
     let generation = must_ok(runtime.block_on(CredentialActivation::activate_login(
@@ -133,7 +162,8 @@ fn login_activation_claims_first_generation_and_removes_transient_claim() {
         AccountCredentialBundle::imported_codex_auth(
             "first-login-access-canary",
             Some("first-login-refresh-canary".to_owned()),
-        ),
+        )
+        .into(),
     );
 
     let generation = must_ok(runtime.block_on(CredentialActivation::activate_login(
@@ -192,6 +222,7 @@ fn failed_login_staged_write_restores_healthy_maintenance() {
         codex_router_state::credential_maintenance::ClaimPurpose::Refresh,
         1,
         2,
+        1_000,
     ))));
     assert!(must_ok(runtime.block_on(
         state.activate_claimed_credential_generation(
@@ -206,7 +237,27 @@ fn failed_login_staged_write_restores_healthy_maintenance() {
     let maintenance_before =
         must_ok(runtime.block_on(state.load_credential_maintenance(&account_id)))
             .expect("successful refresh creates healthy maintenance");
-    let failing_store = FailingStagedCredentialStore(secrets);
+    for generation in 1..=2 {
+        let old_generation_key = must_ok(provider_credential_bundle_key(
+            Provider::Openai,
+            &account_id,
+            generation,
+        ));
+        must_ok(
+            secrets.write_secret(
+                &old_generation_key,
+                &must_ok(
+                    AccountCredentialBundle::imported_codex_auth(
+                        format!("preserved-generation-{generation}-access"),
+                        Some(format!("preserved-generation-{generation}-refresh")),
+                    )
+                    .with_expires_unix_seconds(10_000)
+                    .to_secret_string(),
+                ),
+            ),
+        );
+    }
+    let failing_store = FailingStagedCredentialStore(secrets.clone());
     let request = CredentialActivationRequest::new(
         Provider::Openai,
         account_id.clone(),
@@ -214,7 +265,8 @@ fn failed_login_staged_write_restores_healthy_maintenance() {
         AccountCredentialBundle::imported_codex_auth(
             "failed-login-access-canary",
             Some("failed-login-refresh-canary".to_owned()),
-        ),
+        )
+        .into(),
     );
 
     let result = runtime.block_on(CredentialActivation::activate_login(
@@ -235,6 +287,316 @@ fn failed_login_staged_write_restores_healthy_maintenance() {
         .expect("existing account remains registered");
     assert_eq!(account.status(), AccountStatus::Enabled);
     assert_eq!(account.active_credential_generation(), Some(2));
+    for generation in 1..=2 {
+        let old_generation_key = must_ok(provider_credential_bundle_key(
+            Provider::Openai,
+            &account_id,
+            generation,
+        ));
+        assert!(
+            secrets.read_secret(&old_generation_key).is_ok(),
+            "failed login activation leaves generation {generation} untouched"
+        );
+    }
+    let failed_login_key = must_ok(provider_credential_bundle_key(
+        Provider::Openai,
+        &account_id,
+        3,
+    ));
+    assert!(
+        secrets.read_secret(&failed_login_key).is_err(),
+        "a staged file is removed after its login claim is successfully restored"
+    );
+}
+
+#[test]
+fn login_activation_reclaims_fresh_orphaned_login_claim_under_account_lock() {
+    let temp_dir = AuthTestTempDir::new("login-reclaims-fresh-orphaned-claim");
+    let state_path = temp_dir.path().join("state.sqlite");
+    let secret_root = temp_dir.path().join("secrets");
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("test runtime should build");
+    let state = must_ok(runtime.block_on(AsyncSqliteStateStore::open(&state_path)));
+    let secrets = must_ok(
+        codex_router_secret_store::test_support::open_encrypted_credential_store(&secret_root),
+    );
+    let account_id = account_id("login-reclaims-fresh-claim");
+    must_ok(
+        runtime.block_on(
+            state.upsert_account(
+                &AccountRecord::new(
+                    Provider::Claude,
+                    account_id.clone(),
+                    "Claude account",
+                    AccountStatus::Enabled,
+                )
+                .with_active_credential_generation(1),
+            ),
+        ),
+    );
+    for generation in 1..=2 {
+        let key = must_ok(provider_credential_bundle_key(
+            Provider::Claude,
+            &account_id,
+            generation,
+        ));
+        let bundle = must_ok(
+            codex_router_secret_store::credential_bundle::CredentialBundle::new_claude(
+                SecretString::new(format!("generation-{generation}-access")),
+                SecretString::new(format!("generation-{generation}-refresh")),
+                10_000,
+            ),
+        );
+        must_ok(secrets.write_secret(&key, &must_ok(bundle.to_secret_string())));
+    }
+    let claim_started_unix_seconds = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock should be after the Unix epoch")
+        .as_secs();
+    assert!(must_ok(runtime.block_on(state.claim_credential_refresh(
+        &account_id,
+        Provider::Claude,
+        codex_router_state::credential_maintenance::ClaimPurpose::Login,
+        1,
+        2,
+        claim_started_unix_seconds,
+    ))));
+
+    let activated_generation = must_ok(
+        runtime.block_on(CredentialActivation::activate_login(
+            &state,
+            &secrets,
+            CredentialActivationRequest::new(
+                Provider::Claude,
+                account_id.clone(),
+                "Claude account",
+                codex_router_secret_store::credential_bundle::CredentialBundle::new_claude(
+                    SecretString::new("replacement-access"),
+                    SecretString::new("replacement-refresh"),
+                    20_000,
+                )
+                .expect("Claude login bundle should validate"),
+            ),
+        )),
+    );
+
+    assert_eq!(activated_generation, 2);
+    let orphan_key = must_ok(provider_credential_bundle_key(
+        Provider::Claude,
+        &account_id,
+        2,
+    ));
+    let activated_bundle = must_ok(
+        codex_router_secret_store::credential_bundle::CredentialBundle::from_secret_string(
+            Provider::Claude,
+            must_ok(secrets.read_secret(&orphan_key)),
+        ),
+    );
+    assert_eq!(
+        activated_bundle.access_token().expose_secret(),
+        "replacement-access",
+        "the reclaimed generation is overwritten by the new login bundle"
+    );
+    assert_eq!(
+        must_ok(runtime.block_on(state.load_account(&account_id)))
+            .and_then(|account| account.active_credential_generation()),
+        Some(activated_generation)
+    );
+}
+
+#[test]
+fn claude_login_activation_keeps_only_verified_active_and_previous_files_without_plaintext_writes()
+{
+    let temp_dir = AuthTestTempDir::new("claude-login-activation-traced-files");
+    let state_path = temp_dir.path().join("state.sqlite");
+    let secret_root = temp_dir.path().join("secrets");
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("test runtime should build");
+    let state = must_ok(runtime.block_on(AsyncSqliteStateStore::open(&state_path)));
+    let (secrets, write_trace) = must_ok(
+        codex_router_secret_store::test_support::open_encrypted_credential_store_with_write_trace(
+            &secret_root,
+        ),
+    );
+    let account_id = account_id("claude-login-activation-pruning");
+    must_ok(
+        runtime.block_on(
+            state.upsert_account(
+                &AccountRecord::new(
+                    Provider::Claude,
+                    account_id.clone(),
+                    "Claude login",
+                    AccountStatus::Enabled,
+                )
+                .with_active_credential_generation(3),
+            ),
+        ),
+    );
+    for generation in 1..=3 {
+        let key = must_ok(provider_credential_bundle_key(
+            Provider::Claude,
+            &account_id,
+            generation,
+        ));
+        let bundle = must_ok(
+            codex_router_secret_store::credential_bundle::CredentialBundle::new_claude(
+                SecretString::new(format!("old-claude-access-{generation}")),
+                SecretString::new(format!("old-claude-refresh-{generation}")),
+                10_000,
+            ),
+        );
+        must_ok(secrets.write_secret(&key, &must_ok(bundle.to_secret_string())));
+    }
+
+    let generation = must_ok(
+        runtime.block_on(CredentialActivation::activate_login(
+            &state,
+            &secrets,
+            CredentialActivationRequest::new(
+                Provider::Claude,
+                account_id.clone(),
+                "Claude login",
+                codex_router_secret_store::credential_bundle::CredentialBundle::new_claude(
+                    SecretString::new("claude-login-access-canary"),
+                    SecretString::new("claude-login-refresh-canary"),
+                    20_000,
+                )
+                .expect("Claude login bundle should validate"),
+            ),
+        )),
+    );
+
+    assert_eq!(generation, 4);
+    for generation in 1..=2 {
+        let key = must_ok(provider_credential_bundle_key(
+            Provider::Claude,
+            &account_id,
+            generation,
+        ));
+        assert!(secrets.read_secret(&key).is_err());
+    }
+    for generation in 3..=4 {
+        let key = must_ok(provider_credential_bundle_key(
+            Provider::Claude,
+            &account_id,
+            generation,
+        ));
+        assert!(secrets.read_secret(&key).is_ok());
+    }
+    let token_canaries = [
+        "claude-login-access-canary",
+        "claude-login-refresh-canary",
+        "old-claude-access-1",
+        "old-claude-refresh-1",
+        "old-claude-access-2",
+        "old-claude-refresh-2",
+        "old-claude-access-3",
+        "old-claude-refresh-3",
+    ];
+    for event in write_trace.events() {
+        if let codex_router_secret_store::test_support::FileWriteTraceEvent::TemporaryFileWritten {
+            contents,
+            ..
+        } = event
+        {
+            let temporary_bytes = String::from_utf8_lossy(&contents);
+            for canary in token_canaries {
+                assert!(!temporary_bytes.contains(canary));
+            }
+        }
+    }
+    for file in must_ok(std::fs::read_dir(&secret_root)) {
+        let bytes = must_ok(file).path();
+        let file_bytes = must_ok(std::fs::read(bytes));
+        let stored_file_contents = String::from_utf8_lossy(&file_bytes);
+        for canary in token_canaries {
+            assert!(!stored_file_contents.contains(canary));
+        }
+    }
+}
+
+#[test]
+fn login_pruning_preserves_previously_active_generation_across_a_gap() {
+    let temp_dir = AuthTestTempDir::new("login-pruning-preserves-active-across-gap");
+    let state_path = temp_dir.path().join("state.sqlite");
+    let secret_root = temp_dir.path().join("secrets");
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("test runtime should build");
+    let state = must_ok(runtime.block_on(AsyncSqliteStateStore::open(&state_path)));
+    let secrets = must_ok(
+        codex_router_secret_store::test_support::open_encrypted_credential_store(&secret_root),
+    );
+    let account_id = account_id("login-pruning-gap");
+    must_ok(
+        runtime.block_on(
+            state.upsert_account(
+                &AccountRecord::new(
+                    Provider::Claude,
+                    account_id.clone(),
+                    "Claude login gap",
+                    AccountStatus::Enabled,
+                )
+                .with_active_credential_generation(1),
+            ),
+        ),
+    );
+
+    for (generation, access_token) in [(1, "active-access"), (2, "orphan-access")] {
+        let key = must_ok(provider_credential_bundle_key(
+            Provider::Claude,
+            &account_id,
+            generation,
+        ));
+        let bundle = must_ok(
+            codex_router_secret_store::credential_bundle::CredentialBundle::new_claude(
+                SecretString::new(access_token),
+                SecretString::new(format!("{access_token}-refresh")),
+                10_000,
+            ),
+        );
+        must_ok(secrets.write_secret(&key, &must_ok(bundle.to_secret_string())));
+    }
+
+    let activated_generation = must_ok(
+        runtime.block_on(CredentialActivation::activate_login(
+            &state,
+            &secrets,
+            CredentialActivationRequest::new(
+                Provider::Claude,
+                account_id.clone(),
+                "Claude login gap",
+                codex_router_secret_store::credential_bundle::CredentialBundle::new_claude(
+                    SecretString::new("replacement-access"),
+                    SecretString::new("replacement-refresh"),
+                    20_000,
+                )
+                .expect("Claude login bundle should validate"),
+            ),
+        )),
+    );
+
+    assert_eq!(activated_generation, 3);
+    let previous_active_key = must_ok(provider_credential_bundle_key(
+        Provider::Claude,
+        &account_id,
+        1,
+    ));
+    let activated_key = must_ok(provider_credential_bundle_key(
+        Provider::Claude,
+        &account_id,
+        activated_generation,
+    ));
+    assert!(
+        secrets.read_secret(&previous_active_key).is_ok(),
+        "the previously active generation remains readable during pruning"
+    );
+    assert!(secrets.read_secret(&activated_key).is_ok());
 }
 
 #[test]
@@ -283,7 +645,8 @@ fn login_activation_reenables_a_disabled_account_on_the_next_generation() {
         AccountCredentialBundle::imported_codex_auth(
             "new-access-canary",
             Some("new-refresh-canary".to_owned()),
-        ),
+        )
+        .into(),
     );
 
     let generation = must_ok(runtime.block_on(CredentialActivation::activate_login(
@@ -328,7 +691,8 @@ fn login_activation_rejects_a_provider_mismatch_before_writing() {
         AccountCredentialBundle::imported_codex_auth(
             "must-not-write-access-canary",
             Some("must-not-write-refresh-canary".to_owned()),
-        ),
+        )
+        .into(),
     );
 
     let result = runtime.block_on(CredentialActivation::activate_login(
@@ -345,4 +709,50 @@ fn login_activation_rejects_a_provider_mismatch_before_writing() {
         .expect("Claude account should remain registered");
     assert_eq!(account.provider(), Provider::Claude);
     assert_eq!(account.active_credential_generation(), None);
+}
+
+#[test]
+fn claude_bundle_under_openai_provider_is_rejected_before_state_or_secret_write() {
+    let temp_dir = AuthTestTempDir::new("claude-bundle-under-openai-provider");
+    let state_path = temp_dir.path().join("state.sqlite");
+    let secret_root = temp_dir.path().join("secrets");
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("test runtime should build");
+    let state = must_ok(runtime.block_on(AsyncSqliteStateStore::open(&state_path)));
+    let secrets = must_ok(
+        codex_router_secret_store::test_support::open_encrypted_credential_store(&secret_root),
+    );
+    let account_id = account_id("claude-bundle-under-openai-provider");
+    let claude_bundle = must_ok(
+        codex_router_secret_store::credential_bundle::CredentialBundle::new_claude(
+            SecretString::new("must-not-write-claude-access"),
+            SecretString::new("must-not-write-claude-refresh"),
+            10_000,
+        ),
+    );
+
+    let result = runtime.block_on(CredentialActivation::activate_login(
+        &state,
+        &secrets,
+        CredentialActivationRequest::new(
+            Provider::Openai,
+            account_id.clone(),
+            "misrouted Claude bundle",
+            claude_bundle,
+        ),
+    ));
+
+    assert!(matches!(
+        result,
+        Err(crate::credential_activation::CredentialActivationError::CredentialProviderMismatch)
+    ));
+    assert!(must_ok(runtime.block_on(state.load_account(&account_id))).is_none());
+    let openai_key = must_ok(provider_credential_bundle_key(
+        Provider::Openai,
+        &account_id,
+        1,
+    ));
+    assert!(secrets.read_secret(&openai_key).is_err());
 }

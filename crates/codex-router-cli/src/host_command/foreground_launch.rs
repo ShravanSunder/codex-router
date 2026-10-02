@@ -26,7 +26,10 @@ use codex_router_host::ManagedUpdateInputs;
 use codex_router_host::PreExecTelemetry;
 
 use super::HostCommandError;
+mod router_child_command;
+
 use crate::CliContext;
+use router_child_command::{RouterChildCommandInputs, router_child_command};
 
 struct HostPreExecTelemetry(crate::telemetry::TelemetryShutdownHandle);
 
@@ -138,19 +141,14 @@ pub(super) async fn run_foreground_host(
     let otlp_endpoint = crate::telemetry::foreground_host_otlp_endpoint(
         context.env_var("OTEL_EXPORTER_OTLP_ENDPOINT"),
     );
-    let router_command = ChildCommandSpec::new(current_executable.clone())
-        .with_arguments([
-            OsString::from("serve"),
-            OsString::from("--port"),
-            OsString::from(port.to_string()),
-            OsString::from("--state-db"),
-            router_root.join("state.sqlite").into_os_string(),
-            OsString::from("--secret-root"),
-            router_root.join("secrets").into_os_string(),
-        ])
-        .with_environment("OTEL_EXPORTER_OTLP_ENDPOINT", otlp_endpoint)
-        .with_environment("OTEL_EXPORTER_OTLP_PROTOCOL", "http/protobuf")
-        .with_output(ChildOutput::Telemetry);
+    let router_command = router_child_command(RouterChildCommandInputs {
+        executable: current_executable.clone(),
+        router_root: router_root.clone(),
+        port,
+        launch_mode,
+        otlp_endpoint,
+        context,
+    });
     let replacement_command = host_replacement_command(HostReplacementCommandInputs {
         executable: current_executable,
         router_root: router_root.clone(),

@@ -1,0 +1,17 @@
+{
+  "status": 429,
+  "headers": {
+    "anthropic-ratelimit-unified-status": "rejected",
+    "anthropic-ratelimit-unified-representative-claim": "five_hour",
+    "anthropic-ratelimit-unified-5h-status": "rejected",
+    "anthropic-ratelimit-unified-5h-reset": "1764554400",
+    "anthropic-ratelimit-unified-7d-status": "allowed"
+  },
+  "body": {
+    "type": "error",
+    "error": {
+      "type": "rate_limit_error",
+      "message": "Shared usage window rejected."
+    }
+  }
+}

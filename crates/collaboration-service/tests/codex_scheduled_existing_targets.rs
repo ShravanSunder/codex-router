@@ -1,11 +1,12 @@
 //! Existing scheduled Codex targets preserve and verify the declared workspace.
 use agent_automation::RouteEffectEvidence;
 use collaboration_protocol::{
-    CodexGeneration, MessageHeaderContext, MessageHeaderOrigin, RouterNoticeKind,
-    SessionDisplayName, SessionRef,
+    CodexGeneration, MachineId, MachineLabel, PushHeaderFacts, PushId, PushKind, PushLineInput,
+    PushOrigin, RouterLink, SessionRef, render_push_line,
 };
 use collaboration_service::{
-    DeliveryFuture, DeliveryPrecondition, NativeControlBackend, NativeGenerationGate,
+    DeliveryFuture, DeliveryPrecondition, LoadPolicy, NativeControlBackend, NativeGenerationGate,
+    ScheduledRunPayload, layer_zero::PreparedPush,
 };
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
@@ -65,7 +66,23 @@ async fn scheduled_run_to_materialized_thread_preserves_declared_workspace()
         Arc::new(collaboration_service::UnmaterializedThreadHolder::new()),
     );
     let run_id = agent_automation::RunId::generate();
-    let expected_run_id = run_id.clone();
+    let schedule_id = agent_automation::ScheduleId::generate();
+    let push_id = PushId::try_from(uuid::Uuid::now_v7().to_string())?;
+    let prepared_line = render_push_line(&PushLineInput {
+        link: RouterLink::new(MachineId::try_from(service_id.to_owned())?, push_id.clone()),
+        machine_label: MachineLabel::try_from("fixture-host".to_owned())?,
+        origin: PushOrigin::Router(PushKind::ScheduleRun),
+        header_facts: PushHeaderFacts::ScheduleRun {
+            schedule_id,
+            run_id: run_id.clone(),
+        },
+        body: Some("materialized scheduled input".to_owned()),
+    })?;
+    let expected_push_id = push_id.clone();
+    let expected_line = prepared_line.clone();
+    if push_id.as_str() == run_id.as_str() {
+        return Err("schedule push id must be distinct from RunId".into());
+    }
     let native = tokio::spawn(async move {
         for methods in [
             &["thread/read"][..],
@@ -92,20 +109,14 @@ async fn scheduled_run_to_materialized_thread_preserves_declared_workspace()
                     continue;
                 }
                 if expected == "turn/start"
-                    && request["params"]["clientUserMessageId"] != expected_run_id.as_str()
+                    && request["params"]["clientUserMessageId"] != expected_push_id.as_str()
                 {
-                    return Err("scheduled turn lost run ID".into());
+                    return Err("scheduled turn lost push correlation id".into());
                 }
                 if expected == "turn/start"
-                    && !request["params"]["input"][0]["text"]
-                        .as_str()
-                        .is_some_and(|text| {
-                            text.starts_with(
-                                "🤖 Codex Main ← ⏰ Router schedule\nRouter delivery\n",
-                            ) && text.ends_with("\n\nmaterialized scheduled input")
-                        })
+                    && request["params"]["input"][0]["text"] != expected_line
                 {
-                    return Err("scheduled turn omitted its Router identity header".into());
+                    return Err("scheduled turn did not use the prepared push line".into());
                 }
                 let result = if expected == "thread/read" {
                     json!({"thread":{"id":"materialized-thread","cwd":"/work","status":{"type":"idle"}}})
@@ -167,13 +178,12 @@ async fn scheduled_run_to_materialized_thread_preserves_declared_workspace()
             collaboration_service::ScheduledRunSubmission {
                 run_id,
                 target,
-                message: "materialized scheduled input".to_owned().try_into()?,
-                header_context: MessageHeaderContext {
-                    sender_display_name: None,
-                    recipient_display_name: Some(SessionDisplayName::try_from(
-                        "🤖 Codex Main".to_owned(),
-                    )?),
-                    origin: MessageHeaderOrigin::RouterNotice(RouterNoticeKind::Schedule),
+                payload: ScheduledRunPayload::Existing {
+                    prepared: PreparedPush {
+                        push_id,
+                        line: prepared_line.try_into()?,
+                        load_policy: LoadPolicy::MayLoad,
+                    },
                 },
                 precondition: DeliveryPrecondition::Unpinned,
                 inputs,

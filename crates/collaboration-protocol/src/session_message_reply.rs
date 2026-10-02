@@ -1,5 +1,5 @@
-//! Reply to the latest accepted Agent message delivered to one exact session.
-use crate::{DeliveryReceipt, MessageText, SessionRef};
+//! Reply to one stored direct message using its push id or Router link.
+use crate::{DeliveryReceipt, MessageText, PushDeliveryState, PushId, SessionRef};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -8,18 +8,19 @@ use serde::{Deserialize, Serialize};
 pub struct SessionMessageReplyParams {
     /// Session receiving the earlier Agent communication and issuing this reply.
     pub caller: SessionRef,
-    /// Refuses to send if the latest accepted Agent sender differs from this session.
-    #[serde(default)]
-    pub expect_sender: Option<SessionRef>,
+    /// Local push id or router:// machine/push/id link being answered.
+    pub reference: String,
     pub text: MessageText,
 }
 
 #[derive(Clone, Debug, JsonSchema, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SessionMessageReplyResult {
-    /// Resolved recipient selected from the caller's latest accepted Agent delivery.
+    /// Sender of the selected direct message.
     pub target: SessionRef,
-    /// Emoji-prefixed display identity for the resolved recipient.
     pub target_identity: String,
+    pub push_id: PushId,
+    pub link: String,
+    pub delivery_state: PushDeliveryState,
     pub receipt: DeliveryReceipt,
 }

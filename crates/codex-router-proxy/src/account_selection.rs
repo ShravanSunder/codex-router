@@ -14,6 +14,7 @@ use codex_router_core::affinity::hash_previous_response_id;
 use codex_router_core::ids::AccountId;
 use codex_router_core::ids::TokenGeneration;
 use codex_router_core::provider::Provider;
+use codex_router_core::route_profile::CLAUDE_MESSAGES;
 use codex_router_core::route_profile::ClaudeFiveHourReservePercent;
 use codex_router_core::route_profile::DEFAULT_CLAUDE_FIVE_HOUR_RESERVE_PERCENT;
 use codex_router_core::route_profile::RESPONSES_HTTP;
@@ -54,6 +55,7 @@ use codex_router_state::repositories::AffinityRepository;
 use codex_router_state::repositories::SelectorQuotaRepository;
 use codex_router_state::selection_projection::AsyncSelectionProjectionRepository;
 use codex_router_state::selection_projection::project_route_band_selection_inputs_with_active_counts_read_only;
+use codex_router_state::session_account_affinity::PinObservation;
 use codex_router_state::sqlite::AsyncAffinityRepository;
 use codex_router_state::sqlite::AsyncSessionAccountAffinityRepository;
 use codex_router_state::sqlite::StateStoreError;
@@ -75,8 +77,10 @@ use crate::session_account_affinity_cache::SessionAccountAffinityCache;
 use crate::session_account_affinity_cache::SessionAffinityActivityHandle;
 use crate::session_account_affinity_cache::SharedSessionAccountAffinityCache;
 use crate::session_account_affinity_cache::lookup_session_account_affinity;
+use crate::session_account_affinity_cache::observe_claude_session_account_affinity;
 use crate::session_account_affinity_cache::publish_session_account_affinity;
 use crate::session_account_affinity_cache::reconcile_persisted_session_account_affinity;
+use crate::session_account_affinity_cache::release_claude_session_account_affinity;
 
 #[path = "account_selection/floor_switch_peer.rs"]
 mod floor_switch_peer;
@@ -214,6 +218,7 @@ pub const DEFAULT_ACCOUNT_HOLD_COOLDOWN_SECONDS: u64 = 120;
 pub const PROMPT_CACHE_ACCOUNT_AFFINITY_IDLE_TTL_SECONDS: u64 =
     DEFAULT_SESSION_PIN_IDLE_TTL.as_secs();
 const ACTIVE_SESSION_RESERVATION_UNITS: u32 = 1;
+const MAX_CLAUDE_ADMISSION_PIN_RELEASE_ATTEMPTS: usize = 2;
 const ACTIVE_RESERVATION_MAX_AGE_SECONDS: u64 = 7_200;
 const RUNTIME_QUOTA_EXHAUSTION_MAX_AGE_SECONDS: u64 = 300;
 const SHORT_QUOTA_WAIT_MIN_JITTER_SECONDS: u64 = 60;
@@ -567,6 +572,7 @@ pub struct SelectedAccountDecision {
     selection_reason: String,
     active_reservation_guard: Option<ActiveReservationGuard>,
     session_affinity_activity_handle: Option<SessionAffinityActivityHandle>,
+    pin_observation: Option<PinObservation>,
 }
 
 impl SelectedAccountDecision {
@@ -578,6 +584,7 @@ impl SelectedAccountDecision {
             selection_reason: selection_reason.into(),
             active_reservation_guard: None,
             session_affinity_activity_handle: None,
+            pin_observation: None,
         }
     }
 
@@ -632,6 +639,19 @@ impl SelectedAccountDecision {
     #[must_use]
     pub const fn session_affinity_activity_handle(&self) -> Option<&SessionAffinityActivityHandle> {
         self.session_affinity_activity_handle.as_ref()
+    }
+
+    /// Carries the admission or release authority through Claude's attempt lifecycle.
+    #[must_use]
+    pub(crate) fn with_pin_observation(mut self, observation: Option<PinObservation>) -> Self {
+        self.pin_observation = observation;
+        self
+    }
+
+    /// Returns the one versioned observation that may publish this Claude attempt.
+    #[must_use]
+    pub(crate) const fn pin_observation(&self) -> Option<&PinObservation> {
+        self.pin_observation.as_ref()
     }
 }
 
@@ -779,6 +799,7 @@ where
         + Sync,
 {
     state_repository: &'a R,
+    claude_affinity_writer: &'a (dyn AsyncSessionAccountAffinityRepository + Sync),
     weighted_selectors: RouteBandWeightedSelectors,
     account_holds: RouteBandAccountHolds,
     active_reservations: RouteBandReservationBooks,
@@ -857,6 +878,7 @@ where
     pub fn new(state_repository: &'a R) -> Self {
         Self {
             state_repository,
+            claude_affinity_writer: state_repository,
             weighted_selectors: Arc::new(Mutex::new(HashMap::new())),
             account_holds: Arc::new(Mutex::new(HashMap::new())),
             active_reservations: Arc::new(Mutex::new(HashMap::new())),
@@ -883,6 +905,7 @@ where
     ) -> Self {
         Self {
             state_repository,
+            claude_affinity_writer: state_repository,
             weighted_selectors,
             account_holds,
             active_reservations: Arc::new(Mutex::new(HashMap::new())),
@@ -911,6 +934,7 @@ where
     ) -> Self {
         Self {
             state_repository,
+            claude_affinity_writer: state_repository,
             weighted_selectors,
             account_holds,
             active_reservations: Arc::new(Mutex::new(HashMap::new())),
@@ -940,6 +964,7 @@ where
     ) -> Self {
         Self {
             state_repository,
+            claude_affinity_writer: state_repository,
             weighted_selectors,
             account_holds,
             active_reservations,
@@ -992,6 +1017,7 @@ where
     ) -> Self {
         Self {
             state_repository,
+            claude_affinity_writer: state_repository,
             weighted_selectors: runtime_state.weighted_selectors,
             account_holds: runtime_state.account_holds,
             active_reservations: runtime_state.active_reservations,
@@ -1021,6 +1047,16 @@ where
     #[must_use]
     pub fn with_session_affinity_writer(mut self, db_write_actor: DbWriteActor) -> Self {
         self.session_affinity_writer = Some(db_write_actor);
+        self
+    }
+
+    /// Routes Claude pin CAS through a writable repository while reads keep their owner.
+    #[must_use]
+    pub(crate) fn with_claude_affinity_writer(
+        mut self,
+        writer: &'a (dyn AsyncSessionAccountAffinityRepository + Sync),
+    ) -> Self {
+        self.claude_affinity_writer = writer;
         self
     }
 
@@ -1244,6 +1280,66 @@ where
             } else {
                 None
             };
+            let session_id = session_id_for_route(request, route_kind);
+            let mut pin_observation =
+                match session_id.filter(|_| route_profile.provider == Provider::Claude) {
+                    Some(session_id) => Some(
+                        observe_claude_session_account_affinity(
+                            &self.session_affinity_cache,
+                            session_id,
+                            self.state_repository,
+                            (self.clock)(),
+                        )
+                        .await
+                        .map_err(|_error| HttpProxyError::Selection {
+                            reason: QuotaAwareAccountSelectorError::StateUnavailable,
+                        })?,
+                    ),
+                    None => None,
+                };
+            let reserve_release_required = pin_observation
+                .as_ref()
+                .and_then(PinObservation::active_account)
+                .is_some_and(|account_id| {
+                    assessment_account_must_yield(&assessment, account_id, &route_profile)
+                });
+            let release_attempt_limit = if reserve_release_required {
+                MAX_CLAUDE_ADMISSION_PIN_RELEASE_ATTEMPTS
+            } else {
+                1
+            };
+            let mut select_afresh_after_pin_release_contention = false;
+            for release_attempt in 0..release_attempt_limit {
+                let Some(session_id) = session_id else { break };
+                let Some(observation) = pin_observation.as_ref() else {
+                    break;
+                };
+                if !observation.active_account().is_some_and(|account_id| {
+                    !assessment_account_is_available(&assessment, account_id)
+                        || assessment_account_must_yield(&assessment, account_id, &route_profile)
+                }) {
+                    break;
+                }
+                let release = release_claude_session_account_affinity(
+                    &self.session_affinity_cache,
+                    session_id,
+                    observation,
+                    self.state_repository,
+                    self.claude_affinity_writer,
+                    (self.clock)(),
+                )
+                .await
+                .map_err(|_error| HttpProxyError::Selection {
+                    reason: QuotaAwareAccountSelectorError::StateUnavailable,
+                })?;
+                select_afresh_after_pin_release_contention = reserve_release_required
+                    && release_attempt + 1 == release_attempt_limit
+                    && !release.released;
+                pin_observation = Some(release.observation);
+                if release.released {
+                    break;
+                }
+            }
             if assessment.selected_pool() == SelectedPool::None {
                 if affinity_owner_account_id.as_ref().is_some_and(|owner_id| {
                     assessment.accounts().iter().any(|account| {
@@ -1264,15 +1360,8 @@ where
                 }
                 return Err(empty_assessment_selection_error(&assessment));
             }
-            let session_id = if route_kind.previous_response_affinity_capable() {
-                request
-                    .header_value("session-id")
-                    .filter(|session_id| !session_id.is_empty())
-            } else {
-                None
-            };
             let session_affinity = match session_affinity_lookup_session_id(
-                session_id,
+                session_id.filter(|_| route_profile.provider != Provider::Claude),
                 affinity_owner_account_id.is_some(),
             ) {
                 Some(session_id) => {
@@ -1372,18 +1461,23 @@ where
                 );
             }
 
-            if let Some(session_affinity) = session_affinity.as_ref()
-                && assessment_account_is_available(&assessment, session_affinity.account_id())
-                && !assessment_account_must_yield(
-                    &assessment,
-                    session_affinity.account_id(),
-                    &route_profile,
-                )
+            let pinned_account_id = pin_observation
+                .as_ref()
+                .and_then(PinObservation::active_account)
+                .or_else(|| {
+                    session_affinity
+                        .as_ref()
+                        .map(|affinity| affinity.account_id())
+                });
+            if let Some(pinned_account_id) = pinned_account_id
+                && !select_afresh_after_pin_release_contention
+                && assessment_account_is_available(&assessment, pinned_account_id)
+                && !assessment_account_must_yield(&assessment, pinned_account_id, &route_profile)
             {
                 let selected = select_affinity_owner(
                     route_band,
                     route_profile.provider,
-                    session_affinity.account_id(),
+                    pinned_account_id,
                     &assessment,
                     &mut account_holds,
                     now_unix_seconds,
@@ -1398,7 +1492,7 @@ where
                     now_unix_seconds,
                 )?;
                 return publish_selected_session_affinity(
-                    selected,
+                    selected.with_pin_observation(pin_observation),
                     route_profile.provider,
                     &self.session_affinity_cache,
                     self.session_affinity_writer.as_ref(),
@@ -1426,7 +1520,7 @@ where
                 now_unix_seconds,
             )?;
             publish_selected_session_affinity(
-                selected,
+                selected.with_pin_observation(pin_observation),
                 route_profile.provider,
                 &self.session_affinity_cache,
                 self.session_affinity_writer.as_ref(),
@@ -1436,6 +1530,19 @@ where
             )
         })
     }
+}
+
+fn session_id_for_route(request: &HttpProxyRequest, route_kind: RouteKind) -> Option<&str> {
+    let header_name = if route_kind == RouteKind::ClaudeMessages {
+        "x-claude-code-session-id"
+    } else if route_kind.previous_response_affinity_capable() {
+        "session-id"
+    } else {
+        return None;
+    };
+    request
+        .header_value(header_name)
+        .filter(|session_id| !session_id.is_empty())
 }
 
 fn session_affinity_lookup_session_id(
@@ -1528,6 +1635,9 @@ fn publish_selected_session_affinity(
     route_band: RouteBand,
     now_unix_seconds: u64,
 ) -> Result<SelectedAccountDecision, HttpProxyError> {
+    if provider == Provider::Claude {
+        return Ok(selected);
+    }
     let Some(session_id) = session_id else {
         return Ok(selected);
     };
@@ -1557,7 +1667,7 @@ fn select_from_account_states(
             .map_err(|_error| HttpProxyError::Selection {
                 reason: QuotaAwareAccountSelectorError::SelectorStateUnavailable,
             })?;
-    select_from_account_states_with_selector(accounts, &mut weighted_selector)
+    select_from_account_states_with_selector(accounts, &mut weighted_selector, current_unix_seconds)
 }
 
 fn quota_states_excluding_attempted(
@@ -1665,14 +1775,16 @@ fn active_session_counts_by_account(book: &ReservationBook) -> HashMap<AccountId
 fn select_from_account_states_with_selector(
     accounts: &[QuotaAwareAccountState],
     weighted_selector: &mut WeightedDeficitSelector,
+    mut clock: impl FnMut() -> u64,
 ) -> Result<SelectedAccountDecision, HttpProxyError> {
+    let now_unix_seconds = clock();
     let account_inputs = accounts
         .iter()
-        .map(account_input_from_quota_state)
+        .map(|account| account_input_from_quota_state(account, now_unix_seconds))
         .collect::<Vec<_>>();
     let assessment_input = BurnDownRouteBandAssessmentInput::new(
         RouteBand::Responses,
-        current_unix_seconds(),
+        now_unix_seconds,
         RESPONSES_HTTP.clone(),
         account_inputs,
     );
@@ -2471,6 +2583,7 @@ fn route_kind_for_request(
 fn route_profile_for_kind(route_kind: RouteKind) -> RouteProfile {
     match route_kind {
         RouteKind::ResponsesWebSocket => RESPONSES_WEBSOCKET.clone(),
+        RouteKind::ClaudeMessages => CLAUDE_MESSAGES.clone(),
         RouteKind::Responses
         | RouteKind::Models
         | RouteKind::MemoriesTraceSummarize
@@ -2612,18 +2725,20 @@ fn skip_json_whitespace(body: &[u8], mut cursor: usize) -> usize {
     cursor
 }
 
-fn account_input_from_quota_state(account: &QuotaAwareAccountState) -> BurnDownAccountInput {
+fn account_input_from_quota_state(
+    account: &QuotaAwareAccountState,
+    now_unix_seconds: u64,
+) -> BurnDownAccountInput {
     let status = quota_window_status_from_freshness(account.freshness);
-    let reset_base = current_unix_seconds();
     let short_window = QuotaWindowFact::new(V1_SHORT_WINDOW_SECONDS, status)
         .with_remaining_headroom(account.remaining_headroom)
-        .with_reset_unix_seconds(reset_base)
-        .with_observed_unix_seconds(reset_base)
+        .with_reset_unix_seconds(now_unix_seconds)
+        .with_observed_unix_seconds(now_unix_seconds)
         .with_effective(true);
     let weekly_window = QuotaWindowFact::new(V1_WEEKLY_WINDOW_SECONDS, status)
         .with_remaining_headroom(account.remaining_headroom)
-        .with_reset_unix_seconds(reset_base)
-        .with_observed_unix_seconds(reset_base)
+        .with_reset_unix_seconds(now_unix_seconds)
+        .with_observed_unix_seconds(now_unix_seconds)
         .with_effective(false);
     BurnDownAccountInput::new(
         account.account_id.clone(),
@@ -2691,9 +2806,11 @@ mod tests {
     use super::QuotaAwareAccountState;
     use super::RouteBandReservationBooks;
     use super::SqliteActiveClientLeaseReporter;
+    use crate::routes::RouteKind;
     use codex_router_core::ids::AccountId;
     use codex_router_core::ids::TokenGeneration;
     use codex_router_core::provider::Provider;
+    use codex_router_core::route_profile::CLAUDE_MESSAGES;
     use codex_router_core::route_profile::RESPONSES_HTTP;
     use codex_router_core::routes::RouteBand;
     use codex_router_quota::snapshot::SnapshotFreshness;
@@ -2701,6 +2818,7 @@ mod tests {
     use codex_router_selection::reservation::ReservationHandle;
     use codex_router_state::sqlite::AsyncSqliteStateStore;
     use std::collections::HashMap;
+    use std::collections::VecDeque;
     use std::env;
     use std::path::PathBuf;
     use std::sync::Arc;
@@ -2725,6 +2843,364 @@ mod tests {
             super::session_affinity_lookup_session_id(Some("session-id"), true),
             None
         );
+    }
+
+    #[test]
+    fn claude_messages_route_uses_the_claude_selection_profile() {
+        assert_eq!(
+            super::route_profile_for_kind(RouteKind::ClaudeMessages),
+            CLAUDE_MESSAGES
+        );
+    }
+
+    #[tokio::test]
+    async fn claude_admission_reads_its_session_header_and_keeps_the_active_pin() {
+        let preferred_account = account_id("acct_claude_preferred");
+        let pinned_account = account_id("acct_claude_pinned");
+        let mut repository = SlowSelectionProjectionRepository::new_with_accounts(vec![
+            preferred_account,
+            pinned_account.clone(),
+        ]);
+        repository.provider = Provider::Claude;
+        repository.short_headroom.insert(pinned_account.clone(), 80);
+        repository.persisted_affinities.lock().expect("test pin lock").push(
+            codex_router_state::session_account_affinity::SessionAccountAffinity::with_pin_state(
+                Provider::Claude, "claude-session", Some(pinned_account.clone()), 7, 1_000,
+            ),
+        );
+        let selector = super::AsyncRepositoryBackedAccountSelector::new_with_runtime_dependencies(
+            &repository,
+            super::AsyncAccountSelectorRuntimeState::new(
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                Default::default(),
+            ),
+            super::DEFAULT_ACCOUNT_HOLD_COOLDOWN_SECONDS,
+            Arc::new(|| 1_001),
+        );
+        let request = crate::http_sse::HttpProxyRequest::new(
+            crate::routes::Method::Post,
+            "/anthropic/v1/messages",
+        )
+        .with_header(crate::headers::Header::new("session-id", "codex-session"))
+        .with_header(crate::headers::Header::new(
+            "x-claude-code-session-id",
+            "claude-session",
+        ));
+
+        let selected = selector
+            .select_upstream_account(&request, TokenGeneration::new(1), None)
+            .await
+            .expect("Claude selection should succeed");
+
+        assert_eq!(selected.account_id(), &pinned_account);
+        assert_eq!(selected.selection_reason(), "prompt_cache_account_affinity");
+        assert_eq!(
+            selected.pin_observation(),
+            Some(&super::PinObservation::new(Some(pinned_account), 7))
+        );
+        assert!(selected.session_affinity_activity_handle().is_none());
+    }
+
+    #[tokio::test]
+    async fn claude_admission_releases_reserve_pin_before_selecting_a_preferred_account() {
+        let preferred_account = account_id("acct_claude_preferred");
+        let pinned_account = account_id("acct_claude_reserve");
+        let mut repository = SlowSelectionProjectionRepository::new_with_accounts(vec![
+            preferred_account.clone(),
+            pinned_account.clone(),
+        ]);
+        repository.provider = Provider::Claude;
+        repository.short_headroom.insert(pinned_account.clone(), 5);
+        repository.persisted_affinities.lock().expect("test pin lock").push(
+            codex_router_state::session_account_affinity::SessionAccountAffinity::with_pin_state(
+                Provider::Claude, "claude-session", Some(pinned_account), 7, 1_000,
+            ),
+        );
+        let selector = super::AsyncRepositoryBackedAccountSelector::new_with_runtime_dependencies(
+            &repository,
+            super::AsyncAccountSelectorRuntimeState::new(
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                Default::default(),
+            ),
+            super::DEFAULT_ACCOUNT_HOLD_COOLDOWN_SECONDS,
+            Arc::new(|| 1_001),
+        );
+        let request = crate::http_sse::HttpProxyRequest::new(
+            crate::routes::Method::Post,
+            "/anthropic/v1/messages",
+        )
+        .with_header(crate::headers::Header::new(
+            "x-claude-code-session-id",
+            "claude-session",
+        ));
+
+        let selected = selector
+            .select_upstream_account(&request, TokenGeneration::new(1), None)
+            .await
+            .expect("Claude selection should succeed");
+
+        assert_eq!(selected.account_id(), &preferred_account);
+        assert_eq!(
+            selected.pin_observation(),
+            Some(&super::PinObservation::new(None, 8))
+        );
+        assert!(selected.session_affinity_activity_handle().is_none());
+        let persisted = repository
+            .persisted_affinities
+            .lock()
+            .expect("test pin lock");
+        assert_eq!(persisted[0].account_id(), None);
+        assert_eq!(persisted[0].pin_version(), 8);
+    }
+
+    #[test]
+    fn session_header_extraction_is_profile_specific_and_codex_is_unchanged() {
+        let request =
+            crate::http_sse::HttpProxyRequest::new(crate::routes::Method::Post, "/v1/responses")
+                .with_header(crate::headers::Header::new("session-id", "codex-session"))
+                .with_header(crate::headers::Header::new(
+                    "x-claude-code-session-id",
+                    "claude-session",
+                ));
+        for route_kind in [RouteKind::Responses, RouteKind::ResponsesWebSocket] {
+            assert_eq!(
+                super::session_id_for_route(&request, route_kind),
+                Some("codex-session")
+            );
+        }
+        assert_eq!(
+            super::session_id_for_route(&request, RouteKind::ClaudeMessages),
+            Some("claude-session")
+        );
+        assert_eq!(
+            super::session_id_for_route(&request, RouteKind::Models),
+            None
+        );
+        let empty_claude_session = crate::http_sse::HttpProxyRequest::new(
+            crate::routes::Method::Post,
+            "/anthropic/v1/messages",
+        )
+        .with_header(crate::headers::Header::new("session-id", "codex-session"))
+        .with_header(crate::headers::Header::new("x-claude-code-session-id", ""));
+        assert_eq!(
+            super::session_id_for_route(&empty_claude_session, RouteKind::ClaudeMessages),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn claude_admission_preserves_inactive_versions_and_keeps_a_single_reserve_pin() {
+        let account = account_id("acct_claude_only");
+        for (stored_pin, expected) in [
+            (None, super::PinObservation::new(None, 0)),
+            (
+                Some((Some(account.clone()), 7, 990)),
+                super::PinObservation::new(None, 7),
+            ),
+            (Some((None, 8, 1_000)), super::PinObservation::new(None, 8)),
+            (
+                Some((Some(account.clone()), 9, 1_000)),
+                super::PinObservation::new(Some(account.clone()), 9),
+            ),
+        ] {
+            let mut repository = SlowSelectionProjectionRepository::new(account.clone());
+            repository.provider = Provider::Claude;
+            repository.short_headroom.insert(account.clone(), 5);
+            if let Some((owner, version, last_seen)) = stored_pin {
+                repository.persisted_affinities.lock().unwrap_or_else(|_| panic!("test pin lock")).push(
+                    codex_router_state::session_account_affinity::SessionAccountAffinity::with_pin_state(
+                        Provider::Claude, "claude-session", owner, version, last_seen,
+                    ),
+                );
+            }
+            let runtime_state =
+                super::AsyncAccountSelectorRuntimeState::new_with_selection_lock_and_affinity_cache(
+                    Default::default(),
+                    Default::default(),
+                    Default::default(),
+                    Default::default(),
+                    Default::default(),
+                    Default::default(),
+                    super::SessionAccountAffinityCache::shared(std::time::Duration::from_secs(10)),
+                );
+            let selector =
+                super::AsyncRepositoryBackedAccountSelector::new_with_runtime_dependencies(
+                    &repository,
+                    runtime_state,
+                    super::DEFAULT_ACCOUNT_HOLD_COOLDOWN_SECONDS,
+                    Arc::new(|| 1_001),
+                );
+            let request = crate::http_sse::HttpProxyRequest::new(
+                crate::routes::Method::Post,
+                "/anthropic/v1/messages",
+            )
+            .with_header(crate::headers::Header::new(
+                "x-claude-code-session-id",
+                "claude-session",
+            ));
+            let selected = selector
+                .select_upstream_account(&request, TokenGeneration::new(1), None)
+                .await
+                .unwrap_or_else(|error| panic!("single Reserve account should select: {error}"));
+            assert_eq!(selected.account_id(), &account);
+            assert_eq!(selected.pin_observation(), Some(&expected));
+            assert!(selected.session_affinity_activity_handle().is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn claude_admission_releases_an_ineligible_pin_even_without_a_selectable_pool() {
+        let mut repository = SlowSelectionProjectionRepository::new_with_accounts(Vec::new());
+        repository.provider = Provider::Claude;
+        repository.persisted_affinities.lock().unwrap_or_else(|_| panic!("test pin lock")).push(
+            codex_router_state::session_account_affinity::SessionAccountAffinity::with_pin_state(
+                Provider::Claude, "claude-session", Some(account_id("acct_ineligible")), 7, 1_000,
+            ),
+        );
+        let selector = super::AsyncRepositoryBackedAccountSelector::new_with_runtime_dependencies(
+            &repository,
+            super::AsyncAccountSelectorRuntimeState::new(
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                Default::default(),
+            ),
+            super::DEFAULT_ACCOUNT_HOLD_COOLDOWN_SECONDS,
+            Arc::new(|| 1_001),
+        );
+        let request = crate::http_sse::HttpProxyRequest::new(
+            crate::routes::Method::Post,
+            "/anthropic/v1/messages",
+        )
+        .with_header(crate::headers::Header::new(
+            "x-claude-code-session-id",
+            "claude-session",
+        ));
+        assert!(
+            selector
+                .select_upstream_account(&request, TokenGeneration::new(1), None)
+                .await
+                .is_err()
+        );
+        let persisted = repository
+            .persisted_affinities
+            .lock()
+            .unwrap_or_else(|_| panic!("test pin lock"));
+        assert_eq!(persisted.first().and_then(|pin| pin.account_id()), None);
+        assert_eq!(persisted.first().map(|pin| pin.pin_version()), Some(8));
+    }
+
+    #[tokio::test]
+    async fn claude_admission_single_contention_releases_the_fresh_reserve_pin() {
+        assert_claude_admission_contention(false, 80).await;
+    }
+
+    #[tokio::test]
+    async fn claude_admission_double_contention_selects_afresh_with_the_latest_observation() {
+        for latest_short_headroom in [5, 80] {
+            assert_claude_admission_contention(true, latest_short_headroom).await;
+        }
+    }
+
+    async fn assert_claude_admission_contention(
+        double_contention: bool,
+        latest_short_headroom: u32,
+    ) {
+        use codex_router_state::session_account_affinity::SessionAccountAffinity;
+        let first_reserve = account_id("acct_first_reserve");
+        let second_reserve = account_id("acct_second_reserve");
+        let latest_preferred = account_id("acct_latest_preferred");
+        let best_preferred = account_id("acct_best_preferred");
+        let mut repository = SlowSelectionProjectionRepository::new_with_accounts(vec![
+            first_reserve.clone(),
+            second_reserve.clone(),
+            latest_preferred.clone(),
+            best_preferred.clone(),
+        ]);
+        repository.provider = Provider::Claude;
+        repository.short_headroom.insert(first_reserve.clone(), 5);
+        repository.short_headroom.insert(second_reserve.clone(), 5);
+        repository
+            .short_headroom
+            .insert(latest_preferred.clone(), latest_short_headroom);
+        repository
+            .persisted_affinities
+            .lock()
+            .unwrap_or_else(|_| panic!("test pin lock"))
+            .push(SessionAccountAffinity::with_pin_state(
+                Provider::Claude,
+                "session",
+                Some(first_reserve),
+                7,
+                1_000,
+            ));
+        {
+            let mut contention = repository
+                .release_contention_pins
+                .lock()
+                .unwrap_or_else(|_| panic!("test contention lock"));
+            contention.push_back(SessionAccountAffinity::with_pin_state(
+                Provider::Claude,
+                "session",
+                Some(second_reserve),
+                9,
+                1_000,
+            ));
+            if double_contention {
+                contention.push_back(SessionAccountAffinity::with_pin_state(
+                    Provider::Claude,
+                    "session",
+                    Some(latest_preferred.clone()),
+                    11,
+                    1_000,
+                ));
+            }
+        }
+        let selector = super::AsyncRepositoryBackedAccountSelector::new_with_runtime_dependencies(
+            &repository,
+            super::AsyncAccountSelectorRuntimeState::new(
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                Default::default(),
+            ),
+            super::DEFAULT_ACCOUNT_HOLD_COOLDOWN_SECONDS,
+            Arc::new(|| 1_001),
+        );
+        let request = crate::http_sse::HttpProxyRequest::new(
+            crate::routes::Method::Post,
+            "/anthropic/v1/messages",
+        )
+        .with_header(crate::headers::Header::new(
+            "x-claude-code-session-id",
+            "session",
+        ));
+        let selected = selector
+            .select_upstream_account(&request, TokenGeneration::new(1), None)
+            .await
+            .unwrap_or_else(|error| panic!("contention selection: {error}"));
+        assert_eq!(
+            repository
+                .release_compare_and_set_count
+                .load(Ordering::Relaxed),
+            2
+        );
+        assert_eq!(selected.account_id(), &best_preferred);
+        let expected = if double_contention {
+            super::PinObservation::new(Some(latest_preferred), 11)
+        } else {
+            super::PinObservation::new(None, 10)
+        };
+        assert_eq!(selected.pin_observation(), Some(&expected));
+        assert_ne!(selected.selection_reason(), "prompt_cache_account_affinity");
     }
 
     fn claude_quota_account(
@@ -3051,6 +3527,44 @@ mod tests {
             assert_eq!(selected.account_id(), &strong_account_id);
             assert_ne!(selected.account_id(), &weak_account_id);
         }
+    }
+
+    #[test]
+    fn strict_quota_selection_keeps_strong_account_across_second_boundary() {
+        let weak_account_id = account_id("acct_weekly_low");
+        let strong_account_id = account_id("acct_weekly_healthy");
+        let accounts = vec![
+            QuotaAwareAccountState::new(
+                weak_account_id.clone(),
+                23,
+                SnapshotFreshness::Fresh { age_seconds: 1 },
+            ),
+            QuotaAwareAccountState::new(
+                strong_account_id.clone(),
+                76,
+                SnapshotFreshness::Fresh { age_seconds: 1 },
+            ),
+        ];
+        let boundary_instants = [1_800_000_000, 1_800_000_001];
+        let mut clock_reads = 0;
+        let mut weighted_selector = super::WeightedDeficitSelector::default();
+
+        let selected = super::select_from_account_states_with_selector(
+            &accounts,
+            &mut weighted_selector,
+            || {
+                // Production consumes the first instant; a hypothetical second read crosses the
+                // boundary, giving the first account a weekly reset R21 prefers before quota weight.
+                let instant = boundary_instants[clock_reads.min(boundary_instants.len() - 1)];
+                clock_reads += 1;
+                instant
+            },
+        )
+        .unwrap_or_else(|error| panic!("selection should succeed: {error}"));
+
+        assert_eq!(clock_reads, 1, "one selection must read its clock once");
+        assert_eq!(selected.account_id(), &strong_account_id);
+        assert_ne!(selected.account_id(), &weak_account_id);
     }
 
     #[test]
@@ -4366,15 +4880,22 @@ mod tests {
     #[derive(Clone)]
     struct SlowSelectionProjectionRepository {
         account_ids: Vec<AccountId>,
+        provider: Provider,
+        short_headroom: HashMap<AccountId, u32>,
+        release_contention_pins: Arc<
+            Mutex<VecDeque<codex_router_state::session_account_affinity::SessionAccountAffinity>>,
+        >,
+        release_compare_and_set_count: Arc<AtomicUsize>,
         in_flight_selector_reads: Arc<std::sync::atomic::AtomicUsize>,
         max_concurrent_selector_reads: Arc<std::sync::atomic::AtomicUsize>,
         affinity_read: Option<Arc<BlockingAffinityRead>>,
+        persisted_affinities:
+            Arc<Mutex<Vec<codex_router_state::session_account_affinity::SessionAccountAffinity>>>,
     }
 
     struct BlockingAffinityRead {
         entered: tokio::sync::Notify,
         release: tokio::sync::Notify,
-        persisted: codex_router_state::session_account_affinity::SessionAccountAffinity,
     }
 
     #[derive(Default)]
@@ -4424,9 +4945,14 @@ mod tests {
         fn new_with_accounts(account_ids: Vec<AccountId>) -> Self {
             Self {
                 account_ids,
+                provider: Provider::Openai,
+                short_headroom: HashMap::new(),
+                release_contention_pins: Arc::new(Mutex::new(VecDeque::new())),
+                release_compare_and_set_count: Arc::new(AtomicUsize::new(0)),
                 in_flight_selector_reads: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
                 max_concurrent_selector_reads: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
                 affinity_read: None,
+                persisted_affinities: Arc::new(Mutex::new(Vec::new())),
             }
         }
 
@@ -4435,10 +4961,10 @@ mod tests {
             persisted: codex_router_state::session_account_affinity::SessionAccountAffinity,
         ) -> Self {
             let mut repository = Self::new_with_accounts(account_ids);
+            repository.persisted_affinities = Arc::new(Mutex::new(vec![persisted]));
             repository.affinity_read = Some(Arc::new(BlockingAffinityRead {
                 entered: tokio::sync::Notify::new(),
                 release: tokio::sync::Notify::new(),
-                persisted,
             }));
             repository
         }
@@ -4510,10 +5036,10 @@ mod tests {
                     .account_ids
                     .iter()
                     .map(|account_id| {
-                        codex_router_state::quota_snapshot::SelectorQuotaInput::new(
+                        let input = codex_router_state::quota_snapshot::SelectorQuotaInput::new(
                             account_id.clone(),
                             account_id.as_str(),
-                            Provider::Openai,
+                            self.provider,
                             codex_router_state::account::AccountStatus::Enabled,
                             Some(1),
                             route_band,
@@ -4524,7 +5050,7 @@ mod tests {
                             codex_router_selection::burn_down::V1_SHORT_WINDOW_SECONDS,
                             codex_router_state::quota_snapshot::SelectorQuotaWindowStatus::Eligible,
                         )
-                        .with_remaining_headroom(90)
+                        .with_remaining_headroom(self.short_headroom.get(account_id).copied().unwrap_or(90))
                         .with_reset_unix_seconds(18_000)
                         .with_effective(true)
                         .with_observed_unix_seconds(900),
@@ -4539,7 +5065,24 @@ mod tests {
                         .with_effective(true)
                         .with_observed_unix_seconds(900),
                         ],
-                        )
+                        );
+                        if self.provider == Provider::Claude {
+                            let observations = [
+                                (codex_router_core::route_profile::WindowKind::FiveHour,
+                                 self.short_headroom.get(account_id).copied().unwrap_or(90) * 100),
+                                (codex_router_core::route_profile::WindowKind::Weekly, 9_000),
+                            ].into_iter().map(|(window_kind, remaining)| {
+                                codex_router_state::window_observation::WindowObservation::new(
+                                    codex_router_state::window_observation::WindowObservationProps::new(
+                                        account_id.clone(), window_kind, remaining, 900,
+                                    ).with_reset_unix_seconds(18_000)
+                                     .with_fresh_until_unix_seconds(2_000),
+                                ).unwrap_or_else(|error| panic!("test Claude observation: {error}"))
+                            }).collect();
+                            input.with_window_state(observations, Vec::new())
+                        } else {
+                            input
+                        }
                     })
                     .collect())
             })
@@ -4654,18 +5197,145 @@ mod tests {
     {
         fn upsert_session_account_affinity<'a>(
             &'a self,
-            _affinity: &'a codex_router_state::session_account_affinity::SessionAccountAffinity,
+            affinity: &'a codex_router_state::session_account_affinity::SessionAccountAffinity,
         ) -> futures_util::future::BoxFuture<
             'a,
             Result<(), codex_router_state::sqlite::StateStoreError>,
         > {
-            Box::pin(async { Ok(()) })
+            Box::pin(async move {
+                let mut persisted_affinities = self
+                    .persisted_affinities
+                    .lock()
+                    .expect("test affinity store lock should not be poisoned");
+                if let Some(existing) = persisted_affinities.iter_mut().find(|existing| {
+                    existing.provider() == affinity.provider()
+                        && existing.session_id() == affinity.session_id()
+                }) {
+                    *existing = affinity.clone();
+                } else {
+                    persisted_affinities.push(affinity.clone());
+                }
+                Ok(())
+            })
+        }
+
+        fn compare_and_set_session_account_affinity<'a>(
+            &'a self,
+            observation: &'a codex_router_state::session_account_affinity::PinObservation,
+            affinity: &'a codex_router_state::session_account_affinity::SessionAccountAffinity,
+            pin_ttl_seconds: u64,
+        ) -> futures_util::future::BoxFuture<
+            'a,
+            Result<bool, codex_router_state::sqlite::StateStoreError>,
+        > {
+            Box::pin(async move {
+                let expected_version = observation.version();
+                let next_version = expected_version.checked_add(1);
+                let desired_version = affinity.pin_version();
+                let valid_transition = match (observation.active_account(), affinity.account_id()) {
+                    (None, Some(_)) => next_version == Some(desired_version),
+                    (Some(observed), Some(replacement)) => {
+                        observed == replacement && desired_version == expected_version
+                    }
+                    (Some(_), None) => next_version == Some(desired_version),
+                    (None, None) => false,
+                };
+                if !valid_transition {
+                    return Ok(false);
+                }
+
+                if affinity.account_id().is_none() {
+                    self.release_compare_and_set_count
+                        .fetch_add(1, Ordering::Relaxed);
+                    let replacement = self
+                        .release_contention_pins
+                        .lock()
+                        .unwrap_or_else(|_| panic!("test contention lock"))
+                        .pop_front();
+                    if let Some(replacement) = replacement {
+                        let mut persisted = self
+                            .persisted_affinities
+                            .lock()
+                            .unwrap_or_else(|_| panic!("test pin lock"));
+                        if let Some(current) = persisted.iter_mut().find(|pin| {
+                            pin.provider() == affinity.provider()
+                                && pin.session_id() == affinity.session_id()
+                        }) {
+                            *current = replacement;
+                        } else {
+                            persisted.push(replacement);
+                        }
+                        return Ok(false);
+                    }
+                }
+
+                let mut persisted_affinities = self
+                    .persisted_affinities
+                    .lock()
+                    .expect("test affinity store lock should not be poisoned");
+                let existing_index = persisted_affinities.iter().position(|existing| {
+                    existing.provider() == affinity.provider()
+                        && existing.session_id() == affinity.session_id()
+                });
+                let publication_time = affinity.last_seen_unix_seconds();
+                let current_state_matches = match existing_index {
+                    None => expected_version == 0 && observation.active_account().is_none(),
+                    Some(index) => {
+                        let existing = &persisted_affinities[index];
+                        if existing.pin_version() != expected_version {
+                            false
+                        } else {
+                            match observation.active_account() {
+                                None => {
+                                    existing.account_id().is_none()
+                                        || (!fake_pin_is_active_at(
+                                            existing.last_seen_unix_seconds(),
+                                            publication_time,
+                                            pin_ttl_seconds,
+                                        ) && existing.account_id().is_some())
+                                }
+                                Some(observed_account) => {
+                                    existing.account_id() == Some(observed_account)
+                                        && fake_pin_is_active_at(
+                                            existing.last_seen_unix_seconds(),
+                                            publication_time,
+                                            pin_ttl_seconds,
+                                        )
+                                }
+                            }
+                        }
+                    }
+                };
+                if !current_state_matches {
+                    return Ok(false);
+                }
+
+                let stored_last_seen = existing_index.map_or(publication_time, |index| {
+                    persisted_affinities[index]
+                        .last_seen_unix_seconds()
+                        .max(publication_time)
+                });
+                let replacement =
+                    codex_router_state::session_account_affinity::SessionAccountAffinity::with_pin_state(
+                        affinity.provider(),
+                        affinity.session_id(),
+                        affinity.account_id().cloned(),
+                        desired_version,
+                        stored_last_seen,
+                    );
+                if let Some(index) = existing_index {
+                    persisted_affinities[index] = replacement;
+                } else {
+                    persisted_affinities.push(replacement);
+                }
+                Ok(true)
+            })
         }
 
         fn load_session_account_affinity<'a>(
             &'a self,
-            _provider: Provider,
-            _session_id: &'a str,
+            provider: Provider,
+            session_id: &'a str,
         ) -> futures_util::future::BoxFuture<
             'a,
             Result<
@@ -4674,14 +5344,31 @@ mod tests {
             >,
         > {
             Box::pin(async move {
-                let Some(affinity_read) = &self.affinity_read else {
-                    return Ok(None);
-                };
-                affinity_read.entered.notify_one();
-                affinity_read.release.notified().await;
-                Ok(Some(affinity_read.persisted.clone()))
+                if let Some(affinity_read) = &self.affinity_read {
+                    affinity_read.entered.notify_one();
+                    affinity_read.release.notified().await;
+                }
+                let persisted_affinities = self
+                    .persisted_affinities
+                    .lock()
+                    .expect("test affinity store lock should not be poisoned");
+                Ok(persisted_affinities
+                    .iter()
+                    .find(|affinity| {
+                        affinity.provider() == provider && affinity.session_id() == session_id
+                    })
+                    .cloned())
             })
         }
+    }
+
+    fn fake_pin_is_active_at(
+        last_seen_unix_seconds: u64,
+        publication_unix_seconds: u64,
+        pin_ttl_seconds: u64,
+    ) -> bool {
+        publication_unix_seconds < pin_ttl_seconds
+            || last_seen_unix_seconds > publication_unix_seconds - pin_ttl_seconds
     }
 
     fn account_input_for_runtime_exhaustion_test(

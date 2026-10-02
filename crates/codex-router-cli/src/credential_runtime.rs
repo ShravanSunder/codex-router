@@ -7,7 +7,7 @@ use codex_router_auth::resolver::AsyncRefreshLeaseRegistry;
 use codex_router_auth::resolver::AsyncRouterCredentialResolver;
 use codex_router_auth::resolver::CredentialRefreshClient;
 use codex_router_auth::resolver::CredentialResolverError;
-use codex_router_auth::resolver::OpenAiOAuthRefreshClient;
+use codex_router_auth::resolver::ProviderCredentialRefreshClients;
 use codex_router_auth::resolver::ProviderCredentialResolver;
 use codex_router_auth::resolver::ResolvedProviderCredential;
 use codex_router_core::ids::AccountId;
@@ -38,7 +38,7 @@ pub enum CliCredentialResolverOpenError {
 
 /// CLI-owned credential resolver adapter.
 #[derive(Debug)]
-pub struct CliCredentialResolver<C = OpenAiOAuthRefreshClient>
+pub struct CliCredentialResolver<C = ProviderCredentialRefreshClients>
 where
     C: CredentialRefreshClient + Clone,
 {
@@ -55,18 +55,20 @@ pub(crate) trait AsyncProviderCredentialResolver {
     async fn resolve_provider_credentials_async(
         &self,
         account_id: &AccountId,
+        expected_provider: codex_router_core::provider::Provider,
     ) -> Result<ResolvedProviderCredential, CredentialResolverError>;
 
     async fn recover_unauthorized_credentials_async(
         &self,
         _account_id: &AccountId,
+        _expected_provider: codex_router_core::provider::Provider,
         _rejected_generation: u64,
     ) -> Result<(ResolvedProviderCredential, bool), CredentialResolverError> {
         Err(CredentialResolverError::RefreshUnavailable)
     }
 }
 
-impl CliCredentialResolver<OpenAiOAuthRefreshClient> {
+impl CliCredentialResolver<ProviderCredentialRefreshClients> {
     /// Opens resolver state while reusing the serving process's encrypted-store handle.
     pub(crate) fn open_with_secret_store(
         state_db_path: &Path,
@@ -81,7 +83,7 @@ impl CliCredentialResolver<OpenAiOAuthRefreshClient> {
             state_db_path: state_db_path.to_path_buf(),
             state_store,
             secret_store,
-            refresh_client: OpenAiOAuthRefreshClient::new(),
+            refresh_client: ProviderCredentialRefreshClients::new(),
             refresh_leases: AsyncRefreshLeaseRegistry::new(),
         })
     }
@@ -121,6 +123,7 @@ where
     fn resolve_provider_credentials(
         &self,
         account_id: &AccountId,
+        expected_provider: codex_router_core::provider::Provider,
     ) -> Result<ResolvedProviderCredential, CredentialResolverError> {
         let resolver = AsyncRouterCredentialResolver::new_with_refresh_leases(
             self.state_store.clone(),
@@ -130,13 +133,13 @@ where
             self.refresh_leases.clone(),
         );
         self.runtime
-            .block_on(resolver.resolve_provider_credentials(account_id))
+            .block_on(resolver.resolve_provider_credentials(account_id, expected_provider))
     }
 }
 
 /// CLI credential resolver owned by the process Tokio runtime.
 #[derive(Debug)]
-pub(crate) struct AsyncCliCredentialResolver<C = OpenAiOAuthRefreshClient>
+pub(crate) struct AsyncCliCredentialResolver<C = ProviderCredentialRefreshClients>
 where
     C: CredentialRefreshClient + Clone,
 {
@@ -146,7 +149,7 @@ where
     refresh_leases: AsyncRefreshLeaseRegistry,
 }
 
-impl AsyncCliCredentialResolver<OpenAiOAuthRefreshClient> {
+impl AsyncCliCredentialResolver<ProviderCredentialRefreshClients> {
     /// Opens credential resolver dependencies without creating a nested runtime.
     pub(crate) async fn open(
         state_db_path: &Path,
@@ -159,7 +162,7 @@ impl AsyncCliCredentialResolver<OpenAiOAuthRefreshClient> {
         Ok(Self {
             state_store,
             secret_store,
-            refresh_client: OpenAiOAuthRefreshClient::new(),
+            refresh_client: ProviderCredentialRefreshClients::new(),
             refresh_leases: AsyncRefreshLeaseRegistry::new(),
         })
     }
@@ -172,6 +175,7 @@ where
     async fn resolve_provider_credentials_async(
         &self,
         account_id: &AccountId,
+        expected_provider: codex_router_core::provider::Provider,
     ) -> Result<ResolvedProviderCredential, CredentialResolverError> {
         let resolver = AsyncRouterCredentialResolver::new_with_refresh_leases(
             self.state_store.clone(),
@@ -180,12 +184,15 @@ where
             None,
             self.refresh_leases.clone(),
         );
-        resolver.resolve_provider_credentials(account_id).await
+        resolver
+            .resolve_provider_credentials(account_id, expected_provider)
+            .await
     }
 
     async fn recover_unauthorized_credentials_async(
         &self,
         account_id: &AccountId,
+        expected_provider: codex_router_core::provider::Provider,
         rejected_generation: u64,
     ) -> Result<(ResolvedProviderCredential, bool), CredentialResolverError> {
         let resolver = AsyncRouterCredentialResolver::new_with_refresh_leases(
@@ -196,7 +203,7 @@ where
             self.refresh_leases.clone(),
         );
         resolver
-            .recover_unauthorized_credentials(account_id, rejected_generation)
+            .recover_unauthorized_credentials(account_id, expected_provider, rejected_generation)
             .await
     }
 }
@@ -208,6 +215,7 @@ where
     async fn resolve_provider_credentials_async(
         &self,
         account_id: &AccountId,
+        expected_provider: codex_router_core::provider::Provider,
     ) -> Result<ResolvedProviderCredential, CredentialResolverError> {
         let state_store = AsyncSqliteStateStore::open(&self.state_db_path)
             .await
@@ -219,12 +227,15 @@ where
             None,
             self.refresh_leases.clone(),
         );
-        resolver.resolve_provider_credentials(account_id).await
+        resolver
+            .resolve_provider_credentials(account_id, expected_provider)
+            .await
     }
 
     async fn recover_unauthorized_credentials_async(
         &self,
         account_id: &AccountId,
+        expected_provider: codex_router_core::provider::Provider,
         rejected_generation: u64,
     ) -> Result<(ResolvedProviderCredential, bool), CredentialResolverError> {
         let state_store = AsyncSqliteStateStore::open(&self.state_db_path)
@@ -238,7 +249,7 @@ where
             self.refresh_leases.clone(),
         );
         resolver
-            .recover_unauthorized_credentials(account_id, rejected_generation)
+            .recover_unauthorized_credentials(account_id, expected_provider, rejected_generation)
             .await
     }
 }

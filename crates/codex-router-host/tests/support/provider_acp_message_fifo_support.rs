@@ -2,14 +2,15 @@ use agent_automation::RouteEffectEvidence;
 use codex_router_host::{ExternalProviderLaunch, LiveSessionOwnership, LiveSessionOwnershipCheck};
 use collaboration_protocol::{
     AttemptId, ChannelDescription, CodexGeneration, DeliveryCorrelationId, EndpointAvailability,
-    EndpointDescription, EndpointId, EndpointRef, GenerationNumber, MessageContent,
-    MessageDelivery, MessageText, NonEmptyText, ObservationTimestamp, ProviderBindingId,
-    ProviderBindingIdentity, ProviderCapabilities, ProviderCapability, ProviderCapabilityEvidence,
-    ProviderCapabilityName, ProviderCapabilityStatus, ProviderKind, ProviderRuntimeIdentity,
-    ProviderTransport, SessionId, SessionRef, UuidIdentity,
+    EndpointDescription, EndpointId, EndpointRef, GenerationNumber, MessageDelivery, MessageText,
+    NonEmptyText, ObservationTimestamp, ProviderBindingId, ProviderBindingIdentity,
+    ProviderCapabilities, ProviderCapability, ProviderCapabilityEvidence, ProviderCapabilityName,
+    ProviderCapabilityStatus, ProviderKind, ProviderRuntimeIdentity, ProviderTransport, PushId,
+    SessionId, SessionRef, UuidIdentity,
 };
 use collaboration_service::{
-    AttemptEvidenceSink, DeliveryFuture, DeliveryPrecondition, DeliveryRequest, EndpointDirectory,
+    AttemptEvidenceSink, DeliveryFuture, DeliveryPrecondition, EndpointDirectory,
+    layer_zero::{DeliveryRequest, PreparedPush},
 };
 use std::path::{Path, PathBuf};
 
@@ -149,8 +150,7 @@ request=json.loads(sys.stdin.readline())
 assert request['method']=='session/prompt'
 assert len(request['params']['prompt'])==1, request['params']['prompt']
 assert request['params']['prompt'][0]['type']=='text'
-assert request['params']['prompt'][0]['text'].startswith('▶️ cursor-local/fixture- ← 🔔 Router notice\nRouter delivery\nIntended recipient: ')
-assert request['params']['prompt'][0]['text'].endswith('\n\nfirst')
+assert request['params']['prompt'][0]['text']=='first', request['params']['prompt']
 with socket.socket(socket.AF_UNIX,socket.SOCK_STREAM) as event:
  event.connect({:?})
  event.sendall(b'first')
@@ -239,16 +239,26 @@ sys.stdin.read()
 }
 
 pub(super) fn request(target: SessionRef, text: &str) -> DeliveryRequest {
+    let push_id =
+        PushId::try_from(AttemptId::generate().as_str().to_owned()).expect("UUIDv7 push id");
+    let correlation =
+        DeliveryCorrelationId::try_from(push_id.as_str().to_owned()).expect("push id correlation");
+    let line = MessageText::try_from(format!(
+        "✉️ sender · \"{text}\" · router://{}/push/{}",
+        String::from(target.endpoint.service_id.clone()),
+        push_id.as_str()
+    ))
+    .expect("prepared push line");
     DeliveryRequest {
-        target,
-        message: MessageContent::HumanUser {
-            text: MessageText::try_from(text.to_owned()).expect("message"),
+        payload: PreparedPush {
+            push_id,
+            line,
+            load_policy: collaboration_service::LoadPolicy::MayLoad,
         },
-        header_context: collaboration_protocol::MessageHeaderContext::default(),
+        target,
         mode: MessageDelivery::Auto,
-        load_policy: collaboration_service::LoadPolicy::MayLoad,
         precondition: DeliveryPrecondition::Unpinned,
-        correlation: DeliveryCorrelationId::generate(),
+        correlation,
         attempt: AttemptId::generate(),
     }
 }

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE router_pushes SET delivery_state='held',last_outcome_json=?,settled_at=NULL WHERE push_id=? AND kind=? AND delivery_state IN ('pending','held')",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "127b4d5b9cdc26e11a8b9fabd459105ffe77f64c4ddffe38a55251bcc77c5c66"
+}

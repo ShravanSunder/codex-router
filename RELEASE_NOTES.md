@@ -1,10 +1,22 @@
 # Release Notes
 
-## Unreleased - 2026-09-24
+## 0.1.59
 
-- Persist thread and topic subscription policies, lifecycle, per-root batching windows, and backfill eligible existing participants. This is storage groundwork; session-target delivery arrives in the next release. Migration `202609170001` was rewritten in place: local or debug board databases that applied the earlier branch version fail with `InvalidSchema` and may need to be deleted; production databases are unaffected.
+- **Breaking:** remove CLI `board thread listen` and MCP `board_thread_listen` and its control tools; use per-thread subscriptions and poll-mode `board thread wait` instead.
+- Persist thread and topic subscription policies, lifecycle, per-root batching windows, and backfill eligible existing participants. Migration `202609170001` was rewritten in place: local or debug board databases that applied the earlier branch version fail with `InvalidSchema` and may need to be deleted; production databases are unaffected.
+- Subscribe participants when they join a watched thread, batch thread activity, and hold thread notices or DMs for targets that are not running. Store Router pushes as 30-day `router://` records and fetch them with `agent-collaboration show`.
+- Print message-send failures as one `error: <explanation> — <next step>` line without `--json` and held DMs as `held: <link> — delivered when <target> is next running`. Delivered or held outcomes exit 0, rejected deliveries exit 4, and unknown outcomes exit 5. Unknown DM outcomes point to `show <link>` before retrying. Ambiguous Claude terminal errors list live claimant PIDs and short names; structured details retain full names and cwd where available, and the line says to close one terminal or run `/branch`.
+- Remove `message reply --expect-sender` and implicit reply-to-latest-sender behavior; a DM reply now requires its push id or `router://` link.
+- Reject `steer` and generation-guarded DMs when the target is not running; these sends are not held for later delivery.
+- If a wait response is lost after activity may have been handed off, report an unknown outcome and inspect `board thread subscriptions` and `board inbox fetch` before waiting again.
+- Publish the generic `overloaded` admission error for message send/reply/inbox/history and `router/show`, matching rejection before route dispatch.
+- Watching or subscribing to a topic with no board activity yet now works and covers the first later thread; existing watch rows are preserved.
+- Retry known-rejected Provider ACP scheduled-run submissions with the same stored push id, leaving the run available for another attempt.
+
+## 0.1.58
+
 - Provider setting rejection errors now name the setting, requested value, and advertised choices; display truncation is marked with an ellipsis.
-- Add recipient-first emoji identity headers and `agent-collaboration message reply --expect-sender`; hide empty sessions from the picker by default.
+- Hide empty sessions from the picker by default.
 - Encrypt pooled account credentials with a Router-owned Keychain key. After upgrading, authorize Router once at the first Host restart; refreshes in that running Host do not prompt. The Host migrates existing pooled credential files to encrypted envelopes, reads each credential back for verification, then removes the plaintext file. If migration stops early, the Host still starts, Claude requests report the incomplete migration, Codex requests keep the existing credential-unavailable response, and `account list` and `quota` identify accounts still to convert; the next Host restart resumes migration without marking accounts as needing login.
 - Add `serve --claude-five-hour-reserve-percent` to configure when Claude's five-hour window enters the reserve tier; defaults to 95 percent and accepts values from 1 to 99.
 - Route Claude accounts by their five-hour and weekly quota windows. Claude accounts are not yet shown by `quota`; that view is added in PR4.
@@ -23,6 +35,13 @@
 - Use one CLI and MCP conversation surface for Codex, Claude, and Cursor, including create, prompt, load, and operation inspection. Claude and Cursor can cancel one exact operation; Codex directs callers to turn interrupt. Provider operations retain caller IDs and report completed or pending work.
 - Route messages, wakes, listen pushes, approvals, and scheduled runs through the selected Codex, provider ACP, or live Claude Code peer route. Delivery receipts expose the observed outcome and reachability; `peerMessageWritten` confirms a socket write, not a peer reply.
 - Preserve Codex create-then-message across frontend closure while the Host remains running. Provider schedules run on existing sessions and finish from provider settlement without a summary.
+
+## 0.1.57 - 2026-10-01
+
+- Add Claude account login with `codex-router account login --provider claude` and show five-hour and weekly usage in `codex-router quota status`.
+- Route new and resumed Claude Code sessions through Router's pooled accounts with `agent-sessions --provider claude`. Claude no-account responses explain unavailable credentials, accounts that need login, usage limits with reset hints, and accounts held by quota floors or stale weekly observations.
+- Bound OpenAI device login with a 5-second minimum poll interval, a 15-minute overall limit, and 30-second HTTP request timeouts.
+- Assess every account against one clock instant per selection to prevent account-order drift at second boundaries.
 
 ## 0.1.54 - 2026-09-30
 

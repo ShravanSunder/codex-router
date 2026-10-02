@@ -270,6 +270,7 @@ fn saved_floor_refresh_reconnects_established_websocket_before_later_response_cr
         &failed_provider,
         QuotaRefreshObservationContext {
             observed_unix_seconds: 1_200,
+            schedule: crate::quota::QuotaRefreshSchedule::Manual,
             weekly_floor_observer: Some(&floor_notifier),
         },
     ));
@@ -307,6 +308,7 @@ fn saved_floor_refresh_reconnects_established_websocket_before_later_response_cr
         &provider,
         QuotaRefreshObservationContext {
             observed_unix_seconds: 1_200,
+            schedule: crate::quota::QuotaRefreshSchedule::Manual,
             weekly_floor_observer: Some(&floor_notifier),
         },
     ));

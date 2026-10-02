@@ -137,6 +137,10 @@ async fn exercise_input_validation(
         gate,
         codex_home: root.clone(),
     };
+    let machine_identity = crate::MachineIdentity::new(
+        backend.endpoint.service_id.clone(),
+        Some("Validation Fixture"),
+    )?;
     let worker = ScheduledRunWorker {
         store: store.clone(),
         execution: Arc::new(crate::CodexAppServerScheduledRuns::new(
@@ -145,7 +149,7 @@ async fn exercise_input_validation(
         )),
         backend: Some(backend),
         configuration: crate::AutomationConfigurationHandle::default(),
-        display_names: crate::SessionDisplayNameCache::default(),
+        machine_identity,
     };
     worker.step(run.clone()).await?;
     let failed = store

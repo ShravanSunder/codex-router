@@ -20,11 +20,15 @@ impl CodexRouterProfile {
     }
 
     /// Renders the profile file used by existing CLI commands.
+    ///
+    /// The profile carries model routing only. The Codex TUI refuses to resume a
+    /// remote thread when the selected profile sets any of
+    /// [`crate::REMOTE_RESUME_PERMISSION_KEYS`], because a remote resume always
+    /// restores the thread's saved permissions and would silently drop them.
     #[must_use]
     pub fn render(self) -> String {
         format!(
             r#"model_provider = "codex-router"
-sandbox_mode = "workspace-write"
 
 [model_providers.codex-router]
 name = "codex-router"
@@ -66,8 +70,8 @@ supports_websockets = true
 /// the sandbox for any thread request that selects none, overriding home and project
 /// `sandbox_mode` or `default_permissions`; Router's own threads select a profile, and
 /// a client that asks for another sandbox on start (for example `--yolo`, which
-/// requests `danger-full-access`) still gets it. Clients compute their own request
-/// from their config, so the rendered profile file carries the same default.
+/// requests `danger-full-access`) still gets it. The rendered profile file must not
+/// repeat it: a permission key there makes the Codex TUI refuse remote resume.
 ///
 /// Both profiles get direct network access. The managed network proxy is switched
 /// off explicitly so a home or project setting cannot reinstate it: behind it,

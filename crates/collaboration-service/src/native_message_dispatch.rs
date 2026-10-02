@@ -6,9 +6,10 @@ use codex_native_integration::{
     NativeConnectionError, NativeOperation, NativePayloadSchemas, NativeProtocolConnection,
 };
 use collaboration_protocol::{
-    AcceptedResumeEffect, ChannelDescription, EndpointDescription, MessageDelivery,
-    MessageHeaderContext, NativeInputDisposition, NativeInputOperation, NativeSendAcceptance,
-    NativeSendParams, NativeSendReceipt, NonEmptyText, SessionRef, UuidIdentity,
+    AcceptedResumeEffect, ChannelDescription, CodexGeneration, EndpointDescription,
+    MessageDelivery, MessageInputKind, MessageRepresentation, MessageText, NativeInputDisposition,
+    NativeInputOperation, NativeSendAcceptance, NativeSendReceipt, NonEmptyText, RenderedMessage,
+    SessionRef, UuidIdentity,
 };
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -24,7 +25,6 @@ pub(crate) enum NativeThreadStatus {
 
 pub(crate) struct NativeThreadSnapshot {
     pub status: NativeThreadStatus,
-    pub thread: Value,
 }
 
 pub(crate) enum NativeThreadStatusReadError {
@@ -101,19 +101,39 @@ pub(crate) async fn read_native_thread_status(
         Some(_) => NativeThreadStatus::Other,
         None => return Err(NativeThreadStatusReadError::InvalidResponse),
     };
-    Ok(NativeThreadSnapshot { status, thread })
+    Ok(NativeThreadSnapshot { status })
 }
 
 pub(crate) struct NativeMessageRequest<'a> {
-    pub params: NativeSendParams,
+    pub params: NativeMessageParams,
     pub id: Value,
     pub service_id: &'a UuidIdentity,
     pub backend: &'a NativeControlBackend,
     pub endpoints: &'a [EndpointDescription],
-    pub header_context: MessageHeaderContext,
-    pub display_names: &'a crate::SessionDisplayNameCache,
     pub held_connection: Option<&'a mut NativeProtocolConnection>,
     pub load_policy: LoadPolicy,
+}
+
+pub(crate) struct NativeMessageParams {
+    pub target: SessionRef,
+    pub generation: CodexGeneration,
+    pub body: NativeMessageBody,
+    pub delivery: MessageDelivery,
+    pub client_user_message_id: Option<NonEmptyText>,
+}
+
+pub(crate) enum NativeMessageBody {
+    PreparedPush(MessageText),
+}
+
+fn render_native_message(body: &NativeMessageBody) -> RenderedMessage {
+    match body {
+        NativeMessageBody::PreparedPush(line) => RenderedMessage {
+            text: line.as_str().to_owned(),
+            kind: MessageInputKind::Agent,
+            representation: MessageRepresentation::DeclaredAgentText,
+        },
+    }
 }
 
 pub(crate) enum NativeMessageOutcome {
@@ -160,13 +180,7 @@ pub(crate) async fn dispatch_message(
     {
         return NativeMessageOutcome::Failed(effects.failure("unsupportedCapability", "queue"));
     }
-    let Ok(rendered) = collaboration_protocol::render_message_with_context(
-        &params.target,
-        &params.message,
-        &request.header_context,
-    ) else {
-        return NativeMessageOutcome::Failed(effects.failure("overloaded", "inspect"));
-    };
+    let rendered = render_native_message(&params.body);
     let correlation = match &params.client_user_message_id {
         Some(id) => String::from(id.clone()),
         None => match crate::new_service_uuid() {
@@ -213,8 +227,6 @@ pub(crate) async fn dispatch_message(
     let delivery_context = NativeMessageDeliveryContext {
         thread_id: &target_id,
         params: &params,
-        header_context: &request.header_context,
-        display_names: request.display_names,
         correlation: &correlation,
         held_unmaterialized: held,
         load_policy,
@@ -253,9 +265,7 @@ struct MessageSession<'a> {
 
 struct NativeMessageDeliveryContext<'a> {
     thread_id: &'a str,
-    params: &'a NativeSendParams,
-    header_context: &'a MessageHeaderContext,
-    display_names: &'a crate::SessionDisplayNameCache,
+    params: &'a NativeMessageParams,
     correlation: &'a str,
     held_unmaterialized: bool,
     load_policy: LoadPolicy,
@@ -372,25 +382,7 @@ impl MessageSession<'_> {
         } else {
             Some(self.read_thread_status(request.thread_id).await?)
         };
-        if let Some(snapshot) = thread_snapshot.as_ref() {
-            cache_thread_display_name(
-                request.display_names,
-                &request.params.target,
-                &snapshot.thread,
-            );
-        }
-        let current_header_context = MessageHeaderContext::resolve(
-            &request.params.target,
-            &request.params.message,
-            request.display_names,
-            request.header_context.origin,
-        );
-        let rendered = collaboration_protocol::render_message_with_context(
-            &request.params.target,
-            &request.params.message,
-            &current_header_context,
-        )
-        .map_err(|_| self.effects.failure("overloaded", "inspect"))?;
+        let rendered = render_native_message(&request.params.body);
         let input = json!([{"type":"text","text":rendered.text}]);
         let status = thread_snapshot
             .as_ref()
@@ -465,20 +457,5 @@ impl MessageSession<'_> {
             .and_then(Value::as_str)
             .and_then(|id| NonEmptyText::try_from(id.to_owned()).ok())
             .ok_or_else(|| self.effects.failure("outcomeUnknown", stage))
-    }
-}
-
-fn cache_thread_display_name(
-    display_names: &crate::SessionDisplayNameCache,
-    target: &SessionRef,
-    thread: &Value,
-) {
-    let name = thread
-        .get("name")
-        .and_then(Value::as_str)
-        .filter(|value| !value.trim().is_empty());
-    match name {
-        Some(name) => display_names.remember(target.clone(), name),
-        None => display_names.forget(target.clone()),
     }
 }

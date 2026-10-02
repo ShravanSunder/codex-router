@@ -30,6 +30,8 @@ fn search_consistency_record(
 
 #[path = "catalog_projection_tests.rs"]
 mod catalog_projection_tests;
+#[path = "process_runner_tests.rs"]
+mod process_runner_tests;
 #[path = "session_display_tests.rs"]
 mod session_display_tests;
 #[path = "session_option_tests.rs"]

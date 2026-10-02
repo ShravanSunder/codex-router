@@ -84,11 +84,20 @@ pub trait PreparationEvidenceSink: Send + Sync {
 pub struct ScheduledRunSubmission {
     pub run_id: RunId,
     pub target: SessionRef,
-    pub message: MessageText,
-    pub header_context: collaboration_protocol::MessageHeaderContext,
+    pub payload: ScheduledRunPayload,
     pub precondition: DeliveryPrecondition,
     pub inputs: CapturedRunInputs<SessionRef, EndpointRef>,
     pub recorded: RouteEffectEvidence<SessionRef, CodexGeneration>,
+}
+
+#[derive(Clone, Debug)]
+pub enum ScheduledRunPayload {
+    Existing {
+        prepared: crate::layer_zero::PreparedPush,
+    },
+    Fresh {
+        task_input: MessageText,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

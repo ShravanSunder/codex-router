@@ -38,9 +38,31 @@ pub enum SessionsCommandError {
     /// Codex failed to launch.
     #[error("failed to launch codex resume command: {0}")]
     CodexLaunch(std::io::Error),
+    /// The selected profile sets permission keys, so Codex would refuse the remote
+    /// resume or fork.
+    #[error(
+        "{} sets {}; Codex refuses to reopen or fork a Router session while its profile sets a permission key, because the session keeps its saved permissions. Remove those keys from that file (`codex-router profile --approve-codex-home-write` rewrites the Router profile without them) and keep permission defaults in CODEX_HOME/config.toml",
+        profile_path.display(),
+        keys.join(", ")
+    )]
+    ProfileBlocksRemoteResume {
+        /// Profile file Codex loads for the Router profile.
+        profile_path: std::path::PathBuf,
+        /// Permission keys the profile sets.
+        keys: Vec<&'static str>,
+    },
     /// Codex exited unsuccessfully.
     #[error("codex resume command exited with {status}")]
     CodexExit {
+        /// Exit status string.
+        status: String,
+    },
+    /// Router-backed Claude Code launch or inventory failed.
+    #[error("{0}")]
+    ClaudeLaunch(String),
+    /// Claude Code exited unsuccessfully.
+    #[error("Claude Code exited with {status}")]
+    ClaudeExit {
         /// Exit status string.
         status: String,
     },

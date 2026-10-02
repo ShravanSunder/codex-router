@@ -7,6 +7,7 @@ use codex_native_integration::AppServerCommandSpec;
 use codex_native_integration::CodexPaths;
 use codex_native_integration::CodexRouterProfile;
 use codex_native_integration::SessionLaunch;
+use codex_native_integration::profile_remote_resume_permission_keys;
 
 #[test]
 fn codex_paths_keep_native_state_under_normal_codex_home() {
@@ -40,6 +41,16 @@ fn expected_router_root_overrides() -> Vec<String> {
 }
 
 #[test]
+fn rendered_profile_sets_no_permission_key_so_remote_resume_works() {
+    // Act
+    let keys =
+        profile_remote_resume_permission_keys(&CodexRouterProfile::new(8787).render()).unwrap();
+
+    // Assert
+    assert!(keys.is_empty(), "profile must not set {keys:?}");
+}
+
+#[test]
 fn router_profile_has_one_rendering_and_root_override_projection() {
     // Arrange: the production loopback port and the production collaboration directory.
     let profile = CodexRouterProfile::new(8787);
@@ -48,8 +59,7 @@ fn router_profile_has_one_rendering_and_root_override_projection() {
     assert_eq!(
         profile.render(),
         concat!(
-            "model_provider = \"codex-router\"\n",
-            "sandbox_mode = \"workspace-write\"\n\n",
+            "model_provider = \"codex-router\"\n\n",
             "[model_providers.codex-router]\n",
             "name = \"codex-router\"\n",
             "base_url = \"http://127.0.0.1:8787/v1\"\n",

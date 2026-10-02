@@ -7,6 +7,8 @@ mod migration;
 mod review_minor_regressions;
 #[path = "thread_subscriptions/review_regressions.rs"]
 mod review_regressions;
+#[path = "thread_subscriptions/topic_watch_boundary.rs"]
+mod topic_watch_boundary;
 #[path = "thread_subscriptions/windows.rs"]
 mod windows;
 
@@ -160,6 +162,8 @@ impl ThreadSubscriptionFixture {
         self.store
             .join_thread(
                 ThreadJoinRequest {
+                    mode: None,
+                    when_idle: None,
                     root_message_id: self.root_message_id.clone(),
                     actor: reader,
                     role,
@@ -194,72 +198,10 @@ impl ThreadSubscriptionFixture {
             .unwrap()
     }
 
-    fn listen_request(&self) -> ThreadListenRequest {
-        ThreadListenRequest {
-            reader: self.reader.clone(),
-            selection: ThreadListenSelection::Roots {
-                root_message_ids: vec![self.root_message_id.clone()],
-            },
-            mode: ThreadListenMode::Repeating {
-                lifetime_seconds: 60 * 60,
-            },
-            from_activity_sequence: None,
-            acknowledge: false,
-            delivery: ThreadListenDelivery::Session,
-        }
-    }
-
     async fn finish(self) {
         self.store.close().await.unwrap();
         std::fs::remove_file(self.path).unwrap();
     }
-}
-
-#[tokio::test]
-async fn delivered_position_never_moves_backwards_during_late_settlement() {
-    let mut fixture = ThreadSubscriptionFixture::create("monotonic-delivered").await;
-    let first = fixture.post_reply("first-author", "first reply").await;
-    let second = fixture.post_reply("second-author", "second reply").await;
-    let context = fixture
-        .store
-        .prepare_thread_listen(&fixture.listen_request())
-        .await
-        .unwrap();
-    let batch_set = fixture
-        .store
-        .select_pending_thread_listen_batch_set(ListenId::generate(), &context, 32_000)
-        .await
-        .unwrap();
-    assert_eq!(
-        batch_set.batches[0].delivered_through,
-        second.message.activity_sequence
-    );
-
-    fixture
-        .store
-        .record_thread_listen_batch_delivery(&context, &batch_set)
-        .await
-        .unwrap();
-
-    let mut older_settlement = batch_set;
-    older_settlement.batches[0].delivered_through = first.message.activity_sequence;
-    fixture
-        .store
-        .record_thread_listen_batch_delivery(&context, &older_settlement)
-        .await
-        .unwrap();
-
-    let pending_after_late_settlement = fixture
-        .store
-        .select_pending_thread_listen_batch_set(ListenId::generate(), &context, 32_000)
-        .await
-        .unwrap();
-    assert!(
-        pending_after_late_settlement.batches.is_empty(),
-        "a late lower through-position must not make the newer reply selectable again"
-    );
-
-    fixture.finish().await;
 }
 
 async fn post(

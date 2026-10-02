@@ -11,6 +11,9 @@ pub use collaboration_protocol::{
     AdapterOperationFailure as OperationFailure, OperationEffect, OperationFailureKind,
 };
 pub use collaboration_protocol::{ControlInitializationResult, EndpointInventory, ProtocolVersion};
+pub use collaboration_protocol::{
+    PushRecordHistoryParams, PushRecordListParams, PushRecordShowParams,
+};
 pub use control_connection::{ClientError, ControlClient};
 pub use message_operation::{
     MessageReplyError, MessageReplyRequest, MessageSendError, MessageSendRequest,

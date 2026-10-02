@@ -1,4 +1,15 @@
 //! Public communication contracts without process, storage or transport ownership.
+mod thread_subscription_contract;
+mod thread_subscription_wait;
+pub use thread_subscription_contract::{
+    ThreadSubscribeRequest, ThreadSubscriptionPresence, ThreadSubscriptionState,
+    ThreadSubscriptionView, ThreadSubscriptionsRequest, ThreadSubscriptionsResult,
+    ThreadUnsubscribeRequest,
+};
+pub use thread_subscription_wait::{
+    InvalidSubscriptionWait, MAX_SUBSCRIPTION_WAIT_SECONDS, SubscriptionWaitBatch,
+    ThreadSubscriptionWaitFilter, ThreadSubscriptionWaitRequest, ThreadSubscriptionWaitResult,
+};
 mod cli_output_contract;
 pub use cli_output_contract::{
     ConversationRecord, ConversationTerminalReason, EffortChange, FiniteCommandRecord,
@@ -89,8 +100,16 @@ pub use control_schema_identity::{ControlSchema, ControlSchemaError};
 mod delivery_rejection;
 mod delivery_route_evidence;
 mod message_content;
+mod push_line;
+#[cfg(test)]
+#[path = "push_line_tests.rs"]
+mod push_line_tests;
+mod push_record;
+mod router_origin_ref;
 mod session_delivery_outcome;
-pub use delivery_rejection::{DeliveryNextAction, DeliveryRejection, DeliveryRejectionReason};
+pub use delivery_rejection::{
+    DeliveryNextAction, DeliveryPeerClaim, DeliveryRejection, DeliveryRejectionReason,
+};
 mod session_delivery_receipt;
 mod session_message_send;
 pub use delivery_route_evidence::DeliveryRouteEvidence;
@@ -104,13 +123,9 @@ pub use session_message_reply::{SessionMessageReplyParams, SessionMessageReplyRe
 mod native_schema_references;
 mod native_session_catalog;
 pub use message_content::{
-    AcceptedResumeEffect, MessageContent, MessageDelivery, MessageHeaderContext,
-    MessageHeaderOrigin, MessageInputKind, MessageRepresentation, MessageText, MessageTextError,
-    ParsedAgentMessageEnvelope, ParsedRouterMessageEnvelope, RenderedMessage, RouterNoticeKind,
-    SessionDisplayName, SessionDisplayNameError, SessionDisplayNameLookup,
-    SessionDisplayNameLookupError, parse_agent_message_envelope, parse_router_message_envelope,
-    queued_message_matches_content, render_message, render_message_with_context,
-    render_message_with_lookup, session_identity, title_from_agent_message_envelope,
+    AcceptedResumeEffect, MessageContent, MessageDelivery, MessageInputKind, MessageRepresentation,
+    MessageText, MessageTextError, RenderedMessage, SessionDisplayName, SessionDisplayNameError,
+    SessionDisplayNameLookup, SessionDisplayNameLookupError, session_identity,
 };
 pub use native_control_contract::{
     NativeInputDisposition, NativeInputOperation, NativeSendAcceptance, NativeSendParams,
@@ -120,6 +135,20 @@ pub use native_session_catalog::{
     NativeSessionListParams, NativeSessionListResult, NativeSessionObservation, NativeSessionScope,
     NativeSessionSource, NativeSessionSummary, NativeSessionView,
 };
+pub use push_line::{
+    MAX_MACHINE_LABEL_SCALARS, MAX_PUSH_LINE_BYTES, MachineId, MachineLabel, MachineLabelError,
+    ParsedPushLineHeader, PushHeaderFacts, PushId, PushIdError, PushKind, PushLineError,
+    PushLineInput, PushOrigin, RouterLink, escape_push_line_field, parse_push_line_header,
+    render_push_line,
+};
+pub use push_record::{
+    MAX_DIRECT_MESSAGE_BODY_BYTES, MAX_PUSH_ACTIVITY_RANGES, PushActivityRange,
+    PushActivityRangeRead, PushActivitySnapshot, PushDeliveryState, PushMessageSendResult,
+    PushRecord, PushRecordDraft, PushRecordHistoryParams, PushRecordListParams,
+    PushRecordListResult, PushRecordNotice, PushRecordShowParams, PushRecordShowResult,
+    PushRecordValidationError,
+};
+pub use router_origin_ref::{InteractionId, InteractionPresentationId, RouterOriginRef};
 mod control_initialization;
 mod endpoint_inventory;
 pub use control_initialization::{

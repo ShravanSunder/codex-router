@@ -1,8 +1,8 @@
 //! The feature-facing delivery seam and the route-facing client contract.
 use agent_automation::RouteEffectEvidence;
 use collaboration_protocol::{
-    AttemptId, CodexGeneration, DeliveryCorrelationId, DeliveryReceipt, MessageContent,
-    MessageDelivery, MessageHeaderContext, SessionReachability, SessionRef,
+    CodexGeneration, DeliveryReceipt, DeliveryRejection, MessageDelivery, PushId,
+    SessionReachability, SessionRef,
 };
 use serde::{Deserialize, Serialize};
 use std::{future::Future, pin::Pin, sync::Arc};
@@ -26,16 +26,30 @@ pub enum DeliveryContractError {
     PreparationChangeConflict,
 }
 
-#[derive(Clone, Debug)]
-pub struct DeliveryRequest {
-    pub target: SessionRef,
-    pub message: MessageContent,
-    pub header_context: MessageHeaderContext,
-    pub mode: MessageDelivery,
-    pub load_policy: LoadPolicy,
-    pub precondition: DeliveryPrecondition,
-    pub correlation: DeliveryCorrelationId,
-    pub attempt: AttemptId,
+/// Layer-0 contract introduced before all existing callers move to prepared pushes.
+pub mod layer_zero {
+    use super::{DeliveryPrecondition, LoadPolicy};
+    use agent_automation::AttemptId;
+    use collaboration_protocol::{
+        DeliveryCorrelationId, MessageDelivery, MessageText, PushId, SessionRef,
+    };
+
+    #[derive(Clone, Debug)]
+    pub struct PreparedPush {
+        pub push_id: PushId,
+        pub line: MessageText,
+        pub load_policy: LoadPolicy,
+    }
+
+    #[derive(Clone, Debug)]
+    pub struct DeliveryRequest {
+        pub payload: PreparedPush,
+        pub target: SessionRef,
+        pub mode: MessageDelivery,
+        pub precondition: DeliveryPrecondition,
+        pub correlation: DeliveryCorrelationId,
+        pub attempt: AttemptId,
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -69,7 +83,7 @@ pub enum DeliveryPrecondition {
 
 pub struct AttemptReconciliationContext {
     pub target: SessionRef,
-    pub message: MessageContent,
+    pub prepared_push_id: PushId,
     pub mode: MessageDelivery,
     pub recorded: RouteEffectEvidence<SessionRef, CodexGeneration>,
 }
@@ -93,6 +107,10 @@ pub enum RouteClaim {
     NotMine,
     Holds,
     CanLoad,
+    /// The route selected this target but has a typed terminal rejection before dispatch.
+    Rejected {
+        rejection: DeliveryRejection,
+    },
     LiveElsewhere {
         writable: bool,
         detail: Option<String>,
@@ -123,9 +141,15 @@ impl AttemptEvidenceSink for UnstoredAttemptEvidenceSink {
 }
 
 pub trait SessionMessageDelivery: Send + Sync {
+    /// Reports whether the route serving this target can accept the requested mode.
+    /// Implementations without route-specific mode constraints accept it by default.
+    fn supports_delivery_mode(&self, _target: &SessionRef, _mode: MessageDelivery) -> bool {
+        true
+    }
+
     fn deliver<'a>(
         &'a self,
-        request: DeliveryRequest,
+        request: layer_zero::DeliveryRequest,
         evidence: &'a dyn AttemptEvidenceSink,
     ) -> DeliveryFuture<'a, DeliveryReceipt>;
 
@@ -141,11 +165,15 @@ pub trait TargetPresenceProbe: Send + Sync {
 
 pub trait SessionDeliveryRoute: Send + Sync {
     fn reachability(&self) -> SessionReachability;
+    /// Returns false only when this route serves the target and rejects the mode.
+    fn supports_delivery_mode(&self, _target: &SessionRef, _mode: MessageDelivery) -> bool {
+        true
+    }
     fn claim(&self, target: &SessionRef) -> DeliveryFuture<'_, RouteClaim>;
     fn presence(&self, target: &SessionRef) -> DeliveryFuture<'_, RoutePresence>;
     fn deliver<'a>(
         &'a self,
-        request: DeliveryRequest,
+        request: layer_zero::DeliveryRequest,
         evidence: &'a dyn AttemptEvidenceSink,
     ) -> DeliveryFuture<'a, DeliveryReceipt>;
     fn reconcile_attempt(

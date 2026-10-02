@@ -9,6 +9,7 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+async-compression = { version = "0.4.32", features = ["tokio", "gzip", "zlib", "brotli", "zstd"] }
 codex-router-auth = { path = "../codex-router-auth", version = "0.1.4" }
 codex-router-core.workspace = true
 codex-router-quota.workspace = true
@@ -32,13 +33,14 @@ sha2.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tokio-tungstenite.workspace = true
-tokio-util.workspace = true
+tokio-util = { workspace = true, features = ["io"] }
 tracing.workspace = true
 
 [dev-dependencies]
-codex-router-auth = { path = "../codex-router-auth", version = "0.1.4", features = ["sync-rusqlite-fixtures"] }
+codex-router-auth = { path = "../codex-router-auth", version = "0.1.4", features = ["sync-rusqlite-fixtures", "test-support"] }
 codex-router-secret-store = { path = "../codex-router-secret-store", version = "0.1.4", features = ["keychain-test-guard", "test-support"] }
 codex-router-state = { path = "../codex-router-state", version = "0.1.4", features = ["sync-rusqlite-fixtures"] }
 sqlx.workspace = true
+tempfile = "3.27.0"
 tokio = { workspace = true, features = ["test-util"] }
 tracing-subscriber.workspace = true

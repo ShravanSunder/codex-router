@@ -301,6 +301,12 @@ async fn app_server_owner_rejects_foreign_endpoint_and_observes_native_readiness
         readiness,
         AppServerReadiness::Ready {
             running_version: "1.2.3".to_owned(),
+            remote_control_server_name: Some(
+                "shared-host-fixture"
+                    .to_owned()
+                    .try_into()
+                    .expect("valid fixture Remote Control name"),
+            ),
         },
         "native initialize and connected Remote Control must be ready",
     )?;
@@ -347,6 +353,12 @@ async fn app_server_readiness_gives_remote_control_its_own_deadline_after_native
         readiness,
         AppServerReadiness::Ready {
             running_version: "1.2.3".to_owned(),
+            remote_control_server_name: Some(
+                "fixture"
+                    .to_owned()
+                    .try_into()
+                    .expect("valid fixture Remote Control name"),
+            ),
         },
         "native and Remote Control convergence must receive separate deadlines",
     )?;

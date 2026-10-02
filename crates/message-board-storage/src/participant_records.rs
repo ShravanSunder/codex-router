@@ -316,11 +316,17 @@ impl BoardStore {
         )
         .await?;
         if request.watch {
+            let policy_patch = SubscriptionPolicyPatch {
+                mode: request.mode,
+                when_idle: request.when_idle,
+                ..SubscriptionPolicyPatch::default()
+            };
             let subscription_started = upsert_join_subscription(
                 &mut transaction,
                 &actor_key,
                 &request.actor,
                 &request.root_message_id,
+                &policy_patch,
                 now,
             )
             .await?;

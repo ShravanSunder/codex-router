@@ -20,6 +20,12 @@ impl SessionProfile {
             Self::RouterDebug => "codex-router-debug",
         }
     }
+
+    /// File name Codex loads from `CODEX_HOME` for `--profile <name>`.
+    #[must_use]
+    pub fn file_name(self) -> String {
+        format!("{}.config.toml", self.name())
+    }
 }
 
 /// Model and reasoning effort a stored session last ran with.

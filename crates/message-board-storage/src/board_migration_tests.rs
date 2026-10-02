@@ -15,7 +15,7 @@ const REBUILD: &str = "CREATE TABLE replacement_projects(project_id TEXT PRIMARY
 
 fn current_schema() -> String {
     format!(
-        "{BASELINE} {THREAD_DELIVERY_POSITIONS} {THREAD_PARTICIPANTS} {THREAD_IMPLEMENTER} {TOPIC_WATCHES} {THREAD_SUBSCRIPTIONS}"
+        "{BASELINE} {THREAD_DELIVERY_POSITIONS} {THREAD_PARTICIPANTS} {THREAD_IMPLEMENTER} {TOPIC_WATCHES} {THREAD_SUBSCRIPTIONS} {TOPIC_WATCHES_EMPTY_BOUNDARY}"
     )
 }
 
@@ -65,6 +65,13 @@ fn migrator(version: i64, description: &'static str, extra: &str) -> Migrator {
                 false,
             ),
             Migration::new(
+                202610010001,
+                "topic watches empty boundary".into(),
+                MigrationType::Simple,
+                TOPIC_WATCHES_EMPTY_BOUNDARY.into_sql_str(),
+                false,
+            ),
+            Migration::new(
                 version,
                 description.into(),
                 MigrationType::Simple,
@@ -96,6 +103,243 @@ fn pre_participants_migrator() -> Migrator {
         ]),
         ..Migrator::DEFAULT
     }
+}
+
+fn pre_topic_watch_boundary_migrator() -> Migrator {
+    Migrator {
+        migrations: Cow::Owned(vec![
+            Migration::new(
+                202609120001,
+                "project board".into(),
+                MigrationType::Simple,
+                BASELINE.into_sql_str(),
+                false,
+            ),
+            Migration::new(
+                202609140001,
+                "thread delivery positions".into(),
+                MigrationType::Simple,
+                THREAD_DELIVERY_POSITIONS.into_sql_str(),
+                false,
+            ),
+            Migration::new(
+                202609150001,
+                "thread participants".into(),
+                MigrationType::Simple,
+                THREAD_PARTICIPANTS.into_sql_str(),
+                false,
+            ),
+            Migration::new(
+                202609160001,
+                "thread implementer".into(),
+                MigrationType::Simple,
+                THREAD_IMPLEMENTER.into_sql_str(),
+                false,
+            ),
+            Migration::new(
+                202609160002,
+                "topic watches".into(),
+                MigrationType::Simple,
+                TOPIC_WATCHES.into_sql_str(),
+                false,
+            ),
+            Migration::new(
+                202609170001,
+                "thread subscriptions".into(),
+                MigrationType::Simple,
+                THREAD_SUBSCRIPTIONS.into_sql_str(),
+                false,
+            ),
+        ]),
+        ..Migrator::DEFAULT
+    }
+}
+
+fn pre_topic_watch_boundary_schema() -> String {
+    format!(
+        "{BASELINE} {THREAD_DELIVERY_POSITIONS} {THREAD_PARTICIPANTS} {THREAD_IMPLEMENTER} {TOPIC_WATCHES} {THREAD_SUBSCRIPTIONS}"
+    )
+}
+
+async fn topic_watch_row_bytes(
+    connection: &mut SqliteConnection,
+) -> Vec<(String, String, String, String)> {
+    sqlx::query_as(
+        "SELECT hex(CAST(reader_key AS BLOB)),hex(CAST(topic_id AS BLOB)), \
+           quote(starts_after_activity),quote(active) \
+         FROM topic_watches ORDER BY reader_key,topic_id",
+    )
+    .fetch_all(connection)
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+async fn topic_watch_boundary_migration_preserves_rows_on_a_copied_pre_change_database() {
+    let suffix = message_board::MessageId::generate().as_str().to_owned();
+    let original_path =
+        std::env::temp_dir().join(format!("board-topic-watch-before-{suffix}.sqlite"));
+    let copied_path = std::env::temp_dir().join(format!("board-topic-watch-copy-{suffix}.sqlite"));
+    let mut original =
+        SqliteConnection::connect(&format!("sqlite://{}?mode=rwc", original_path.display()))
+            .await
+            .unwrap();
+    initialize_with(
+        &mut original,
+        &pre_topic_watch_boundary_migrator(),
+        &pre_topic_watch_boundary_schema(),
+    )
+    .await
+    .unwrap();
+
+    let project_id = message_board::ProjectId::generate();
+    let board_id = message_board::BoardId::generate();
+    let topic_id = message_board::TopicId::generate();
+    let root_id = message_board::MessageId::generate();
+    let owner_key = "human:topic-watch-migration-owner";
+    let active_reader_key = "human:topic-watch-migration-active";
+    let inactive_reader_key = "human:topic-watch-migration-inactive";
+    sqlx::query(
+        "INSERT INTO board_identities(identity_key,kind,human_id) \
+         VALUES(?,'human','topic-watch-migration-owner'), \
+               (?,'human','topic-watch-migration-active'), \
+               (?,'human','topic-watch-migration-inactive')",
+    )
+    .bind(owner_key)
+    .bind(active_reader_key)
+    .bind(inactive_reader_key)
+    .execute(&mut original)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO board_projects(project_id,name,description) VALUES(?,'Topic Watch Project','')")
+        .bind(project_id.as_str())
+        .execute(&mut original)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO project_boards(board_id,project_id,name,description,state) VALUES(?,?,'Topic Watch Board','','active')")
+        .bind(board_id.as_str())
+        .bind(project_id.as_str())
+        .execute(&mut original)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO board_topics(topic_id,board_id,name,description) VALUES(?,?,'Topic Watch Topic','')")
+        .bind(topic_id.as_str())
+        .bind(board_id.as_str())
+        .execute(&mut original)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO board_messages(message_id,topic_id,board_id,root_id,actor_key,text) \
+         VALUES(?,?,?,NULL,?,'topic watch migration root')",
+    )
+    .bind(root_id.as_str())
+    .bind(topic_id.as_str())
+    .bind(board_id.as_str())
+    .bind(owner_key)
+    .execute(&mut original)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO board_threads(root_id,state) VALUES(?,'unresolved')")
+        .bind(root_id.as_str())
+        .execute(&mut original)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE activity_checkpoint SET last_sequence=1 WHERE singleton=1")
+        .execute(&mut original)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO board_activity(activity_sequence,project_id,board_id,topic_id,root_id,kind,actor_key,message_id) \
+         VALUES(1,?,?,?,NULL,'mainMessageCreated',?,?)",
+    )
+    .bind(project_id.as_str())
+    .bind(board_id.as_str())
+    .bind(topic_id.as_str())
+    .bind(owner_key)
+    .bind(root_id.as_str())
+    .execute(&mut original)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO topic_watches(reader_key,topic_id,starts_after_activity,active) \
+         VALUES(?,?,1,1),(?,?,1,0)",
+    )
+    .bind(active_reader_key)
+    .bind(topic_id.as_str())
+    .bind(inactive_reader_key)
+    .bind(topic_id.as_str())
+    .execute(&mut original)
+    .await
+    .unwrap();
+
+    let rows_before_migration = topic_watch_row_bytes(&mut original).await;
+    original.close().await.unwrap();
+    std::fs::copy(&original_path, &copied_path).unwrap();
+
+    BoardStore::open(&copied_path)
+        .await
+        .unwrap()
+        .close()
+        .await
+        .unwrap();
+
+    let mut migrated = SqliteConnection::connect(&format!("sqlite://{}", copied_path.display()))
+        .await
+        .unwrap();
+    let rows_after_migration = topic_watch_row_bytes(&mut migrated).await;
+    assert_eq!(rows_after_migration, rows_before_migration);
+    let mut foreign_key_targets = sqlx::query("PRAGMA foreign_key_list(topic_watches)")
+        .fetch_all(&mut migrated)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|row| row.get::<String, _>("table"))
+        .collect::<Vec<_>>();
+    foreign_key_targets.sort();
+    assert_eq!(
+        foreign_key_targets,
+        vec!["board_identities", "board_topics"]
+    );
+    let topic_watch_schema: String = sqlx::query_scalar(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='topic_watches'",
+    )
+    .fetch_one(&mut migrated)
+    .await
+    .unwrap();
+    assert!(topic_watch_schema.contains("CHECK(active IN (0,1))"));
+    assert!(topic_watch_schema.ends_with("STRICT"));
+    let mut topic_watch_columns = sqlx::query("PRAGMA table_info(topic_watches)")
+        .fetch_all(&mut migrated)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|row| {
+            (
+                row.get::<String, _>("name"),
+                row.get::<i64, _>("notnull"),
+                row.get::<i64, _>("pk"),
+            )
+        })
+        .collect::<Vec<_>>();
+    topic_watch_columns.sort_by_key(|(name, _, _)| name.clone());
+    assert_eq!(
+        topic_watch_columns,
+        vec![
+            ("active".to_owned(), 1, 0),
+            ("reader_key".to_owned(), 1, 1),
+            ("starts_after_activity".to_owned(), 1, 0),
+            ("topic_id".to_owned(), 1, 2),
+        ]
+    );
+    assert!(foreign_key_violations(&mut migrated).await.is_empty());
+    assert_eq!(
+        migration_versions(&mut migrated).await.last(),
+        Some(&202610010001)
+    );
+    migrated.close().await.unwrap();
+
+    std::fs::remove_file(original_path).unwrap();
+    std::fs::remove_file(copied_path).unwrap();
 }
 
 #[tokio::test]
@@ -179,7 +423,8 @@ async fn participant_migration_preserves_populated_board_and_enforces_one_open_o
             202609150001,
             202609160001,
             202609160002,
-            202609170001
+            202609170001,
+            202610010001
         ]
     );
     assert!(index_exists(&mut connection, "thread_single_orchestrator").await);
@@ -334,7 +579,8 @@ async fn delivered_position_migration_preserves_populated_thread_and_watch_state
             202609150001,
             202609160001,
             202609160002,
-            202609170001
+            202609170001,
+            202610010001
         ]
     );
     assert!(
@@ -363,7 +609,7 @@ async fn additive_migration_preserves_semantic_state_and_history() {
     let expected = format!("{} {ADDITIVE}", current_schema());
     initialize_with(
         &mut connection,
-        &migrator(202609170002, "test-only additive", ADDITIVE),
+        &migrator(202610010002, "test-only additive", ADDITIVE),
         &expected,
     )
     .await
@@ -379,7 +625,8 @@ async fn additive_migration_preserves_semantic_state_and_history() {
             202609160001,
             202609160002,
             202609170001,
-            202609170002
+            202610010001,
+            202610010002
         ]
     );
     assert!(index_exists(&mut store.connection, "board_projects_migration_note").await);
@@ -400,7 +647,7 @@ async fn populated_parent_rebuild_preserves_exact_rows_domain_reads_and_relation
     let expected = format!("{} {REBUILD}", current_schema());
     initialize_with(
         &mut connection,
-        &migrator(202609170002, "test-only rebuild", REBUILD),
+        &migrator(202610010002, "test-only rebuild", REBUILD),
         &expected,
     )
     .await
@@ -417,7 +664,8 @@ async fn populated_parent_rebuild_preserves_exact_rows_domain_reads_and_relation
             202609160001,
             202609160002,
             202609170001,
-            202609170002
+            202610010001,
+            202610010002
         ]
     );
     for index in [
@@ -450,7 +698,7 @@ async fn failed_rebuild_reopens_separately_with_original_exact_state_and_history
     assert!(
         initialize_with(
             &mut connection,
-            &migrator(202609170002, "test-only failing rebuild", &failing),
+            &migrator(202610010002, "test-only failing rebuild", &failing),
             &current_schema()
         )
         .await
@@ -472,7 +720,8 @@ async fn failed_rebuild_reopens_separately_with_original_exact_state_and_history
             202609150001,
             202609160001,
             202609160002,
-            202609170001
+            202609170001,
+            202610010001
         ]
     );
     fixture.finish(reopened).await;
@@ -491,7 +740,7 @@ async fn broken_relationship_rejects_migration_and_reopens_unchanged() {
     assert!(
         initialize_with(
             &mut connection,
-            &migrator(202609170002, "test-only invalid relationship", &invalid),
+            &migrator(202610010002, "test-only invalid relationship", &invalid),
             &current_schema()
         )
         .await
@@ -508,7 +757,8 @@ async fn broken_relationship_rejects_migration_and_reopens_unchanged() {
             202609150001,
             202609160001,
             202609160002,
-            202609170001
+            202609170001,
+            202610010001
         ]
     );
     assert!(

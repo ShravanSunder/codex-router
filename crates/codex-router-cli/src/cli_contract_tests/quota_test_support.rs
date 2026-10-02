@@ -1,4 +1,5 @@
 use super::*;
+use crate::quota::QuotaWindowHeadroom;
 
 pub(super) struct JoinedFloorCrossingProvider {
     pub(super) floor_account_id: AccountId,
@@ -18,13 +19,13 @@ impl QuotaRefreshProvider for JoinedFloorCrossingProvider {
             windows: vec![
                 QuotaRefreshProviderWindow {
                     limit_window_seconds: 18_000,
-                    remaining_headroom: 100,
+                    headroom: QuotaWindowHeadroom::Percent(100),
                     reset_unix_seconds: Some(18_000),
                     effective: true,
                 },
                 QuotaRefreshProviderWindow {
                     limit_window_seconds: 604_800,
-                    remaining_headroom: weekly_remaining,
+                    headroom: QuotaWindowHeadroom::Percent(weekly_remaining),
                     reset_unix_seconds: Some(604_800),
                     effective: false,
                 },
@@ -127,8 +128,13 @@ where
     async fn resolve_provider_credentials_async(
         &self,
         account_id: &AccountId,
+        expected_provider: codex_router_core::provider::Provider,
     ) -> Result<ResolvedProviderCredential, CredentialResolverError> {
-        ProviderCredentialResolver::resolve_provider_credentials(self, account_id)
+        ProviderCredentialResolver::resolve_provider_credentials(
+            self,
+            account_id,
+            expected_provider,
+        )
     }
 }
 
@@ -289,13 +295,13 @@ impl QuotaRefreshProvider for FloorNotificationOrderingQuotaProvider {
             vec![
                 QuotaRefreshProviderWindow {
                     limit_window_seconds: 18_000,
-                    remaining_headroom,
+                    headroom: QuotaWindowHeadroom::Percent(remaining_headroom),
                     reset_unix_seconds: Some(20_000),
                     effective: true,
                 },
                 QuotaRefreshProviderWindow {
                     limit_window_seconds: 604_800,
-                    remaining_headroom,
+                    headroom: QuotaWindowHeadroom::Percent(remaining_headroom),
                     reset_unix_seconds: Some(614_800),
                     effective: false,
                 },
@@ -473,13 +479,13 @@ pub(super) fn verified_quota_windows(remaining_headroom: u32) -> Vec<QuotaRefres
     vec![
         QuotaRefreshProviderWindow {
             limit_window_seconds: 18_000,
-            remaining_headroom,
+            headroom: QuotaWindowHeadroom::Percent(remaining_headroom),
             reset_unix_seconds: Some(20_000),
             effective: true,
         },
         QuotaRefreshProviderWindow {
             limit_window_seconds: 604_800,
-            remaining_headroom: remaining_headroom.max(50),
+            headroom: QuotaWindowHeadroom::Percent(remaining_headroom.max(50)),
             reset_unix_seconds: Some(614_800),
             effective: false,
         },

@@ -67,7 +67,7 @@ tempfile = "3.27.0"
 codex-router-host = { path = "../codex-router-host", version = "0.1.4", features = ["keychain-test-support"] }
 collaboration-client = { path = "../collaboration-client", version = "0.1.14" }
 codex-router-secret-store = { path = "../codex-router-secret-store", version = "0.1.4", features = ["keychain-test-guard", "test-support"] }
-codex-router-auth = { path = "../codex-router-auth", version = "0.1.4", features = ["sync-rusqlite-fixtures"] }
+codex-router-auth = { path = "../codex-router-auth", version = "0.1.4", features = ["sync-rusqlite-fixtures", "test-support"] }
 codex-router-state = { path = "../codex-router-state", version = "0.1.4", features = ["sync-rusqlite-fixtures"] }
 futures-util.workspace = true
 rustix.workspace = true

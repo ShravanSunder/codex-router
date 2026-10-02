@@ -42,7 +42,7 @@ impl ControlClient {
                 stage: "socket-connect",
                 source,
             })?;
-        let client = Self::initialize(stream, name, version).await?;
+        let mut client = Self::initialize(stream, name, version).await?;
         let identity = client.identity();
         if identity.service_id != manifest.service_id
             || identity.service_epoch != manifest.service_epoch
@@ -52,6 +52,7 @@ impl ControlClient {
                 "manifest and connected service disagree",
             ));
         }
+        client.set_machine_label_from_manifest(manifest.machine_label);
         Ok(client)
     }
 }

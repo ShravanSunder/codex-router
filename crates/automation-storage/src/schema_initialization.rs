@@ -298,7 +298,7 @@ mod tests {
                 .close()
                 .await?;
             let adopted = inspect_seed_and_history(&database.path).await?;
-            if adopted.0 != 1 || adopted.1 != 79 || adopted.2 != 1 || adopted.3.len() != 3 {
+            if adopted.0 != 1 || adopted.1 != 79 || adopted.2 != 1 || adopted.3.len() != 4 {
                 return Err(
                     format!("{stage}: reopen did not adopt intact state: {adopted:?}").into(),
                 );
@@ -313,7 +313,7 @@ mod tests {
         create_seeded_legacy_v1(&database.path).await?;
         run_checkpoint_child(&database.path, "outer-committed").await?;
         let committed = inspect_seed_and_history(&database.path).await?;
-        if committed.0 != 1 || committed.1 != 79 || committed.2 != 1 || committed.3.len() != 3 {
+        if committed.0 != 1 || committed.1 != 79 || committed.2 != 1 || committed.3.len() != 4 {
             return Err(format!("postcommit exit lost native state: {committed:?}").into());
         }
         crate::AutomationStore::open(&database.path)

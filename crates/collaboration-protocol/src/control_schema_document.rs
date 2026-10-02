@@ -157,22 +157,22 @@ pub fn control_schema_document(
         message_board::ThreadParticipantListRequest,
         message_board::ThreadParticipantListResult,
     >("board/threadParticipantList", &[])?;
-    assembly.add_method::<message_board::ThreadListenRequest, message_board::ThreadListenResult>(
-        "board/threadListen",
+    assembly.add_method::<ThreadSubscribeRequest, ThreadSubscriptionView>(
+        "board/threadSubscribe",
         &[],
     )?;
-    assembly.add_method::<message_board::ThreadWaitRequest, message_board::ThreadWaitResult>(
+    assembly.add_method::<ThreadUnsubscribeRequest, ThreadSubscriptionView>(
+        "board/threadUnsubscribe",
+        &[],
+    )?;
+    assembly.add_method::<ThreadSubscriptionsRequest, ThreadSubscriptionsResult>(
+        "board/threadSubscriptions",
+        &[],
+    )?;
+    assembly.add_method::<ThreadSubscriptionWaitRequest, ThreadSubscriptionWaitResult>(
         "board/threadWait",
         &[],
     )?;
-    assembly.add_method::<
-        message_board::ThreadListenShowRequest,
-        message_board::ThreadListenShowResult,
-    >("board/threadListenShow", &[])?;
-    assembly.add_method::<
-        message_board::ThreadListenCancelRequest,
-        message_board::ThreadListenCancelResult,
-    >("board/threadListenCancel", &[])?;
     assembly.add_method::<message_board::InboxFetchRequest, message_board::InboxFetchResult>(
         "board/inboxFetch",
         &[],
@@ -371,28 +371,50 @@ pub fn control_schema_document(
             "nameMismatch",
         ],
     )?;
-    assembly.add_method::<SessionMessageSendParams, DeliveryReceipt>(
+    assembly.add_method::<SessionMessageSendParams, PushMessageSendResult>(
         "message/send",
         &[
             "wrongService",
             "unavailable",
-            "replyUnavailable",
+            "invalidField",
             "outcomeUnknown",
             "overloaded",
-            "threadNotLoaded",
-            "noActiveTurn",
         ],
     )?;
     assembly.add_method::<SessionMessageReplyParams, SessionMessageReplyResult>(
         "message/reply",
         &[
             "wrongService",
-            "replyUnavailable",
-            "latestSenderUnknown",
-            "latestSenderMismatch",
+            "unavailable",
+            "invalidField",
+            "notFound",
+            "notPermitted",
+            "foreignMachine",
+            "notDirectMessage",
+            "ownerReplyUnsupported",
             "outcomeUnknown",
             "overloaded",
         ],
+    )?;
+    assembly.add_method::<PushRecordShowParams, PushRecordShowResult>(
+        "router/show",
+        &[
+            "wrongService",
+            "unavailable",
+            "invalidField",
+            "notFound",
+            "notPermitted",
+            "foreignMachine",
+            "overloaded",
+        ],
+    )?;
+    assembly.add_method::<PushRecordListParams, PushRecordListResult>(
+        "message/inbox",
+        &["wrongService", "unavailable", "invalidField", "overloaded"],
+    )?;
+    assembly.add_method::<PushRecordHistoryParams, PushRecordListResult>(
+        "message/history",
+        &["wrongService", "unavailable", "invalidField", "overloaded"],
     )?;
     assembly.add_method::<NativeInterruptParams, NativeInterruptResult>(
         "codex/turnInterrupt",

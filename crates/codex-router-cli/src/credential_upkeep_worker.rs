@@ -14,7 +14,7 @@ use codex_router_auth::resolver::CredentialRefreshClient;
 #[cfg(test)]
 use codex_router_auth::resolver::NoopCredentialRefreshClient;
 #[cfg(not(test))]
-use codex_router_auth::resolver::OpenAiOAuthRefreshClient;
+use codex_router_auth::resolver::ProviderCredentialRefreshClients;
 use codex_router_auth::resolver::current_unix_seconds;
 use codex_router_secret_store::encrypted_credential_store::EncryptedCredentialStore;
 use codex_router_secret_store::model::SecretStoreError;
@@ -25,6 +25,10 @@ use codex_router_state::sqlite::StateStoreError;
 use thiserror::Error;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
+
+#[path = "credential_upkeep_worker/telemetry.rs"]
+mod telemetry;
+use telemetry::TelemetryCredentialUpkeepRefreshClient;
 
 const UPKEEP_CYCLE_SECONDS: u64 = 180;
 const LOCAL_FAILURE_RETRY_SECONDS: u64 = 60;
@@ -119,7 +123,7 @@ pub(crate) fn start_background_credential_upkeep_worker(
     start_background_credential_upkeep_worker_with_client_and_clock(
         state_db_path,
         secret_store,
-        OpenAiOAuthRefreshClient::new(),
+        ProviderCredentialRefreshClients::new(),
         || current_unix_seconds().unwrap_or(0),
     )
 }
@@ -308,7 +312,7 @@ where
         let resolver = AsyncRouterCredentialResolver::new(
             state.clone(),
             secrets.clone(),
-            refresh_client.clone(),
+            TelemetryCredentialUpkeepRefreshClient::new(refresh_client.clone()),
             Some(observed_now),
         );
         let account_id = account.account_id().clone();

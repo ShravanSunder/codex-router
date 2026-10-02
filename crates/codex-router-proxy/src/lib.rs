@@ -3,6 +3,7 @@
 
 pub mod account_selection;
 mod capacity_retry;
+pub(crate) mod claude_edge;
 mod credential_runtime;
 pub mod db_write_actor;
 pub mod headers;
@@ -10690,6 +10691,7 @@ mod tests {
         fn resolve_provider_credentials(
             &self,
             account_id: &codex_router_core::ids::AccountId,
+            _expected_provider: codex_router_core::provider::Provider,
         ) -> Result<ResolvedProviderCredential, CredentialResolverError> {
             self.recorded
                 .borrow_mut()
@@ -10727,6 +10729,7 @@ mod tests {
         fn resolve_provider_credentials<'a>(
             &'a self,
             account_id: &'a codex_router_core::ids::AccountId,
+            _expected_provider: codex_router_core::provider::Provider,
         ) -> BoxFuture<'a, Result<ResolvedProviderCredential, CredentialResolverError>> {
             Box::pin(async move {
                 lock_test_mutex(&self.recorded, "async credential records")
@@ -10762,6 +10765,7 @@ mod tests {
         fn resolve_provider_credentials(
             &self,
             account_id: &codex_router_core::ids::AccountId,
+            _expected_provider: codex_router_core::provider::Provider,
         ) -> Result<ResolvedProviderCredential, CredentialResolverError> {
             self.recorded
                 .borrow_mut()
@@ -10794,6 +10798,7 @@ mod tests {
         fn resolve_provider_credentials(
             &self,
             account_id: &codex_router_core::ids::AccountId,
+            _expected_provider: codex_router_core::provider::Provider,
         ) -> Result<ResolvedProviderCredential, CredentialResolverError> {
             self.recorded
                 .borrow_mut()
@@ -10837,6 +10842,7 @@ mod tests {
         fn resolve_provider_credentials<'a>(
             &'a self,
             account_id: &'a codex_router_core::ids::AccountId,
+            _expected_provider: codex_router_core::provider::Provider,
         ) -> BoxFuture<'a, Result<ResolvedProviderCredential, CredentialResolverError>> {
             Box::pin(async move {
                 lock_test_mutex(&self.recorded, "async fail-first credential records")
@@ -11737,7 +11743,10 @@ mod tests {
             refresh_client.clone(),
         ));
 
-        let resolved = must_ok(resolver.resolve_provider_credentials(&account_id));
+        let resolved = must_ok(resolver.resolve_provider_credentials(
+            &account_id,
+            codex_router_core::provider::Provider::Openai,
+        ));
 
         assert_eq!(
             resolved.access_token().expose_secret(),

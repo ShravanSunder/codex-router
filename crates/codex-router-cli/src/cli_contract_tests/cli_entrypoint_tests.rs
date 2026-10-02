@@ -252,7 +252,7 @@ fn process_binary_path_is_skipped_before_command_parse() {
         "serve                         Run the local Codex account router",
         "account disable --account <name>  Stop routing to an account",
         "account enable --account <name>   Resume routing to an account",
-        "account login --label <name>  Add an OAuth account",
+        "account login --provider <openai|claude> --label <name>  Add a provider OAuth account",
         "account list                  Show configured router accounts",
         "account set-weekly-floor      Set or disable an account weekly quota floor",
         "quota                         Show quota, refresh state, and next account",
@@ -296,16 +296,17 @@ fn nested_user_facing_help_does_not_leak_internal_commands() {
                 "codex-router account",
                 "disable --account <name>",
                 "enable --account <name>",
-                "login --label <name>  Add an OAuth account",
+                "login --provider <openai|claude> --label <name>  Add a provider OAuth account",
                 "list                  Show configured router accounts",
             ][..],
         ),
         (
             &["codex-router", "account", "login", "--help"][..],
             &[
-                "codex-router account login --label <name>",
+                "codex-router account login --provider <openai|claude> --label <name>",
                 "--label <name>",
-                "--codex-bin <path>",
+                "--provider <name>",
+                "OpenAI login displays a device URL and code, then waits for approval.",
             ][..],
         ),
         (
@@ -358,7 +359,9 @@ fn nested_user_facing_help_does_not_leak_internal_commands() {
             "token",
             "import-codex-auth",
             "live quota",
+            "--codex-bin",
             "--allow-plaintext-file-secrets",
+            "--device-auth",
         ] {
             assert!(
                 !output.stdout.contains(hidden_line),

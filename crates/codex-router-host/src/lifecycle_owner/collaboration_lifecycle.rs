@@ -1,7 +1,7 @@
 //! Join existing child lifecycle facts to the independent public collaboration runtime.
 use crate::{
     AppServerChild, BackendSchemaEvidence, CollaborationRuntime, CollaborationRuntimeInputs,
-    HostConfig,
+    HostConfig, RemoteControlServerName,
 };
 use std::{io, path::PathBuf};
 
@@ -11,8 +11,10 @@ pub(super) struct CollaborationLifecycle {
     codex_home: PathBuf,
     backend_socket: PathBuf,
     mcp_bind: std::net::SocketAddr,
+    router_proxy_endpoint: std::net::SocketAddr,
     external_provider_startups: Vec<crate::ExternalProviderStartup>,
     provider_operation_retention_days: std::num::NonZeroU32,
+    remote_control_server_name: Option<RemoteControlServerName>,
     router_executable_relation:
         tokio::sync::watch::Receiver<collaboration_protocol::RouterExecutableRelation>,
     runtime: Option<CollaborationRuntime>,
@@ -23,6 +25,7 @@ impl CollaborationLifecycle {
     pub(super) async fn start(
         config: &HostConfig,
         child: &AppServerChild,
+        remote_control_server_name: Option<RemoteControlServerName>,
         router_executable_relation: tokio::sync::watch::Receiver<
             collaboration_protocol::RouterExecutableRelation,
         >,
@@ -30,6 +33,14 @@ impl CollaborationLifecycle {
         let Some(directory) = config.collaboration_directory() else {
             return Ok(None);
         };
+        let router_secret_root = config.coordination_paths().router_secret_root();
+        let external_provider_startups =
+            crate::claude_provider_launch_environment::configure_claude_provider_launches(
+                config.external_provider_startups().to_vec(),
+                config.router_endpoint(),
+                router_secret_root.as_deref(),
+            )
+            .await?;
         let mut owner = Self {
             owner_human_id: config.owner_human_id().cloned(),
             directory: directory.to_owned(),
@@ -39,8 +50,10 @@ impl CollaborationLifecycle {
                 .to_owned(),
             backend_socket: config.app_server_socket().to_owned(),
             mcp_bind: config.mcp_bind(),
-            external_provider_startups: config.external_provider_startups().to_vec(),
+            router_proxy_endpoint: config.router_endpoint(),
+            external_provider_startups,
             provider_operation_retention_days: config.provider_operation_retention_days(),
+            remote_control_server_name,
             router_executable_relation,
             runtime: None,
             published_child: None,
@@ -85,21 +98,24 @@ impl CollaborationLifecycle {
                 Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
                 Err(error) => return Err(error),
             }
-            let mut runtime =
-                CollaborationRuntime::start_with_external_providers_and_router_relation(
-                    CollaborationRuntimeInputs {
+            let mut runtime = CollaborationRuntime::start_for_host_with_router_proxy_endpoint(
+                crate::HostCollaborationInputs {
+                    collaboration_runtime: CollaborationRuntimeInputs {
                         directory: self.directory.clone(),
                         codex_home: self.codex_home.clone(),
                         backend_socket: self.backend_socket.clone(),
                         mcp_bind: self.mcp_bind,
                         native_schema: export.clone(),
                         peer_registry_directory: None,
+                        remote_control_server_name: self.remote_control_server_name.clone(),
                         owner_human_id: self.owner_human_id.clone(),
                     },
-                    self.external_provider_startups.clone(),
-                    self.router_executable_relation.clone(),
-                )
-                .await?;
+                    router_proxy_endpoint: self.router_proxy_endpoint,
+                },
+                self.external_provider_startups.clone(),
+                self.router_executable_relation.clone(),
+            )
+            .await?;
             runtime
                 .configure_provider_operation_retention(self.provider_operation_retention_days)
                 .await?;

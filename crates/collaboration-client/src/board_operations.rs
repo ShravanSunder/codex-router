@@ -1,5 +1,10 @@
 //! Typed board calls share Control transport and never replay uncertain writes.
 use crate::{ClientError, ControlClient};
+use collaboration_protocol::{
+    ThreadSubscribeRequest, ThreadSubscriptionView, ThreadSubscriptionWaitFilter,
+    ThreadSubscriptionWaitRequest, ThreadSubscriptionWaitResult, ThreadSubscriptionsRequest,
+    ThreadSubscriptionsResult, ThreadUnsubscribeRequest,
+};
 use message_board::*;
 use std::time::Duration;
 #[derive(Debug, thiserror::Error)]
@@ -11,6 +16,11 @@ pub enum BoardClientError {
         resource: ResourceIdentity,
         message: &'static str,
         next_action: BoardNextAction,
+    },
+    #[error("wait result was lost after a possible handoff")]
+    WaitOutcomeUnknown {
+        actor: Identity,
+        filter: ThreadSubscriptionWaitFilter,
     },
     #[error(transparent)]
     Connection(#[from] ClientError),
@@ -287,19 +297,42 @@ impl ControlClient {
         self.board_call("board/threadParticipantList", request)
             .await
     }
-    pub async fn board_thread_listen(
+    pub async fn board_thread_subscribe(
         &mut self,
-        request: ThreadListenRequest,
-    ) -> Result<ThreadListenResult, BoardClientError> {
-        self.board_call("board/threadListen", request).await
+        request: ThreadSubscribeRequest,
+    ) -> Result<ThreadSubscriptionView, BoardClientError> {
+        let resource = subscription_resource(&request.scope);
+        self.board_mutation_call("board/threadSubscribe", request, resource)
+            .await
+    }
+    pub async fn board_thread_unsubscribe(
+        &mut self,
+        request: ThreadUnsubscribeRequest,
+    ) -> Result<ThreadSubscriptionView, BoardClientError> {
+        let resource = subscription_resource(&request.scope);
+        self.board_mutation_call("board/threadUnsubscribe", request, resource)
+            .await
+    }
+    pub async fn board_thread_subscriptions(
+        &mut self,
+        request: ThreadSubscriptionsRequest,
+    ) -> Result<ThreadSubscriptionsResult, BoardClientError> {
+        self.board_call("board/threadSubscriptions", request).await
     }
     pub async fn board_thread_wait(
         &mut self,
-        request: ThreadWaitRequest,
+        request: ThreadSubscriptionWaitRequest,
         timeout: Duration,
-    ) -> Result<ThreadWaitResult, BoardClientError> {
-        let params = serde_json::to_value(request)
+    ) -> Result<ThreadSubscriptionWaitResult, BoardClientError> {
+        request
+            .validate()
+            .map_err(|_| ClientError::InvalidRequest("invalid Thread Wait request"))?;
+        let actor = request.actor.clone();
+        let filter = request.filter.clone();
+        let params = serde_json::to_value(&request)
             .map_err(|_| ClientError::Protocol("invalid Thread Wait request"))?;
+        self.connection
+            .validate_call_before_transmission("board/threadWait", &params)?;
         let result = match self
             .connection
             .call_with_timeout("board/threadWait", params, timeout)
@@ -315,22 +348,17 @@ impl ControlClient {
                         .map_err(|_| ClientError::Protocol("invalid board failure"))?,
                 )));
             }
+            Err(ClientError::Timeout)
+            | Err(ClientError::Transport(_))
+            | Err(ClientError::Protocol(_)) => {
+                return Err(BoardClientError::WaitOutcomeUnknown { actor, filter });
+            }
             Err(error) => return Err(error.into()),
         };
-        serde_json::from_value(result)
-            .map_err(|_| ClientError::Protocol("invalid Thread Wait result").into())
-    }
-    pub async fn board_thread_listen_show(
-        &mut self,
-        request: ThreadListenShowRequest,
-    ) -> Result<ThreadListenShowResult, BoardClientError> {
-        self.board_call("board/threadListenShow", request).await
-    }
-    pub async fn board_thread_listen_cancel(
-        &mut self,
-        request: ThreadListenCancelRequest,
-    ) -> Result<ThreadListenCancelResult, BoardClientError> {
-        self.board_call("board/threadListenCancel", request).await
+        match serde_json::from_value(result) {
+            Ok(result) => Ok(result),
+            Err(_) => Err(BoardClientError::WaitOutcomeUnknown { actor, filter }),
+        }
     }
     pub async fn board_inbox_fetch(
         &mut self,
@@ -433,5 +461,16 @@ fn outcome_unknown(resource: ResourceIdentity) -> BoardClientError {
         resource,
         message: "Board write outcome is unknown. Inspect the affected resource before deciding whether to retry.",
         next_action: BoardNextAction::InspectResource,
+    }
+}
+
+fn subscription_resource(scope: &SubscriptionScope) -> ResourceIdentity {
+    match scope {
+        SubscriptionScope::Thread { root_message_id } => ResourceIdentity::Thread {
+            root_message_id: root_message_id.clone(),
+        },
+        SubscriptionScope::Topic { topic_id } => ResourceIdentity::Topic {
+            topic_id: topic_id.clone(),
+        },
     }
 }

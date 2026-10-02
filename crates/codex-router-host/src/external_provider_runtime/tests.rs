@@ -419,7 +419,7 @@ fn acp_error_codes_classify_authentication_without_message_matching() {
     authentication.message = "provider conversation is busy".to_owned();
     assert!(matches!(
         acp_operation_error(authentication),
-        ExternalProviderRuntimeError::AuthenticationRequired { code: -32000 }
+        ExternalProviderRuntimeError::AuthenticationRequired { code: -32000, .. }
     ));
     for message in [
         "provider conversation is busy",
@@ -433,7 +433,7 @@ fn acp_error_codes_classify_authentication_without_message_matching() {
         let reason = acp_operation_error(provider);
         assert!(matches!(
             &reason,
-            ExternalProviderRuntimeError::ProviderRejected { code } if *code == -32603
+            ExternalProviderRuntimeError::ProviderRejected { code, .. } if *code == -32603
         ));
         assert!(!reason.to_string().contains("must not escape"));
         assert!(!reason.to_string().contains(message));
@@ -444,7 +444,7 @@ fn acp_error_codes_classify_authentication_without_message_matching() {
     let reason = acp_operation_error(missing);
     assert!(matches!(
         &reason,
-        ExternalProviderRuntimeError::ResourceNotFound { code } if *code == -32002
+        ExternalProviderRuntimeError::ResourceNotFound { code, .. } if *code == -32002
     ));
     assert!(!reason.to_string().contains("private"));
 }
@@ -505,7 +505,7 @@ async fn resource_not_found_from_session_load_is_session_not_found() {
         .expect_err("missing session");
     assert!(matches!(
         error,
-        ExternalProviderRuntimeError::ProviderSessionNotFound { code: -32002 }
+        ExternalProviderRuntimeError::ProviderSessionNotFound { code: -32002, .. }
     ));
     runtime.shutdown().await;
 }

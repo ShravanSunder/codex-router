@@ -245,7 +245,7 @@ async fn loaded_only_rechecks_after_reclaim_when_conversation_close_unloads_sess
         evidence: tokio::sync::Mutex::new(Vec::new()),
     };
     let mut request = request(target, "held notification");
-    request.load_policy = LoadPolicy::LoadedOnly;
+    request.payload.load_policy = LoadPolicy::LoadedOnly;
 
     let receipt = route
         .deliver(request, &sink)
@@ -299,7 +299,7 @@ async fn loaded_only_reports_non_retryable_unsupported_load_after_can_load_claim
         Arc::new(NoLivePeer),
     );
     let mut request = request(target, "held batch");
-    request.load_policy = LoadPolicy::LoadedOnly;
+    request.payload.load_policy = LoadPolicy::LoadedOnly;
 
     let receipt = route
         .deliver(
@@ -349,7 +349,7 @@ async fn loaded_only_preserves_live_elsewhere_reason_after_can_load_claim() {
         Arc::new(LivePeer),
     );
     let mut request = request(target, "held batch");
-    request.load_policy = LoadPolicy::LoadedOnly;
+    request.payload.load_policy = LoadPolicy::LoadedOnly;
 
     let receipt = route
         .deliver(
@@ -437,7 +437,7 @@ async fn loaded_only_reports_non_retryable_missing_record_after_can_load_claim()
         Arc::new(NoLivePeer),
     );
     let mut request = request(target.clone(), "held batch");
-    request.load_policy = LoadPolicy::LoadedOnly;
+    request.payload.load_policy = LoadPolicy::LoadedOnly;
     let sink = RemoveSessionRecordAtDispatch {
         database_path: root.path().join("operations.sqlite"),
         target: target.clone(),
@@ -534,7 +534,7 @@ async fn loaded_only_queue_refuses_not_loaded_session_before_enqueue() {
 
     let mut queued_request = request(target.clone(), "held batch");
     queued_request.mode = MessageDelivery::Queue;
-    queued_request.load_policy = LoadPolicy::LoadedOnly;
+    queued_request.payload.load_policy = LoadPolicy::LoadedOnly;
     let receipt = route
         .deliver(
             queued_request,

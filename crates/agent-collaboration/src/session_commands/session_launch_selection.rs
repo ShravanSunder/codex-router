@@ -14,6 +14,7 @@ pub(super) enum SessionsLaunchTarget {
     Hosted {
         app_server_socket: PathBuf,
         service_directory: PathBuf,
+        codex_home: PathBuf,
         invoking_cwd: PathBuf,
         profile: codex_native_integration::SessionProfile,
     },
@@ -36,6 +37,36 @@ impl SessionsLaunchTarget {
         }
         Ok(())
     }
+
+    /// Stops a hosted resume or fork when the selected profile sets a permission key,
+    /// naming the keys and file instead of leaving the user with Codex's generic
+    /// "Permission overrides are not supported when resuming a remote task."
+    ///
+    /// A missing, unreadable or malformed profile is left to Codex, which reports it.
+    pub(super) fn ensure_profile_allows_remote_resume(&self) -> Result<(), SessionsCommandError> {
+        let Self::Hosted {
+            codex_home,
+            profile,
+            ..
+        } = self
+        else {
+            return Ok(());
+        };
+        let profile_path = codex_home.join(profile.file_name());
+        let Ok(profile_text) = std::fs::read_to_string(&profile_path) else {
+            return Ok(());
+        };
+        let Ok(keys) =
+            codex_native_integration::profile_remote_resume_permission_keys(&profile_text)
+        else {
+            return Ok(());
+        };
+        if keys.is_empty() {
+            return Ok(());
+        }
+        Err(SessionsCommandError::ProfileBlocksRemoteResume { profile_path, keys })
+    }
+
     fn profile(&self) -> codex_native_integration::SessionProfile {
         match self {
             Self::Hosted { profile, .. } | Self::Local { profile, .. } => *profile,
@@ -139,20 +170,33 @@ pub(super) fn sessions_launch_target(
             profile,
         });
     }
-    let codex_paths = codex_native_integration::CodexPaths::from_codex_home(codex_home(context)?);
+    let codex_home = codex_home(context)?;
+    let codex_paths = codex_native_integration::CodexPaths::from_codex_home(codex_home.clone());
     let _validated_backend = crate::app_server_socket_or_default(context, &codex_paths)
         .map_err(|message| SessionsCommandError::AppServerSocket(message.to_owned()))?;
-    let service_directory = collaboration_client::resolve_service_directory(
-        collaboration_client::ServiceDirectoryOptions {
-            explicit_directory: None,
-            debug_defaults: cfg!(all(debug_assertions, not(test))),
-            use_home_default: context.env_var("CODEX_ROUTER_USE_HOME_DEFAULT").is_some(),
-            debug_router_root: context
-                .env_var("CODEX_ROUTER_DEBUG_ROUTER_ROOT")
-                .map(Into::into),
-            home_directory: context.env_var("HOME").map(Into::into),
-        },
-    )
+    let service_directory = collaboration_service_directory(context)?;
+    let app_server_socket = service_directory.join("codex-native.sock");
+    Ok(SessionsLaunchTarget::Hosted {
+        app_server_socket,
+        service_directory,
+        codex_home,
+        invoking_cwd,
+        profile,
+    })
+}
+
+pub(super) fn collaboration_service_directory(
+    context: &CliContext,
+) -> Result<PathBuf, SessionsCommandError> {
+    collaboration_client::resolve_service_directory(collaboration_client::ServiceDirectoryOptions {
+        explicit_directory: None,
+        debug_defaults: cfg!(all(debug_assertions, not(test))),
+        use_home_default: context.env_var("CODEX_ROUTER_USE_HOME_DEFAULT").is_some(),
+        debug_router_root: context
+            .env_var("CODEX_ROUTER_DEBUG_ROUTER_ROOT")
+            .map(Into::into),
+        home_directory: context.env_var("HOME").map(Into::into),
+    })
     .map_err(|error| {
         let message = match error {
             collaboration_client::ServiceDirectoryError::AbsoluteHomeRequired
@@ -167,13 +211,6 @@ pub(super) fn sessions_launch_target(
             other => other.to_string(),
         };
         SessionsCommandError::AppServerSocket(message)
-    })?;
-    let app_server_socket = service_directory.join("codex-native.sock");
-    Ok(SessionsLaunchTarget::Hosted {
-        app_server_socket,
-        service_directory,
-        invoking_cwd,
-        profile,
     })
 }
 
@@ -187,3 +224,7 @@ pub(super) fn session_profile_for_environment(
         codex_native_integration::SessionProfile::Router
     }
 }
+
+#[cfg(test)]
+#[path = "session_launch_selection_tests.rs"]
+mod session_launch_selection_tests;

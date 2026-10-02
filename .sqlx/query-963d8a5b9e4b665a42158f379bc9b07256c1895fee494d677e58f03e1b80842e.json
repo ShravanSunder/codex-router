@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM mailbox_deliveries WHERE rowid IN (SELECT delivery.rowid FROM mailbox_deliveries AS delivery WHERE delivery.created_at_ms < ? AND delivery.delivery_status IN ('accepted','failed','discarded') AND NOT EXISTS (SELECT 1 FROM wakeup_definitions AS wake WHERE wake.pending_delivery_id=delivery.delivery_id) ORDER BY delivery.created_at_ms,delivery.delivery_id LIMIT ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "963d8a5b9e4b665a42158f379bc9b07256c1895fee494d677e58f03e1b80842e"
+}

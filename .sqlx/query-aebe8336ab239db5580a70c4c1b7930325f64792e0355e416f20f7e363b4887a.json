@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE router_pushes SET delivery_state=?,last_outcome_json=?,settled_at=? WHERE push_id=? AND origin_kind='router' AND origin_router_ref=? AND delivery_state='attempted'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": []
+  },
+  "hash": "aebe8336ab239db5580a70c4c1b7930325f64792e0355e416f20f7e363b4887a"
+}

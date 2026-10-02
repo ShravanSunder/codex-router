@@ -1,4 +1,6 @@
 //! Opt-in acceptance Host: normal Codex home, existing debug provider, fresh runtime and Luna only.
+#[path = "automation_debug_host/host_replacement.rs"]
+mod host_replacement;
 #[path = "automation_debug_host/proof_permissions.rs"]
 mod proof_permissions;
 
@@ -7,7 +9,7 @@ use codex_native_integration::{
 };
 use codex_router_host::{
     AppServerLaunchPlan, ChildCommandSpec, ChildOutput, HostConfig, HostConfigInputs,
-    HostCoordinationPaths, HostDeadlines, HostInstance, HostRuntime, ManagedChildLaunchPlans,
+    HostCoordinationPaths, HostDeadlines, HostRuntime, ManagedChildLaunchPlans,
     ManagedUpdateInputs,
 };
 use serde::{Deserialize, Serialize};
@@ -122,6 +124,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut launch = AppServerLaunchPlan::new(native, executable, version)
         .with_schema_directory(collaboration.clone());
     launch.prepare_schema().await;
+    let replacement_command = host_replacement::build_host_replacement_command(
+        &options.run_directory,
+        &options.router_binary,
+        options.port,
+    )?;
     let router = ChildCommandSpec::new(options.router_binary)
         .with_arguments([
             OsString::from("serve"),
@@ -160,7 +167,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         port: options.port,
         host_pid: std::process::id(),
     };
-    let instance = HostInstance::acquire(config.coordination_paths().clone())?;
+    let instance =
+        host_replacement::acquire_acceptance_host_instance(config.coordination_paths().clone())?;
     match options.run_directory_admission {
         RunDirectoryAdmission::Fresh => write_fresh_context(&prepared)?,
         RunDirectoryAdmission::Resume => replace_resumed_context(&prepared)?,
@@ -170,7 +178,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     HostRuntime::run_acquired(
         config,
         ManagedChildLaunchPlans::new(Some(router), launch),
-        ManagedUpdateInputs::production(),
+        ManagedUpdateInputs::production().with_replacement_command(replacement_command),
         instance,
     )
     .await?;
@@ -328,7 +336,9 @@ fn validate_resume_run_directory(
     {
         return Err("resume run directory marker does not match the requested debug Host".into());
     }
-    confirm_process_absent(context.host_pid)?;
+    if !host_replacement::is_inherited_host_replacement(context.host_pid) {
+        confirm_process_absent(context.host_pid)?;
+    }
     Ok(())
 }
 

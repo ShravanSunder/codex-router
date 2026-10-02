@@ -161,7 +161,7 @@ impl ConversationFixture {
             identity,
         )
         .expect("control");
-        let manifest = serde_json::from_value(json!({"version":2,"serviceId":SERVICE_ID,"serviceEpoch":SERVICE_EPOCH,"control":{"transport":"unixJsonLines","path":"control.sock"},"controlSchemaDigest":digest,"mcp":{"transport":"streamableHttp","url":"http://127.0.0.1:0/mcp"}})).expect("manifest");
+        let manifest = serde_json::from_value(json!({"version":2,"serviceId":SERVICE_ID,"serviceEpoch":SERVICE_EPOCH,"machineLabel":"fixture-host","control":{"transport":"unixJsonLines","path":"control.sock"},"controlSchemaDigest":digest,"mcp":{"transport":"streamableHttp","url":"http://127.0.0.1:0/mcp"}})).expect("manifest");
         let publication =
             collaboration_service::ManifestPublication::publish(root.path(), &manifest)
                 .expect("publication");

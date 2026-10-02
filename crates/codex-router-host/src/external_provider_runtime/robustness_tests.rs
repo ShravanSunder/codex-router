@@ -58,9 +58,11 @@ sys.stdin.read()
 }
 
 #[cfg(unix)]
-fn output_limit_and_late_update_fixture() -> ExternalProviderLaunch {
+fn output_limit_and_late_update_fixture(control_path: &std::path::Path) -> ExternalProviderLaunch {
     let fixture = r#"
-import json,sys,time
+import json,socket,sys
+control=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM)
+control.connect(sys.argv[1])
 request=json.loads(sys.stdin.readline())
 print(json.dumps({'jsonrpc':'2.0','id':request['id'],'result':{'protocolVersion':1,'agentCapabilities':{},'agentInfo':{'name':'output-limit-fixture','version':'1'}}})); sys.stdout.flush()
 request=json.loads(sys.stdin.readline())
@@ -74,7 +76,10 @@ assert cancel['method']=='session/cancel'
 print(json.dumps({'jsonrpc':'2.0','id':first['id'],'result':{'stopReason':'cancelled'}})); sys.stdout.flush()
 late={'jsonrpc':'2.0','method':'session/update','params':{'sessionId':'fixture-session','update':{'sessionUpdate':'agent_message_chunk','content':{'type':'text','text':'LATE_OUTPUT'}}}}
 print(json.dumps(late)); sys.stdout.flush()
-time.sleep(0.05)
+print(json.dumps({'jsonrpc':'2.0','id':99,'method':'probe/unknown','params':{'sessionId':'fixture-session'}})); sys.stdout.flush()
+barrier=json.loads(sys.stdin.readline())
+assert barrier['id']==99 and 'error' in barrier, barrier
+control.sendall(b'r')
 second=json.loads(sys.stdin.readline())
 assert second['method']=='session/prompt'
 current={'jsonrpc':'2.0','method':'session/update','params':{'sessionId':'fixture-session','update':{'sessionUpdate':'agent_message_chunk','content':{'type':'text','text':'CURRENT_OUTPUT'}}}}
@@ -84,7 +89,11 @@ sys.stdin.read()
     ExternalProviderLaunch {
         persistence_target: acp_client_runtime::ProviderPersistenceTarget::Unspecified,
         executable: PathBuf::from("/usr/bin/python3"),
-        arguments: vec!["-c".to_owned(), fixture.to_owned()],
+        arguments: vec![
+            "-c".to_owned(),
+            fixture.to_owned(),
+            control_path.to_string_lossy().into_owned(),
+        ],
         environment: vec![],
     }
 }
@@ -313,9 +322,18 @@ async fn load_replay_accepts_the_old_exact_update_boundary_without_history_leak(
 #[cfg(unix)]
 #[tokio::test]
 async fn output_limit_cancels_and_settles_before_late_updates_can_reach_next_prompt() {
-    let runtime = ExternalProviderRuntime::initialize(output_limit_and_late_update_fixture())
-        .await
-        .expect("fixture initializes");
+    let root = tempfile::tempdir().expect("fixture root");
+    let control_path = root.path().join("late-output.sock");
+    let control_listener = tokio::net::UnixListener::bind(&control_path).expect("control socket");
+    let runtime =
+        ExternalProviderRuntime::initialize(output_limit_and_late_update_fixture(&control_path))
+            .await
+            .expect("fixture initializes");
+    let (mut control, _) =
+        tokio::time::timeout(std::time::Duration::from_secs(2), control_listener.accept())
+            .await
+            .expect("fixture connects to control socket")
+            .expect("control connection accepted");
     runtime
         .create_session(PathBuf::from("/tmp"))
         .await
@@ -329,6 +347,15 @@ async fn output_limit_cancels_and_settles_before_late_updates_can_reach_next_pro
         error,
         ExternalProviderRuntimeError::PromptOutputLimitExceeded
     ));
+    let mut barrier_signal = [0u8; 1];
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        tokio::io::AsyncReadExt::read_exact(&mut control, &mut barrier_signal),
+    )
+    .await
+    .expect("unknown-request response barrier completes")
+    .expect("control signal received");
+    assert_eq!(barrier_signal, *b"r");
     let next = runtime
         .prompt("fixture-session".to_owned(), "next".to_owned())
         .await

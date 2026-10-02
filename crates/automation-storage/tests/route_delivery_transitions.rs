@@ -9,6 +9,8 @@ use automation_storage::{
     WakeEvaluation,
 };
 use serde::{Deserialize, Serialize};
+#[path = "support/wake_push_draft.rs"]
+mod wake_push_test_support;
 
 #[derive(Clone, Serialize, Deserialize)]
 struct StoredMessage {
@@ -52,7 +54,11 @@ async fn claimed_attempt(
         })
         .await?;
     let WakeEvaluation::Fired { delivery_id, .. } = store
-        .evaluate_wakeup::<StoredMessage>(&wake.definition.wakeup_id, 1000)
+        .evaluate_wakeup::<StoredMessage>(
+            &wake.definition.wakeup_id,
+            1000,
+            wake_push_test_support::build_test_wake_push_draft,
+        )
         .await?
     else {
         return Err("missing fire".into());
