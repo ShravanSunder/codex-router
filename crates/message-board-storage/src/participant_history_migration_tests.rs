@@ -108,3 +108,58 @@ async fn participant_history_migration_review_probes_p2_p3_p4_preserve_unknown()
     }
     finish(store, path).await;
 }
+
+#[tokio::test]
+async fn participant_history_migration_p3_later_first_join_cannot_attribute_legacy_root() {
+    let mut history = LegacyHistory::open().await;
+    let root = history.roots[0].clone();
+    let human_reply = history.reply(&root, "H").await;
+    let first_join = history.join(&root, "A", Reviewer, None).await;
+    let session_reply = history.reply(&root, "A").await;
+    let (mut store, path) = history.migrate_copy().await;
+    assert_event(&mut store, first_join, (Some("A"), Some("reviewer"), None)).await;
+    assert_eq!(attribution(&mut store, &root).await, None);
+    assert_eq!(attribution(&mut store, &human_reply).await, None);
+    assert_eq!(
+        attribution(&mut store, &session_reply).await,
+        Some(first_join)
+    );
+    finish(store, path).await;
+}
+
+#[tokio::test]
+async fn participant_history_migration_replacement_with_both_rows_overwritten_is_unknown() {
+    let mut history = LegacyHistory::open().await;
+    let root = history.roots[0].clone();
+    history.join(&root, "B", Implementer, None).await;
+    let replacement = history.join(&root, "A", Implementer, Some("B")).await;
+    let reply = history.reply(&root, "A").await;
+    history.join(&root, "A", Reviewer, None).await;
+    history.join(&root, "B", Advisor, None).await;
+    let (mut store, path) = history.migrate_copy().await;
+    assert_event(&mut store, replacement, (None, None, None)).await;
+    assert_eq!(attribution(&mut store, &reply).await, None);
+    finish(store, path).await;
+}
+
+#[tokio::test]
+async fn participant_history_migration_surviving_handover_does_not_promote_original_join() {
+    let mut history = LegacyHistory::open().await;
+    let root = history.roots[0].clone();
+    history.join(&root, "O", Orchestrator, None).await;
+    let original_join = history.join(&root, "A", Reviewer, None).await;
+    let before = history.reply(&root, "A").await;
+    let handover = history.handover(&root, "O", "A").await;
+    let after = history.reply(&root, "A").await;
+    let (mut store, path) = history.migrate_copy().await;
+    assert_event(&mut store, original_join, (Some("A"), None, None)).await;
+    assert_event(
+        &mut store,
+        handover,
+        (Some("A"), Some("orchestrator"), Some("O")),
+    )
+    .await;
+    assert_eq!(attribution(&mut store, &before).await, None);
+    assert_eq!(attribution(&mut store, &after).await, Some(handover));
+    finish(store, path).await;
+}
