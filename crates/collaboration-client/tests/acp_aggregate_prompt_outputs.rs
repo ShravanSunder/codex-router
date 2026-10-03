@@ -59,13 +59,21 @@ async fn aggregate_existing_prompt_handles_missing_reply_and_history_setup_failu
             load.pointer("/params/_meta/codex-router~1replayHistory"),
             Some(&json!(false))
         );
-        writer.write_all(format!("{}\n", json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"existing-thread","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"history replay"}}}})).as_bytes()).await.unwrap();
-        writer
+        for index in 0..=1024 {
+            let update = json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"existing-thread","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":format!("setup-{index}")}}}});
+            if writer
+                .write_all(format!("{update}\n").as_bytes())
+                .await
+                .is_err()
+            {
+                break;
+            }
+        }
+        let _ = writer
             .write_all(
                 format!("{}\n", json!({"jsonrpc":"2.0","id":load["id"],"result":{}})).as_bytes(),
             )
-            .await
-            .unwrap();
+            .await;
 
         let prompt: Value =
             serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();

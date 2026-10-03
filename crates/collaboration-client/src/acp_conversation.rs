@@ -270,6 +270,7 @@ impl AcpConversation {
             .request(
                 "initialize",
                 initialize,
+                true,
                 "InitializeRequest",
                 "InitializeResponse",
             )
@@ -368,6 +369,7 @@ impl AcpConversation {
             self.request(
                 "session/load",
                 params,
+                replay_history,
                 "LoadSessionRequest",
                 "LoadSessionResponse",
             )
@@ -433,6 +435,7 @@ impl AcpConversation {
                 .request(
                     "session/new",
                     params,
+                    replay_history,
                     "NewSessionRequest",
                     "NewSessionResponse",
                 )
@@ -563,6 +566,7 @@ impl AcpConversation {
         &mut self,
         method: &str,
         params: Value,
+        retain_setup_updates: bool,
         input: &str,
         output: &str,
     ) -> Result<Value, ClientError> {
@@ -571,7 +575,9 @@ impl AcpConversation {
             loop {
                 let frame = self.read().await?;
                 if frame.get("method").is_some() {
-                    if let Some(update) = self.handle_callback(&frame).await? {
+                    if let Some(update) = self.handle_callback(&frame).await?
+                        && retain_setup_updates
+                    {
                         self.pending_bytes += serde_json::to_vec(&update)
                             .map_err(|_| ClientError::Protocol("ACP update encoding failed"))?
                             .len();
