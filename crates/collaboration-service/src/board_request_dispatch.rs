@@ -64,7 +64,36 @@ pub(crate) async fn dispatch(
  match result { Ok(result)=>json!({"jsonrpc":"2.0","id":id,"result":result}),Err(error)=>failure(id,error) }
  }};
  }
+    // Lifecycle writes use the same clock as the delivery owner for durable window deadlines.
+    macro_rules! call_with_subscription_now_and_reconcile {
+ ($request:ty,$method:ident)=>{{
+ let request=match serde_json::from_value::<$request>(params.clone()) {
+     Ok(request)=>request,
+     Err(_error)=>return failure(id,crate::board_request_validation::classify(method,&params)),
+ };
+ let reader=request.actor.clone();
+ let result=store.lock().await.$method(request,identity.subscription_clock.now()).await;
+ match result {
+     Ok(result)=>{
+         if let Some(service)=identity.subscription_delivery.as_ref()
+             && let Err(error)=service.reconcile_reader(reader).await
+         {
+             tracing::warn!(error=%error,"subscription owner reconciliation failed after a board write");
+             return failure(id,subscription_reconciliation_failed());
+         }
+         json!({"jsonrpc":"2.0","id":id,"result":result})
+     },
+     Err(error)=>failure(id,error)
+ }
+ }};
+ }
     match method {
+        "board/threadSubscribe"
+        | "board/threadUnsubscribe"
+        | "board/threadSubscriptions"
+        | "board/threadWait" => {
+            crate::thread_subscription_dispatch::dispatch(id, method, params, identity).await
+        }
         "board/discoverySearch" => call!(DiscoverySearchRequest, search_discovery),
         "board/messageSearch" => call!(MessageSearchRequest, search_messages),
         "board/projectCreate" => call!(ProjectCreateRequest, create_project),
@@ -82,20 +111,34 @@ pub(crate) async fn dispatch(
         "board/topicCreate" => call!(TopicCreateRequest, create_topic),
         "board/topicUpdate" => call!(TopicUpdateRequest, update_topic),
         "board/topicList" => call!(TopicListRequest, list_topics),
-        "board/messagePost" => call!(MessagePostRequest, post_message),
+        "board/messagePost" => {
+            call_with_subscription_now_and_reconcile!(MessagePostRequest, post_message)
+        }
         "board/messageShow" => call!(MessageShowRequest, show_message),
         "board/messageList" => call!(MessageListRequest, list_messages),
         "board/threadShow" => call!(ThreadShowRequest, show_thread),
-        "board/threadResolve" => call!(ThreadResolveRequest, resolve_thread),
+        "board/threadResolve" => {
+            call_with_subscription_now_and_reconcile!(ThreadResolveRequest, resolve_thread)
+        }
         "board/threadUnresolve" => call!(ThreadUnresolveRequest, unresolve_thread),
         "board/threadWatch" => call!(ThreadWatchRequest, watch_thread),
-        "board/threadUnwatch" => call!(ThreadUnwatchRequest, unwatch_thread),
+        "board/threadUnwatch" => {
+            call_with_subscription_now_and_reconcile!(ThreadUnwatchRequest, unwatch_thread)
+        }
         "board/topicWatch" => call!(TopicWatchRequest, watch_topic),
-        "board/topicUnwatch" => call!(TopicWatchRequest, unwatch_topic),
+        "board/topicUnwatch" => {
+            call_with_subscription_now_and_reconcile!(TopicWatchRequest, unwatch_topic)
+        }
         "board/threadList" => call!(ThreadListRequest, list_threads),
-        "board/threadCreate" => call!(ThreadCreateRequest, create_thread),
-        "board/threadJoin" => call!(ThreadJoinRequest, join_thread),
-        "board/threadLeave" => call!(ThreadLeaveRequest, leave_thread),
+        "board/threadCreate" => {
+            call_with_subscription_now_and_reconcile!(ThreadCreateRequest, create_thread)
+        }
+        "board/threadJoin" => {
+            call_with_subscription_now_and_reconcile!(ThreadJoinRequest, join_thread)
+        }
+        "board/threadLeave" => {
+            call_with_subscription_now_and_reconcile!(ThreadLeaveRequest, leave_thread)
+        }
         "board/threadParticipantList" => {
             call!(ThreadParticipantListRequest, list_thread_participants)
         }
@@ -105,5 +148,15 @@ pub(crate) async fn dispatch(
         _ => {
             json!({"jsonrpc":"2.0","id":id,"error":{"code":-32601,"message":"Unknown board method"}})
         }
+    }
+}
+
+fn subscription_reconciliation_failed() -> BoardError {
+    BoardError {
+        kind: BoardFailureKind::OutcomeUnknown,
+        stage: BoardFailureStage::Storage,
+        message: "The board change was saved, but subscription delivery could not synchronize. Inspect the current subscription state before retrying.".to_owned(),
+        next_action: BoardNextAction::RetryLater,
+        details: BoardErrorDetails::None,
     }
 }

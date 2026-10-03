@@ -1,12 +1,16 @@
 //! Shared primitives for codex-router.
 
 pub mod affinity;
+pub mod attempt_outcome;
 pub mod audit;
 pub mod config;
+pub mod credit_usage;
 pub mod error;
 pub mod ids;
 pub mod local_auth;
+pub mod provider;
 pub mod redaction;
+pub mod route_profile;
 pub mod router_compatibility;
 pub mod routes;
 

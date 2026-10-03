@@ -9,10 +9,15 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use codex_router_auth::live_quota::DEFAULT_CHATGPT_BACKEND_BASE_URL;
+use codex_router_core::local_auth::LocalRouterTokenRecord;
 use codex_router_proxy::server::LoopbackBindAddress;
 use codex_router_proxy::server::LoopbackRouterRuntime;
 use codex_router_proxy::server::LoopbackRouterRuntimeConfig;
+use codex_router_proxy::session_account_affinity_cache::DEFAULT_SESSION_PIN_IDLE_TTL;
+#[cfg(debug_assertions)]
+use codex_router_proxy::upstream::ClaudeUpstreamEndpoint;
 use codex_router_proxy::upstream::UpstreamEndpoint;
+use codex_router_secret_store::encrypted_credential_store::EncryptedCredentialStore;
 use codex_router_secret_store::file_backend::FileSecretStore;
 
 pub mod account;
@@ -61,11 +66,13 @@ use cli_argument_parsing::{CliCommand, ProfileCommand, TokenCommand};
 const DEFAULT_PROFILE_PORT: u16 = 8787;
 const DEFAULT_MAX_SNAPSHOT_AGE_SECONDS: u64 = 300;
 const DEFAULT_QUOTA_REFRESH_INTERVAL_SECONDS: u64 = 180;
+const DEFAULT_SESSION_PIN_IDLE_TTL_SECONDS: u64 = DEFAULT_SESSION_PIN_IDLE_TTL.as_secs();
 const LOCAL_TOKEN_ENV_VAR: &str = "CODEX_ROUTER_TOKEN";
 const DEFAULT_ROUTER_ROOT_DIR: &str = ".codex-router";
 #[cfg(all(debug_assertions, not(test)))]
 const DEBUG_ROUTER_ROOT_ENV: &str = "CODEX_ROUTER_DEBUG_ROUTER_ROOT";
 const DEBUG_APP_SERVER_SOCKET_ENV: &str = "CODEX_ROUTER_DEBUG_APP_SERVER_SOCKET";
+#[cfg(all(debug_assertions, not(test)))]
 const USE_HOME_DEFAULT_ENV: &str = "CODEX_ROUTER_USE_HOME_DEFAULT";
 const DEFAULT_DEBUG_ROUTER_ROOT_DIR: &str = ".codex-router-debug";
 
@@ -220,54 +227,68 @@ where
 fn run_serve_command_with_upkeep_start(
     stdout: &mut impl Write,
     command: cli_argument_parsing::ServeCommand,
+    credential_store: EncryptedCredentialStore,
     upkeep_start: impl FnOnce(
         &Path,
-        &Path,
+        EncryptedCredentialStore,
     ) -> Result<
         credential_upkeep_worker::CredentialUpkeepWorker,
         credential_upkeep_worker::CredentialUpkeepStartError,
     >,
 ) -> Result<(), CliError> {
-    let bind_address = LoopbackBindAddress::new(&command.listen_host, command.port)?;
-    let upstream_endpoint = UpstreamEndpoint::new(command.upstream_base_url)?;
+    run_serve_command_with_upkeep_start_and_token_reload_observer(
+        stdout,
+        command,
+        credential_store,
+        upkeep_start,
+        |_generation| {},
+    )
+}
+
+fn run_serve_command_with_upkeep_start_and_token_reload_observer(
+    stdout: &mut impl Write,
+    command: cli_argument_parsing::ServeCommand,
+    credential_store: EncryptedCredentialStore,
+    upkeep_start: impl FnOnce(
+        &Path,
+        EncryptedCredentialStore,
+    ) -> Result<
+        credential_upkeep_worker::CredentialUpkeepWorker,
+        credential_upkeep_worker::CredentialUpkeepStartError,
+    >,
+    token_reload_observer: impl Fn(codex_router_core::ids::TokenGeneration) + Send + 'static,
+) -> Result<(), CliError> {
+    let mut runtime_config = base_serve_runtime_config(&command)?;
     let state_db = command.state_db.clone();
     let secret_root = command.secret_root.clone();
-    let mut runtime_config = LoopbackRouterRuntimeConfig::new_tokenless(
-        bind_address,
-        upstream_endpoint,
-        command.state_db,
-        command.secret_root,
-    );
-    if let Some(audit_file) = command.audit_file {
+    if let Some(audit_file) = command.audit_file.clone() {
         runtime_config = runtime_config.with_audit_file(audit_file);
     }
     if let Some(report_file) = command.websocket_registry_report_file.clone() {
         validate_websocket_registry_report_file(&report_file)?;
         runtime_config = runtime_config.with_websocket_registry_report_file(report_file);
     }
-    let token_reload_watcher = if command.require_local_token {
-        let secret_store =
-            FileSecretStore::open(&secret_root).map_err(TokenCommandError::SecretStore)?;
-        let token_service = LocalRouterTokenService::new(secret_store.clone());
-        let local_token = token_service.load_current()?;
-        let initial_token_generation = local_token.generation();
+    let local_token_store =
+        FileSecretStore::open(&secret_root).map_err(TokenCommandError::SecretStore)?;
+    let token_service = LocalRouterTokenService::new(local_token_store.clone());
+    let local_token = token_service.ensure_local_token(&secret_root)?;
+    let initial_token_generation = local_token.generation();
+    let (mut runtime_config, quota_refresh_interval) =
+        configure_serve_claude_edge_runtime(runtime_config, &command, local_token.clone());
+    if command.require_local_token {
         runtime_config = runtime_config.with_required_local_token(local_token);
-        Some((secret_store, initial_token_generation))
-    } else {
-        None
-    };
+    }
     if let Some(now_unix_seconds) = command.now_unix_seconds {
         runtime_config =
             runtime_config.with_quota_clock(now_unix_seconds, command.max_snapshot_age_seconds);
     }
-    let runtime = LoopbackRouterRuntime::start(runtime_config)?;
+    let runtime = LoopbackRouterRuntime::start(runtime_config, credential_store.clone())?;
+    let local_auth_reloader = runtime.local_auth_reloader();
     let _token_reload_watcher =
-        token_reload_watcher.map(|(secret_store, initial_token_generation)| {
-            LocalTokenReloadWatcher::start(
-                secret_store,
-                runtime.local_auth_reloader(),
-                initial_token_generation,
-            )
+        LocalTokenReloadWatcher::start(local_token_store, initial_token_generation, move |auth| {
+            let current_generation = auth.current_generation();
+            local_auth_reloader.reload_auth(auth);
+            token_reload_observer(current_generation);
         });
 
     crate::presentation::host::render_progress_event(
@@ -276,13 +297,14 @@ fn run_serve_command_with_upkeep_start(
     )
     .map_err(CliError::Stdout)?;
     writeln!(stdout, "listening: {}", runtime.local_addr()).map_err(CliError::Stdout)?;
-    let _credential_upkeep_worker = upkeep_start(&state_db, &secret_root)?;
+    let _credential_upkeep_worker = upkeep_start(&state_db, credential_store.clone())?;
     let _quota_refresh_worker = if command.background_quota_refresh_enabled {
         Some(quota::start_background_quota_refresh_worker(
             state_db,
             secret_root,
+            credential_store,
             DEFAULT_CHATGPT_BACKEND_BASE_URL.to_owned(),
-            Duration::from_secs(command.quota_refresh_interval_seconds),
+            quota_refresh_interval,
             runtime.websocket_quota_floor_notifier(),
         )?)
     } else {
@@ -293,6 +315,199 @@ fn run_serve_command_with_upkeep_start(
         write_websocket_registry_report_file(&report_file, handled_connections, &runtime)?;
     }
     Ok(())
+}
+
+fn base_serve_runtime_config(
+    command: &cli_argument_parsing::ServeCommand,
+) -> Result<LoopbackRouterRuntimeConfig, CliError> {
+    let bind_address = LoopbackBindAddress::new(&command.listen_host, command.port)?;
+    let upstream_endpoint = UpstreamEndpoint::new(command.upstream_base_url.clone())?;
+    let runtime_config = LoopbackRouterRuntimeConfig::new_tokenless(
+        bind_address,
+        upstream_endpoint,
+        command.state_db.clone(),
+        command.secret_root.clone(),
+    )
+    .with_session_pin_idle_ttl(Duration::from_secs(command.session_pin_idle_ttl_seconds))
+    .with_claude_five_hour_reserve_percent(command.claude_five_hour_reserve_percent);
+    #[cfg(debug_assertions)]
+    let runtime_config = if let Some(base_url) = &command.debug_claude_upstream_base_url {
+        let endpoint = ClaudeUpstreamEndpoint::isolated_debug_override(
+            base_url.clone(),
+            command.require_debug_isolation,
+        )?;
+        runtime_config.with_debug_claude_upstream_endpoint(endpoint)
+    } else {
+        runtime_config
+    };
+    Ok(runtime_config)
+}
+
+fn configure_serve_claude_edge_runtime(
+    runtime_config: LoopbackRouterRuntimeConfig,
+    command: &cli_argument_parsing::ServeCommand,
+    local_token: LocalRouterTokenRecord,
+) -> (LoopbackRouterRuntimeConfig, Duration) {
+    let quota_refresh_interval = Duration::from_secs(command.quota_refresh_interval_seconds);
+    (
+        runtime_config.with_claude_edge_local_token(local_token, quota_refresh_interval),
+        quota_refresh_interval,
+    )
+}
+
+#[cfg(test)]
+mod session_pin_idle_ttl_tests {
+    use super::*;
+    use std::ffi::OsString;
+
+    #[test]
+    fn serve_flag_reaches_runtime_configuration() {
+        let command = match CliCommand::parse([
+            OsString::from("serve"),
+            OsString::from("--session-pin-idle-ttl-seconds"),
+            OsString::from("1800"),
+        ]) {
+            Ok(CliCommand::Serve(command)) => command,
+            Ok(_) => panic!("serve arguments should parse as a serve command"),
+            Err(error) => panic!("serve arguments should parse: {error}"),
+        };
+        let runtime_config = base_serve_runtime_config(&command)
+            .unwrap_or_else(|error| panic!("serve runtime config should build: {error}"));
+        let expected_config = LoopbackRouterRuntimeConfig::new_tokenless(
+            LoopbackBindAddress::new(&command.listen_host, command.port)
+                .expect("serve bind address should be valid"),
+            UpstreamEndpoint::new(command.upstream_base_url.clone())
+                .expect("serve upstream endpoint should be valid"),
+            command.state_db,
+            command.secret_root,
+        )
+        .with_session_pin_idle_ttl(Duration::from_secs(1_800))
+        .with_claude_five_hour_reserve_percent(command.claude_five_hour_reserve_percent);
+
+        assert_eq!(runtime_config, expected_config);
+    }
+
+    #[test]
+    fn serve_quota_refresh_interval_reaches_runtime_configuration() {
+        let command = match CliCommand::parse([
+            OsString::from("serve"),
+            OsString::from("--quota-refresh-interval-seconds"),
+            OsString::from("400"),
+        ]) {
+            Ok(CliCommand::Serve(command)) => command,
+            Ok(_) => panic!("serve arguments should parse as a serve command"),
+            Err(error) => panic!("serve arguments should parse: {error}"),
+        };
+        let base_config = base_serve_runtime_config(&command)
+            .unwrap_or_else(|error| panic!("serve runtime config should build: {error}"));
+        let local_token = LocalRouterTokenRecord::new(
+            codex_router_core::redaction::SecretString::new("serve-test-token"),
+            codex_router_core::ids::TokenGeneration::new(1),
+        );
+        let (runtime_config, quota_refresh_interval) =
+            configure_serve_claude_edge_runtime(base_config, &command, local_token.clone());
+        assert_eq!(quota_refresh_interval, Duration::from_secs(400));
+        let expected_config = LoopbackRouterRuntimeConfig::new_tokenless(
+            LoopbackBindAddress::new(&command.listen_host, command.port)
+                .expect("serve bind address should be valid"),
+            UpstreamEndpoint::new(command.upstream_base_url.clone())
+                .expect("serve upstream endpoint should be valid"),
+            command.state_db,
+            command.secret_root,
+        )
+        .with_session_pin_idle_ttl(Duration::from_secs(command.session_pin_idle_ttl_seconds))
+        .with_claude_edge_local_token(local_token, quota_refresh_interval)
+        .with_claude_five_hour_reserve_percent(command.claude_five_hour_reserve_percent);
+
+        assert_eq!(runtime_config, expected_config);
+    }
+
+    #[test]
+    fn claude_five_hour_reserve_percent_reaches_route_profile_configuration() {
+        let command = match CliCommand::parse([
+            OsString::from("serve"),
+            OsString::from("--claude-five-hour-reserve-percent"),
+            OsString::from("90"),
+        ]) {
+            Ok(CliCommand::Serve(command)) => command,
+            Ok(_) => panic!("serve arguments should parse as a serve command"),
+            Err(error) => panic!("serve arguments should parse: {error}"),
+        };
+
+        let runtime_config = base_serve_runtime_config(&command)
+            .unwrap_or_else(|error| panic!("serve runtime config should build: {error}"));
+        let expected_config = LoopbackRouterRuntimeConfig::new_tokenless(
+            LoopbackBindAddress::new(&command.listen_host, command.port)
+                .expect("serve bind address should be valid"),
+            UpstreamEndpoint::new(command.upstream_base_url.clone())
+                .expect("serve upstream endpoint should be valid"),
+            command.state_db,
+            command.secret_root,
+        )
+        .with_session_pin_idle_ttl(Duration::from_secs(command.session_pin_idle_ttl_seconds))
+        .with_claude_five_hour_reserve_percent(command.claude_five_hour_reserve_percent);
+
+        assert_eq!(runtime_config, expected_config);
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn isolated_debug_claude_override_reaches_runtime_without_changing_codex_upstream() {
+        let command = match CliCommand::parse([
+            OsString::from("serve"),
+            OsString::from("--upstream-base-url"),
+            OsString::from("https://codex.example/v1"),
+            OsString::from("--require-debug-isolation"),
+            OsString::from("--debug-claude-upstream-base-url"),
+            OsString::from("http://127.0.0.1:19888"),
+        ]) {
+            Ok(CliCommand::Serve(command)) => command,
+            Ok(_) => panic!("serve arguments should parse as a serve command"),
+            Err(error) => panic!("serve arguments should parse: {error}"),
+        };
+        let runtime_config = base_serve_runtime_config(&command)
+            .unwrap_or_else(|error| panic!("debug serve runtime config should build: {error}"));
+        let expected_config = LoopbackRouterRuntimeConfig::new_tokenless(
+            LoopbackBindAddress::new(&command.listen_host, command.port)
+                .expect("serve bind address should be valid"),
+            UpstreamEndpoint::new("https://codex.example/v1")
+                .expect("Codex upstream should remain independently configured"),
+            command.state_db,
+            command.secret_root,
+        )
+        .with_session_pin_idle_ttl(Duration::from_secs(command.session_pin_idle_ttl_seconds))
+        .with_claude_five_hour_reserve_percent(command.claude_five_hour_reserve_percent)
+        .with_debug_claude_upstream_endpoint(
+            ClaudeUpstreamEndpoint::isolated_debug_override("http://127.0.0.1:19888", true)
+                .expect("debug endpoint should be isolated and valid"),
+        );
+
+        assert_eq!(runtime_config, expected_config);
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn invalid_debug_claude_url_is_reported_without_echoing_the_value() {
+        let supplied_url = "http://user:token@127.0.0.1:19888?secret=value";
+        let command = match CliCommand::parse([
+            OsString::from("serve"),
+            OsString::from("--require-debug-isolation"),
+            OsString::from("--debug-claude-upstream-base-url"),
+            OsString::from(supplied_url),
+        ]) {
+            Ok(CliCommand::Serve(command)) => command,
+            Ok(_) => panic!("serve arguments should parse as a serve command"),
+            Err(error) => panic!("serve arguments should parse: {error}"),
+        };
+        let error = base_serve_runtime_config(&command)
+            .expect_err("query string must not be accepted in a debug Claude base URL");
+        let message = error.to_string();
+
+        assert!(message.contains("--debug-claude-upstream-base-url"));
+        assert!(message.contains("CODEX_ROUTER_DEBUG_CLAUDE_UPSTREAM_BASE_URL"));
+        assert!(message.contains("absolute HTTP(S) base URL"));
+        assert!(!message.contains(supplied_url));
+    }
 }
 
 /// Executes CLI args with process-independent IO.
@@ -310,17 +525,21 @@ where
     let command = CliCommand::parse(args)?;
     match command {
         CliCommand::Serve(command) => {
+            let credential_store =
+                secret_store_factory::open_cli_secret_store(&command.secret_root)
+                    .map_err(|_| CliError::CredentialStoreOpen)?;
             run_serve_command_with_upkeep_start(
                 stdout,
                 command,
+                credential_store,
                 credential_upkeep_worker::start_background_credential_upkeep_worker,
             )?;
         }
         CliCommand::Token(TokenCommand::Init { router_root }) => {
             let store =
-                FileSecretStore::open(router_root).map_err(TokenCommandError::SecretStore)?;
+                FileSecretStore::open(&router_root).map_err(TokenCommandError::SecretStore)?;
             let service = LocalRouterTokenService::new(store);
-            let record = service.initialize()?;
+            let record = service.ensure_local_token(&router_root)?;
             writeln!(stdout, "generation: {}", record.generation().as_u64())
                 .map_err(CliError::Stdout)?;
         }
@@ -460,12 +679,12 @@ fn debug_default_router_root_for_home(home: &Path) -> PathBuf {
 pub(crate) fn app_server_socket_or_default(
     context: &CliContext,
     paths: &codex_native_integration::CodexPaths,
+    isolated_debug: bool,
 ) -> Result<PathBuf, &'static str> {
     codex_native_integration::select_app_server_endpoint(
         codex_native_integration::AppServerEndpointSelection {
             paths,
-            debug_defaults: cfg!(all(debug_assertions, not(test)))
-                && context.env_var(USE_HOME_DEFAULT_ENV).is_none(),
+            debug_defaults: isolated_debug,
             requested_socket: context.env_var(DEBUG_APP_SERVER_SOCKET_ENV),
         },
     )
@@ -572,7 +791,7 @@ commands:
   serve                         Run the local Codex account router
   account disable --account <name>  Stop routing to an account
   account enable --account <name>   Resume routing to an account
-  account login --label <name>  Add an OAuth account
+  account login --provider <openai|claude> --label <name>  Add a provider OAuth account
   account list                  Show configured router accounts
   account set-weekly-floor      Set or disable an account weekly quota floor
   quota                         Show quota, refresh state, and next account

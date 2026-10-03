@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT reader_key FROM thread_subscriptions WHERE scope_kind='topic' AND scope_id=? AND state='active' AND expires_at>? ORDER BY reader_key",
+  "describe": {
+    "columns": [
+      {
+        "name": "reader_key",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "thread_subscriptions",
+            "name": "reader_key"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "e8502db84d0adb3d738eab905fa52c5dc57455ff82f2a3eacb0d3bea8a0ffe72"
+}

@@ -15,7 +15,7 @@ fn confirmed_and_lost_turns_keep_distinct_evidence() {
         local_cause: None,
     };
     let lost = TurnOutcome::Lost {
-        reason: "provider retired".into(),
+        reason: session_event_model::TurnLostReason::ProviderRetired,
     };
     assert_ne!(confirmed, lost);
     assert_eq!(
@@ -24,15 +24,35 @@ fn confirmed_and_lost_turns_keep_distinct_evidence() {
     );
 }
 
+#[test]
+fn accepted_steer_input_joins_an_existing_turn_with_its_own_id() {
+    let input_id = session_event_model::InputId::generate();
+    let event = session_event_model::SessionEvent::InputAccepted {
+        input_id: input_id.clone(),
+        turn_id: "turn-one".into(),
+    };
+    let encoded = serde_json::to_value(&event).expect("event JSON");
+    assert_eq!(encoded["inputId"], input_id.as_str());
+    assert_eq!(encoded["turnId"], "turn-one");
+    let decoded: session_event_model::SessionEvent =
+        serde_json::from_value(encoded).expect("event round trip");
+    assert_eq!(decoded, event);
+    assert!(session_event_model::InputId::new("").is_err());
+}
+
 // Specification E7: requiresAction implies at least one pending interaction.
 #[test]
 fn requires_action_cannot_start_with_an_empty_pending_set() {
     assert!(PendingInteractions::new(vec![]).is_none());
-    let pending = PendingInteractions::new(vec![PendingInteraction {
-        request_id: "request-1".into(),
-        kind: InteractionKind::Approval,
-    }])
-    .expect("one pending interaction");
+    let request: PendingInteraction = serde_json::from_value(serde_json::json!({
+        "kind":"approval",
+        "approver":{"kind":"human","humanId":"owner"},
+        "request":{"requestId":"request-1","title":"Run command","options":[
+            {"optionId":"allow-once","label":"Allow once","choice":{"effect":"allow","scope":"once"}}
+        ]}
+    }))
+    .expect("full pending approval");
+    let pending = PendingInteractions::new(vec![request]).expect("one pending interaction");
     assert_eq!(
         SessionState::RequiresAction { pending }.requires_action_kind(),
         Some(InteractionKind::Approval)

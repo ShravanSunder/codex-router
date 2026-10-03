@@ -1,6 +1,30 @@
 use super::*;
 
 #[test]
+fn provider_aware_refresh_adapter_rejects_legacy_claude_dispatch_as_local_unspent() {
+    use crate::resolver::CredentialRefreshClient;
+    use codex_router_core::provider::Provider;
+    use codex_router_core::redaction::SecretString;
+    use codex_router_state::credential_maintenance::CredentialFailureClass;
+
+    let client = crate::resolver::OpenAiOAuthRefreshClient::new();
+    let failure = client
+        .refresh_provider_credentials(
+            Provider::Claude,
+            &account_id("legacy-refresh-adapter"),
+            &SecretString::new("refresh-token-must-not-be-sent"),
+        )
+        .expect_err("legacy OpenAI adapter must not dispatch Claude refresh");
+
+    assert_eq!(
+        failure.failure_class,
+        CredentialFailureClass::LocalPersistence
+    );
+    assert!(failure.confirmed_unspent);
+    assert_eq!(failure.retry_after_seconds, None);
+}
+
+#[test]
 fn loopback_oauth_outcomes_keep_retry_safety_and_redacted_failure_class() {
     use crate::resolver::CredentialRefreshFailure;
     use codex_router_state::credential_maintenance::CredentialFailureClass;
@@ -97,17 +121,26 @@ async fn truncated_429_body_preserves_retry_after_and_blocks_refresh_before_cool
 
     let temp_dir = AuthTestTempDir::new("truncated-429-cooldown");
     let state = must_ok(AsyncSqliteStateStore::open(&temp_dir.path().join("state.sqlite")).await);
-    let secrets = must_ok(FileSecretStore::open(temp_dir.path().join("secrets")));
+    let secrets = must_ok(
+        codex_router_secret_store::test_support::open_encrypted_credential_store(
+            temp_dir.path().join("secrets"),
+        ),
+    );
     let account_id = account_id("truncated-429-account");
     must_ok(
         state
             .upsert_account(
-                &AccountRecord::new(account_id.clone(), "rate limited", AccountStatus::Enabled)
-                    .with_active_credential_generation(1),
+                &AccountRecord::new(
+                    codex_router_core::provider::Provider::Openai,
+                    account_id.clone(),
+                    "rate limited",
+                    AccountStatus::Enabled,
+                )
+                .with_active_credential_generation(1),
             )
             .await,
     );
-    let active_key = must_ok(account_credential_bundle_key(&account_id, 1));
+    let active_key = must_ok(openai_account_credential_bundle_key(&account_id, 1));
     must_ok(
         secrets.write_secret(
             &active_key,
@@ -140,7 +173,12 @@ async fn truncated_429_body_preserves_retry_after_and_blocks_refresh_before_cool
     let resolver = AsyncRouterCredentialResolver::new(state.clone(), secrets, client, Some(1_000));
 
     assert_eq!(
-        resolver.resolve_provider_credentials(&account_id).await,
+        resolver
+            .resolve_provider_credentials(
+                &account_id,
+                codex_router_core::provider::Provider::Openai,
+            )
+            .await,
         Err(CredentialResolverError::RefreshUnavailable)
     );
     must_ok(server_thread.join().map_err(|_| "loopback server failed"));
@@ -153,7 +191,12 @@ async fn truncated_429_body_preserves_retry_after_and_blocks_refresh_before_cool
     );
     assert_eq!(maintenance.next_attempt_unix_seconds, Some(1_120));
     assert_eq!(
-        resolver.resolve_provider_credentials(&account_id).await,
+        resolver
+            .resolve_provider_credentials(
+                &account_id,
+                codex_router_core::provider::Provider::Openai,
+            )
+            .await,
         Err(CredentialResolverError::RefreshUnavailable)
     );
     must_ok(listener.set_nonblocking(true));

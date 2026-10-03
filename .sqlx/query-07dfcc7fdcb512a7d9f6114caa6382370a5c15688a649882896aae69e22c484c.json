@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM router_pushes WHERE push_id IN (SELECT push_id FROM router_pushes WHERE created_at < ? ORDER BY created_at,push_id LIMIT ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "07dfcc7fdcb512a7d9f6114caa6382370a5c15688a649882896aae69e22c484c"
+}

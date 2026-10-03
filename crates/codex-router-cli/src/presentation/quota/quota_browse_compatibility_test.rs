@@ -118,6 +118,171 @@ async fn quota_browse_matches_canonical_responsive_goldens() {
 }
 
 #[tokio::test]
+async fn quota_browse_footer_names_account_options() {
+    let text = render_quota_capture_model_at(
+        quota_view_model(),
+        160,
+        24,
+        vec![TerminalEvent::Key(KeyEvent::new(
+            KeyEventKind::Press,
+            KeyCode::Esc,
+        ))],
+    )
+    .await;
+
+    assert!(text.contains("ctrl-r account options"), "{text}");
+}
+
+#[tokio::test]
+#[ignore = "writes iocraft account-options captures for design review"]
+async fn quota_account_options_capture_artifacts_for_design_review() {
+    use codex_router_core::credit_usage::CreditAvailability;
+    use codex_router_core::credit_usage::CreditBalance;
+    use codex_router_core::credit_usage::CreditProviderLimitReason;
+    use codex_router_core::credit_usage::CreditProviderObservation;
+    use codex_router_core::credit_usage::CreditSpendControl;
+
+    let capture_dir = capture_dir();
+    let dimensions = [
+        (160usize, 36usize),
+        (100, 36),
+        (48, 36),
+        (100, 24),
+        (48, 24),
+    ];
+    for (width, height) in dimensions {
+        for credits_tab in [false, true] {
+            let mut view_model = quota_two_account_view_model();
+            view_model.rows[0].credit_usage = crate::quota::CreditUsageStatus {
+                policy: codex_router_core::credit_usage::CreditUsagePolicy::Disallow,
+                provider_observation: CreditProviderObservation::new(
+                    CreditAvailability::Available {
+                        balance: Some(
+                            CreditBalance::new("42.00")
+                                .expect("capture balance fixture should be valid"),
+                        ),
+                    },
+                    CreditSpendControl::Clear,
+                    Some(CreditProviderLimitReason::RateLimitReached),
+                ),
+                freshness: crate::quota::CreditUsageFreshness::Fresh,
+                age_label: "18s".to_owned(),
+            };
+            view_model.rows[0].credit_usage_summary = "42.00 fresh".to_owned();
+
+            let mut ctrl_r = KeyEvent::new(KeyEventKind::Press, KeyCode::Char('r'));
+            ctrl_r.modifiers = KeyModifiers::CONTROL;
+            let mut ctrl_c = KeyEvent::new(KeyEventKind::Press, KeyCode::Char('c'));
+            ctrl_c.modifiers = KeyModifiers::CONTROL;
+            let mut events = vec![(TerminalEvent::Key(ctrl_r), Some("Reset credits"))];
+            if credits_tab {
+                events.push((
+                    TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Tab)),
+                    Some("Credit usage"),
+                ));
+                events.push((
+                    TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Enter)),
+                    Some("enter save"),
+                ));
+            }
+            events.push((TerminalEvent::Key(ctrl_c), None));
+
+            let (acknowledged_events, acknowledgement_sender) =
+                acknowledged_account_options_events(events);
+            let frames = element! {
+                QuotaStatusComponent(view_model, width, height)
+            }
+            .mock_terminal_render_loop(MockTerminalConfig::with_events(acknowledged_events))
+            .map(|canvas| canvas.to_string())
+            .inspect(move |frame| {
+                for marker in ["Reset credits", "Credit usage", "enter save"] {
+                    if frame.contains(marker) {
+                        let _ = acknowledgement_sender.send(marker);
+                    }
+                }
+            })
+            .collect::<Vec<_>>()
+            .await;
+            let expected_tab_content = if credits_tab {
+                "Credit usage"
+            } else {
+                "Reset credits"
+            };
+            let frame = frames
+                .iter()
+                .rev()
+                .find(|frame| frame.contains(expected_tab_content))
+                .unwrap_or_else(|| {
+                    panic!(
+                        "synthetic {expected_tab_content} pane should render at {width}x{height}:\n{}",
+                        frames.join("\n--- frame ---\n")
+                    )
+                });
+            let pane = if credits_tab { "credits" } else { "resets" };
+            let name = format!("account-options-{pane}-{width}x{height}");
+            write_capture_pair(&capture_dir, &name, frame);
+            std::fs::write(
+                capture_dir.join(format!("{name}.meta")),
+                format!(
+                    "viewport={width}x{height}\ndata=synthetic iocraft presentation fixture\nprovider_balance=42.00\npolicy=Disallow\n"
+                ),
+            )
+            .expect("capture metadata should write");
+        }
+    }
+}
+
+fn acknowledged_account_options_events(
+    ordered_events: Vec<(TerminalEvent, Option<&'static str>)>,
+) -> (
+    impl futures_util::Stream<Item = TerminalEvent>,
+    tokio::sync::mpsc::UnboundedSender<&'static str>,
+) {
+    let (acknowledgement_sender, acknowledgement_receiver) =
+        tokio::sync::mpsc::unbounded_channel();
+    let events = futures_util::stream::unfold(
+        (ordered_events.into_iter(), acknowledgement_receiver, None),
+        |(mut pending_events, mut acknowledgement_receiver, expected_frame)| async move {
+            if let Some(expected_frame) = expected_frame {
+                loop {
+                    match acknowledgement_receiver.recv().await {
+                        Some(acknowledgement) if acknowledgement == expected_frame => break,
+                        Some(_) => {}
+                        None => panic!(
+                            "rendered-frame acknowledgement channel closed before marker {expected_frame:?}"
+                        ),
+                    }
+                }
+            }
+            let (event, next_expected_frame) = pending_events.next()?;
+            Some((
+                event,
+                (
+                    pending_events,
+                    acknowledgement_receiver,
+                    next_expected_frame,
+                ),
+            ))
+        },
+    );
+    (events, acknowledgement_sender)
+}
+
+#[tokio::test]
+#[should_panic(expected = "rendered-frame acknowledgement channel closed before marker")]
+async fn acknowledged_account_options_events_fail_when_expected_frame_is_missing() {
+    let (events, acknowledgement_sender) = acknowledged_account_options_events(vec![(
+        TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Enter)),
+        Some("Reset credits"),
+    )]);
+    drop(acknowledgement_sender);
+    let mut events = Box::pin(events);
+
+    let _ = events.next().await;
+    let _ = events.next().await;
+}
+
+#[tokio::test]
 async fn quota_browse_empty_and_error_states_are_structurally_explicit() {
     let exit = vec![TerminalEvent::Key(KeyEvent::new(
         KeyEventKind::Press,
@@ -419,7 +584,7 @@ fn quota_status_static_narrow_rows_preserve_quota_windows_and_forecast() {
 }
 
 #[test]
-fn quota_status_title_right_aligns_live_freshness() {
+fn quota_status_title_shows_report_wide_freshness() {
     let text = render_quota_static_capture(quota_view_model(), 120, false);
     let title_line = text
         .lines()
@@ -427,10 +592,10 @@ fn quota_status_title_right_aligns_live_freshness() {
         .unwrap_or_else(|| panic!("quota title line should render:\n{text}"));
 
     assert!(title_line.contains("Quota status"), "{text}");
-    assert!(title_line.contains("fresh 14s ago"), "{text}");
+    assert!(title_line.contains("fresh 1"), "{text}");
     assert!(
-        !title_line.contains("fresh ok") && !title_line.contains("sample fresh"),
-        "title should show compact freshness, not refresh-status or sample copy:\n{text}"
+        !title_line.contains("14s ago") && !title_line.contains("sample fresh"),
+        "title should show report-wide counts while individual age remains in account details:\n{text}"
     );
 }
 
@@ -446,12 +611,13 @@ fn quota_status_title_shows_serving_spinner_when_active_clients_exist() {
         .unwrap_or_else(|| panic!("quota title line should render:\n{text}"));
 
     assert!(title_line.contains("serving 1 client"), "{text}");
-    assert!(title_line.contains("fresh 14s ago"), "{text}");
+    assert!(title_line.contains("fresh 1"), "{text}");
 }
 
 #[test]
 fn quota_status_title_uses_row_freshness_when_all_accounts_are_exhausted() {
     let mut view_model = quota_view_model();
+    view_model.pool_freshness_summary = "stale 1".to_owned();
     view_model.route_line = "responses -> none    [blocked]".to_owned();
     view_model.why_line = "why: no usable accounts".to_owned();
     view_model.rows[0].selected = false;
@@ -464,8 +630,7 @@ fn quota_status_title_uses_row_freshness_when_all_accounts_are_exhausted() {
         .find(|line| line.contains("Quota status"))
         .unwrap_or_else(|| panic!("quota title line should render:\n{text}"));
 
-    assert!(title_line.contains("fresh 14s ago"), "{text}");
-    assert!(!title_line.contains("unknown"), "{text}");
+    assert!(title_line.contains("stale 1"), "{text}");
 }
 
 #[test]

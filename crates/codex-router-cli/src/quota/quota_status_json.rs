@@ -6,6 +6,8 @@ pub(super) struct JsonQuotaStatusReport {
     pub(super) app_version: String,
     pub(super) route_band: String,
     pub(super) selection_projection_source: &'static str,
+    pub(super) credential_store_status: &'static str,
+    pub(super) unconverted_accounts: Vec<String>,
     pub(super) selected_pool: &'static str,
     pub(super) selected_pool_reason: &'static str,
     pub(super) preferred_next_account_hash: Option<String>,
@@ -19,6 +21,11 @@ impl JsonQuotaStatusReport {
             app_version: report.app_version.clone(),
             route_band: report.route_band.clone(),
             selection_projection_source: report.selection_projection_source.as_json(),
+            credential_store_status: report.credential_store_availability.as_json_status(),
+            unconverted_accounts: report
+                .credential_store_availability
+                .unavailable_accounts()
+                .to_vec(),
             selected_pool: selected_pool_json(report.selected_pool),
             selected_pool_reason: selected_pool_reason_json(report.selected_pool),
             preferred_next_account_hash: report
@@ -28,7 +35,13 @@ impl JsonQuotaStatusReport {
             accounts: report
                 .rows
                 .iter()
-                .map(|row| JsonQuotaStatusAccount::from_row(row, report.now_unix_seconds))
+                .map(|row| {
+                    JsonQuotaStatusAccount::from_row(
+                        row,
+                        report.now_unix_seconds,
+                        &report.credential_store_availability,
+                    )
+                })
                 .collect(),
         }
     }
@@ -36,9 +49,11 @@ impl JsonQuotaStatusReport {
 
 #[derive(Serialize)]
 pub(super) struct JsonQuotaStatusAccount {
+    pub(super) provider: &'static str,
     pub(super) account_hash: String,
     pub(super) safe_account_label: String,
     pub(super) availability: &'static str,
+    pub(super) credential_store_status: &'static str,
     pub(super) freshness: &'static str,
     pub(super) routing_exclusion: &'static str,
     pub(super) next_use: String,
@@ -69,17 +84,24 @@ pub(super) struct JsonQuotaStatusAccount {
     pub(super) reset_credits_available: Option<u32>,
     pub(super) active_clients: Option<u32>,
     pub(super) active_clients_source: &'static str,
+    pub(super) credit_usage: JsonCreditUsage,
     pub(super) updated: String,
     pub(super) window_slots: JsonWindowSlots,
     pub(super) windows: Vec<JsonQuotaWindow>,
 }
 
 impl JsonQuotaStatusAccount {
-    pub(super) fn from_row(row: &QuotaStatusRow, now_unix_seconds: u64) -> Self {
+    pub(super) fn from_row(
+        row: &QuotaStatusRow,
+        now_unix_seconds: u64,
+        credential_store_availability: &CredentialStoreAvailability,
+    ) -> Self {
         Self {
+            provider: row.provider.as_str(),
             account_hash: telemetry_hash(row.account_id.as_str()),
             safe_account_label: row.account_label.clone(),
             availability: availability_json(row.availability),
+            credential_store_status: credential_store_availability.as_json_status(),
             freshness: freshness_json(row.freshness),
             routing_exclusion: routing_exclusion_json(row.routing_exclusion),
             next_use: row.next_use.clone(),
@@ -101,7 +123,11 @@ impl JsonQuotaStatusAccount {
                 row.weekly_quota_floor_basis_points,
             )
             .map(|basis_points| basis_points / 100),
-            oauth_maintenance_state: oauth_maintenance_state(row.oauth_maintenance.as_ref()),
+            oauth_maintenance_state: if credential_store_availability.is_ready() {
+                oauth_maintenance_state(row.oauth_maintenance.as_ref())
+            } else {
+                credential_store_availability.as_json_status()
+            },
             oauth_last_success_unix_seconds: row
                 .oauth_maintenance
                 .as_ref()
@@ -128,6 +154,7 @@ impl JsonQuotaStatusAccount {
             reset_credits_available: row.reset_credits_available_value,
             active_clients: row.active_clients_value,
             active_clients_source: row.active_clients_source,
+            credit_usage: JsonCreditUsage::from_status(&row.credit_usage),
             updated: row.updated.clone(),
             window_slots: JsonWindowSlots::from_windows(&row.windows, now_unix_seconds),
             windows: row
@@ -135,6 +162,53 @@ impl JsonQuotaStatusAccount {
                 .iter()
                 .map(|window| JsonQuotaWindow::from_window(window, now_unix_seconds))
                 .collect(),
+        }
+    }
+}
+
+#[derive(Serialize)]
+pub(super) struct JsonCreditUsage {
+    pub(super) policy: &'static str,
+    pub(super) availability: &'static str,
+    pub(super) balance: Option<String>,
+    pub(super) spend_control: &'static str,
+    pub(super) provider_limit_reason: Option<&'static str>,
+    pub(super) freshness: &'static str,
+    pub(super) observation_age: String,
+}
+
+impl JsonCreditUsage {
+    fn from_status(status: &CreditUsageStatus) -> Self {
+        let provider_observation = &status.provider_observation;
+        let balance = match provider_observation.availability() {
+            codex_router_core::credit_usage::CreditAvailability::Available { balance } => {
+                balance.as_ref().map(|balance| balance.as_str().to_owned())
+            }
+            codex_router_core::credit_usage::CreditAvailability::Unknown
+            | codex_router_core::credit_usage::CreditAvailability::Depleted
+            | codex_router_core::credit_usage::CreditAvailability::Unlimited => None,
+        };
+        let policy = if status.policy.allows_credit_usage() {
+            "allow"
+        } else {
+            "disallow"
+        };
+        let freshness = match status.freshness {
+            CreditUsageFreshness::Fresh => "fresh",
+            CreditUsageFreshness::Stale => "stale",
+            CreditUsageFreshness::Unknown => "unknown",
+        };
+
+        Self {
+            policy,
+            availability: provider_observation.availability().as_str(),
+            balance,
+            spend_control: provider_observation.spend_control().as_str(),
+            provider_limit_reason: provider_observation
+                .limit_reason()
+                .map(codex_router_core::credit_usage::CreditProviderLimitReason::as_str),
+            freshness,
+            observation_age: status.age_label.clone(),
         }
     }
 }
@@ -363,6 +437,7 @@ pub(super) const fn quota_evidence_reason_json(value: QuotaEvidenceReason) -> &'
         QuotaEvidenceReason::AccountDisabled => "account_disabled",
         QuotaEvidenceReason::MissingCredential => "missing_credential",
         QuotaEvidenceReason::WeeklyQuotaFloor => "excluded_weekly_quota_floor",
+        QuotaEvidenceReason::CreditBacked => "credit_backed",
     }
 }
 
@@ -465,4 +540,111 @@ pub(super) fn window_pressure_and_surplus(
         Some(expected_remaining_percent.saturating_sub(remaining_headroom)),
         Some(remaining_headroom.saturating_sub(expected_remaining_percent)),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use codex_router_core::credit_usage::CreditAvailability;
+    use codex_router_core::credit_usage::CreditBalance;
+    use codex_router_core::credit_usage::CreditProviderLimitReason;
+    use codex_router_core::credit_usage::CreditProviderObservation;
+    use codex_router_core::credit_usage::CreditSpendControl;
+    use codex_router_core::credit_usage::CreditUsagePolicy;
+
+    use super::JsonCreditUsage;
+    use crate::quota::CreditUsageFreshness;
+    use crate::quota::CreditUsageStatus;
+
+    fn status(
+        availability: CreditAvailability,
+        spend_control: CreditSpendControl,
+        limit_reason: Option<CreditProviderLimitReason>,
+    ) -> CreditUsageStatus {
+        CreditUsageStatus {
+            policy: CreditUsagePolicy::Allow,
+            provider_observation: CreditProviderObservation::new(
+                availability,
+                spend_control,
+                limit_reason,
+            ),
+            freshness: CreditUsageFreshness::Fresh,
+            age_label: "0s".to_owned(),
+        }
+    }
+
+    #[test]
+    fn json_credit_usage_distinguishes_unknown_depleted_and_hidden_balance() {
+        let unknown = serde_json::to_value(JsonCreditUsage::from_status(&status(
+            CreditAvailability::Unknown,
+            CreditSpendControl::Unreported,
+            None,
+        )))
+        .expect("unknown credit usage should serialize");
+        let depleted = serde_json::to_value(JsonCreditUsage::from_status(&status(
+            CreditAvailability::Depleted,
+            CreditSpendControl::Clear,
+            Some(CreditProviderLimitReason::WorkspaceOwnerCreditsDepleted),
+        )))
+        .expect("depleted credit usage should serialize");
+        let hidden_balance = serde_json::to_value(JsonCreditUsage::from_status(&status(
+            CreditAvailability::Available { balance: None },
+            CreditSpendControl::Clear,
+            Some(CreditProviderLimitReason::RateLimitReached),
+        )))
+        .expect("available credit usage should serialize");
+
+        assert_eq!(unknown["policy"], "allow");
+        assert_eq!(unknown["availability"], "unknown");
+        assert!(unknown["balance"].is_null());
+        assert_eq!(unknown["freshness"], "fresh");
+        assert_eq!(unknown["observation_age"], "0s");
+        assert_eq!(depleted["availability"], "depleted");
+        assert_eq!(
+            depleted["provider_limit_reason"],
+            "workspace_owner_credits_depleted"
+        );
+        assert_eq!(hidden_balance["availability"], "available");
+        assert!(hidden_balance["balance"].is_null());
+        assert_eq!(hidden_balance["spend_control"], "clear");
+        assert_eq!(
+            hidden_balance["provider_limit_reason"],
+            "rate_limit_reached"
+        );
+        let unlimited = serde_json::to_value(JsonCreditUsage::from_status(&status(
+            CreditAvailability::Unlimited,
+            CreditSpendControl::Unreported,
+            None,
+        )))
+        .expect("unlimited credit usage should serialize");
+        assert_eq!(unlimited["availability"], "unlimited");
+        assert!(unlimited["balance"].is_null());
+        let precise_balance = serde_json::to_value(JsonCreditUsage::from_status(&status(
+            CreditAvailability::Available {
+                balance: Some(
+                    CreditBalance::new("42.0007")
+                        .expect("provider balance should already be validated"),
+                ),
+            },
+            CreditSpendControl::Clear,
+            None,
+        )))
+        .expect("available balance should serialize");
+        assert_eq!(precise_balance["balance"], "42.0007");
+
+        let mut stale_status = status(
+            CreditAvailability::Available { balance: None },
+            CreditSpendControl::Unknown,
+            Some(CreditProviderLimitReason::Unknown),
+        );
+        stale_status.policy = CreditUsagePolicy::Disallow;
+        stale_status.freshness = CreditUsageFreshness::Stale;
+        stale_status.age_label = "older than freshness window".to_owned();
+        let stale = serde_json::to_value(JsonCreditUsage::from_status(&stale_status))
+            .expect("stale credit usage should serialize");
+        assert_eq!(stale["policy"], "disallow");
+        assert_eq!(stale["spend_control"], "unknown");
+        assert_eq!(stale["provider_limit_reason"], "unknown");
+        assert_eq!(stale["freshness"], "stale");
+        assert_eq!(stale["observation_age"], "older than freshness window");
+    }
 }

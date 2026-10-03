@@ -1,0 +1,98 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT window_id,opened_at,last_arrival_at,held_since,retry_not_before, retry_attempts,in_flight_through FROM subscription_windows WHERE reader_key=? AND root_id=?",
+  "describe": {
+    "columns": [
+      {
+        "name": "window_id",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "subscription_windows",
+            "name": "window_id"
+          }
+        }
+      },
+      {
+        "name": "opened_at",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "subscription_windows",
+            "name": "opened_at"
+          }
+        }
+      },
+      {
+        "name": "last_arrival_at",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "subscription_windows",
+            "name": "last_arrival_at"
+          }
+        }
+      },
+      {
+        "name": "held_since",
+        "ordinal": 3,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "subscription_windows",
+            "name": "held_since"
+          }
+        }
+      },
+      {
+        "name": "retry_not_before",
+        "ordinal": 4,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "subscription_windows",
+            "name": "retry_not_before"
+          }
+        }
+      },
+      {
+        "name": "retry_attempts",
+        "ordinal": 5,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "subscription_windows",
+            "name": "retry_attempts"
+          }
+        }
+      },
+      {
+        "name": "in_flight_through",
+        "ordinal": 6,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "subscription_windows",
+            "name": "in_flight_through"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      true,
+      false,
+      true
+    ]
+  },
+  "hash": "ed8dd9aacad1786b9f466a18197767ea1e8135e7e9fef6def5a4ff80aa97905b"
+}

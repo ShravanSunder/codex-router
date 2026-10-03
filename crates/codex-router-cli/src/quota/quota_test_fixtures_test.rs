@@ -61,6 +61,7 @@ pub(super) fn quota_capture_row(fixture: QuotaCaptureRowFixture) -> QuotaStatusR
     };
 
     QuotaStatusRow {
+        provider: codex_router_core::provider::Provider::Openai,
         account_id: account_id(fixture.account_id_value),
         active_credential_generation: Some(1),
         account_label: fixture.account_label.to_owned(),
@@ -86,6 +87,7 @@ pub(super) fn quota_capture_row(fixture: QuotaCaptureRowFixture) -> QuotaStatusR
         active_clients_source: "sqlx_mirror",
         reset_credits_available: "2 available".to_owned(),
         reset_credits_available_value: Some(2),
+        credit_usage: CreditUsageStatus::default(),
         routing: format_routing_reason(fixture.routing_reason).to_owned(),
         next_use: format_next_use_for_capture(fixture.routing_reason).to_owned(),
         weekly_pace: Some(QuotaPaceSnapshot {
@@ -129,6 +131,7 @@ pub(super) fn quota_capture_report() -> QuotaStatusReport {
         preferred_next_account_id: Some(account_id("acct_ssdev")),
         selection_projection_source: SelectionProjectionSource::SqlxProjection,
         now_unix_seconds: NOW,
+        credential_store_availability: CredentialStoreAvailability::Ready,
         rows: vec![
             quota_capture_row(QuotaCaptureRowFixture {
                 account_id_value: "acct_ssdev",
@@ -240,6 +243,7 @@ pub(super) fn blocked_quota_capture_report() -> QuotaStatusReport {
         preferred_next_account_id: None,
         selection_projection_source: SelectionProjectionSource::SqlxProjection,
         now_unix_seconds: NOW,
+        credential_store_availability: CredentialStoreAvailability::Ready,
         rows: vec![
             quota_capture_row(QuotaCaptureRowFixture {
                 account_id_value: "acct_ssdev",
@@ -321,8 +325,10 @@ pub(super) fn format_next_use_for_capture(reason: RoutingReason) -> &'static str
         | RoutingReason::PreferredSafestQuota
         | RoutingReason::PreferredLastResortShortWindowGuard => "preferred by quota",
         RoutingReason::AvailableSamePool => "available by quota",
+        RoutingReason::CreditBacked => "uses usage credits",
         RoutingReason::HeldReserve
         | RoutingReason::HeldUnknown
+        | RoutingReason::HeldForIncludedQuota
         | RoutingReason::HeldShortWindowGuard
         | RoutingReason::HeldFloorSwitch => "held by quota",
         RoutingReason::UnknownFallbackPreferred | RoutingReason::UnknownFallbackAvailable => {
@@ -495,8 +501,13 @@ pub(super) fn must_ok<T, E: std::fmt::Display>(result: Result<T, E>) -> T {
 }
 
 pub(super) fn account(account_id: &str, label: &str) -> AccountRecord {
-    AccountRecord::new(test_account_id(account_id), label, AccountStatus::Enabled)
-        .with_active_credential_generation(1)
+    AccountRecord::new(
+        codex_router_core::provider::Provider::Openai,
+        test_account_id(account_id),
+        label,
+        AccountStatus::Enabled,
+    )
+    .with_active_credential_generation(1)
 }
 
 pub(super) fn account_id(value: &str) -> AccountId {

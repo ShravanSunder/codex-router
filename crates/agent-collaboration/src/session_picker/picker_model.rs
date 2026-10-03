@@ -14,11 +14,11 @@ use crate::presentation::session_picker::picker_rendering::render_model_snapshot
 use crate::presentation::session_picker::picker_request::SessionsPickerDataQuery;
 use crate::presentation::session_picker::picker_request::SessionsPickerRequest;
 use crate::presentation::session_picker::picker_request::SessionsPickerRoot;
-use crate::sessions::SessionPickerRecord;
 use crate::sessions::SessionSearchExpression;
 use crate::sessions::SessionsProvider;
 use crate::sessions::SessionsSort;
 use crate::sessions::SessionsSource;
+use crate::sessions::{SessionPickerIdentity, SessionPickerRecord};
 
 pub(super) const VISIBLE_SESSION_ROWS: usize = 8;
 
@@ -46,7 +46,7 @@ impl SessionsPickerRuntimeView {
 pub(super) enum SessionsPickerFocus {
     #[default]
     StartNew,
-    SessionId(String),
+    Session(SessionPickerIdentity),
 }
 
 /// Pure sessions picker state. iocraft owns rendering/input, this owns behavior.
@@ -181,6 +181,7 @@ impl SessionsPickerModel {
             source: self.source,
             sort: self.sort,
             search: self.search.clone(),
+            include_empty_sessions: self.request.include_empty_sessions,
         }
     }
 
@@ -214,20 +215,47 @@ impl SessionsPickerModel {
     #[cfg(test)]
     pub(crate) fn focus_visible_session(&mut self, session_id: &str) -> bool {
         self.pointer_window_start = None;
-        self.focus_visible_session_in_window(session_id, None)
+        let identity = self
+            .request
+            .records
+            .iter()
+            .find(|record| record.session_id == session_id)
+            .map(|record| record.identity.clone());
+        identity.is_some_and(|identity| self.focus_visible_identity_in_window(&identity, None))
     }
 
+    #[cfg(test)]
     pub(crate) fn focus_visible_session_in_window(
         &mut self,
         session_id: &str,
         window_start: Option<usize>,
     ) -> bool {
-        if self.visible_index_for_session(session_id).is_none() {
+        let identity = self
+            .request
+            .records
+            .iter()
+            .find(|record| record.session_id == session_id)
+            .map(|record| record.identity.clone());
+        identity
+            .is_some_and(|identity| self.focus_visible_identity_in_window(&identity, window_start))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn focus_visible_identity(&mut self, identity: &SessionPickerIdentity) -> bool {
+        self.focus_visible_identity_in_window(identity, None)
+    }
+
+    pub(crate) fn focus_visible_identity_in_window(
+        &mut self,
+        identity: &SessionPickerIdentity,
+        window_start: Option<usize>,
+    ) -> bool {
+        if self.visible_index_for_identity(identity).is_none() {
             return false;
         }
         self.pointer_window_start = window_start;
-        if self.focused_session_id() != Some(session_id) {
-            self.focus = SessionsPickerFocus::SessionId(session_id.to_owned());
+        if self.focused_identity() != Some(identity) {
+            self.focus = SessionsPickerFocus::Session(identity.clone());
         }
         true
     }
@@ -243,17 +271,31 @@ impl SessionsPickerModel {
     }
 
     pub(crate) fn focused_session_id(&self) -> Option<&str> {
+        self.focused_record()
+            .map(|record| record.session_id.as_str())
+    }
+
+    pub(crate) fn focused_identity(&self) -> Option<&SessionPickerIdentity> {
         match &self.focus {
             SessionsPickerFocus::StartNew => None,
-            SessionsPickerFocus::SessionId(session_id) => Some(session_id.as_str()),
+            SessionsPickerFocus::Session(identity) => Some(identity),
         }
     }
 
     pub(crate) fn activation_outcome_for_focus(&self) -> Option<SessionsPickerOutcome> {
-        match self.focused_session_id() {
-            Some(session_id) => Some(SessionsPickerOutcome::ResumeSession(session_id.to_owned())),
+        match self.focused_record() {
+            Some(record) if record.identity.is_provider() => None,
+            Some(record) => Some(SessionsPickerOutcome::ResumeSession(
+                record.session_id.clone(),
+            )),
             None => Some(SessionsPickerOutcome::StartNewSession),
         }
+    }
+
+    pub(crate) fn fork_outcome_for_focus(&self) -> Option<SessionsPickerOutcome> {
+        self.focused_record()
+            .filter(|record| !record.identity.is_provider())
+            .map(|record| SessionsPickerOutcome::ForkSession(record.session_id.clone()))
     }
 
     #[cfg(test)]
@@ -275,8 +317,8 @@ impl SessionsPickerModel {
     }
 
     pub(super) fn focused_visible_index(&self) -> usize {
-        match self.focused_session_id() {
-            Some(session_id) => self.visible_index_for_session(session_id).unwrap_or(0),
+        match self.focused_identity() {
+            Some(identity) => self.visible_index_for_identity(identity).unwrap_or(0),
             None => 0,
         }
     }
@@ -350,11 +392,11 @@ impl SessionsPickerModel {
     }
 
     fn focus_first_record_when_available(&mut self) {
-        if let Some(session_id) = self
+        if let Some(identity) = self
             .visible_record_at(0)
-            .map(|record| record.session_id.clone())
+            .map(|record| record.identity.clone())
         {
-            self.focus = SessionsPickerFocus::SessionId(session_id);
+            self.focus = SessionsPickerFocus::Session(identity);
         }
     }
 
@@ -363,30 +405,30 @@ impl SessionsPickerModel {
             self.focus_start_new();
             return;
         }
-        if let Some(session_id) = self
+        if let Some(identity) = self
             .visible_choice_record_at(index)
-            .map(|record| record.session_id.clone())
+            .map(|record| record.identity.clone())
         {
-            self.focus = SessionsPickerFocus::SessionId(session_id);
+            self.focus = SessionsPickerFocus::Session(identity);
         }
     }
 
-    fn visible_index_for_session(&self, session_id: &str) -> Option<usize> {
+    fn visible_index_for_identity(&self, identity: &SessionPickerIdentity) -> Option<usize> {
         self.visible_indices
             .iter()
             .position(|record_index| {
                 self.request
                     .records
                     .get(*record_index)
-                    .is_some_and(|record| record.session_id == session_id)
+                    .is_some_and(|record| &record.identity == identity)
             })
             .map(|index| index + 1)
     }
 
     fn restore_focus_or_fallback(&mut self, previous_index: usize) {
         if self
-            .focused_session_id()
-            .is_some_and(|session_id| self.visible_index_for_session(session_id).is_some())
+            .focused_identity()
+            .is_some_and(|identity| self.visible_index_for_identity(identity).is_some())
         {
             return;
         }

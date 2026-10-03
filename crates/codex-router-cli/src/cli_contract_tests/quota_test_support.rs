@@ -1,4 +1,5 @@
 use super::*;
+use crate::quota::QuotaWindowHeadroom;
 
 pub(super) struct JoinedFloorCrossingProvider {
     pub(super) floor_account_id: AccountId,
@@ -18,18 +19,19 @@ impl QuotaRefreshProvider for JoinedFloorCrossingProvider {
             windows: vec![
                 QuotaRefreshProviderWindow {
                     limit_window_seconds: 18_000,
-                    remaining_headroom: 100,
+                    headroom: QuotaWindowHeadroom::Percent(100),
                     reset_unix_seconds: Some(18_000),
                     effective: true,
                 },
                 QuotaRefreshProviderWindow {
                     limit_window_seconds: 604_800,
-                    remaining_headroom: weekly_remaining,
+                    headroom: QuotaWindowHeadroom::Percent(weekly_remaining),
                     reset_unix_seconds: Some(604_800),
                     effective: false,
                 },
             ],
             reset_credits_available: None,
+            ..Default::default()
         })
     }
 }
@@ -46,14 +48,16 @@ where
     R: AsyncProviderCredentialResolver,
     P: QuotaRefreshProvider,
 {
-    test_async_runtime().block_on(refresh_quota_with_dependencies_async(
-        stdout,
-        router_root,
-        base_url,
-        credential_resolver,
-        quota_provider,
-        observed_unix_seconds,
-    ))
+    test_async_runtime()
+        .block_on(refresh_quota_with_dependencies_async(
+            stdout,
+            router_root,
+            base_url,
+            credential_resolver,
+            quota_provider,
+            observed_unix_seconds,
+        ))
+        .map(|_report| ())
 }
 
 pub(super) fn refresh_quota_store_paths_with_dependencies<R, P>(
@@ -69,15 +73,17 @@ where
     R: AsyncProviderCredentialResolver,
     P: QuotaRefreshProvider,
 {
-    test_async_runtime().block_on(refresh_quota_store_paths_with_dependencies_async(
-        stdout,
-        state_db,
-        secret_root,
-        base_url,
-        credential_resolver,
-        quota_provider,
-        observed_unix_seconds,
-    ))
+    test_async_runtime()
+        .block_on(refresh_quota_store_paths_with_dependencies_async(
+            stdout,
+            state_db,
+            secret_root,
+            base_url,
+            credential_resolver,
+            quota_provider,
+            observed_unix_seconds,
+        ))
+        .map(|_report| ())
 }
 
 pub(super) fn refresh_quota_store_paths_with_floor_observer<R, P>(
@@ -93,17 +99,19 @@ where
     R: AsyncProviderCredentialResolver,
     P: QuotaRefreshProvider,
 {
-    test_async_runtime().block_on(
-        refresh_quota_store_paths_with_dependencies_and_floor_notifier_async(
-            stdout,
-            state_db,
-            secret_root,
-            base_url,
-            credential_resolver,
-            quota_provider,
-            observation_context,
-        ),
-    )
+    test_async_runtime()
+        .block_on(
+            refresh_quota_store_paths_with_dependencies_and_floor_notifier_async(
+                stdout,
+                state_db,
+                secret_root,
+                base_url,
+                credential_resolver,
+                quota_provider,
+                observation_context,
+            ),
+        )
+        .map(|_report| ())
 }
 
 #[derive(Default)]
@@ -127,8 +135,13 @@ where
     async fn resolve_provider_credentials_async(
         &self,
         account_id: &AccountId,
+        expected_provider: codex_router_core::provider::Provider,
     ) -> Result<ResolvedProviderCredential, CredentialResolverError> {
-        ProviderCredentialResolver::resolve_provider_credentials(self, account_id)
+        ProviderCredentialResolver::resolve_provider_credentials(
+            self,
+            account_id,
+            expected_provider,
+        )
     }
 }
 
@@ -208,6 +221,7 @@ impl QuotaRefreshProvider for RecordingQuotaRefreshProvider {
         Ok(QuotaRefreshProviderResponse {
             windows: verified_quota_windows(self.remaining_headroom),
             reset_credits_available: None,
+            ..Default::default()
         })
     }
 }
@@ -289,13 +303,13 @@ impl QuotaRefreshProvider for FloorNotificationOrderingQuotaProvider {
             vec![
                 QuotaRefreshProviderWindow {
                     limit_window_seconds: 18_000,
-                    remaining_headroom,
+                    headroom: QuotaWindowHeadroom::Percent(remaining_headroom),
                     reset_unix_seconds: Some(20_000),
                     effective: true,
                 },
                 QuotaRefreshProviderWindow {
                     limit_window_seconds: 604_800,
-                    remaining_headroom,
+                    headroom: QuotaWindowHeadroom::Percent(remaining_headroom),
                     reset_unix_seconds: Some(614_800),
                     effective: false,
                 },
@@ -306,6 +320,7 @@ impl QuotaRefreshProvider for FloorNotificationOrderingQuotaProvider {
         Ok(QuotaRefreshProviderResponse {
             windows,
             reset_credits_available: None,
+            ..Default::default()
         })
     }
 }
@@ -324,6 +339,7 @@ impl QuotaRefreshProvider for StaticQuotaRefreshProvider {
         Ok(QuotaRefreshProviderResponse {
             windows: self.windows.clone(),
             reset_credits_available: None,
+            ..Default::default()
         })
     }
 }
@@ -351,6 +367,7 @@ impl QuotaRefreshProvider for SlowQuotaRefreshProvider {
         Ok(QuotaRefreshProviderResponse {
             windows: verified_quota_windows(self.remaining_headroom),
             reset_credits_available: None,
+            ..Default::default()
         })
     }
 }
@@ -398,6 +415,7 @@ impl QuotaRefreshProvider for BlockingQuotaRefreshProvider {
         Ok(QuotaRefreshProviderResponse {
             windows: verified_quota_windows(self.remaining_headroom),
             reset_credits_available: None,
+            ..Default::default()
         })
     }
 }
@@ -427,6 +445,7 @@ impl QuotaRefreshProvider for SignalingQuotaRefreshProvider {
         Ok(QuotaRefreshProviderResponse {
             windows: verified_quota_windows(self.remaining_headroom),
             reset_credits_available: None,
+            ..Default::default()
         })
     }
 }
@@ -465,6 +484,7 @@ impl QuotaRefreshProvider for AccountFailingQuotaRefreshProvider {
         Ok(QuotaRefreshProviderResponse {
             windows: verified_quota_windows(self.remaining_headroom),
             reset_credits_available: None,
+            ..Default::default()
         })
     }
 }
@@ -473,13 +493,13 @@ pub(super) fn verified_quota_windows(remaining_headroom: u32) -> Vec<QuotaRefres
     vec![
         QuotaRefreshProviderWindow {
             limit_window_seconds: 18_000,
-            remaining_headroom,
+            headroom: QuotaWindowHeadroom::Percent(remaining_headroom),
             reset_unix_seconds: Some(20_000),
             effective: true,
         },
         QuotaRefreshProviderWindow {
             limit_window_seconds: 604_800,
-            remaining_headroom: remaining_headroom.max(50),
+            headroom: QuotaWindowHeadroom::Percent(remaining_headroom.max(50)),
             reset_unix_seconds: Some(614_800),
             effective: false,
         },

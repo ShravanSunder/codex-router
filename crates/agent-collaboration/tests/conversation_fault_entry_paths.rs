@@ -141,7 +141,7 @@ async fn fork_response_loss_after_session_new_reports_unknown_without_replay() {
             .expect("control bind");
     let manifest = serde_json::from_value(json!({
         "version":2,"serviceId":service_id,"serviceEpoch":epoch,
-        "control":{"transport":"unixJsonLines","path":"control.sock"},
+        "machineLabel":"fixture-host","control":{"transport":"unixJsonLines","path":"control.sock"},
         "controlSchemaDigest":digest,"mcp":{"transport":"streamableHttp","url":"http://127.0.0.1:0/mcp"}
     }))
     .expect("manifest");
@@ -281,7 +281,7 @@ async fn acp_initialize_response_loss_reports_no_effect_before_conversation_crea
     let control =
         collaboration_service::LocalControlService::bind(&root.join("control.sock"), identity)
             .expect("control bind");
-    let manifest = serde_json::from_value(json!({"version":2,"serviceId":service_id,"serviceEpoch":epoch,"control":{"transport":"unixJsonLines","path":"control.sock"},"controlSchemaDigest":digest,"mcp":{"transport":"streamableHttp","url":"http://127.0.0.1:0/mcp"}})).expect("manifest");
+    let manifest = serde_json::from_value(json!({"version":2,"serviceId":service_id,"serviceEpoch":epoch,"machineLabel":"fixture-host","control":{"transport":"unixJsonLines","path":"control.sock"},"controlSchemaDigest":digest,"mcp":{"transport":"streamableHttp","url":"http://127.0.0.1:0/mcp"}})).expect("manifest");
     let publication = collaboration_service::ManifestPublication::publish(&root, &manifest)
         .expect("publish manifest");
     let stop = CancellationToken::new();
@@ -377,7 +377,7 @@ async fn compiled_cli_conversation_records_deserialize_for_success_errors_deadli
             .expect("control bind");
     let manifest = serde_json::from_value(json!({
         "version":2,"serviceId":service_id,"serviceEpoch":epoch,
-        "control":{"transport":"unixJsonLines","path":"control.sock"},
+        "machineLabel":"fixture-host","control":{"transport":"unixJsonLines","path":"control.sock"},
         "controlSchemaDigest":digest,"mcp":{"transport":"streamableHttp","url":"http://127.0.0.1:0/mcp"}
     })).expect("manifest");
     let publication = collaboration_service::ManifestPublication::publish(&root, &manifest)
@@ -468,9 +468,9 @@ async fn compiled_cli_conversation_records_deserialize_for_success_errors_deadli
                             .send(())
                             .expect("interrupt signal");
                     }
-                    let cancel: Value = serde_json::from_str(&lines.next_line().await.expect("cancel read").expect("cancel frame")).expect("cancel JSON");
-                    assert_eq!(cancel["method"], "session/cancel");
-                    writer.write_all(format!("{}\n", json!({"jsonrpc":"2.0","id":prompt["id"],"result":{"stopReason":"cancelled"}})).as_bytes()).await.expect("settlement response");
+                    assert!(tokio::time::timeout(Duration::from_secs(5), lines.next_line())
+                        .await.expect("caller detaches").expect("ACP read").is_none(),
+                        "wait expiry and Ctrl-C must not send session/cancel");
                 }
                 _ => panic!("fixed fixture outcomes"),
             }
@@ -581,11 +581,18 @@ async fn compiled_cli_conversation_records_deserialize_for_success_errors_deadli
     );
 
     let deadline = prompt(&root, 1).await;
-    assert_eq!(deadline.status.code(), Some(124));
+    assert_eq!(deadline.status.code(), Some(0));
     let deadline_result = create_prompt_result_line(&deadline.stdout);
+    assert_eq!(deadline_result["prompt"]["kind"], "running");
     assert_eq!(
-        deadline_result["prompt"]["settlement"]["stopReason"],
-        "timedOut"
+        deadline_result["prompt"]["target"]["sessionId"],
+        "deadline-thread"
+    );
+    assert!(
+        deadline_result["prompt"]["followUp"]
+            .as_str()
+            .expect("follow-up command")
+            .contains("session inspect")
     );
 
     let mut interrupted = tokio::process::Command::new(env!("CARGO_BIN_EXE_agent-collaboration"));
@@ -637,11 +644,12 @@ async fn compiled_cli_conversation_records_deserialize_for_success_errors_deadli
         .await
         .expect("interrupt deadline")
         .expect("interrupt output");
-    assert_eq!(interrupted.status.code(), Some(130));
+    assert_eq!(interrupted.status.code(), Some(0));
     let interrupted_result = create_prompt_result_line(&interrupted.stdout);
+    assert_eq!(interrupted_result["prompt"]["kind"], "running");
     assert_eq!(
-        interrupted_result["prompt"]["settlement"]["stopReason"],
-        "cancelled"
+        interrupted_result["prompt"]["target"]["sessionId"],
+        "interrupt-thread"
     );
 
     tokio::time::timeout(Duration::from_secs(5), peer)
@@ -726,7 +734,7 @@ async fn run_resumed_prompt_after_load(load_error: Option<Value>) -> std::proces
             .expect("control bind");
     let manifest = serde_json::from_value(json!({
         "version":2,"serviceId":service_id,"serviceEpoch":epoch,
-        "control":{"transport":"unixJsonLines","path":"control.sock"},
+        "machineLabel":"fixture-host","control":{"transport":"unixJsonLines","path":"control.sock"},
         "controlSchemaDigest":digest,"mcp":{"transport":"streamableHttp","url":"http://127.0.0.1:0/mcp"}
     }))
     .expect("manifest");
@@ -852,7 +860,7 @@ async fn conversation_create_without_identity_or_from_reports_unavailable() {
             .expect("control bind");
     let manifest = serde_json::from_value(json!({
         "version":2,"serviceId":service_id,"serviceEpoch":epoch,
-        "control":{"transport":"unixJsonLines","path":"control.sock"},
+        "machineLabel":"fixture-host","control":{"transport":"unixJsonLines","path":"control.sock"},
         "controlSchemaDigest":digest,"mcp":{"transport":"streamableHttp","url":"http://127.0.0.1:0/mcp"}
     }))
     .expect("manifest");
@@ -929,7 +937,7 @@ async fn conversation_create_from_supplies_created_by_without_env() {
             .expect("control bind");
     let manifest = serde_json::from_value(json!({
         "version":2,"serviceId":service_id,"serviceEpoch":epoch,
-        "control":{"transport":"unixJsonLines","path":"control.sock"},
+        "machineLabel":"fixture-host","control":{"transport":"unixJsonLines","path":"control.sock"},
         "controlSchemaDigest":digest,"mcp":{"transport":"streamableHttp","url":"http://127.0.0.1:0/mcp"}
     }))
     .expect("manifest");

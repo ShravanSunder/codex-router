@@ -1,0 +1,21 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT EXISTS(\n                        SELECT 1 FROM account_window_rejections\n                         WHERE account_id = ?1\n                    ) AS is_exhausted",
+  "describe": {
+    "columns": [
+      {
+        "name": "is_exhausted",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "7b0fc2aede36d436ac60cd9ae7cefdde9d42f6e366e91a46ed63a1964ba38b51"
+}

@@ -17,16 +17,23 @@ fn run_saved_switch_band_websocket_case(with_healthy_peer: bool) {
     let state_path = test_root.path().join("state.sqlite");
     let secret_root = test_root.path().join("secrets");
     let state = must_ok(SqliteStateStore::open(&state_path));
-    let secrets = must_ok(FileSecretStore::open(&secret_root));
+    let secrets = must_ok(
+        codex_router_secret_store::test_support::open_encrypted_credential_store(&secret_root),
+    );
     let floor_account_id = account_id("acct_a_graceful_floor");
     let healthy_account_id = account_id("acct_b_graceful_peer");
     let seed_account = |account_id: &AccountId, label: &str, remaining: u32, access: &str| {
         must_ok(AccountStateRepository::upsert_account(
             &state,
-            &AccountRecord::new(account_id.clone(), label, AccountStatus::Enabled)
-                .with_active_credential_generation(1),
+            &AccountRecord::new(
+                codex_router_core::provider::Provider::Openai,
+                account_id.clone(),
+                label,
+                AccountStatus::Enabled,
+            )
+            .with_active_credential_generation(1),
         ));
-        let key = must_ok(account_credential_bundle_key(account_id, 1));
+        let key = must_ok(openai_account_credential_bundle_key(account_id, 1));
         let bundle = AccountCredentialBundle::imported_codex_auth(
             access,
             Some("fixture-refresh-canary".to_owned()),
@@ -71,16 +78,18 @@ fn run_saved_switch_band_websocket_case(with_healthy_peer: bool) {
         9,
         "graceful-floor-access",
     );
-    let mutation = must_ok(
-        test_async_runtime().block_on(AsyncWeeklyQuotaFloorMutationStore::open(&state_path)),
-    );
-    must_ok(
-        test_async_runtime().block_on(mutation.set_weekly_quota_floor_by_account_id(
-            &floor_account_id,
-            Some(must_ok(WeeklyQuotaFloorBasisPoints::new(500))),
-        )),
-    );
-    test_async_runtime().block_on(mutation.close());
+    test_async_runtime().block_on(async {
+        let mutation = must_ok(AsyncWeeklyQuotaFloorMutationStore::open(&state_path).await);
+        must_ok(
+            mutation
+                .set_weekly_quota_floor_by_account_id(
+                    &floor_account_id,
+                    Some(must_ok(WeeklyQuotaFloorBasisPoints::new(500))),
+                )
+                .await,
+        );
+        mutation.close().await;
+    });
 
     let upstream_listener = must_ok(TcpListener::bind("127.0.0.1:0"));
     let upstream_address = must_ok(upstream_listener.local_addr());
@@ -146,7 +155,7 @@ fn run_saved_switch_band_websocket_case(with_healthy_peer: bool) {
         secret_root.clone(),
     )
     .with_quota_clock(1_100, 300);
-    let router = must_ok(LoopbackRouterRuntime::start(config));
+    let router = must_ok(LoopbackRouterRuntime::start(config, secrets.clone()));
     let router_port = router.local_addr().port();
     let floor_notifier = router.websocket_quota_floor_notifier();
     let router_thread = thread::spawn(move || {
@@ -184,6 +193,7 @@ fn run_saved_switch_band_websocket_case(with_healthy_peer: bool) {
         &provider,
         QuotaRefreshObservationContext {
             observed_unix_seconds: 1_200,
+            schedule: crate::quota::QuotaRefreshSchedule::Manual,
             weekly_floor_observer: Some(&floor_notifier),
         },
     ));

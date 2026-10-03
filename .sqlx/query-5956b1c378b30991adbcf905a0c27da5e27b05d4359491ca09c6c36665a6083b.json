@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO subscription_windows(reader_key,root_id,opened_at,last_arrival_at, held_since,retry_not_before,retry_attempts,window_id,in_flight_through,residual_opened_at) VALUES(?,?,?,?,NULL,NULL,0,?,NULL,NULL) ON CONFLICT(reader_key,root_id) DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": []
+  },
+  "hash": "5956b1c378b30991adbcf905a0c27da5e27b05d4359491ca09c6c36665a6083b"
+}

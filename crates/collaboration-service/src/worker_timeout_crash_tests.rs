@@ -432,10 +432,16 @@ fn fixture_worker(
         gate,
         codex_home: root.to_owned(),
     };
+    let machine_identity =
+        crate::MachineIdentity::new(backend.endpoint.service_id.clone(), Some("Timeout Fixture"))?;
     Ok(ScheduledRunWorker {
         store,
-        execution: Arc::new(crate::CodexAppServerScheduledRuns::new(backend.clone())),
+        execution: Arc::new(crate::CodexAppServerScheduledRuns::new(
+            backend.clone(),
+            Arc::new(crate::UnmaterializedThreadHolder::new()),
+        )),
         backend: Some(backend),
         configuration: crate::AutomationConfigurationHandle::default(),
+        machine_identity,
     })
 }

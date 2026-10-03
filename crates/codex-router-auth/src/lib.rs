@@ -1,8 +1,11 @@
 //! OpenAI account authentication boundaries for codex-router.
 #![cfg_attr(test, allow(clippy::panic_in_result_fn))]
 
+pub mod claude_oauth;
+pub mod credential_activation;
 pub mod live_quota;
 pub mod oauth;
+pub mod openai_oauth;
 pub mod quota_client;
 pub mod refresh_worker;
 pub mod resolver;
@@ -16,6 +19,7 @@ pub const fn package_name() -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::env;
     use std::fs;
     use std::io::Read;
@@ -37,9 +41,13 @@ mod tests {
     use codex_router_core::redaction::SecretString;
     use codex_router_secret_store::SecretStore;
     use codex_router_secret_store::account_tokens::AccountCredentialBundle;
-    use codex_router_secret_store::account_tokens::account_credential_bundle_key;
+    use codex_router_secret_store::account_tokens::openai_account_credential_bundle_key;
     use codex_router_secret_store::account_tokens::upstream_access_token_key;
-    use codex_router_secret_store::file_backend::FileSecretStore;
+    use codex_router_secret_store::credential_bundle::CredentialBundle;
+    use codex_router_secret_store::encrypted_credential_store::EncryptedCredentialStore;
+    use codex_router_secret_store::keychain_data_key::KeychainAccess;
+    use codex_router_secret_store::keychain_data_key::KeychainAccessError;
+    use codex_router_secret_store::keychain_data_key::ROUTER_KEYCHAIN_SERVICE;
     use codex_router_secret_store::model::SecretKey;
     use codex_router_secret_store::model::SecretStoreError;
     use codex_router_state::account::AccountRecord;
@@ -74,6 +82,9 @@ mod tests {
     use crate::resolver::credential_renewal_is_due;
     use crate::router_credentials::RouterCredentialBundle;
 
+    mod credential_activation_tests;
+    mod credential_maintenance_reauth_tests;
+    mod credential_provider_mismatch_tests;
     mod credential_renewal_http_outcome_tests;
     mod credential_renewal_outcome_tests;
     mod credential_renewal_tests;
@@ -111,27 +122,35 @@ mod tests {
             last_success_unix_seconds: Some(1_000),
             next_attempt_unix_seconds: None,
             claimed_successor_generation: None,
+            claim_purpose: None,
+            claim_started_unix_seconds: None,
+            claim_prior_state: None,
             consecutive_failures: 0,
         };
-        let short =
+        let short = CredentialBundle::from(
             AccountCredentialBundle::imported_codex_auth("short", Some("refresh".to_owned()))
-                .with_expires_unix_seconds(1_120);
+                .with_expires_unix_seconds(1_120),
+        );
         assert!(!credential_renewal_is_due(
             &short,
             Some(&maintenance),
             1_059
         ));
         assert!(credential_renewal_is_due(&short, Some(&maintenance), 1_060));
-        let long = AccountCredentialBundle::imported_codex_auth("long", Some("refresh".to_owned()))
-            .with_expires_unix_seconds(50_000);
+        let long = CredentialBundle::from(
+            AccountCredentialBundle::imported_codex_auth("long", Some("refresh".to_owned()))
+                .with_expires_unix_seconds(50_000),
+        );
         assert!(!credential_renewal_is_due(
             &long,
             Some(&maintenance),
             15_399
         ));
         assert!(credential_renewal_is_due(&long, Some(&maintenance), 15_400));
-        let unknown =
-            AccountCredentialBundle::imported_codex_auth("unknown", Some("refresh".to_owned()));
+        let unknown = CredentialBundle::from(AccountCredentialBundle::imported_codex_auth(
+            "unknown",
+            Some("refresh".to_owned()),
+        ));
         assert!(!credential_renewal_is_due(
             &unknown,
             Some(&maintenance),
@@ -258,13 +277,22 @@ mod tests {
         let state = must_ok(SqliteStateStore::open(
             &temp_dir.path().join("state.sqlite"),
         ));
-        let secrets = must_ok(FileSecretStore::open(temp_dir.path().join("secrets")));
+        let secrets = must_ok(
+            codex_router_secret_store::test_support::open_encrypted_credential_store(
+                temp_dir.path().join("secrets"),
+            ),
+        );
         let account_id = account_id("acct_active_bundle");
-        let account = AccountRecord::new(account_id.clone(), "active", AccountStatus::Enabled)
-            .with_active_credential_generation(2);
+        let account = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
+            account_id.clone(),
+            "active",
+            AccountStatus::Enabled,
+        )
+        .with_active_credential_generation(2);
         must_ok(AccountStateRepository::upsert_account(&state, &account));
-        let inactive_key = must_ok(account_credential_bundle_key(&account_id, 1));
-        let active_key = must_ok(account_credential_bundle_key(&account_id, 2));
+        let inactive_key = must_ok(openai_account_credential_bundle_key(&account_id, 1));
+        let active_key = must_ok(openai_account_credential_bundle_key(&account_id, 2));
         must_ok(
             secrets.write_secret(
                 &inactive_key,
@@ -297,7 +325,10 @@ mod tests {
         let resolver =
             RouterCredentialResolver::new(&state, &secrets, NoopCredentialRefreshClient, 1_000);
 
-        let resolved = must_ok(resolver.resolve_provider_credentials(&account_id));
+        let resolved = must_ok(resolver.resolve_provider_credentials(
+            &account_id,
+            codex_router_core::provider::Provider::Openai,
+        ));
 
         assert_eq!(resolved.account_id(), &account_id);
         assert_eq!(
@@ -316,12 +347,22 @@ mod tests {
         let state = must_ok(SqliteStateStore::open(
             &temp_dir.path().join("state.sqlite"),
         ));
-        let secrets = must_ok(FileSecretStore::open(temp_dir.path().join("secrets")));
+        let (secrets, write_trace) = must_ok(
+            codex_router_secret_store::test_support::
+                open_encrypted_credential_store_with_write_trace(
+                    temp_dir.path().join("secrets"),
+                ),
+        );
         let account_id = account_id("acct_refresh_bundle");
-        let account = AccountRecord::new(account_id.clone(), "refresh", AccountStatus::Enabled)
-            .with_active_credential_generation(1);
+        let account = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
+            account_id.clone(),
+            "refresh",
+            AccountStatus::Enabled,
+        )
+        .with_active_credential_generation(1);
         must_ok(AccountStateRepository::upsert_account(&state, &account));
-        let expired_key = must_ok(account_credential_bundle_key(&account_id, 1));
+        let expired_key = must_ok(openai_account_credential_bundle_key(&account_id, 1));
         must_ok(
             secrets.write_secret(
                 &expired_key,
@@ -345,17 +386,46 @@ mod tests {
         let resolver =
             RouterCredentialResolver::new(&state, &secrets, refresh_client.clone(), 1_000);
 
-        let resolved = must_ok(resolver.resolve_provider_credentials(&account_id));
+        let resolved = must_ok(resolver.resolve_provider_credentials(
+            &account_id,
+            codex_router_core::provider::Provider::Openai,
+        ));
 
         assert_eq!(
             resolved.access_token().expose_secret(),
             "refreshed-access-token-canary"
         );
         assert_eq!(refresh_client.calls(), 1);
+        let token_canaries = [
+            "expired-access-token-canary",
+            "refresh-token-canary",
+            "refreshed-access-token-canary",
+            "refreshed-refresh-token-canary",
+        ];
+        let trace_events = write_trace.events();
+        assert!(trace_events.iter().any(|event| {
+            matches!(event, codex_router_secret_store::test_support::FileWriteTraceEvent::TemporaryFileWritten { .. })
+        }));
+        assert!(trace_events.iter().any(|event| {
+            matches!(event, codex_router_secret_store::test_support::FileWriteTraceEvent::FileRenamed { to, .. }
+                if to.file_name().is_some_and(|name| name.to_string_lossy().ends_with(".2.v2")))
+        }));
+        for event in &trace_events {
+            if let codex_router_secret_store::test_support::FileWriteTraceEvent::TemporaryFileWritten {
+                contents,
+                ..
+            } = event
+            {
+                let serialized = String::from_utf8_lossy(contents);
+                for canary in token_canaries {
+                    assert!(!serialized.contains(canary));
+                }
+            }
+        }
         let loaded_account = must_ok(AccountStateRepository::load_account(&state, &account_id))
             .unwrap_or_else(|| panic!("account should remain registered"));
         assert_eq!(loaded_account.active_credential_generation(), Some(2));
-        let refreshed_key = must_ok(account_credential_bundle_key(&account_id, 2));
+        let refreshed_key = must_ok(openai_account_credential_bundle_key(&account_id, 2));
         let refreshed = must_ok(AccountCredentialBundle::from_secret_string(must_ok(
             secrets.read_secret(&refreshed_key),
         )));
@@ -366,18 +436,93 @@ mod tests {
     }
 
     #[test]
+    fn credential_refresh_does_not_reaccess_keychain_after_process_store_open() {
+        let temp_dir = AuthTestTempDir::new("refresh-does-not-prompt");
+        let state = must_ok(SqliteStateStore::open(
+            &temp_dir.path().join("state.sqlite"),
+        ));
+        let secret_root = temp_dir.path().join("secrets");
+        must_ok(fs::create_dir(&secret_root));
+        must_ok(fs::write(secret_root.join("format-v2.marker"), b"2\n"));
+        let keychain = CountingTestKeychain::default();
+        let secrets = must_ok(EncryptedCredentialStore::open_for_process_with_keychain(
+            &secret_root,
+            &keychain,
+        ));
+        let reads_after_open = keychain.read_count.load(Ordering::SeqCst);
+        let adds_after_open = keychain.add_count.load(Ordering::SeqCst);
+        let account_id = account_id("acct_keychain_refresh");
+        must_ok(AccountStateRepository::upsert_account(
+            &state,
+            &AccountRecord::new(
+                codex_router_core::provider::Provider::Openai,
+                account_id.clone(),
+                "keychain refresh",
+                AccountStatus::Enabled,
+            )
+            .with_active_credential_generation(1),
+        ));
+        let active_key = must_ok(openai_account_credential_bundle_key(&account_id, 1));
+        must_ok(
+            secrets.write_secret(
+                &active_key,
+                &must_ok(
+                    AccountCredentialBundle::imported_codex_auth(
+                        "expired-access-canary",
+                        Some("refresh-token-canary".to_owned()),
+                    )
+                    .with_expires_unix_seconds(900)
+                    .to_secret_string(),
+                ),
+            ),
+        );
+        let refresh_client = RecordingRefreshClient::new_for_account(
+            account_id.as_str(),
+            "refresh-token-canary",
+            AccountCredentialBundle::imported_codex_auth(
+                "refreshed-access-canary",
+                Some("refreshed-refresh-canary".to_owned()),
+            )
+            .with_expires_unix_seconds(2_000),
+        );
+        let resolver =
+            RouterCredentialResolver::new(&state, &secrets, refresh_client.clone(), 1_000);
+
+        let resolved = must_ok(resolver.resolve_provider_credentials(
+            &account_id,
+            codex_router_core::provider::Provider::Openai,
+        ));
+
+        assert_eq!(
+            resolved.access_token().expose_secret(),
+            "refreshed-access-canary"
+        );
+        assert_eq!(refresh_client.calls(), 1);
+        assert_eq!(keychain.read_count.load(Ordering::SeqCst), reads_after_open);
+        assert_eq!(keychain.add_count.load(Ordering::SeqCst), adds_after_open);
+    }
+
+    #[test]
     fn credential_resolver_failpoint_after_secret_write_keeps_old_generation_authoritative() {
         let temp_dir = AuthTestTempDir::new("refresh-after-secret-write-failpoint");
         let state = must_ok(SqliteStateStore::open(
             &temp_dir.path().join("state.sqlite"),
         ));
-        let secrets = must_ok(FileSecretStore::open(temp_dir.path().join("secrets")));
+        let secrets = must_ok(
+            codex_router_secret_store::test_support::open_encrypted_credential_store(
+                temp_dir.path().join("secrets"),
+            ),
+        );
         let account_id = account_id("acct_secret_write_failpoint");
-        let account =
-            AccountRecord::new(account_id.clone(), "secret-write", AccountStatus::Enabled)
-                .with_active_credential_generation(1);
+        let account = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
+            account_id.clone(),
+            "secret-write",
+            AccountStatus::Enabled,
+        )
+        .with_active_credential_generation(1);
         must_ok(AccountStateRepository::upsert_account(&state, &account));
-        let expired_key = must_ok(account_credential_bundle_key(&account_id, 1));
+        let expired_key = must_ok(openai_account_credential_bundle_key(&account_id, 1));
         must_ok(
             secrets.write_secret(
                 &expired_key,
@@ -404,7 +549,10 @@ mod tests {
             .with_refresh_commit_failpoint(RefreshCommitFailpoint::AfterSecretWrite);
 
         assert_eq!(
-            resolver.resolve_provider_credentials(&account_id),
+            resolver.resolve_provider_credentials(
+                &account_id,
+                codex_router_core::provider::Provider::Openai
+            ),
             Err(CredentialResolverError::RefreshUnavailable)
         );
         let loaded_account = must_ok(AccountStateRepository::load_account(&state, &account_id))
@@ -417,7 +565,7 @@ mod tests {
             old_bundle.access_token().expose_secret(),
             "old-access-token-canary"
         );
-        let new_key = must_ok(account_credential_bundle_key(&account_id, 2));
+        let new_key = must_ok(openai_account_credential_bundle_key(&account_id, 2));
         let orphaned_new_bundle = must_ok(AccountCredentialBundle::from_secret_string(must_ok(
             secrets.read_secret(&new_key),
         )));
@@ -433,13 +581,21 @@ mod tests {
         let state = must_ok(SqliteStateStore::open(
             &temp_dir.path().join("state.sqlite"),
         ));
-        let secrets = must_ok(FileSecretStore::open(temp_dir.path().join("secrets")));
+        let secrets = must_ok(
+            codex_router_secret_store::test_support::open_encrypted_credential_store(
+                temp_dir.path().join("secrets"),
+            ),
+        );
         let account_id = account_id("acct_state_commit_failpoint");
-        let account =
-            AccountRecord::new(account_id.clone(), "state-commit", AccountStatus::Enabled)
-                .with_active_credential_generation(1);
+        let account = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
+            account_id.clone(),
+            "state-commit",
+            AccountStatus::Enabled,
+        )
+        .with_active_credential_generation(1);
         must_ok(AccountStateRepository::upsert_account(&state, &account));
-        let expired_key = must_ok(account_credential_bundle_key(&account_id, 1));
+        let expired_key = must_ok(openai_account_credential_bundle_key(&account_id, 1));
         must_ok(
             secrets.write_secret(
                 &expired_key,
@@ -467,13 +623,19 @@ mod tests {
                 .with_refresh_commit_failpoint(RefreshCommitFailpoint::AfterStateCommit);
 
         assert_eq!(
-            resolver.resolve_provider_credentials(&account_id),
+            resolver.resolve_provider_credentials(
+                &account_id,
+                codex_router_core::provider::Provider::Openai
+            ),
             Err(CredentialResolverError::RefreshUnavailable)
         );
 
         let retry_resolver =
             RouterCredentialResolver::new(&state, &secrets, refresh_client.clone(), 1_000);
-        let resolved = must_ok(retry_resolver.resolve_provider_credentials(&account_id));
+        let resolved = must_ok(retry_resolver.resolve_provider_credentials(
+            &account_id,
+            codex_router_core::provider::Provider::Openai,
+        ));
         assert_eq!(
             resolved.access_token().expose_secret(),
             "new-state-access-token-canary"
@@ -491,13 +653,19 @@ mod tests {
         let database_path = temp_dir.path().join("state.sqlite");
         let secret_path = temp_dir.path().join("secrets");
         let state = must_ok(SqliteStateStore::open(&database_path));
-        let secrets = must_ok(FileSecretStore::open(&secret_path));
+        let secrets = must_ok(
+            codex_router_secret_store::test_support::open_encrypted_credential_store(&secret_path),
+        );
         let account_id = account_id("acct_single_flight_bundle");
-        let account =
-            AccountRecord::new(account_id.clone(), "single-flight", AccountStatus::Enabled)
-                .with_active_credential_generation(1);
+        let account = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
+            account_id.clone(),
+            "single-flight",
+            AccountStatus::Enabled,
+        )
+        .with_active_credential_generation(1);
         must_ok(AccountStateRepository::upsert_account(&state, &account));
-        let expired_key = must_ok(account_credential_bundle_key(&account_id, 1));
+        let expired_key = must_ok(openai_account_credential_bundle_key(&account_id, 1));
         must_ok(
             secrets.write_secret(
                 &expired_key,
@@ -535,7 +703,11 @@ mod tests {
             let start_barrier = Arc::clone(&start_barrier);
             handles.push(thread::spawn(move || {
                 let state = must_ok(SqliteStateStore::open(&database_path));
-                let secrets = must_ok(FileSecretStore::open(&secret_path));
+                let secrets = must_ok(
+                    codex_router_secret_store::test_support::open_encrypted_credential_store(
+                        &secret_path,
+                    ),
+                );
                 let resolver = RouterCredentialResolver::new_with_refresh_leases(
                     &state,
                     &secrets,
@@ -545,10 +717,13 @@ mod tests {
                 );
                 start_barrier.wait();
 
-                must_ok(resolver.resolve_provider_credentials(&account_id))
-                    .access_token()
-                    .expose_secret()
-                    .to_owned()
+                must_ok(resolver.resolve_provider_credentials(
+                    &account_id,
+                    codex_router_core::provider::Provider::Openai,
+                ))
+                .access_token()
+                .expose_secret()
+                .to_owned()
             }));
         }
         start_barrier.wait();
@@ -639,6 +814,54 @@ mod tests {
                 thread::sleep(std::time::Duration::from_millis(self.delay_millis));
             }
             Ok(self.response.clone())
+        }
+    }
+
+    #[derive(Default)]
+    struct CountingTestKeychain {
+        items: Mutex<HashMap<(String, String), Vec<u8>>>,
+        read_count: AtomicUsize,
+        add_count: AtomicUsize,
+    }
+
+    impl KeychainAccess for CountingTestKeychain {
+        fn read_secret(
+            &self,
+            service: &str,
+            account: &str,
+        ) -> Result<Option<Vec<u8>>, KeychainAccessError> {
+            if service != ROUTER_KEYCHAIN_SERVICE {
+                return Err(KeychainAccessError::ServiceRejected);
+            }
+            self.read_count.fetch_add(1, Ordering::SeqCst);
+            Ok(self
+                .items
+                .lock()
+                .map_err(|_| KeychainAccessError::Unavailable)?
+                .get(&(service.to_owned(), account.to_owned()))
+                .cloned())
+        }
+
+        fn add_secret(
+            &self,
+            service: &str,
+            account: &str,
+            secret: &[u8],
+        ) -> Result<(), KeychainAccessError> {
+            if service != ROUTER_KEYCHAIN_SERVICE {
+                return Err(KeychainAccessError::ServiceRejected);
+            }
+            self.add_count.fetch_add(1, Ordering::SeqCst);
+            let mut items = self
+                .items
+                .lock()
+                .map_err(|_| KeychainAccessError::Unavailable)?;
+            let item_key = (service.to_owned(), account.to_owned());
+            if items.contains_key(&item_key) {
+                return Err(KeychainAccessError::Unavailable);
+            }
+            items.insert(item_key, secret.to_vec());
+            Ok(())
         }
     }
 

@@ -10,6 +10,23 @@ fn endpoint(service_id: &str) -> EndpointRef {
 }
 
 #[test]
+fn acp_prompt_forwarding_preserves_exact_caller_text_without_envelope() {
+    let sender = SessionRef {
+        endpoint: endpoint("018f47d2-24d5-7a68-b9ec-6f759c39458f"),
+        session_id: collaboration_protocol::SessionId::try_from("claude-session".to_owned())
+            .expect("sender session"),
+    };
+    let line = "Review the implementation exactly as written.";
+    let prompt = PublicPromptContent::Agent {
+        sender,
+        text: MessageText::try_from(line.to_owned()).expect("message text"),
+    };
+    let forwarded = super::conversation_prompt_text(&prompt);
+
+    assert_eq!(forwarded, line);
+}
+
+#[test]
 fn wrong_service_is_rejected_by_read_only_validation_before_session_open() {
     let observed = endpoint("018f47d2-24d5-7a68-b9ec-6f759c39458f");
     let requested = endpoint("018f47d2-24d5-7a68-b9ec-6f759c394590");

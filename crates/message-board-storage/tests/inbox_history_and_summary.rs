@@ -225,11 +225,14 @@ async fn inactive_watch_hides_subscription_start_without_rewriting_history() {
     )
     .await;
     let inactive = store
-        .unwatch_thread(ThreadUnwatchRequest {
-            root_message_id: root.message.message_id.clone(),
-            actor: watcher.clone(),
-            acting_for: None,
-        })
+        .unwatch_thread(
+            ThreadUnwatchRequest {
+                root_message_id: root.message.message_id.clone(),
+                actor: watcher.clone(),
+                acting_for: None,
+            },
+            chrono::Utc::now(),
+        )
         .await
         .unwrap();
     assert_eq!(inactive.watch_status.starts_after_activity_sequence, None);
@@ -349,11 +352,14 @@ async fn never_tracked_acknowledge_and_unwatch_do_not_create_summary_rows() {
         }
     );
     let unwatched = store
-        .unwatch_thread(ThreadUnwatchRequest {
-            root_message_id: root.message.message_id.clone(),
-            actor: unwatching_reader.clone(),
-            acting_for: None,
-        })
+        .unwatch_thread(
+            ThreadUnwatchRequest {
+                root_message_id: root.message.message_id.clone(),
+                actor: unwatching_reader.clone(),
+                acting_for: None,
+            },
+            chrono::Utc::now(),
+        )
         .await
         .unwrap();
     assert_eq!(unwatched.watch_status.starts_after_activity_sequence, None);

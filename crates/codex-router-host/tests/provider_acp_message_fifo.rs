@@ -7,7 +7,7 @@ use codex_router_host::{
 };
 use collaboration_protocol::{
     DeliveryOutcome, MessageContent, MessageDelivery, MessageText, ProviderOperationKind,
-    ProviderRequestedPolicy, ProviderWorkingDirectory, RouterAccess,
+    ProviderRequestedPolicy, ProviderWorkingDirectory, RouterAccess, SessionId,
 };
 use collaboration_service::{ProviderOperationStore, ProviderSessionRecord, SessionDeliveryRoute};
 use std::{path::PathBuf, sync::Arc, time::Duration};
@@ -17,8 +17,158 @@ use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 mod provider_acp_message_fifo_support;
 use provider_acp_message_fifo_support::{
     NoLivePeer, RecordedEvidence, available_directory, cursor_prompt_fixture,
-    first_prompt_refusal_fixture, provider_binding, refusing_load_fixture, request, target,
+    first_prompt_refusal_fixture, multiblock_queue_fixture, provider_binding,
+    refusing_load_fixture, request, target,
 };
+
+#[tokio::test]
+async fn typed_queue_keeps_blocks_and_input_identity_through_fifo() {
+    let root = tempfile::tempdir().expect("provider root");
+    let event_socket = root.path().join("prompt-events.sock");
+    let listener = tokio::net::UnixListener::bind(&event_socket).expect("fixture events");
+    let target = target();
+    let binding = provider_binding(&target);
+    let runtime = ExternalProviderRuntime::initialize(multiblock_queue_fixture(&event_socket))
+        .await
+        .expect("fixture provider");
+    runtime
+        .create_session(PathBuf::from("/tmp"))
+        .await
+        .expect("session/new");
+    let store = Arc::new(tokio::sync::Mutex::new(
+        ProviderOperationStore::open(&root.path().join("operations.sqlite"))
+            .await
+            .expect("store"),
+    ));
+    store
+        .lock()
+        .await
+        .record_session(&ProviderSessionRecord {
+            target: target.clone(),
+            working_directory: ProviderWorkingDirectory::try_from("/tmp".to_owned()).expect("cwd"),
+            requested_policy: ProviderRequestedPolicy {
+                access: RouterAccess::WriteRestricted,
+            },
+            created_by: (target.clone()).into(),
+            approver: (target.clone()).into(),
+            updated_at_ms: 1,
+        })
+        .await
+        .expect("session record");
+    let supervisor = Arc::new(
+        ExternalProviderSupervisor::new(
+            vec![ExternalProviderBinding {
+                identity: binding.clone(),
+                runtime,
+            }],
+            Arc::clone(&store),
+        )
+        .expect("supervisor"),
+    );
+    let route = ProviderAcpDeliveryRoute::new(
+        target.endpoint.service_id.clone(),
+        std::iter::once(target.endpoint.clone()).collect(),
+        available_directory(&target, &binding),
+        Arc::clone(&supervisor),
+        store,
+        Arc::new(NoLivePeer),
+    );
+    let first = collaboration_service::ProviderConversationBackend::prompt(
+        supervisor.as_ref(),
+        collaboration_protocol::ConversationPromptRequest {
+            input_id: None,
+            operation_id: collaboration_protocol::OperationId::generate(),
+            target: target.clone(),
+            generation: Some(binding.generation),
+            requested_by: (target.clone()).into(),
+            approver: (target.clone()).into(),
+            prompt: MessageContent::Router {
+                text: MessageText::try_from("first".to_owned()).expect("prompt"),
+            },
+        },
+    )
+    .await
+    .expect("first prompt admitted");
+    let (mut first_event, _) = tokio::time::timeout(Duration::from_secs(2), listener.accept())
+        .await
+        .expect("first prompt deadline")
+        .expect("first prompt event");
+    let mut first_bytes = [0_u8; 5];
+    first_event
+        .read_exact(&mut first_bytes)
+        .await
+        .expect("first event");
+    assert_eq!(&first_bytes, b"first");
+    let mut other_actor = target.clone();
+    other_actor.session_id = SessionId::try_from("other-session".to_owned()).expect("actor ID");
+
+    let unsupported = route
+        .queue_contents(
+            target.clone(),
+            other_actor.clone().into(),
+            vec![
+                session_event_model::PromptContent::image(
+                    "image/png".into(),
+                    "aGVsbG8=".into(),
+                    None,
+                )
+                .expect("image"),
+            ],
+        )
+        .await;
+    assert!(matches!(
+        unsupported,
+        Err(
+            codex_router_host::ProviderQueueAdmissionError::UnsupportedContent {
+                content_type: "image"
+            }
+        )
+    ));
+
+    let queued = route
+        .queue_contents(
+            target.clone(),
+            other_actor.into(),
+            vec![
+                session_event_model::PromptContent::resource_link(
+                    "https://example.test/context".into(),
+                    "context".into(),
+                    None,
+                )
+                .expect("resource link"),
+                session_event_model::PromptContent::text("queued text".into()).expect("text"),
+            ],
+        )
+        .await
+        .expect("typed queue admission");
+    assert_eq!(queued.preview, "queued text");
+    assert_eq!(route.queue_list(&target)[0].input_id, queued.input_id);
+
+    first_event.write_all(b"x").await.expect("release first");
+    collaboration_service::ProviderConversationBackend::wait(
+        supervisor.as_ref(),
+        collaboration_protocol::ConversationOperationWaitRequest {
+            operation_id: first.operation.operation_id,
+            timeout_seconds: collaboration_protocol::PositiveSeconds::try_from(2)
+                .expect("wait seconds"),
+        },
+    )
+    .await
+    .expect("first prompt settles");
+    let (mut blocks_event, _) = tokio::time::timeout(Duration::from_secs(2), listener.accept())
+        .await
+        .expect("queued blocks deadline")
+        .expect("queued blocks event");
+    let mut blocks = [0_u8; 9];
+    blocks_event
+        .read_exact(&mut blocks)
+        .await
+        .expect("blocks event");
+    assert_eq!(&blocks, b"blocks-ok");
+    blocks_event.write_all(b"x").await.expect("release blocks");
+    route.shutdown_queue().await;
+    supervisor.shutdown().await.expect("supervisor shutdown");
+}
 
 #[tokio::test]
 async fn cursor_queue_drains_after_control_prompt_settles() {
@@ -48,8 +198,8 @@ async fn cursor_queue_drains_after_control_prompt_settles() {
             requested_policy: ProviderRequestedPolicy {
                 access: RouterAccess::WriteRestricted,
             },
-            created_by: target.clone(),
-            approver: target.clone(),
+            created_by: (target.clone()).into(),
+            approver: (target.clone()).into(),
             updated_at_ms: 1,
         })
         .await
@@ -77,11 +227,12 @@ async fn cursor_queue_drains_after_control_prompt_settles() {
     let first = collaboration_service::ProviderConversationBackend::prompt(
         supervisor.as_ref(),
         collaboration_protocol::ConversationPromptRequest {
+            input_id: None,
             operation_id: first_operation_id,
             target: target.clone(),
             generation: Some(binding.generation.clone()),
-            requested_by: target.clone(),
-            approver: target.clone(),
+            requested_by: (target.clone()).into(),
+            approver: (target.clone()).into(),
             prompt: MessageContent::Router {
                 text: MessageText::try_from("first".to_owned()).expect("prompt"),
             },
@@ -105,6 +256,13 @@ async fn cursor_queue_drains_after_control_prompt_settles() {
         .expect("first bytes");
     let evidence = RecordedEvidence(tokio::sync::Mutex::new(Vec::new()));
     let queued_request = request(target.clone(), "second");
+    let expected_push_preview = queued_request
+        .payload
+        .line
+        .as_str()
+        .chars()
+        .take(80)
+        .collect::<String>();
     let queued_operation_id =
         collaboration_protocol::OperationId::try_from(queued_request.attempt.as_str().to_owned())
             .expect("queue operation ID");
@@ -125,6 +283,11 @@ async fn cursor_queue_drains_after_control_prompt_settles() {
         queued_snapshot.queue_state,
         Some(collaboration_protocol::ConversationOperationQueueState::RouterQueued)
     );
+    let queued_input_id = queued_snapshot.input_id.clone().expect("queued InputId");
+    let listed = route.queue_list(&target);
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].input_id, queued_input_id);
+    assert_eq!(listed[0].preview, expected_push_preview);
 
     let blocker_id = collaboration_protocol::OperationId::generate();
     {
@@ -198,6 +361,10 @@ async fn cursor_queue_drains_after_control_prompt_settles() {
     .expect("submitted operation uses provider operation record");
     assert_eq!(submitted_snapshot.queue_state, None);
     assert_eq!(
+        route.queue_cancel(&target, &queued_input_id),
+        Err(codex_router_host::ProviderQueueCancellationError::NotQueued)
+    );
+    assert_eq!(
         submitted_snapshot.stage,
         collaboration_protocol::ProviderOperationStage::MayHaveDispatched
     );
@@ -260,8 +427,8 @@ async fn permanent_queued_load_failure_is_inspectable_and_does_not_stop_fifo() {
             requested_policy: ProviderRequestedPolicy {
                 access: RouterAccess::WriteRestricted,
             },
-            created_by: target.clone(),
-            approver: target.clone(),
+            created_by: (target.clone()).into(),
+            approver: (target.clone()).into(),
             updated_at_ms: 1,
         })
         .await
@@ -388,8 +555,8 @@ async fn failed_queued_prompt_advances_to_the_next_accepted_item() {
             requested_policy: ProviderRequestedPolicy {
                 access: RouterAccess::WriteRestricted,
             },
-            created_by: target.clone(),
-            approver: target.clone(),
+            created_by: (target.clone()).into(),
+            approver: (target.clone()).into(),
             updated_at_ms: 1,
         })
         .await
@@ -407,11 +574,12 @@ async fn failed_queued_prompt_advances_to_the_next_accepted_item() {
     let active_prompt = collaboration_service::ProviderConversationBackend::prompt(
         supervisor.as_ref(),
         collaboration_protocol::ConversationPromptRequest {
+            input_id: None,
             operation_id: collaboration_protocol::OperationId::generate(),
             target: target.clone(),
             generation: Some(binding.generation.clone()),
-            requested_by: target.clone(),
-            approver: target.clone(),
+            requested_by: (target.clone()).into(),
+            approver: (target.clone()).into(),
             prompt: MessageContent::Router {
                 text: MessageText::try_from("active prompt".to_owned()).expect("prompt"),
             },
@@ -583,8 +751,8 @@ async fn provider_retirement_marks_queued_items_not_submitted() {
             requested_policy: ProviderRequestedPolicy {
                 access: RouterAccess::WriteRestricted,
             },
-            created_by: target.clone(),
-            approver: target.clone(),
+            created_by: (target.clone()).into(),
+            approver: (target.clone()).into(),
             updated_at_ms: 1,
         })
         .await
@@ -610,11 +778,12 @@ async fn provider_retirement_marks_queued_items_not_submitted() {
     let first = collaboration_service::ProviderConversationBackend::prompt(
         supervisor.as_ref(),
         collaboration_protocol::ConversationPromptRequest {
+            input_id: None,
             operation_id: collaboration_protocol::OperationId::generate(),
             target: target.clone(),
             generation: Some(binding.generation.clone()),
-            requested_by: target.clone(),
-            approver: target.clone(),
+            requested_by: (target.clone()).into(),
+            approver: (target.clone()).into(),
             prompt: MessageContent::Router {
                 text: MessageText::try_from("active".to_owned()).expect("prompt"),
             },

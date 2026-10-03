@@ -2,7 +2,7 @@
 use super::*;
 
 impl AcpSessionBinding {
-    pub fn adopt_unmaterialized(
+    pub async fn adopt_unmaterialized(
         &self,
         catalog: &mut AcpSchemaCatalog,
         generation: &CodexGeneration,
@@ -30,7 +30,7 @@ impl AcpSessionBinding {
         let configuration = McpConfiguration::parse(catalog, servers)
             .map_err(|_| SessionSetupError::InvalidParameters)?;
         if !self.accepts_configuration(generation, session_id, &configuration)
-            || normalized_directory(cwd)? != self.working_directory
+            || normalized_directory(cwd).await? != self.working_directory
         {
             return Err(SessionSetupError::ConfigurationMismatch);
         }
@@ -59,7 +59,8 @@ impl AcpSessionBinding {
                 .get("cwd")
                 .and_then(Value::as_str)
                 .ok_or(SessionSetupError::InvalidParameters)?,
-        )?;
+        )
+        .await?;
         let servers = params
             .get("mcpServers")
             .and_then(Value::as_array)
@@ -69,12 +70,23 @@ impl AcpSessionBinding {
         if !self.accepts_configuration(generation, session_id, &configuration) {
             return Err(SessionSetupError::ConfigurationMismatch);
         }
+        let profile = match self.access_route.as_ref() {
+            Some(route) => Some(
+                RouterSessionProfile::for_session(
+                    route.access,
+                    &requested_cwd,
+                    Path::new(&route.scratch_path),
+                )
+                .await?,
+            ),
+            None => None,
+        };
         let result = self
             .connection
             .request_validated(
                 &self.schemas,
                 NativeOperation::ResumeThread,
-                resume_parameters(session_id, &requested_cwd, self.access_route.as_ref()),
+                resume_parameters(session_id, profile.as_ref()),
             )
             .await
             .map_err(map_native_failure)?;
@@ -88,19 +100,12 @@ impl AcpSessionBinding {
             let effective = cwd
                 .and_then(Value::as_str)
                 .ok_or(SessionSetupError::OutcomeUnknown)?;
-            if normalized_directory(effective)? != requested_cwd {
+            if normalized_directory(effective).await? != requested_cwd {
                 return Err(SessionSetupError::ConfigurationMismatch);
             }
         }
-        if let Some(route) = self.access_route.as_ref() {
-            let profile = profile_name(route.access);
-            validate_observed_settings(
-                &result,
-                route.access,
-                &requested_cwd,
-                Path::new(&route.scratch_path),
-                profile,
-            )?;
+        if let Some(profile) = profile.as_ref() {
+            profile.validate_observed(&result)?;
         }
         Ok(result)
     }
@@ -118,30 +123,86 @@ impl AcpSessionBinding {
     }
 }
 
-fn resume_parameters(session_id: &str, cwd: &Path, route: Option<&crate::ApprovalRoute>) -> Value {
-    let Some(route) = route else {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum NativeThreadActivity {
+    Idle,
+    Active,
+    Invalid,
+}
+
+pub(crate) fn native_thread_activity(resume_response: &Value) -> NativeThreadActivity {
+    let Some(thread) = resume_response.get("thread") else {
+        return NativeThreadActivity::Invalid;
+    };
+    let Some(status) = thread.pointer("/status/type").and_then(Value::as_str) else {
+        return NativeThreadActivity::Invalid;
+    };
+    match status {
+        "active" => NativeThreadActivity::Active,
+        "idle" => {
+            let has_active_turn =
+                thread
+                    .get("turns")
+                    .and_then(Value::as_array)
+                    .is_some_and(|turns| {
+                        turns.iter().any(|turn| {
+                            turn.get("status").and_then(Value::as_str) == Some("inProgress")
+                        })
+                    });
+            if has_active_turn {
+                NativeThreadActivity::Active
+            } else {
+                NativeThreadActivity::Idle
+            }
+        }
+        "notLoaded" | "systemError" => NativeThreadActivity::Invalid,
+        _ => NativeThreadActivity::Invalid,
+    }
+}
+
+fn resume_parameters(session_id: &str, profile: Option<&RouterSessionProfile>) -> Value {
+    let Some(profile) = profile else {
         return json!({"threadId":session_id});
     };
-    let profile = profile_name(route.access);
-    let mut filesystem = serde_json::Map::new();
-    filesystem.insert(route.scratch_path.clone(), json!("write"));
-    if route.access == RouterAccess::WriteRestricted {
-        filesystem.insert(
-            cwd.join("tmp").to_string_lossy().into_owned(),
-            json!("write"),
-        );
-        filesystem.insert(
-            cwd.join("docs/wip").to_string_lossy().into_owned(),
-            json!("write"),
-        );
-    }
     json!({
         "threadId":session_id,
-        "permissions":profile,
-        "config":{
-            "default_permissions":profile,
-            format!("permissions.{profile}.extends"):if route.access == RouterAccess::WriteRestricted { ":read-only" } else { ":workspace" },
-            format!("permissions.{profile}.filesystem"):filesystem
-        }
+        "permissions":profile.name(),
+        "config":profile.native_config()
     })
+}
+
+#[cfg(test)]
+mod activity_tests {
+    use super::{NativeThreadActivity, native_thread_activity};
+    use serde_json::json;
+
+    #[test]
+    fn active_resume_state_blocks_session_attachment() {
+        assert_eq!(
+            native_thread_activity(&json!({"thread":{"status":{"type":"active"},"turns":[]}})),
+            NativeThreadActivity::Active
+        );
+        assert_eq!(
+            native_thread_activity(
+                &json!({"thread":{"status":{"type":"idle"},"turns":[{"status":"inProgress"}]}})
+            ),
+            NativeThreadActivity::Active
+        );
+        assert_eq!(
+            native_thread_activity(
+                &json!({"thread":{"status":{"type":"idle"},"turns":[{"status":"completed"}]}})
+            ),
+            NativeThreadActivity::Idle
+        );
+        assert_eq!(
+            native_thread_activity(&json!({"thread":{"turns":[]}})),
+            NativeThreadActivity::Invalid
+        );
+        assert_eq!(
+            native_thread_activity(
+                &json!({"thread":{"status":{"type":"future-state"},"turns":[]}})
+            ),
+            NativeThreadActivity::Invalid
+        );
+    }
 }

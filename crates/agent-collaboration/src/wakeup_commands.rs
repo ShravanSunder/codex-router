@@ -6,7 +6,7 @@ use collaboration_client::protocol::{
     ExpiryRequest, LocalMutationEvidence, LocalMutationState, OperationId, TimingRequest,
     WakeMutationRequest, WakeSendRequest, WakeShowRequest,
 };
-use collaboration_client::{ControlClient, WakeClientError};
+use collaboration_client::{ControlClient, WakeClientError, WakeWaitFailureKind};
 use serde_json::json;
 use std::{
     ffi::OsString,
@@ -24,13 +24,13 @@ struct WakeArguments {
 }
 #[derive(Subcommand)]
 enum WakeCommand {
-    /// Save a timed message. Returns after durable creation; this is not native acceptance.
+    /// Save a timed message; optional first-fire wait returns one combined result, not native acceptance.
     Send {
         #[command(flatten)]
         message: Box<SendArguments>,
         #[command(flatten)]
         timing: WakeTimingArguments,
-        /// Reuse this UUIDv7 to recover a lost creation response safely.
+        /// Reuse this UUIDv7 to recover a lost creation response; pass it with --wait-until-first-fire so an interrupted wait can inspect the created wake.
         #[arg(long)]
         operation_id: Option<String>,
         /// Block until the first firing is recorded; native acceptance remains separate.
@@ -233,28 +233,73 @@ pub fn run_wakeup_command(arguments: Vec<OsString>) -> i32 {
     } else {
         None
     };
+    let (record, code) = if let Some(id) = wait_id {
+        match runtime.block_on(crate::wakeup_wait_output::wait(
+            &invocation.directory,
+            id.clone(),
+        )) {
+            Ok(fire) => {
+                combine_first_fire(record, json!(fire), invocation.operation_id.as_ref(), &id)
+            }
+            Err(error) => {
+                let failure = error.into_operation_failure();
+                let code = if matches!(
+                    failure.kind,
+                    WakeWaitFailureKind::Unavailable
+                        | WakeWaitFailureKind::NotFound
+                        | WakeWaitFailureKind::Connection
+                ) {
+                    3
+                } else {
+                    4
+                };
+                (
+                    json!({"kind":"error","operationId":invocation.operation_id,
+                    "wakeupId":id,"created":record.pointer("/result/record"),"error":failure}),
+                    code,
+                )
+            }
+        }
+    } else if invocation.wait_until_first_fire && code == 0 {
+        (
+            json!({"kind":"error","operationId":invocation.operation_id,
+            "created":record.pointer("/result/record"),
+            "error":{"kind":"protocolViolation","message":"Created wake snapshot omitted its identity"}}),
+            5,
+        )
+    } else {
+        (record, code)
+    };
     let text = if machine {
         serde_json::to_string(&record)
     } else {
         serde_json::to_string_pretty(&record)
     };
     match text {
-        Ok(text) if writeln!(io::stdout(), "{text}").is_ok() => {
-            if let Some(id) = wait_id {
-                runtime.block_on(crate::wakeup_wait_output::wait(
-                    &invocation.directory,
-                    id,
-                    machine,
-                ))
-            } else if invocation.wait_until_first_fire && code == 0 {
-                5
-            } else {
-                code
-            }
-        }
+        Ok(text) if writeln!(io::stdout(), "{text}").is_ok() => code,
         _ => 5,
     }
 }
+
+fn combine_first_fire(
+    mut created: serde_json::Value,
+    fire: serde_json::Value,
+    operation_id: Option<&OperationId>,
+    wakeup_id: &collaboration_client::protocol::WakeupId,
+) -> (serde_json::Value, i32) {
+    if let Some(first_fire) = created.pointer_mut("/result/record/firstFire") {
+        *first_fire = fire;
+        (created, 0)
+    } else {
+        (
+            json!({"kind":"error","operationId":operation_id,
+            "wakeupId":wakeup_id,"created":created.pointer("/result/record"),
+            "error":{"kind":"protocolViolation","message":"Created wake snapshot omitted firstFire"}}),
+            5,
+        )
+    }
+}
+
 fn prepare(command: WakeCommand) -> Result<WakeInvocation, String> {
     match command {
         WakeCommand::Pause(args) => prepare_lifecycle(args, LifecycleAction::Pause),
@@ -357,4 +402,26 @@ fn prepare_lifecycle(
             },
         ),
     })
+}
+
+#[cfg(test)]
+mod first_fire_tests {
+    use super::*;
+
+    #[test]
+    fn missing_first_fire_returns_one_protocol_violation_with_created_record() {
+        let operation_id = OperationId::generate();
+        let wakeup_id = collaboration_client::protocol::WakeupId::generate();
+        let created = json!({"result":{"record":{"wakeupId":wakeup_id}}});
+        let (result, exit_code) = combine_first_fire(
+            created,
+            json!({"kind":"wakeFired"}),
+            Some(&operation_id),
+            &wakeup_id,
+        );
+        assert_eq!(exit_code, 5);
+        assert_eq!(result["error"]["kind"], "protocolViolation");
+        assert_eq!(result["created"]["wakeupId"], json!(wakeup_id));
+        assert_eq!(result["operationId"], json!(operation_id));
+    }
 }

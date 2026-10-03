@@ -1,20 +1,140 @@
 //! Public provider Session operations after connection admission.
 
 use super::*;
+use crate::provider_prompt_content::acp_blocks_from_prompt_content;
+use agent_client_protocol::schema::v1::ContentBlock;
+use session_event_model::PromptContent;
+
+/// Until the Close command enters the connection queue, dropping its caller
+/// must release the admission mark. The connection task clears it afterward.
+struct PendingCloseAdmissionGuard {
+    marks: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+    provider_session_id: String,
+    submitted: bool,
+}
+
+impl PendingCloseAdmissionGuard {
+    fn transfer_to_connection(&mut self) {
+        self.submitted = true;
+    }
+}
+
+impl Drop for PendingCloseAdmissionGuard {
+    fn drop(&mut self) {
+        if !self.submitted {
+            self.marks
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(&self.provider_session_id);
+        }
+    }
+}
 
 impl<P: InteractionPort> AgentSessionClient<P> {
+    fn retired_operation_error(&self) -> ExternalProviderRuntimeError {
+        if self.sink_closed.is_cancelled() {
+            ExternalProviderRuntimeError::SinkClosed
+        } else {
+            ExternalProviderRuntimeError::TransportFailure
+        }
+    }
+
     #[must_use]
     pub fn admission(&self) -> &ExternalProviderAdmission {
         &self.admission
     }
 
     pub async fn capability_report(&self, provider_session_id: &str) -> ProviderCapabilityReport {
-        self.session_capabilities
+        let report = self
+            .session_capabilities
             .read()
             .await
             .get(provider_session_id)
             .cloned()
-            .unwrap_or_else(|| self.base_capabilities.clone())
+            .unwrap_or_else(|| self.base_capabilities.clone());
+        report.with_auth_status(self.auth_status.read().await.clone())
+    }
+
+    pub async fn settings_catalog(
+        &self,
+        provider_session_id: &str,
+    ) -> Option<crate::ProviderSettingsCatalog> {
+        self.session_settings
+            .read()
+            .await
+            .get(provider_session_id)
+            .cloned()
+    }
+
+    pub async fn last_settings_catalog(&self) -> Option<crate::ProviderSettingsCatalog> {
+        self.last_settings_catalog.read().await.clone()
+    }
+
+    pub async fn settings_unresolved(&self, provider_session_id: &str) -> bool {
+        self.settings_unresolved
+            .read()
+            .await
+            .contains_key(provider_session_id)
+    }
+
+    pub async fn accept_session_settings(
+        &self,
+        provider_session_id: String,
+    ) -> Result<crate::EffectiveProviderSettings, ExternalProviderRuntimeError> {
+        if self.settings_unresolved.read().await.get(&provider_session_id).is_some_and(|kinds| kinds.values().any(|cause| *cause == crate::provider_session_settings::UnresolvedSettingCause::OutcomeUnknown)) {
+            return Err(ExternalProviderRuntimeError::SettingsOutcomeUncertain);
+        }
+        let catalog = self
+            .session_settings
+            .read()
+            .await
+            .get(&provider_session_id)
+            .cloned()
+            .ok_or(ExternalProviderRuntimeError::LocalNotFound)?;
+        self.settings_unresolved
+            .write()
+            .await
+            .remove(&provider_session_id);
+        Ok(catalog.effective_settings())
+    }
+
+    pub async fn set_setting(
+        &self,
+        provider_session_id: String,
+        kind: crate::ProviderSettingKind,
+        value: String,
+    ) -> Result<crate::EffectiveProviderSettings, ExternalProviderRuntimeError> {
+        let uncertain_session_id = provider_session_id.clone();
+        let uncertain_value = value.clone();
+        let (reply, result) = tokio::sync::oneshot::channel();
+        self.commands
+            .send(ProviderCommand::SetSetting {
+                provider_session_id,
+                kind,
+                value,
+                reply,
+            })
+            .await
+            .map_err(|_| self.retired_operation_error())?;
+        match result.await {
+            Ok(result) => result,
+            Err(_) => {
+                self.settings_unresolved
+                    .write()
+                    .await
+                    .entry(uncertain_session_id.clone())
+                    .or_default()
+                    .insert(
+                        kind,
+                        crate::provider_session_settings::UnresolvedSettingCause::OutcomeUnknown,
+                    );
+                Err(ExternalProviderRuntimeError::SettingOutcomeUnknown {
+                    provider_session_id: uncertain_session_id,
+                    setting: kind,
+                    value: uncertain_value,
+                })
+            }
+        }
     }
 
     #[must_use]
@@ -83,16 +203,6 @@ impl<P: InteractionPort> AgentSessionClient<P> {
         }
     }
 
-    pub async fn prompt_with_approval_context(
-        &self,
-        provider_session_id: String,
-        prompt: String,
-        context: P::Context,
-    ) -> Result<ExternalProviderPromptOutcome, ExternalProviderRuntimeError> {
-        self.prompt_with_approval_dispatch(provider_session_id, prompt, context, None)
-            .await
-    }
-
     pub async fn create_session(
         &self,
         cwd: PathBuf,
@@ -106,14 +216,25 @@ impl<P: InteractionPort> AgentSessionClient<P> {
         &self,
         cwd: PathBuf,
     ) -> Result<ExternalProviderCreatedSession, ExternalProviderRuntimeError> {
+        self.create_session_with_settings(cwd, crate::RequestedProviderSettings::default())
+            .await
+    }
+
+    pub async fn create_session_with_settings(
+        &self,
+        cwd: PathBuf,
+        settings: crate::RequestedProviderSettings,
+    ) -> Result<ExternalProviderCreatedSession, ExternalProviderRuntimeError> {
         let (reply, result) = tokio::sync::oneshot::channel();
         self.commands
-            .send(ProviderCommand::Create { cwd, reply })
+            .send(ProviderCommand::Create {
+                cwd,
+                settings,
+                reply,
+            })
             .await
-            .map_err(|_| ExternalProviderRuntimeError::TransportFailure)?;
-        result
-            .await
-            .map_err(|_| ExternalProviderRuntimeError::TransportFailure)?
+            .map_err(|_| self.retired_operation_error())?;
+        result.await.map_err(|_| self.retired_operation_error())?
     }
 
     pub async fn load_session(
@@ -121,40 +242,163 @@ impl<P: InteractionPort> AgentSessionClient<P> {
         provider_session_id: String,
         cwd: PathBuf,
     ) -> Result<(), ExternalProviderRuntimeError> {
+        if !self.base_capabilities.supports_load {
+            return Err(ExternalProviderRuntimeError::UnsupportedCapability {
+                capability: "session/load",
+            });
+        }
+        self.restore_session(
+            provider_session_id,
+            cwd,
+            super::provider_session_restore::RestoreHistoryMode::Replay,
+        )
+        .await
+    }
+
+    pub async fn resume_session(
+        &self,
+        provider_session_id: String,
+        cwd: PathBuf,
+    ) -> Result<(), ExternalProviderRuntimeError> {
+        if !self.base_capabilities.supports_resume {
+            return Err(ExternalProviderRuntimeError::UnsupportedCapability {
+                capability: "session/resume",
+            });
+        }
+        self.restore_session(
+            provider_session_id,
+            cwd,
+            super::provider_session_restore::RestoreHistoryMode::WithoutReplay,
+        )
+        .await
+    }
+
+    async fn restore_session(
+        &self,
+        provider_session_id: String,
+        cwd: PathBuf,
+        mode: super::provider_session_restore::RestoreHistoryMode,
+    ) -> Result<(), ExternalProviderRuntimeError> {
         let (reply, result) = tokio::sync::oneshot::channel();
         self.commands
-            .send(ProviderCommand::Load {
+            .send(ProviderCommand::Restore {
                 provider_session_id,
                 cwd,
+                mode,
                 reply,
             })
             .await
-            .map_err(|_| ExternalProviderRuntimeError::TransportFailure)?;
-        result
-            .await
-            .map_err(|_| ExternalProviderRuntimeError::TransportFailure)?
+            .map_err(|_| self.retired_operation_error())?;
+        result.await.map_err(|_| self.retired_operation_error())?
     }
 
-    pub async fn steer_session(
+    pub async fn list_sessions(
+        &self,
+        cwd: Option<PathBuf>,
+    ) -> Result<Vec<super::ProviderSessionSummary>, ExternalProviderRuntimeError> {
+        if !self.base_capabilities.supports_list {
+            return Err(ExternalProviderRuntimeError::UnsupportedCapability {
+                capability: "session/list",
+            });
+        }
+        let (reply, result) = tokio::sync::oneshot::channel();
+        self.commands
+            .send(ProviderCommand::List { cwd, reply })
+            .await
+            .map_err(|_| self.retired_operation_error())?;
+        result.await.map_err(|_| self.retired_operation_error())?
+    }
+
+    pub async fn close_session(
         &self,
         provider_session_id: String,
-        prompt: String,
+    ) -> Result<(), ExternalProviderRuntimeError> {
+        if !self.base_capabilities.supports_close {
+            return Err(ExternalProviderRuntimeError::UnsupportedCapability {
+                capability: "session/close",
+            });
+        }
+        if !self
+            .pending_close_marks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(provider_session_id.clone())
+        {
+            return Err(ExternalProviderRuntimeError::LocalBusy);
+        }
+        let mut admission_guard = PendingCloseAdmissionGuard {
+            marks: Arc::clone(&self.pending_close_marks),
+            provider_session_id: provider_session_id.clone(),
+            submitted: false,
+        };
+        self.close_session_after_mark(provider_session_id, &mut admission_guard)
+            .await
+    }
+
+    async fn close_session_after_mark(
+        &self,
+        provider_session_id: String,
+        admission_guard: &mut PendingCloseAdmissionGuard,
+    ) -> Result<(), ExternalProviderRuntimeError> {
+        if self.session_activity(provider_session_id.clone()).await?
+            == ProviderSessionActivity::Running
+        {
+            match self.cancel_active_prompt(provider_session_id.clone()).await {
+                Ok(()) | Err(ExternalProviderRuntimeError::LocalNotFound) => {}
+                Err(error) => return Err(error),
+            }
+            self.wait_session_idle(provider_session_id.clone()).await?;
+        }
+        let (reply, result) = tokio::sync::oneshot::channel();
+        self.commands
+            .send(ProviderCommand::Close {
+                provider_session_id,
+                reply,
+            })
+            .await
+            .map_err(|_| self.retired_operation_error())?;
+        admission_guard.transfer_to_connection();
+        result.await.map_err(|_| self.retired_operation_error())?
+    }
+
+    /// Steer with the same validated Session vocabulary used for prompts.
+    /// Optional ACP content types are checked before any command is queued.
+    pub async fn steer_contents_with_input(
+        &self,
+        provider_session_id: String,
+        input_id: InputId,
+        contents: Vec<PromptContent>,
+    ) -> Result<ProviderSteeringOutcome<P::OperationId>, ExternalProviderRuntimeError> {
+        self.steer_acp_blocks_with_input(
+            provider_session_id,
+            input_id,
+            acp_blocks_from_prompt_content(contents),
+        )
+        .await
+    }
+
+    async fn steer_acp_blocks_with_input(
+        &self,
+        provider_session_id: String,
+        input_id: InputId,
+        blocks: Vec<ContentBlock>,
     ) -> Result<ProviderSteeringOutcome<P::OperationId>, ExternalProviderRuntimeError> {
         if !self.admission.supports_steering {
             return Err(ExternalProviderRuntimeError::UnsupportedSteering);
         }
+        let capabilities = self.capability_report(&provider_session_id).await;
+        let prompt = ProviderPromptContent::new(blocks, &capabilities)?;
         let (reply, result) = tokio::sync::oneshot::channel();
         self.commands
             .send(ProviderCommand::Steer {
                 provider_session_id,
+                input_id,
                 prompt,
                 reply,
             })
             .await
-            .map_err(|_| ExternalProviderRuntimeError::TransportFailure)?;
-        result
-            .await
-            .map_err(|_| ExternalProviderRuntimeError::TransportFailure)?
+            .map_err(|_| self.retired_operation_error())?;
+        result.await.map_err(|_| self.retired_operation_error())?
     }
 
     pub async fn session_activity(
@@ -168,10 +412,24 @@ impl<P: InteractionPort> AgentSessionClient<P> {
                 reply,
             })
             .await
-            .map_err(|_| ExternalProviderRuntimeError::TransportFailure)?;
-        result
+            .map_err(|_| self.retired_operation_error())?;
+        result.await.map_err(|_| self.retired_operation_error())
+    }
+
+    /// Resolve the operation owned by the currently running Session turn.
+    pub async fn active_prompt_operation(
+        &self,
+        provider_session_id: String,
+    ) -> Result<Option<P::OperationId>, ExternalProviderRuntimeError> {
+        let (reply, result) = tokio::sync::oneshot::channel();
+        self.commands
+            .send(ProviderCommand::InspectActiveOperation {
+                provider_session_id,
+                reply,
+            })
             .await
-            .map_err(|_| ExternalProviderRuntimeError::TransportFailure)
+            .map_err(|_| self.retired_operation_error())?;
+        result.await.map_err(|_| self.retired_operation_error())
     }
 
     pub async fn wait_session_idle(
@@ -185,10 +443,8 @@ impl<P: InteractionPort> AgentSessionClient<P> {
                 reply,
             })
             .await
-            .map_err(|_| ExternalProviderRuntimeError::TransportFailure)?;
-        result
-            .await
-            .map_err(|_| ExternalProviderRuntimeError::TransportFailure)?
+            .map_err(|_| self.retired_operation_error())?;
+        result.await.map_err(|_| self.retired_operation_error())?
     }
 
     pub async fn shutdown(&self) {

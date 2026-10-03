@@ -6,7 +6,7 @@ use codex_router_core::ids::AccountId;
 use codex_router_core::redaction::SecretString;
 use codex_router_secret_store::SecretStore;
 use codex_router_secret_store::account_tokens::AccountCredentialBundle;
-use codex_router_secret_store::account_tokens::account_credential_bundle_key;
+use codex_router_secret_store::account_tokens::openai_account_credential_bundle_key;
 use codex_router_state::account::AccountRecord;
 use codex_router_state::credential_maintenance::CredentialFailureClass;
 use codex_router_state::credential_maintenance::CredentialMaintenanceState;
@@ -14,6 +14,117 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
+
+#[tokio::test]
+async fn unavailable_credential_stores_skip_upkeep_without_health_changes() {
+    #[derive(Clone, Copy)]
+    enum UnavailableStoreKind {
+        KeyUnavailable,
+        MigrationIncomplete,
+    }
+
+    for (suffix, store_kind) in [
+        ("key-unavailable", UnavailableStoreKind::KeyUnavailable),
+        (
+            "migration-incomplete",
+            UnavailableStoreKind::MigrationIncomplete,
+        ),
+    ] {
+        let root = tempfile::tempdir().expect("fixture root");
+        let state = AsyncSqliteStateStore::open(&root.path().join("state.sqlite"))
+            .await
+            .expect("fixture state");
+        let account_id = AccountId::new(format!("upkeep-store-{suffix}")).expect("account id");
+        state
+            .upsert_account(
+                &AccountRecord::new(
+                    codex_router_core::provider::Provider::Openai,
+                    account_id.clone(),
+                    suffix,
+                    AccountStatus::Enabled,
+                )
+                .with_active_credential_generation(1),
+            )
+            .await
+            .expect("account");
+        assert!(
+            state
+                .claim_credential_refresh(
+                    &account_id,
+                    codex_router_core::provider::Provider::Openai,
+                    codex_router_state::credential_maintenance::ClaimPurpose::Refresh,
+                    1,
+                    2,
+                    1_000,
+                )
+                .await
+                .expect("refresh claim")
+        );
+        assert!(
+            state
+                .activate_claimed_credential_generation(
+                    &account_id,
+                    codex_router_core::provider::Provider::Openai,
+                    codex_router_state::credential_maintenance::ClaimPurpose::Refresh,
+                    1,
+                    2,
+                    1_000,
+                )
+                .await
+                .expect("healthy generation")
+        );
+        let maintenance_before = state
+            .load_credential_maintenance(&account_id)
+            .await
+            .expect("maintenance query")
+            .expect("healthy maintenance");
+        let file_store = codex_router_secret_store::file_backend::FileSecretStore::open(
+            root.path().join("secrets"),
+        )
+        .expect("file store");
+        let secrets = match store_kind {
+            UnavailableStoreKind::KeyUnavailable => {
+                EncryptedCredentialStore::key_unavailable(file_store)
+            }
+            UnavailableStoreKind::MigrationIncomplete => {
+                EncryptedCredentialStore::migration_incomplete(
+                    file_store,
+                    vec![account_id.as_str().to_owned()],
+                    codex_router_secret_store::credential_migration::CredentialMigrationFailure::MigrationNotComplete,
+                )
+            }
+        };
+        let resolver = codex_router_auth::resolver::AsyncRouterCredentialResolver::new(
+            state.clone(),
+            secrets.clone(),
+            NoopCredentialRefreshClient,
+            Some(1_100),
+        );
+        let resolution = resolver
+            .resolve_provider_credentials(
+                &account_id,
+                codex_router_core::provider::Provider::Openai,
+            )
+            .await;
+        assert_eq!(
+            resolution,
+            Err(codex_router_auth::resolver::CredentialResolverError::CredentialStoreUnavailable),
+            "{suffix}"
+        );
+
+        let cycle = run_upkeep_cycle(&state, &secrets, NoopCredentialRefreshClient, 1_100).await;
+        let maintenance_after = state
+            .load_credential_maintenance(&account_id)
+            .await
+            .expect("maintenance query")
+            .expect("maintenance remains present");
+
+        assert_eq!(cycle.earliest_due, None, "{suffix}");
+        assert!(!cycle.had_local_error, "{suffix}");
+        assert_eq!(maintenance_after, maintenance_before, "{suffix}");
+        state.close().await.expect("state close");
+    }
+}
 
 #[derive(Clone)]
 struct CountingRefreshClient {
@@ -47,16 +158,24 @@ async fn terminal_and_cooldown_states_do_not_become_local_worker_failures() {
     let state = AsyncSqliteStateStore::open(&root.join("state.sqlite"))
         .await
         .expect("fixture state");
-    let secrets = FileSecretStore::open(root.join("secrets")).expect("fixture secrets");
+    let secrets = codex_router_secret_store::test_support::open_encrypted_credential_store(
+        root.join("secrets"),
+    )
+    .expect("fixture secrets");
     let terminal_id = AccountId::new("upkeep-terminal").expect("terminal id");
     state
         .upsert_account(
-            &AccountRecord::new(terminal_id.clone(), "terminal", AccountStatus::Enabled)
-                .with_active_credential_generation(1),
+            &AccountRecord::new(
+                codex_router_core::provider::Provider::Openai,
+                terminal_id.clone(),
+                "terminal",
+                AccountStatus::Enabled,
+            )
+            .with_active_credential_generation(1),
         )
         .await
         .expect("terminal account");
-    let terminal_key = account_credential_bundle_key(&terminal_id, 1).expect("terminal key");
+    let terminal_key = openai_account_credential_bundle_key(&terminal_id, 1).expect("terminal key");
     secrets
         .write_secret(
             &terminal_key,
@@ -83,12 +202,17 @@ async fn terminal_and_cooldown_states_do_not_become_local_worker_failures() {
     let cooldown_id = AccountId::new("upkeep-cooldown").expect("cooldown id");
     state
         .upsert_account(
-            &AccountRecord::new(cooldown_id.clone(), "cooldown", AccountStatus::Enabled)
-                .with_active_credential_generation(1),
+            &AccountRecord::new(
+                codex_router_core::provider::Provider::Openai,
+                cooldown_id.clone(),
+                "cooldown",
+                AccountStatus::Enabled,
+            )
+            .with_active_credential_generation(1),
         )
         .await
         .expect("cooldown account");
-    let cooldown_key = account_credential_bundle_key(&cooldown_id, 1).expect("cooldown key");
+    let cooldown_key = openai_account_credential_bundle_key(&cooldown_id, 1).expect("cooldown key");
     secrets
         .write_secret(
             &cooldown_key,
@@ -110,12 +234,17 @@ async fn terminal_and_cooldown_states_do_not_become_local_worker_failures() {
     let reauth_id = AccountId::new("upkeep-reauth").expect("reauth id");
     state
         .upsert_account(
-            &AccountRecord::new(reauth_id.clone(), "reauth", AccountStatus::Enabled)
-                .with_active_credential_generation(1),
+            &AccountRecord::new(
+                codex_router_core::provider::Provider::Openai,
+                reauth_id.clone(),
+                "reauth",
+                AccountStatus::Enabled,
+            )
+            .with_active_credential_generation(1),
         )
         .await
         .expect("reauth account");
-    let reauth_key = account_credential_bundle_key(&reauth_id, 1).expect("reauth key");
+    let reauth_key = openai_account_credential_bundle_key(&reauth_id, 1).expect("reauth key");
     secrets
         .write_secret(
             &reauth_key,
@@ -130,7 +259,14 @@ async fn terminal_and_cooldown_states_do_not_become_local_worker_failures() {
         .expect("reauth secret");
     assert!(
         state
-            .claim_credential_refresh(&reauth_id, 1, 2)
+            .claim_credential_refresh(
+                &reauth_id,
+                codex_router_core::provider::Provider::Openai,
+                codex_router_state::credential_maintenance::ClaimPurpose::Refresh,
+                1,
+                2,
+                1_000
+            )
             .await
             .expect("reauth claim")
     );
@@ -138,11 +274,12 @@ async fn terminal_and_cooldown_states_do_not_become_local_worker_failures() {
         state
             .finish_credential_refresh_claim(
                 &reauth_id,
+                codex_router_core::provider::Provider::Openai,
                 1,
                 2,
-                CredentialMaintenanceState::ReauthRequired,
-                CredentialFailureClass::ProviderOutcomeAmbiguous,
-                None,
+                codex_router_state::credential_maintenance::CredentialRefreshClaimDisposition::ReauthRequired {
+                    failure_class: CredentialFailureClass::ProviderOutcomeAmbiguous,
+                },
             )
             .await
             .expect("reauth disposition")
@@ -200,8 +337,13 @@ async fn terminal_and_cooldown_states_do_not_become_local_worker_failures() {
     ] {
         claim_state
             .upsert_account(
-                &AccountRecord::new(account_id.clone(), label, AccountStatus::Disabled)
-                    .with_active_credential_generation(1),
+                &AccountRecord::new(
+                    codex_router_core::provider::Provider::Openai,
+                    account_id.clone(),
+                    label,
+                    AccountStatus::Disabled,
+                )
+                .with_active_credential_generation(1),
             )
             .await
             .expect("prior fixture account should disable");
@@ -209,12 +351,17 @@ async fn terminal_and_cooldown_states_do_not_become_local_worker_failures() {
     let claimed_id = AccountId::new("upkeep-claimed").expect("claimed id");
     claim_state
         .upsert_account(
-            &AccountRecord::new(claimed_id.clone(), "claimed", AccountStatus::Enabled)
-                .with_active_credential_generation(1),
+            &AccountRecord::new(
+                codex_router_core::provider::Provider::Openai,
+                claimed_id.clone(),
+                "claimed",
+                AccountStatus::Enabled,
+            )
+            .with_active_credential_generation(1),
         )
         .await
         .expect("claimed account");
-    let active_key = account_credential_bundle_key(&claimed_id, 1).expect("active key");
+    let active_key = openai_account_credential_bundle_key(&claimed_id, 1).expect("active key");
     secrets
         .write_secret(
             &active_key,
@@ -229,11 +376,18 @@ async fn terminal_and_cooldown_states_do_not_become_local_worker_failures() {
         .expect("active secret");
     assert!(
         claim_state
-            .claim_credential_refresh(&claimed_id, 1, 2)
+            .claim_credential_refresh(
+                &claimed_id,
+                codex_router_core::provider::Provider::Openai,
+                codex_router_state::credential_maintenance::ClaimPurpose::Refresh,
+                1,
+                2,
+                1_000
+            )
             .await
             .expect("unresolved claim")
     );
-    let staged_key = account_credential_bundle_key(&claimed_id, 2).expect("staged key");
+    let staged_key = openai_account_credential_bundle_key(&claimed_id, 2).expect("staged key");
     secrets
         .write_secret(
             &staged_key,

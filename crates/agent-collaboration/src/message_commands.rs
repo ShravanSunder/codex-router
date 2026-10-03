@@ -1,16 +1,17 @@
-//! Descriptive message submission through the public Rust client.
-use crate::message_input_arguments::{SendArguments, prepare};
+//! CLI commands for direct messages and stored Router push records.
+use crate::failure_line::render_failure_line;
+use crate::message_input_arguments::MessageSendArguments;
 use clap::{Parser, Subcommand};
-use collaboration_client::protocol::{DeliveryOutcome, DeliveryReceipt};
-use collaboration_client::{
-    ClientError, ControlClient, MessageSendError, MessageSendRequest, OperationEffect,
-    OperationFailure, OperationFailureKind,
-};
-use serde_json::json;
+use collaboration_client::protocol::{PushId, RouterLink, SessionRef};
+use collaboration_client::{OperationEffect, OperationFailure, OperationFailureKind};
 use std::{
     ffi::OsString,
     io::{self, Write},
+    path::PathBuf,
 };
+
+mod message_send_reply;
+mod push_record_queries;
 
 #[derive(Parser)]
 #[command(
@@ -21,132 +22,162 @@ struct MessageArguments {
     #[command(subcommand)]
     command: MessageCommand,
 }
+
 #[derive(Subcommand)]
 enum MessageCommand {
     /// Submit information. Acceptance is not completion or a peer reply.
-    Send(SendArguments),
+    Send(MessageSendArguments),
+    /// List unread direct-message notices for this session.
+    Inbox(InboxArguments),
+    /// List retained direct-message notices with one session.
+    History(HistoryArguments),
+    /// Reply to one stored direct message by push id or Router link.
+    Reply(ReplyArguments),
 }
+
+#[derive(clap::Args)]
+struct InboxArguments {
+    #[arg(long, default_value_t = 50, value_parser = clap::value_parser!(u32).range(1..=100))]
+    limit: u32,
+    #[arg(long)]
+    service_directory: Option<PathBuf>,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(clap::Args)]
+struct HistoryArguments {
+    /// Exact SessionRef JSON for the other participant.
+    #[arg(long = "with")]
+    other_session: String,
+    #[arg(long, default_value_t = 50, value_parser = clap::value_parser!(u32).range(1..=100))]
+    limit: u32,
+    #[arg(long)]
+    service_directory: Option<PathBuf>,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(clap::Args)]
+struct ReplyArguments {
+    #[arg(value_name = "PUSH_ID_OR_LINK")]
+    reference: String,
+    #[arg(
+        value_name = "TEXT",
+        required_unless_present = "text_file",
+        conflicts_with = "text_file"
+    )]
+    text: Option<String>,
+    /// Read reply text from a file; '-' reads stdin. Content is never shell-interpolated.
+    #[arg(long)]
+    text_file: Option<PathBuf>,
+    #[arg(long)]
+    service_directory: Option<PathBuf>,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Parser)]
+#[command(
+    name = "agent-collaboration show",
+    bin_name = "agent-collaboration show",
+    about = "Fetch one stored Router push record"
+)]
+struct PushRecordShowArguments {
+    #[arg(value_name = "PUSH_ID_OR_LINK")]
+    reference: String,
+    #[arg(long)]
+    service_directory: Option<PathBuf>,
+    #[arg(long)]
+    json: bool,
+}
+
 pub fn run_message_command(arguments: Vec<OsString>) -> i32 {
     let parsed =
         match crate::automation_argument_feedback::parse_arguments::<MessageArguments>(arguments) {
             Ok(value) => value,
             Err(code) => return code,
         };
-    let MessageCommand::Send(args) = parsed.command;
-    let machine = args.json;
-    let prepared = prepare(&args);
-    let (directory, prepared) = match prepared {
-        Ok(value) => value,
-        Err(message) => {
-            return crate::endpoint_commands::report_failure("invalidField", &message, 2, machine);
-        }
-    };
-    let runtime = match tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-    {
-        Ok(value) => value,
-        Err(_) => {
-            return crate::endpoint_commands::report_failure(
-                "unavailable",
-                "Client runtime unavailable",
-                3,
-                machine,
-            );
-        }
-    };
-    let outcome = runtime.block_on(async {
-        let mut client =
-            ControlClient::connect(&directory, "agent-collaboration", env!("CARGO_PKG_VERSION"))
-                .await
-                .map_err(|error| MessageSendError::Preparation(Box::new(error)))?;
-        let saved = prepared
-            .resolve(&client.identity().service_id)
-            .map_err(|_| {
-                MessageSendError::Preparation(Box::new(ClientError::InvalidRequest(
-                    "invalid session target",
-                )))
-            })?;
-        let request = MessageSendRequest {
-            target: saved.target,
-            message: saved
-                .content
-                .try_into()
-                .map_err(|error| MessageSendError::Preparation(Box::new(error)))?,
-            delivery: saved.delivery,
-            generation_guard: saved.generation_guard,
-            correlation: None,
-        };
-        let result = client.send_message(request).await;
-        let _closed = client.close().await;
-        result
-    });
-    report(outcome, machine)
+    match parsed.command {
+        MessageCommand::Send(args) => message_send_reply::run_message_send(args),
+        MessageCommand::Inbox(args) => push_record_queries::run_message_inbox(args),
+        MessageCommand::History(args) => push_record_queries::run_message_history(args),
+        MessageCommand::Reply(args) => message_send_reply::run_message_reply(args),
+    }
 }
 
-fn report(result: Result<DeliveryReceipt, MessageSendError>, machine: bool) -> i32 {
-    if let Err(MessageSendError::Preparation(error)) = &result
-        && let Some(code) = crate::permission_diagnostic_reporting::report_permission_error(
-            error,
-            crate::permission_diagnostic_reporting::PermissionDiagnosticRendering::Command,
-            machine,
-        )
+pub fn run_push_record_show_command(arguments: Vec<OsString>) -> i32 {
+    let args = match crate::automation_argument_feedback::parse_arguments::<PushRecordShowArguments>(
+        arguments,
+    ) {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    push_record_queries::run_push_record_show(args)
+}
+
+fn validate_push_reference(reference: &str) -> Result<(), String> {
+    if PushId::try_from(reference.to_owned()).is_ok() || RouterLink::parse(reference).is_ok() {
+        return Ok(());
+    }
+    Err("PUSH_ID_OR_LINK must be a UUIDv7 push id or router://<machine-id>/push/<push-id>; for example 019f0000-0000-7000-8000-000000000101 or router://00000000-0000-4000-8000-000000000001/push/019f0000-0000-7000-8000-000000000101".to_owned())
+}
+
+fn report_message_failure(kind: &str, message: &str, exit_code: i32, machine: bool) -> i32 {
+    if machine {
+        return crate::endpoint_commands::report_failure(kind, message, exit_code, true);
+    }
+    let next_step = match kind {
+        "invalidField" | "invalidUsage" => "correct the named argument and try again",
+        "currentSessionUnavailable" | "identityUnavailable" => {
+            "run agent-collaboration whoami --json"
+        }
+        "unavailable" => "check Router availability and retry",
+        _ => "run agent-collaboration message --help",
+    };
+    let line = render_failure_line(message, next_step);
+    if writeln!(io::stderr(), "{line}").is_err() {
+        5
+    } else {
+        exit_code
+    }
+}
+
+fn operation_failure_line(failure: &OperationFailure, target: Option<&SessionRef>) -> String {
+    let explanation = target.map_or_else(
+        || failure.message.clone(),
+        |target| {
+            format!(
+                "Delivery to {}: {}",
+                String::from(target.session_id.clone()),
+                failure.message
+            )
+        },
+    );
+    let next_step = if failure.effect == OperationEffect::Unknown
+        || failure.service_kind.as_deref() == Some("outcomeUnknown")
     {
-        return code;
-    }
-    let (record, code, write_failure_code) = match result {
-        Ok(receipt) => {
-            let exit = match receipt.outcome {
-                DeliveryOutcome::NotSubmitted {
-                    retryable: true, ..
-                } => 3,
-                DeliveryOutcome::NotSubmitted {
-                    retryable: false, ..
-                }
-                | DeliveryOutcome::Rejected(_) => 4,
-                DeliveryOutcome::Unknown => 5,
-                DeliveryOutcome::Started
-                | DeliveryOutcome::Steered
-                | DeliveryOutcome::StartedOrSteered
-                | DeliveryOutcome::Queued
-                | DeliveryOutcome::PeerMessageWritten => 0,
-            };
-            (
-                crate::endpoint_commands::result_envelope(json!(receipt)),
-                exit,
-                5,
-            )
-        }
-        Err(error) => {
-            let (failure, target) = error.into_operation_failure_and_target();
-            let exit = operation_failure_exit(&failure);
-            let write_failure = if failure.effect == OperationEffect::Unknown {
-                5
-            } else {
-                3
-            };
-            (
-                json!({"kind":"error","target":target,"error":failure}),
-                exit,
-                write_failure,
-            )
+        "inspect the target before retrying"
+    } else if failure.service_kind.as_deref() == Some("notFound") {
+        "check whether the Router link is expired or belongs to another machine"
+    } else if failure.service_kind.as_deref() == Some("notPermitted") {
+        "run show as the push sender or target session"
+    } else if failure.service_kind.as_deref() == Some("invalidField") {
+        "use a UUIDv7 push id or a router:// machine/push/id link"
+    } else {
+        match failure.kind {
+            OperationFailureKind::UnsupportedCapability => {
+                "run agent-collaboration message send --help for supported delivery modes"
+            }
+            OperationFailureKind::Unavailable | OperationFailureKind::Timeout => {
+                "check Router availability, then retry"
+            }
+            OperationFailureKind::ProtocolViolation | OperationFailureKind::Rejected => {
+                "correct the message request and try again"
+            }
         }
     };
-    let written = if machine {
-        writeln!(io::stdout(), "{record}")
-    } else {
-        writeln!(
-            io::stdout(),
-            "{}",
-            serde_json::to_string_pretty(&record)
-                .unwrap_or_else(|_| "Output unavailable".to_owned())
-        )
-    };
-    if written.is_err() {
-        write_failure_code
-    } else {
-        code
-    }
+    render_failure_line(&explanation, next_step)
 }
 
 fn operation_failure_exit(failure: &OperationFailure) -> i32 {
@@ -162,7 +193,10 @@ fn operation_failure_exit(failure: &OperationFailure) -> i32 {
             2
         }
         OperationFailureKind::Rejected
-            if failure.service_kind.as_deref() == Some("unavailable") =>
+            if matches!(
+                failure.service_kind.as_deref(),
+                Some("unavailable" | "replyUnavailable")
+            ) =>
         {
             3
         }
@@ -171,76 +205,5 @@ fn operation_failure_exit(failure: &OperationFailure) -> i32 {
         OperationFailureKind::UnsupportedCapability | OperationFailureKind::ProtocolViolation => 2,
         OperationFailureKind::Unavailable if failure.effect == OperationEffect::None => 3,
         _ => 4,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::operation_failure_exit;
-    use collaboration_client::{ClientError, MessageSendError, OperationEffect};
-
-    #[test]
-    fn adapter_distinguishes_preparation_loss_from_post_dispatch_loss() {
-        let transport = || {
-            ClientError::Transport(std::io::Error::new(
-                std::io::ErrorKind::ConnectionReset,
-                "fixture",
-            ))
-        };
-        let (preparation, preparation_target) =
-            MessageSendError::Preparation(Box::new(transport()))
-                .into_operation_failure_and_target();
-        assert!(preparation_target.is_none());
-        assert_eq!(preparation.effect, OperationEffect::None);
-        assert_eq!(
-            preparation.kind,
-            collaboration_client::OperationFailureKind::Unavailable
-        );
-
-        let (submission, submission_target) = MessageSendError::Submission {
-            target: serde_json::from_value(serde_json::json!({
-                "endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"codex-local"},
-                "sessionId":"target"
-            }))
-            .expect("target"),
-            source: Box::new(transport()),
-        }
-        .into_operation_failure_and_target();
-        assert!(submission_target.is_some());
-        assert_eq!(submission.effect, OperationEffect::Unknown);
-        assert_eq!(
-            submission.kind,
-            collaboration_client::OperationFailureKind::Unavailable
-        );
-
-        let (malformed_after_dispatch, malformed_target) = MessageSendError::Submission {
-            target: serde_json::from_value(serde_json::json!({
-                "endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"codex-local"},
-                "sessionId":"target"
-            }))
-            .expect("target"),
-            source: Box::new(ClientError::Protocol("malformed result")),
-        }
-        .into_operation_failure_and_target();
-        assert!(malformed_target.is_some());
-        assert_eq!(malformed_after_dispatch.effect, OperationEffect::Unknown);
-        assert_eq!(operation_failure_exit(&malformed_after_dispatch), 5);
-    }
-
-    #[test]
-    fn adapter_preserves_established_service_rejection_exit_codes() {
-        for (service_kind, expected) in [
-            ("outcomeUnknown", 5),
-            ("unsupportedCapability", 2),
-            ("unavailable", 3),
-            ("nativeRejected", 4),
-        ] {
-            let (failure, _) = MessageSendError::Preparation(Box::new(ClientError::Rejected {
-                code: -32050,
-                data: Some(serde_json::json!({"kind":service_kind})),
-            }))
-            .into_operation_failure_and_target();
-            assert_eq!(operation_failure_exit(&failure), expected, "{service_kind}");
-        }
     }
 }

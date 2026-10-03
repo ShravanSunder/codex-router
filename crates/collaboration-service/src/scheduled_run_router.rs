@@ -20,14 +20,22 @@ impl SessionDeliveryRouter {
             .await
             .into_iter()
             .collect::<Result<Vec<_>, _>>()?;
+        if claims
+            .iter()
+            .any(|claim| matches!(claim, RouteClaim::Rejected { .. }))
+        {
+            return Err(DeliveryContractError::ClientOperation);
+        }
         let selected = claims
             .iter()
             .position(|claim| matches!(claim, RouteClaim::Holds))
             .or_else(|| {
-                if claims
-                    .iter()
-                    .any(|claim| matches!(claim, RouteClaim::LiveElsewhere { .. }))
-                {
+                if claims.iter().any(|claim| {
+                    matches!(
+                        claim,
+                        RouteClaim::LiveElsewhere { .. } | RouteClaim::Rejected { .. }
+                    )
+                }) {
                     None
                 } else {
                     claims
@@ -140,12 +148,16 @@ impl ScheduledRunExecution for SessionDeliveryRouter {
     fn prepare_existing_target<'a>(
         &'a self,
         target: &SessionRef,
+        declared_cwd: &str,
         sink: &'a dyn RunEvidenceSink,
     ) -> DeliveryFuture<'a, PreparedTarget> {
         let target = target.clone();
+        let declared_cwd = declared_cwd.to_owned();
         Box::pin(async move {
             let route = self.scheduled_for_existing(&target).await?;
-            route.prepare_existing_target(&target, sink).await
+            route
+                .prepare_existing_target(&target, &declared_cwd, sink)
+                .await
         })
     }
 

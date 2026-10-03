@@ -84,10 +84,20 @@ pub trait PreparationEvidenceSink: Send + Sync {
 pub struct ScheduledRunSubmission {
     pub run_id: RunId,
     pub target: SessionRef,
-    pub message: MessageText,
+    pub payload: ScheduledRunPayload,
     pub precondition: DeliveryPrecondition,
     pub inputs: CapturedRunInputs<SessionRef, EndpointRef>,
     pub recorded: RouteEffectEvidence<SessionRef, CodexGeneration>,
+}
+
+#[derive(Clone, Debug)]
+pub enum ScheduledRunPayload {
+    Existing {
+        prepared: crate::layer_zero::PreparedPush,
+    },
+    Fresh {
+        task_input: MessageText,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -212,6 +222,7 @@ pub trait ScheduledRunExecution: Send + Sync {
     fn prepare_existing_target<'a>(
         &'a self,
         target: &SessionRef,
+        declared_cwd: &str,
         sink: &'a dyn RunEvidenceSink,
     ) -> DeliveryFuture<'a, PreparedTarget>;
     fn prepare_fresh_session<'a>(

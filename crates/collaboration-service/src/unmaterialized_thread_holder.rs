@@ -1,4 +1,4 @@
-//! Host-lifetime ownership of Codex threads that have not started a first turn.
+//! Host-lifetime ownership of unfinished Codex creates and detached prompt drains.
 use codex_acp_adapter::{AcpSessionBinding, HeldBindingCheckout, UnmaterializedBindingStore};
 use std::{collections::BTreeMap, sync::Mutex};
 
@@ -10,7 +10,7 @@ enum HeldThread {
 #[derive(Default)]
 pub struct UnmaterializedThreadHolder {
     threads: Mutex<BTreeMap<String, HeldThread>>,
-    create_tasks: tokio_util::task::TaskTracker,
+    host_tasks: tokio_util::task::TaskTracker,
 }
 
 impl UnmaterializedThreadHolder {
@@ -27,9 +27,43 @@ impl UnmaterializedThreadHolder {
             .contains_key(session_id)
     }
 
-    pub async fn drain_create_tasks(&self) {
-        self.create_tasks.close();
-        self.create_tasks.wait().await;
+    pub async fn drain_host_tasks(&self) {
+        self.host_tasks.close();
+        self.host_tasks.wait().await;
+    }
+}
+
+/// Clears a checked-out slot if dispatch exits before it can restore or finish it.
+pub(crate) struct HeldBindingCleanup<'a> {
+    holder: &'a UnmaterializedThreadHolder,
+    session_id: String,
+    active: bool,
+}
+
+impl<'a> HeldBindingCleanup<'a> {
+    pub(crate) fn new(holder: &'a UnmaterializedThreadHolder, session_id: &str) -> Self {
+        Self {
+            holder,
+            session_id: session_id.into(),
+            active: true,
+        }
+    }
+
+    pub(crate) fn disarm(&mut self) {
+        self.active = false;
+    }
+
+    pub(crate) fn finish(&mut self) {
+        self.holder.finish(&self.session_id);
+        self.disarm();
+    }
+}
+
+impl Drop for HeldBindingCleanup<'_> {
+    fn drop(&mut self) {
+        if self.active {
+            self.holder.finish(&self.session_id);
+        }
     }
 }
 
@@ -76,8 +110,8 @@ impl UnmaterializedBindingStore for UnmaterializedThreadHolder {
         }
     }
 
-    fn create_tasks(&self) -> tokio_util::task::TaskTracker {
-        self.create_tasks.clone()
+    fn host_tasks(&self) -> tokio_util::task::TaskTracker {
+        self.host_tasks.clone()
     }
 }
 
@@ -90,14 +124,14 @@ mod tests {
         let holder = std::sync::Arc::new(UnmaterializedThreadHolder::new());
         let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
         let (release_tx, release_rx) = tokio::sync::oneshot::channel();
-        holder.create_tasks().spawn(async move {
+        holder.host_tasks().spawn(async move {
             let _entered = entered_tx.send(());
             let _released = release_rx.await;
         });
         entered_rx.await.expect("create task started");
         let draining = tokio::spawn({
             let holder = std::sync::Arc::clone(&holder);
-            async move { holder.drain_create_tasks().await }
+            async move { holder.drain_host_tasks().await }
         });
         tokio::task::yield_now().await;
         assert!(!draining.is_finished());

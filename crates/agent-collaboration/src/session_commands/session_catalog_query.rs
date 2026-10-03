@@ -21,6 +21,7 @@ pub(super) struct SessionRecordQuery {
     source: SessionCatalogSource,
     sort: SessionCatalogSort,
     last: bool,
+    include_empty_sessions: bool,
     limit: usize,
     search: String,
 }
@@ -33,6 +34,7 @@ impl SessionRecordQuery {
             source: catalog_source(command.source),
             sort: catalog_sort(command.sort),
             last: command.last,
+            include_empty_sessions: command.include_empty_sessions,
             limit: command.limit,
             search: String::new(),
         }
@@ -46,6 +48,7 @@ impl SessionRecordQuery {
             source: SessionCatalogSource::All,
             sort: SessionCatalogSort::Updated,
             last: false,
+            include_empty_sessions: true,
             limit: SESSION_ID_LOOKUP_LIMIT,
             search: format!("id:{session_id}"),
         }
@@ -58,6 +61,7 @@ impl SessionRecordQuery {
             source: catalog_source(query.source),
             sort: catalog_sort(query.sort),
             last: false,
+            include_empty_sessions: query.include_empty_sessions,
             limit: DEFAULT_SESSION_RECORD_LIMIT,
             search: query.search,
         }
@@ -89,6 +93,7 @@ pub(super) async fn load_session_records_for_query_with_identity(
         source: query.source,
         sort: query.sort,
         last: query.last,
+        include_empty_sessions: query.include_empty_sessions,
         limit: query.limit,
         search: query.search,
         repository_identity,
@@ -133,6 +138,7 @@ fn catalog_provider(provider: &SessionsProvider) -> SessionCatalogProvider {
     match provider {
         SessionsProvider::Any => SessionCatalogProvider::Any,
         SessionsProvider::Current => SessionCatalogProvider::Current,
+        SessionsProvider::ClaudeCode => SessionCatalogProvider::Id("claude".to_owned()),
         SessionsProvider::Id(provider_id) => SessionCatalogProvider::Id(provider_id.clone()),
     }
 }

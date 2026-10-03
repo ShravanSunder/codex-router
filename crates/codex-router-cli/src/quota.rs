@@ -20,6 +20,7 @@ use codex_router_auth::live_quota::WindowPair;
 use codex_router_auth::live_quota::reset_credits_url;
 use codex_router_auth::live_quota::usage_url;
 use codex_router_auth::resolver::CredentialResolverError;
+use codex_router_core::credit_usage::CreditProviderObservation;
 use codex_router_core::ids::AccountId;
 use codex_router_core::redaction::SecretString;
 use codex_router_core::redaction::safe_account_label;
@@ -49,6 +50,8 @@ use codex_router_state::account::AccountRecord;
 use codex_router_state::account::AccountStatus;
 use codex_router_state::account_routing_policy::WeeklyQuotaFloorBasisPoints;
 use codex_router_state::credential_maintenance::CredentialMaintenanceRecord;
+use codex_router_state::credit_store::AsyncCreditUsagePolicyMutationStore;
+use codex_router_state::credit_store::CreditRefreshAttempt;
 use codex_router_state::quota_snapshot::PersistedQuotaHistoryObservation;
 use codex_router_state::quota_snapshot::PersistedQuotaSnapshot;
 use codex_router_state::quota_snapshot::PersistedSelectorQuotaWindow;
@@ -76,6 +79,10 @@ use crate::CliError;
 use crate::credential_runtime::AsyncProviderCredentialResolver;
 use crate::credential_runtime::CliCredentialResolver;
 use crate::credential_runtime::CliCredentialResolverOpenError;
+use crate::presentation::quota::CreditUsagePolicySaveError;
+use crate::presentation::quota::CreditUsagePolicySaver;
+use crate::presentation::quota::CreditUsageRefreshError;
+use crate::presentation::quota::CreditUsageRefresher;
 use crate::presentation::quota::QuotaSelectedAccountViewModel;
 use crate::presentation::quota::QuotaStatusAccountViewModel;
 use crate::presentation::quota::QuotaStatusViewModel;
@@ -109,6 +116,7 @@ fn current_unix_seconds() -> u64 {
         .map_or(0, |duration| duration.as_secs())
 }
 
+mod claude_quota_fetcher;
 mod quota_background_refresh_worker;
 mod quota_command_dispatch;
 mod quota_refresh_command;
@@ -144,6 +152,11 @@ use quota_status_loader::*;
 use quota_status_metrics::*;
 use quota_status_projection::*;
 use quota_status_view_model::*;
+
+pub(crate) use quota_status_command::interactive_credit_usage_refresher;
+
+pub(crate) use quota_status_view_model::CreditUsageFreshness;
+pub(crate) use quota_status_view_model::CreditUsageStatus;
 
 #[cfg(test)]
 mod quota_command_family_test;

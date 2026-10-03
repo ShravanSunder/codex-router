@@ -28,6 +28,7 @@ fn receipt_round_trips_selected_and_unselected_outcomes() -> Result<(), Box<dyn 
                 next_action: DeliveryNextAction::CorrectRequest,
                 client_code: None,
                 detail: Some("no route".into()),
+                claims: None,
             }),
             reachability: None,
             client: None,

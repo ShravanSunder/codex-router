@@ -3,9 +3,8 @@
 use std::ffi::OsString;
 use std::io::Write;
 use std::net::{IpAddr, SocketAddr};
-#[cfg(test)]
-use std::path::Path;
 use std::path::PathBuf;
+use std::path::{Component, Path};
 use std::time::Duration;
 
 use clap::Parser;
@@ -62,6 +61,7 @@ pub(crate) enum RouterAction {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct HostCommand {
+    owner_human_id: Option<message_board::HumanId>,
     action: Option<HostAction>,
     router_root: Option<PathBuf>,
     port: Option<u16>,
@@ -79,7 +79,13 @@ impl HostCommand {
         let mut argv = vec![OsString::from("host")];
         argv.extend(arguments);
         let parsed = ClapHostCommand::try_parse_from(argv).map_err(|error| error.to_string())?;
+        let owner_human_id = parsed
+            .owner_human_id
+            .map(message_board::HumanId::try_from)
+            .transpose()
+            .map_err(|error| error.to_string())?;
         Ok(Self {
+            owner_human_id,
             action: parsed.action,
             router_root: parsed.router_root,
             port: parsed.port,
@@ -121,6 +127,8 @@ impl HostCommand {
 #[derive(Debug, Parser)]
 #[command(name = "host", disable_help_subcommand = true)]
 struct ClapHostCommand {
+    #[arg(long, global = true)]
+    owner_human_id: Option<String>,
     #[command(subcommand)]
     action: Option<HostAction>,
     #[arg(long, global = true)]
@@ -173,38 +181,43 @@ pub(crate) async fn run_host_command<W: Write + Send>(
                 .to_owned(),
         ));
     }
-    if command.require_debug_isolation
-        && (!cfg!(all(debug_assertions, not(test)))
-            || context.env_var(crate::USE_HOME_DEFAULT_ENV).is_some())
+    if context
+        .env_var("CODEX_ROUTER_DEBUG_CLAUDE_UPSTREAM_BASE_URL")
+        .is_some()
+        && (!cfg!(debug_assertions) || !command.require_debug_isolation)
     {
         return Err(HostCommandError::RouterRoot(
-            "debug isolation requires a debug build without home-default mode".to_owned(),
+            "debug Claude upstream override requires --require-debug-isolation in a debug build"
+                .to_owned(),
         ));
     }
     let router_root = crate::router_root_or_default(command.router_root.clone())
         .map_err(|error| HostCommandError::RouterRoot(error.to_string()))?;
+    validate_router_root(&router_root)?;
+    let owner_home = nix::unistd::User::from_uid(nix::unistd::getuid())
+        .ok()
+        .flatten()
+        .map(|user| user.dir);
+    let launch_mode = foreground_launch::HostLaunchMode::resolve(
+        &router_root,
+        context,
+        command.require_debug_isolation,
+        owner_home.as_deref(),
+    );
     let coordination_paths =
         HostCoordinationPaths::new(router_root.join("host.sock"), router_root.join("host.lock"));
     if command.runs_foreground() {
         let provider_launches = external_provider_launches(&command)?;
         return foreground_launch::run_foreground_host(
             foreground_launch::ForegroundHostInputs {
+                owner_human_id: command.owner_human_id.clone(),
                 router_root,
-                port: command.port.unwrap_or_else(|| {
-                    if cfg!(all(debug_assertions, not(test)))
-                        && context.env_var(crate::USE_HOME_DEFAULT_ENV).is_none()
-                    {
-                        18787
-                    } else {
-                        DEFAULT_HOST_PORT
-                    }
-                }),
-                mcp_bind: command.mcp_bind.unwrap_or_else(|| {
-                    default_mcp_bind(
-                        cfg!(all(debug_assertions, not(test)))
-                            && context.env_var(crate::USE_HOME_DEFAULT_ENV).is_none(),
-                    )
-                }),
+                launch_mode,
+                owner_home,
+                port: command.port.unwrap_or(launch_mode.default_port()),
+                mcp_bind: command
+                    .mcp_bind
+                    .unwrap_or(default_mcp_bind(launch_mode.is_isolated())),
                 provider_operation_retention_days: command.provider_operation_retention_days,
                 coordination_paths,
                 external_provider_launches: provider_launches,
@@ -327,6 +340,16 @@ fn external_provider_launches(
     Ok(launches)
 }
 
+fn validate_router_root(router_root: &Path) -> Result<(), HostCommandError> {
+    if router_root
+        .components()
+        .any(|component| component == Component::ParentDir)
+    {
+        return Err(HostCommandError::RouterRootParentSegment);
+    }
+    Ok(())
+}
+
 pub(crate) const fn default_mcp_bind(isolated_debug: bool) -> SocketAddr {
     if isolated_debug {
         SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 18788)
@@ -371,10 +394,20 @@ pub enum HostCommandError {
     OperationFailed(String),
     #[error(transparent)]
     DebugProfile(#[from] codex_native_integration::DebugProfileError),
+    #[error("isolated Host requires a readable debug profile at {path}: {source}")]
+    IsolatedDebugProfile {
+        path: PathBuf,
+        #[source]
+        source: codex_native_integration::DebugProfileError,
+    },
     #[error("failed resolving host router root: {0}")]
     RouterRoot(String),
+    #[error("host router root must not contain a '..' path segment")]
+    RouterRootParentSegment,
     #[error("HOME and CODEX_HOME are unavailable")]
     CodexHomeUnavailable,
+    #[error("isolated Host cannot verify the owner home from the passwd entry")]
+    OwnerHomeUnavailable,
     #[error("invalid debug app-server socket: {0}")]
     AppServerSocket(String),
     #[error("CODEX_ROUTER_DEBUG_LAUNCHCTL must be an absolute path")]
@@ -387,8 +420,6 @@ pub enum HostCommandError {
     DesktopLaunchPolicy(#[from] codex_native_integration::DesktopLaunchPolicyError),
     #[error(transparent)]
     Operator(#[from] OperatorClientError),
-    #[error(transparent)]
-    ControlSocket(#[from] codex_native_integration::RouterControlSocketError),
     #[error(transparent)]
     Runtime(#[from] codex_router_host::HostError),
 }
@@ -460,5 +491,51 @@ mod tests {
             ])
             .is_err()
         );
+    }
+
+    #[test]
+    fn owner_human_id_override_is_validated_at_cli_boundary() {
+        let command = HostCommand::parse(vec![
+            OsString::from("--owner-human-id"),
+            OsString::from("chosen-owner"),
+        ])
+        .expect("valid owner id");
+        assert_eq!(
+            command
+                .owner_human_id
+                .as_ref()
+                .map(message_board::HumanId::as_str),
+            Some("chosen-owner")
+        );
+        assert!(
+            HostCommand::parse(vec![OsString::from("--owner-human-id"), OsString::from("")])
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn router_root_parent_segment_is_a_typed_error() {
+        assert!(matches!(
+            validate_router_root(Path::new("/tmp/private/../router")),
+            Err(HostCommandError::RouterRootParentSegment)
+        ));
+    }
+
+    #[tokio::test]
+    async fn claude_upstream_override_requires_debug_isolation_before_launch() {
+        let context = CliContext::new(vec![(
+            "CODEX_ROUTER_DEBUG_CLAUDE_UPSTREAM_BASE_URL".to_owned(),
+            "http://127.0.0.1:18888".to_owned(),
+        )]);
+        let command = HostCommand::parse(Vec::new()).expect("default Host command");
+        let error = run_host_command(&mut Vec::new(), command, &context, None)
+            .await
+            .expect_err("a Claude endpoint override requires isolated debug Host mode");
+
+        assert!(matches!(
+            error,
+            HostCommandError::RouterRoot(message)
+                if message == "debug Claude upstream override requires --require-debug-isolation in a debug build"
+        ));
     }
 }

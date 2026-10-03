@@ -7,7 +7,10 @@ pub use live_session_ownership_check::{LiveSessionOwnership, LiveSessionOwnershi
 mod app_server_shutdown;
 mod child_diagnostics;
 mod claude_code_peer_delivery_route;
+mod claude_provider_launch_environment;
 mod codex_conversation_recording_composition;
+#[cfg(test)]
+mod host_manifest_publication_tests;
 pub use claude_code_peer_delivery_route::ClaudeCodePeerDeliveryRoute;
 mod claude_code_peer_scheduled_runs;
 mod codex_update_preparation;
@@ -18,7 +21,15 @@ mod provider_acp_delivery_route;
 mod provider_acp_message_fifo;
 mod provider_acp_route_claim;
 mod provider_queue_operation_registry;
-pub use provider_acp_delivery_route::ProviderAcpDeliveryRoute;
+mod provider_session_command_port;
+pub use provider_queue_operation_registry::{ProviderQueueCancellationError, ProviderQueuedInput};
+pub use provider_session_command_port::HostSessionCommandPort;
+mod provider_model_catalog;
+mod provider_session_event_sink;
+pub use provider_acp_delivery_route::{
+    ProviderAcpDeliveryRoute, ProviderCancelActiveTurnError, ProviderPromptContentsError,
+    ProviderQueueAdmissionError, ProviderSteerContentsError,
+};
 mod provider_acp_scheduled_runs;
 mod provider_acp_session_loading;
 pub use external_provider_runtime::{
@@ -26,7 +37,9 @@ pub use external_provider_runtime::{
     ExternalProviderPromptOutcome, ExternalProviderRuntime, ExternalProviderRuntimeError,
 };
 mod external_provider_supervisor;
-pub use external_provider_supervisor::{ExternalProviderBinding, ExternalProviderSupervisor};
+pub use external_provider_supervisor::{
+    ExternalProviderBinding, ExternalProviderSupervisor, ProviderPromptContentsRequest,
+};
 mod host_configuration;
 mod host_replacement_activation;
 mod host_singleton_authority;
@@ -37,8 +50,10 @@ mod managed_app_server;
 mod operator_connection;
 mod operator_messages;
 mod owned_router;
+mod owner_identity_resolution;
 mod process_group_child;
 mod provider_configuration_file;
+mod router_credential_migration;
 pub use provider_configuration_file::{
     ProviderConfigurationEntries, ProviderConfigurationEntry, ProviderConfigurationError,
     ProviderConfigurationFile,
@@ -66,6 +81,7 @@ pub use managed_app_server::AppServerChild;
 pub use managed_app_server::AppServerLaunchPlan;
 pub use managed_app_server::AppServerReadiness;
 pub use managed_app_server::AppServerReadinessError;
+pub use managed_app_server::RemoteControlServerName;
 
 pub use codex_update_preparation::UpdateDeadlineError;
 pub use codex_update_preparation::UpdateDeadlines;
@@ -127,6 +143,7 @@ pub use router_executable_observation::{RouterExecutableObserver, RouterExecutab
 mod backend_publication;
 pub use backend_publication::BackendPublication;
 mod collaboration_runtime;
+pub(crate) use collaboration_runtime::HostCollaborationInputs;
 pub use collaboration_runtime::{
     BackendSchemaEvidence, CollaborationRuntime, CollaborationRuntimeInputs,
     ExternalProviderLaunchBinding,

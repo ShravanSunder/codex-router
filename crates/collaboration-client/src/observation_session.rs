@@ -2,49 +2,15 @@
 use crate::{ClientError, ControlClient};
 use codex_native_integration::{NativeConnectionError, NativeProtocolConnection};
 use collaboration_protocol::{
-    ChannelDescription, CodexGeneration, EndpointAvailability, EndpointId, EndpointRef, SessionId,
-    SessionRef,
+    BoundedObservationRequest, BoundedObservationResult, ChannelDescription, CodexGeneration,
+    EndpointAvailability, EndpointId, EndpointRef, ObservationEndReason, SessionId, SessionRef,
 };
-use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{path::Path, time::Duration};
 use tokio_util::sync::CancellationToken;
 
 const MAX_BOUNDED_EVENTS: usize = 4096;
 const MAX_BOUNDED_BYTES: usize = 1_048_576;
-
-#[derive(JsonSchema, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum ObservationEndReason {
-    DeadlineReached,
-    ResultLimitReached,
-    CallerCancelled,
-    BackendDisconnected,
-}
-
-#[derive(JsonSchema, Clone, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct BoundedObservationResult {
-    pub target: SessionRef,
-    pub generation: CodexGeneration,
-    pub attached: bool,
-    pub events: Vec<Value>,
-    pub end_reason: ObservationEndReason,
-    pub continuation_gap: bool,
-}
-
-#[derive(JsonSchema, Clone, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct BoundedObservationRequest {
-    pub target: SessionRef,
-    #[schemars(range(min = 1))]
-    pub timeout_seconds: u64,
-    #[schemars(range(min = 1, max = 4096))]
-    pub max_events: usize,
-    #[schemars(range(min = 1, max = 1048576))]
-    pub max_bytes: usize,
-}
 
 pub struct NativeObservation {
     connection: NativeProtocolConnection,
@@ -64,6 +30,13 @@ impl NativeObservation {
         cancel: CancellationToken,
     ) -> Result<BoundedObservationResult, crate::OperationError> {
         let target = request.target.clone();
+        if request.after_sequence.is_some() || request.epoch.is_some() {
+            return Err(crate::OperationError::before_dispatch(
+                "observation-validation",
+                Some(target),
+                ClientError::InvalidRequest("paging is available only for provider Sessions"),
+            ));
+        }
         validate_observation_bounds(&request).map_err(|source| {
             crate::OperationError::before_dispatch(
                 "observation-validation",
@@ -162,7 +135,7 @@ impl NativeObservation {
         .await
     }
 
-    async fn attach_with_control_context(
+    pub(crate) async fn attach_with_control_context(
         directory: &Path,
         mut control: ControlClient,
         target: SessionRef,
@@ -333,7 +306,7 @@ impl NativeObservation {
             .await
     }
 
-    async fn collect_until(
+    pub(crate) async fn collect_until(
         mut self,
         deadline: tokio::time::Instant,
         max_events: usize,
@@ -381,11 +354,14 @@ impl NativeObservation {
             events,
             end_reason,
             continuation_gap,
+            epoch: None,
         })
     }
 }
 
-fn validate_observation_bounds(request: &BoundedObservationRequest) -> Result<(), ClientError> {
+pub(crate) fn validate_observation_bounds(
+    request: &BoundedObservationRequest,
+) -> Result<(), ClientError> {
     if request.timeout_seconds == 0
         || request.max_events == 0
         || request.max_events > MAX_BOUNDED_EVENTS
@@ -430,6 +406,8 @@ mod bounded_observation_tests {
             timeout_seconds,
             max_events,
             max_bytes,
+            after_sequence: None,
+            epoch: None,
         }
     }
 
@@ -478,5 +456,24 @@ mod bounded_observation_tests {
         assert_eq!(failure.effect, crate::OperationEffect::None);
         assert!(target.is_some());
         assert!(turn_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn native_observation_rejects_provider_paging_before_discovery() {
+        let mut paged = request(1, 1, 1);
+        paged.after_sequence = Some(2);
+        paged.epoch = Some(1);
+        let error = NativeObservation::observe_bounded(
+            std::path::Path::new("/path-that-must-not-be-read"),
+            paged,
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("native paging must be rejected");
+        let (failure, _, _) = error.into_parts();
+        assert_eq!(
+            failure.message,
+            "invalid collaboration request: paging is available only for provider Sessions"
+        );
     }
 }

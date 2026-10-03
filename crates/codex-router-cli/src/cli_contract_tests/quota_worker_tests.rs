@@ -8,11 +8,18 @@ fn background_quota_refresh_worker_runs_immediate_cycle_without_waiting_for_inte
     let secret_root = test_root.path().join("secrets");
     let state = must_ok(SqliteStateStore::open(&state_path));
     let account_id = account_id("acct_background_refresh");
-    let account = AccountRecord::new(account_id.clone(), "background", AccountStatus::Enabled)
-        .with_active_credential_generation(1);
+    let account = AccountRecord::new(
+        codex_router_core::provider::Provider::Openai,
+        account_id.clone(),
+        "background",
+        AccountStatus::Enabled,
+    )
+    .with_active_credential_generation(1);
     must_ok(AccountStateRepository::upsert_account(&state, &account));
-    let secrets = must_ok(FileSecretStore::open(&secret_root));
-    let bundle_key = must_ok(account_credential_bundle_key(&account_id, 1));
+    let secrets = must_ok(
+        codex_router_secret_store::test_support::open_encrypted_credential_store(&secret_root),
+    );
+    let bundle_key = must_ok(openai_account_credential_bundle_key(&account_id, 1));
     must_ok(
         secrets.write_secret(
             &bundle_key,
@@ -66,11 +73,18 @@ fn background_quota_refresh_worker_start_does_not_wait_for_slow_provider() {
     let secret_root = test_root.path().join("secrets");
     let state = must_ok(SqliteStateStore::open(&state_path));
     let account_id = account_id("acct_background_refresh_slow_provider");
-    let account = AccountRecord::new(account_id.clone(), "background", AccountStatus::Enabled)
-        .with_active_credential_generation(1);
+    let account = AccountRecord::new(
+        codex_router_core::provider::Provider::Openai,
+        account_id.clone(),
+        "background",
+        AccountStatus::Enabled,
+    )
+    .with_active_credential_generation(1);
     must_ok(AccountStateRepository::upsert_account(&state, &account));
-    let secrets = must_ok(FileSecretStore::open(&secret_root));
-    let bundle_key = must_ok(account_credential_bundle_key(&account_id, 1));
+    let secrets = must_ok(
+        codex_router_secret_store::test_support::open_encrypted_credential_store(&secret_root),
+    );
+    let bundle_key = must_ok(openai_account_credential_bundle_key(&account_id, 1));
     must_ok(
         secrets.write_secret(
             &bundle_key,
@@ -116,11 +130,18 @@ fn background_quota_refresh_worker_uses_fresh_time_for_each_cycle() {
     let secret_root = test_root.path().join("secrets");
     let state = must_ok(SqliteStateStore::open(&state_path));
     let account_id = account_id("acct_background_refresh_fresh_time");
-    let account = AccountRecord::new(account_id.clone(), "background", AccountStatus::Enabled)
-        .with_active_credential_generation(1);
+    let account = AccountRecord::new(
+        codex_router_core::provider::Provider::Openai,
+        account_id.clone(),
+        "background",
+        AccountStatus::Enabled,
+    )
+    .with_active_credential_generation(1);
     must_ok(AccountStateRepository::upsert_account(&state, &account));
-    let secrets = must_ok(FileSecretStore::open(&secret_root));
-    let bundle_key = must_ok(account_credential_bundle_key(&account_id, 1));
+    let secrets = must_ok(
+        codex_router_secret_store::test_support::open_encrypted_credential_store(&secret_root),
+    );
+    let bundle_key = must_ok(openai_account_credential_bundle_key(&account_id, 1));
     must_ok(
         secrets.write_secret(
             &bundle_key,
@@ -191,14 +212,17 @@ fn background_quota_refresh_worker_reports_refresh_failures() {
     let account_id = account_id("acct_background_refresh_diagnostics");
     let unsafe_account_label = "person@example.com";
     let account = AccountRecord::new(
+        codex_router_core::provider::Provider::Openai,
         account_id.clone(),
         unsafe_account_label,
         AccountStatus::Enabled,
     )
     .with_active_credential_generation(1);
     must_ok(AccountStateRepository::upsert_account(&state, &account));
-    let secrets = must_ok(FileSecretStore::open(&secret_root));
-    let bundle_key = must_ok(account_credential_bundle_key(&account_id, 1));
+    let secrets = must_ok(
+        codex_router_secret_store::test_support::open_encrypted_credential_store(&secret_root),
+    );
+    let bundle_key = must_ok(openai_account_credential_bundle_key(&account_id, 1));
     must_ok(
         secrets.write_secret(
             &bundle_key,
@@ -264,12 +288,19 @@ fn cli_credential_resolver_refreshes_expired_bundle_through_runtime_wrapper() {
     must_ok(fs::create_dir_all(&router_root));
     let state = must_ok(SqliteStateStore::open(&router_root.join("state.sqlite")));
     let account_id = account_id("acct_cli_runtime_refresh");
-    let account = AccountRecord::new(account_id.clone(), "runtime", AccountStatus::Enabled)
-        .with_active_credential_generation(1);
+    let account = AccountRecord::new(
+        codex_router_core::provider::Provider::Openai,
+        account_id.clone(),
+        "runtime",
+        AccountStatus::Enabled,
+    )
+    .with_active_credential_generation(1);
     must_ok(AccountStateRepository::upsert_account(&state, &account));
     let secrets_root = router_root.join("secrets");
-    let secrets = must_ok(FileSecretStore::open(&secrets_root));
-    let expired_key = must_ok(account_credential_bundle_key(&account_id, 1));
+    let secrets = must_ok(
+        codex_router_secret_store::test_support::open_encrypted_credential_store(&secrets_root),
+    );
+    let expired_key = must_ok(openai_account_credential_bundle_key(&account_id, 1));
     must_ok(
         secrets.write_secret(
             &expired_key,
@@ -298,7 +329,11 @@ fn cli_credential_resolver_refreshes_expired_bundle_through_runtime_wrapper() {
         refresh_client.clone(),
     ));
 
-    let resolved = must_ok(resolver.resolve_provider_credentials(&account_id));
+    let resolved =
+        must_ok(resolver.resolve_provider_credentials(
+            &account_id,
+            codex_router_core::provider::Provider::Openai,
+        ));
 
     assert_eq!(
         resolved.access_token().expose_secret(),

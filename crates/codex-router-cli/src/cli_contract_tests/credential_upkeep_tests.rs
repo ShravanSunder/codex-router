@@ -1,6 +1,8 @@
 use super::*;
 
 use crate::credential_upkeep_worker::start_background_credential_upkeep_worker_with_client_and_clock;
+use codex_router_core::provider::Provider;
+use codex_router_secret_store::credential_bundle::CredentialBundle;
 
 #[derive(Clone)]
 struct RecordingUpkeepRefreshClient {
@@ -43,7 +45,9 @@ fn enabled_exhausted_idle_account_renews_across_simulated_days_without_quota_pro
     let state_path = test_root.path().join("state.sqlite");
     let secret_root = test_root.path().join("secrets");
     let state = must_ok(SqliteStateStore::open(&state_path));
-    let secrets = must_ok(FileSecretStore::open(&secret_root));
+    let secrets = must_ok(
+        codex_router_secret_store::test_support::open_encrypted_credential_store(&secret_root),
+    );
     let enabled_id = account_id("upkeep-enabled");
     let disabled_id = account_id("upkeep-disabled");
     for (account_id, status) in [
@@ -52,10 +56,15 @@ fn enabled_exhausted_idle_account_renews_across_simulated_days_without_quota_pro
     ] {
         must_ok(AccountStateRepository::upsert_account(
             &state,
-            &AccountRecord::new(account_id.clone(), "upkeep", status)
-                .with_active_credential_generation(1),
+            &AccountRecord::new(
+                codex_router_core::provider::Provider::Openai,
+                account_id.clone(),
+                "upkeep",
+                status,
+            )
+            .with_active_credential_generation(1),
         ));
-        let key = must_ok(account_credential_bundle_key(&account_id, 1));
+        let key = must_ok(openai_account_credential_bundle_key(&account_id, 1));
         must_ok(
             secrets.write_secret(
                 &key,
@@ -89,7 +98,7 @@ fn enabled_exhausted_idle_account_renews_across_simulated_days_without_quota_pro
     let worker = must_ok(
         start_background_credential_upkeep_worker_with_client_and_clock(
             &state_path,
-            &secret_root,
+            secrets,
             client,
             move || clock.load(Ordering::SeqCst),
         ),
@@ -119,6 +128,156 @@ fn enabled_exhausted_idle_account_renews_across_simulated_days_without_quota_pro
         .expect("disabled account should remain");
     assert_eq!(disabled.status(), AccountStatus::Disabled);
     assert_eq!(disabled.active_credential_generation(), Some(1));
+}
+
+#[derive(Clone)]
+struct RecordingClaudeUpkeepRefreshClient {
+    observed_account_ids: mpsc::Sender<AccountId>,
+}
+
+impl CredentialRefreshClient for RecordingClaudeUpkeepRefreshClient {
+    fn refresh_credentials(
+        &self,
+        _account_id: &AccountId,
+        _refresh_token: &SecretString,
+    ) -> Result<AccountCredentialBundle, codex_router_auth::resolver::CredentialRefreshFailure>
+    {
+        Err(codex_router_auth::resolver::CredentialRefreshFailure::ambiguous(
+            codex_router_state::credential_maintenance::CredentialFailureClass::ProviderOutcomeAmbiguous,
+        ))
+    }
+
+    fn refresh_provider_credentials(
+        &self,
+        provider: Provider,
+        account_id: &AccountId,
+        refresh_token: &SecretString,
+    ) -> Result<CredentialBundle, codex_router_auth::resolver::CredentialRefreshFailure> {
+        assert_eq!(provider, Provider::Claude);
+        assert_eq!(
+            refresh_token.expose_secret(),
+            format!("claude-refresh-{}", account_id.as_str())
+        );
+        self.observed_account_ids
+            .send(account_id.clone())
+            .expect("Claude refresh call should be observed");
+        CredentialBundle::new_claude(
+            SecretString::new(format!("claude-access-{}", account_id.as_str())),
+            SecretString::new(format!("claude-rotated-{}", account_id.as_str())),
+            10_000_000,
+        )
+        .map_err(|_| {
+            codex_router_auth::resolver::CredentialRefreshFailure::ambiguous(
+                codex_router_state::credential_maintenance::CredentialFailureClass::MalformedResponse,
+            )
+        })
+    }
+}
+
+#[test]
+fn credential_upkeep_refreshes_exhausted_and_idle_claude_accounts() {
+    let test_root = TestRoot::new("credential-upkeep-exhausted-idle-claude");
+    must_ok(fs::create_dir(test_root.path()));
+    let router_root = test_root.path().join("router");
+    must_ok(fs::create_dir(&router_root));
+    ensure_async_state_schema(&router_root);
+    let state_path = router_root.join("state.sqlite");
+    let secret_root = router_root.join("secrets");
+    let state = must_ok(SqliteStateStore::open(&state_path));
+    let secrets = must_ok(
+        codex_router_secret_store::test_support::open_encrypted_credential_store(&secret_root),
+    );
+    let exhausted_id = account_id("upkeep-claude-exhausted");
+    let idle_id = account_id("upkeep-claude-idle");
+
+    for (account_id, label) in [
+        (&exhausted_id, "exhausted Claude"),
+        (&idle_id, "idle Claude"),
+    ] {
+        must_ok(AccountStateRepository::upsert_account(
+            &state,
+            &AccountRecord::new(
+                Provider::Claude,
+                account_id.clone(),
+                label,
+                AccountStatus::Enabled,
+            )
+            .with_active_credential_generation(1),
+        ));
+        let credential_key = must_ok(
+            codex_router_secret_store::account_tokens::provider_credential_bundle_key(
+                Provider::Claude,
+                account_id,
+                1,
+            ),
+        );
+        let bundle = must_ok(CredentialBundle::new_claude(
+            SecretString::new(format!("claude-access-{}", account_id.as_str())),
+            SecretString::new(format!("claude-refresh-{}", account_id.as_str())),
+            10_000_000,
+        ));
+        must_ok(secrets.write_secret(&credential_key, &must_ok(bundle.to_secret_string())));
+    }
+    must_ok(QuotaSnapshotRepository::upsert_snapshot(
+        &state,
+        &PersistedQuotaSnapshot::new(exhausted_id.clone(), QuotaSnapshotSource::MockEndpoint)
+            .with_observed_unix_seconds(1_000)
+            .with_route_band("claude_messages", 0),
+    ));
+    drop(state);
+
+    let (observed_sender, observed_receiver) = mpsc::channel();
+    let worker = must_ok(
+        start_background_credential_upkeep_worker_with_client_and_clock(
+            &state_path,
+            secrets.clone(),
+            RecordingClaudeUpkeepRefreshClient {
+                observed_account_ids: observed_sender,
+            },
+            || 1_000,
+        ),
+    );
+    let mut observed_accounts = [
+        must_ok(observed_receiver.recv_timeout(Duration::from_secs(2)))
+            .as_str()
+            .to_owned(),
+        must_ok(observed_receiver.recv_timeout(Duration::from_secs(2)))
+            .as_str()
+            .to_owned(),
+    ];
+    observed_accounts.sort();
+    let mut expected_accounts = [
+        exhausted_id.as_str().to_owned(),
+        idle_id.as_str().to_owned(),
+    ];
+    expected_accounts.sort();
+    assert_eq!(observed_accounts, expected_accounts);
+    wait_for_upkeep_generation(&state_path, &exhausted_id, 2);
+    wait_for_upkeep_generation(&state_path, &idle_id, 2);
+    drop(worker);
+
+    for account_id in [&exhausted_id, &idle_id] {
+        let credential_key = must_ok(
+            codex_router_secret_store::account_tokens::provider_credential_bundle_key(
+                Provider::Claude,
+                account_id,
+                2,
+            ),
+        );
+        let stored = must_ok(secrets.read_secret(&credential_key));
+        let refreshed = must_ok(CredentialBundle::from_secret_string(
+            Provider::Claude,
+            stored,
+        ));
+        assert_eq!(refreshed.provider(), Provider::Claude);
+        assert_eq!(
+            refreshed
+                .refresh_token()
+                .expect("Claude account remains renewable")
+                .expose_secret(),
+            format!("claude-rotated-{}", account_id.as_str())
+        );
+    }
 }
 
 #[derive(Clone)]
@@ -157,14 +316,21 @@ fn upkeep_shutdown_drains_in_flight_rotation_before_returning() {
     let state_path = test_root.path().join("state.sqlite");
     let secret_root = test_root.path().join("secrets");
     let state = must_ok(SqliteStateStore::open(&state_path));
-    let secrets = must_ok(FileSecretStore::open(&secret_root));
+    let secrets = must_ok(
+        codex_router_secret_store::test_support::open_encrypted_credential_store(&secret_root),
+    );
     let account_id = account_id("upkeep-shutdown");
     must_ok(AccountStateRepository::upsert_account(
         &state,
-        &AccountRecord::new(account_id.clone(), "shutdown", AccountStatus::Enabled)
-            .with_active_credential_generation(1),
+        &AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
+            account_id.clone(),
+            "shutdown",
+            AccountStatus::Enabled,
+        )
+        .with_active_credential_generation(1),
     ));
-    let active_key = must_ok(account_credential_bundle_key(&account_id, 1));
+    let active_key = must_ok(openai_account_credential_bundle_key(&account_id, 1));
     must_ok(
         secrets.write_secret(
             &active_key,
@@ -184,7 +350,7 @@ fn upkeep_shutdown_drains_in_flight_rotation_before_returning() {
     let worker = must_ok(
         start_background_credential_upkeep_worker_with_client_and_clock(
             &state_path,
-            &secret_root,
+            secrets,
             HeldUpkeepRefreshClient {
                 entered_sender,
                 release_receiver: Arc::new(Mutex::new(release_receiver)),
@@ -244,7 +410,9 @@ fn upkeep_shutdown_does_not_admit_a_queued_account_after_stop() {
     let state_path = test_root.path().join("state.sqlite");
     let secret_root = test_root.path().join("secrets");
     let state = must_ok(SqliteStateStore::open(&state_path));
-    let secrets = must_ok(FileSecretStore::open(&secret_root));
+    let secrets = must_ok(
+        codex_router_secret_store::test_support::open_encrypted_credential_store(&secret_root),
+    );
     let account_ids = (0..5)
         .map(|index| account_id(&format!("queued-upkeep-{index}")))
         .collect::<Vec<_>>();
@@ -252,13 +420,14 @@ fn upkeep_shutdown_does_not_admit_a_queued_account_after_stop() {
         must_ok(AccountStateRepository::upsert_account(
             &state,
             &AccountRecord::new(
+                codex_router_core::provider::Provider::Openai,
                 account_id.clone(),
                 format!("queued-{index}"),
                 AccountStatus::Enabled,
             )
             .with_active_credential_generation(1),
         ));
-        let active_key = must_ok(account_credential_bundle_key(account_id, 1));
+        let active_key = must_ok(openai_account_credential_bundle_key(account_id, 1));
         must_ok(
             secrets.write_secret(
                 &active_key,
@@ -274,6 +443,7 @@ fn upkeep_shutdown_does_not_admit_a_queued_account_after_stop() {
         );
     }
     drop(state);
+    let credential_store = secrets.clone();
     drop(secrets);
 
     let (entered_sender, entered_receiver) = mpsc::channel();
@@ -281,7 +451,7 @@ fn upkeep_shutdown_does_not_admit_a_queued_account_after_stop() {
     let worker = must_ok(
         start_background_credential_upkeep_worker_with_client_and_clock(
             &state_path,
-            &secret_root,
+            credential_store,
             HeldQueuedUpkeepRefreshClient {
                 entered_sender,
                 release_receiver: Arc::new(Mutex::new(release_receiver)),

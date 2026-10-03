@@ -1,5 +1,6 @@
 //! Quota status terminal presentation.
 
+mod quota_account_options;
 mod quota_browse_rendering;
 mod quota_floor_editor;
 mod quota_reset_detail_content;
@@ -18,6 +19,11 @@ mod quota_floor_editor_presentation_test;
 #[cfg(test)]
 mod quota_reset_presentation_test;
 
+pub(crate) use quota_account_options::CreditUsagePolicySaveError;
+pub(crate) use quota_account_options::CreditUsagePolicySaver;
+pub(crate) use quota_account_options::CreditUsageRefreshError;
+pub(crate) use quota_account_options::CreditUsageRefresher;
+pub(crate) use quota_account_options::credit_usage_compact_summary;
 pub(crate) use quota_floor_editor::WeeklyQuotaFloorSaveError;
 pub(crate) use quota_floor_editor::WeeklyQuotaFloorSaver;
 pub(crate) use quota_status_entrypoint::run_quota_status_view;

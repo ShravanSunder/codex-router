@@ -1,6 +1,6 @@
 use super::{
     ConversationClient, ConversationClientError, ConversationCreateInput, ConversationTransport,
-    advertised_conversation_transport,
+    advertised_conversation_transport, codex_create_actors,
 };
 use collaboration_protocol::EndpointDescription;
 use serde_json::json;
@@ -176,6 +176,43 @@ fn conversation_create_defaults_approver_to_the_caller() {
 }
 
 #[test]
+fn typed_human_create_is_provider_only_and_legacy_session_json_remains_valid() {
+    let mut input: ConversationCreateInput = serde_json::from_value(json!({
+        "operationId":collaboration_protocol::OperationId::generate(),
+        "endpoint":{"serviceId":"019f0000-0000-7000-8000-000000000001","endpointId":"claude-local"},
+        "workingDirectory":"/tmp/project","access":"workspace-write",
+        "createdBy":{"kind":"human","humanId":"fixture-owner"},
+        "approver":{"kind":"human","humanId":"fixture-owner"}
+    }))
+    .unwrap_or_else(|error| panic!("typed Human create input: {error}"));
+    assert!(
+        ConversationClient::validate_create_input(&input, std::time::Duration::from_secs(1))
+            .is_ok()
+    );
+    assert!(matches!(
+        codex_create_actors(&input),
+        Err(ConversationClientError::UnsupportedInput { field: "createdBy", fix, .. })
+            if fix.contains("provider endpoints only")
+    ));
+    let session = json!({
+        "endpoint":{"serviceId":"019f0000-0000-7000-8000-000000000001","endpointId":"codex-local"},
+        "sessionId":"caller"
+    });
+    input.created_by = serde_json::from_value(session.clone())
+        .unwrap_or_else(|error| panic!("legacy SessionRef create actor: {error}"));
+    assert!(matches!(
+        codex_create_actors(&input),
+        Err(ConversationClientError::UnsupportedInput { field: "approver", fix, .. })
+            if fix.contains("provider endpoints only")
+    ));
+    input.approver = Some(
+        serde_json::from_value(session)
+            .unwrap_or_else(|error| panic!("legacy SessionRef approver: {error}")),
+    );
+    assert!(codex_create_actors(&input).is_ok());
+}
+
+#[test]
 fn conversation_transport_follows_advertised_channel() {
     let acp = endpoint(json!([
         {"kind":"nativeCodex","transport":"unixWebSocket","path":"codex-native.sock","schemaDigest":null,"generation":null},
@@ -205,7 +242,7 @@ fn conversation_transport_follows_advertised_channel() {
 #[tokio::test]
 async fn provider_create_rejects_codex_only_inputs_before_mutation() {
     use collaboration_service::{ServiceIdentity, serve_control_connection};
-    for field in ["model", "effort", "fork", "rootMessageId"] {
+    for field in ["fork", "rootMessageId"] {
         let (client, server) =
             tokio::net::UnixStream::pair().unwrap_or_else(|error| panic!("socket pair: {error}"));
         let identity = ServiceIdentity::new(
@@ -225,8 +262,6 @@ async fn provider_create_rejects_codex_only_inputs_before_mutation() {
             "createdBy":{"endpoint":{"serviceId":"019f0000-0000-7000-8000-000000000001","endpointId":"codex-local"},"sessionId":"caller"}
         })).unwrap_or_else(|error| panic!("create input: {error}"));
         match field {
-            "model" => input.model = Some("gpt-6-sol".to_owned()),
-            "effort" => input.effort = Some("medium".to_owned()),
             "fork" => {
                 input.fork = Some(
                     "source-thread"
@@ -326,6 +361,30 @@ async fn provider_create_wait_returns_the_target_from_exact_operation()
                 })
             })
         }
+        fn resume(
+            &self,
+            _: collaboration_protocol::ConversationResumeRequest,
+        ) -> ProviderConversationFuture<'_, ConversationOperationSubmission> {
+            let operation = self.admitted.clone();
+            Box::pin(async move {
+                Ok(ConversationOperationSubmission {
+                    admission: ConversationAdmissionState::Admitted,
+                    operation,
+                })
+            })
+        }
+        fn close(
+            &self,
+            _: collaboration_protocol::ConversationCloseRequest,
+        ) -> ProviderConversationFuture<'_, ConversationOperationSubmission> {
+            let operation = self.admitted.clone();
+            Box::pin(async move {
+                Ok(ConversationOperationSubmission {
+                    admission: ConversationAdmissionState::Admitted,
+                    operation,
+                })
+            })
+        }
         fn prompt(
             &self,
             _: ConversationPromptRequest,
@@ -366,11 +425,16 @@ async fn provider_create_wait_returns_the_target_from_exact_operation()
             let wait_delay = self.wait_delay;
             Box::pin(async move {
                 tokio::time::sleep(wait_delay).await;
+                let target = operation.target.clone();
                 Ok(ConversationOperationWaitResult {
                     operation,
-                    output: ConversationOperationWaitOutput::OutputUnavailable {
-                        reason:
-                            collaboration_protocol::ConversationOutputUnavailableReason::NotRetained,
+                    output: ConversationOperationWaitOutput::Available {
+                        settlement: serde_json::from_value(json!({
+                            "kind":"created","target":target,
+                            "effectiveSettings":{"requestedPolicy":{"access":"workspace-write"},
+                                "mappingStatus":"verified","authentication":"authenticated"}
+                        }))
+                        .expect("created settlement"),
                     },
                 })
             })
@@ -436,6 +500,10 @@ async fn provider_create_wait_returns_the_target_from_exact_operation()
         != (ConversationCreateOutcome::Created {
             operation_id: operation_id.clone(),
             target: serde_json::from_value(target)?,
+            effective_settings: Some(serde_json::from_value(json!({
+                "requestedPolicy":{"access":"workspace-write"},
+                "mappingStatus":"verified","authentication":"authenticated"
+            }))?),
         })
         || create_calls.load(Ordering::SeqCst) != 1
         || wait_calls.load(Ordering::SeqCst) != 1

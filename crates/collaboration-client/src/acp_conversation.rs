@@ -3,12 +3,10 @@ use crate::conversation_contract::{
     ConversationCreatePromptError, ConversationCreatePromptRequest, ConversationCreatePromptResult,
     ConversationCreateRequest, ConversationCreateResult, ConversationEnd, ConversationEvent,
     ConversationPromptRequest, ExistingConversationPromptError, ExistingConversationPromptRequest,
-    ExistingConversationPromptResult,
+    ExistingConversationPromptResult, PublicPromptContent,
 };
 use crate::{AcpTransportConnection, ClientError};
-use collaboration_protocol::{
-    AcpSchemaCatalog, EndpointId, EndpointRef, MessageContent, SessionRef, render_message,
-};
+use collaboration_protocol::{AcpSchemaCatalog, EndpointId, EndpointRef, SessionRef};
 use serde_json::{Value, json};
 use std::{collections::BTreeSet, path::Path, time::Duration};
 use tokio::{
@@ -354,7 +352,10 @@ impl AcpConversation {
                 ));
             }
             self.target = Some(target.clone());
-            let params = json!({"sessionId":id,"cwd":request.cwd,"mcpServers":[],"_meta":{"codexRouter":router_metadata_effort(request.effort.as_deref())}});
+            let params = json!({"sessionId":id,"cwd":request.cwd,"mcpServers":[],"_meta":{
+                "codexRouter":router_metadata_effort(request.effort.as_deref()),
+                "router":{"sessionRef":target}
+            }});
             self.validate("LoadSessionRequest", &params)
                 .map_err(|source| {
                     crate::OperationError::before_dispatch("load", Some(target.clone()), source)
@@ -501,23 +502,13 @@ impl AcpConversation {
                 "PromptRequest",
             )
             .await?;
-        let mut deadline = tokio::time::Instant::now()
+        let deadline = tokio::time::Instant::now()
             .checked_add(timeout)
             .ok_or(ClientError::InvalidRequest("invalid prompt deadline"))?;
-        let mut end = ConversationEnd::Completed;
         loop {
             let frame = tokio::select! {
-                _=cancel.cancelled(),if end==ConversationEnd::Completed=>{
-                    end=ConversationEnd::Cancelled;
-                    self.write(&json!({"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":session}})).await?;
-                    deadline=tokio::time::Instant::now()+Duration::from_secs(30);continue;
-                },
-                _=tokio::time::sleep_until(deadline)=>{
-                    if end!=ConversationEnd::Completed{return Err(ClientError::Timeout);}
-                    end=ConversationEnd::TimedOut;
-                    self.write(&json!({"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":session}})).await?;
-                    deadline=tokio::time::Instant::now()+Duration::from_secs(30);continue;
-                },
+                _=cancel.cancelled()=>return Ok(ConversationEnd::Detached),
+                _=tokio::time::sleep_until(deadline)=>return Ok(ConversationEnd::Detached),
                 frame=self.read()=>frame?,
             };
             if frame.get("method").is_some() {
@@ -536,14 +527,13 @@ impl AcpConversation {
             let result = self.response(frame, &id, "PromptResponse")?;
             emit(ConversationEvent::PromptResult {
                 target,
-                end,
+                end: ConversationEnd::Completed,
                 result,
             })?;
-            return Ok(end);
+            return Ok(ConversationEnd::Completed);
         }
     }
-    /// Renders caller-declared public content once, then waits for the ACP
-    /// response on the selected conversation connection.
+    /// Forwards caller text without an envelope, then waits for the ACP response.
     pub async fn prompt_and_wait(
         &mut self,
         request: ConversationPromptRequest,
@@ -551,15 +541,11 @@ impl AcpConversation {
         emit: &mut impl FnMut(ConversationEvent) -> Result<(), ClientError>,
     ) -> Result<ConversationEnd, ClientError> {
         request.validate()?;
-        let target = self
-            .target
-            .as_ref()
-            .ok_or(ClientError::Protocol("ACP session not opened"))?;
-        let message = MessageContent::from(request.message);
-        let rendered = render_message(target, &message)
-            .map_err(|_| ClientError::Protocol("conversation message rendering failed"))?;
+        if self.target.is_none() {
+            return Err(ClientError::Protocol("ACP session not opened"));
+        }
         self.prompt(
-            &rendered.text,
+            conversation_prompt_text(&request.message),
             request.effort.as_deref(),
             Duration::from_secs(request.timeout_seconds),
             cancel,
@@ -567,6 +553,7 @@ impl AcpConversation {
         )
         .await
     }
+
     async fn request(
         &mut self,
         method: &str,
@@ -738,6 +725,14 @@ impl AcpConversation {
                 }
                 return Ok(value);
             }
+        }
+    }
+}
+
+fn conversation_prompt_text(message: &PublicPromptContent) -> &str {
+    match message {
+        PublicPromptContent::Agent { text, .. } | PublicPromptContent::HumanUser { text } => {
+            text.as_str()
         }
     }
 }

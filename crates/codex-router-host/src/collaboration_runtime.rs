@@ -1,5 +1,6 @@
 //! Host-owned composition of public listeners and lifecycle publication.
 use crate::BackendPublication;
+use crate::RemoteControlServerName;
 use collaboration_protocol::{
     CodexGeneration, EndpointAvailability, EndpointId, EndpointRef, NonEmptyText,
     ObservationTimestamp, ProviderKind, RouterExecutableRelation, SchemaDigest, UuidIdentity,
@@ -8,11 +9,12 @@ use collaboration_service::{
     LocalControlService, NativeRelayListener, ServiceIdentity, load_service_identity,
     new_service_uuid,
 };
-use std::{io, path::PathBuf};
+use std::{io, net::SocketAddr, path::PathBuf};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
 pub struct CollaborationRuntimeInputs {
+    pub owner_human_id: Option<message_board::HumanId>,
     pub directory: PathBuf,
     pub codex_home: PathBuf,
     pub backend_socket: PathBuf,
@@ -21,6 +23,14 @@ pub struct CollaborationRuntimeInputs {
     pub native_schema: Option<std::sync::Arc<codex_native_integration::NativeSchemaExport>>,
     /// Fixture override; normal Host starts read the owner's ~/.claude/sessions.
     pub peer_registry_directory: Option<PathBuf>,
+    /// Remote Control machine name observed when this Host started.
+    pub remote_control_server_name: Option<RemoteControlServerName>,
+}
+
+/// Host-owned startup facts that are not part of the public collaboration runtime inputs.
+pub(crate) struct HostCollaborationInputs {
+    pub collaboration_runtime: CollaborationRuntimeInputs,
+    pub router_proxy_endpoint: SocketAddr,
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExternalProviderLaunchBinding {
@@ -63,6 +73,7 @@ impl ExternalProviderLaunchBinding {
             label: NonEmptyText::try_from(label.to_owned())?,
             provider,
             launch: crate::ExternalProviderLaunch {
+                persistence_target: acp_client_runtime::ProviderPersistenceTarget::Unspecified,
                 executable,
                 arguments,
                 environment: Vec::new(),
@@ -88,7 +99,9 @@ pub struct BackendSchemaEvidence<'a> {
     pub export: &'a codex_native_integration::NativeSchemaExport,
 }
 pub struct CollaborationRuntime {
+    owner_human_id: Option<message_board::HumanId>,
     board_store: Option<std::sync::Arc<tokio::sync::Mutex<message_board_storage::BoardStore>>>,
+    subscription_delivery: Option<collaboration_service::SubscriptionDeliveryService>,
     provider_store:
         Option<std::sync::Arc<tokio::sync::Mutex<collaboration_service::ProviderOperationStore>>>,
     external_provider_supervisor: Option<std::sync::Arc<crate::ExternalProviderSupervisor>>,
@@ -182,8 +195,46 @@ impl CollaborationRuntime {
         provider_launches: Vec<crate::ExternalProviderStartup>,
         relation_receiver: tokio::sync::watch::Receiver<RouterExecutableRelation>,
     ) -> io::Result<Self> {
+        Self::start_with_optional_router_proxy_endpoint(
+            inputs,
+            provider_launches,
+            relation_receiver,
+            None,
+        )
+        .await
+    }
+
+    pub(crate) async fn start_for_host_with_router_proxy_endpoint(
+        host_inputs: HostCollaborationInputs,
+        provider_launches: Vec<crate::ExternalProviderStartup>,
+        relation_receiver: tokio::sync::watch::Receiver<RouterExecutableRelation>,
+    ) -> io::Result<Self> {
+        Self::start_with_optional_router_proxy_endpoint(
+            host_inputs.collaboration_runtime,
+            provider_launches,
+            relation_receiver,
+            Some(host_inputs.router_proxy_endpoint),
+        )
+        .await
+    }
+
+    async fn start_with_optional_router_proxy_endpoint(
+        inputs: CollaborationRuntimeInputs,
+        provider_launches: Vec<crate::ExternalProviderStartup>,
+        relation_receiver: tokio::sync::watch::Receiver<RouterExecutableRelation>,
+        router_proxy_endpoint: Option<SocketAddr>,
+    ) -> io::Result<Self> {
+        let mut owner_human_id = inputs.owner_human_id.clone();
         let service_id = load_service_identity(&inputs.directory)?;
         let service_epoch = new_service_uuid()?;
+        let machine_identity = collaboration_service::MachineIdentity::new(
+            service_id.clone(),
+            inputs
+                .remote_control_server_name
+                .as_ref()
+                .map(RemoteControlServerName::as_str),
+        )
+        .map_err(io::Error::other)?;
         let native_digest = if let Some(export) = &inputs.native_schema {
             export
                 .bundle()
@@ -232,6 +283,8 @@ impl CollaborationRuntime {
             &String::from(service_epoch.clone()),
             &String::from(control_schema.digest().clone()),
         )
+        .map_err(io::Error::other)?
+        .with_machine_identity(machine_identity.clone())
         .map_err(io::Error::other)?;
         if let Some(journal) = &journal {
             identity = identity.with_journal(std::sync::Arc::clone(journal));
@@ -253,12 +306,14 @@ impl CollaborationRuntime {
                 );
             }
         }
+        let mut automation_store = None;
         let mut settings_backend = None;
         match automation_storage::AutomationStore::open(&inputs.directory.join("automation.sqlite"))
             .await
         {
             Ok(store) => {
                 let store = std::sync::Arc::new(tokio::sync::Mutex::new(store));
+                automation_store = Some(std::sync::Arc::clone(&store));
                 let handle = collaboration_service::AutomationConfigurationHandle::default();
                 handle.suspend().await;
                 let backend = std::sync::Arc::new(crate::AutomationSettingsFile::new(
@@ -312,8 +367,10 @@ impl CollaborationRuntime {
             &mcp_url,
         )
         .await?;
+        let provider_face_endpoints = startup.endpoints.clone();
         let provider_retirements = startup.retirements;
         let external_provider_supervisor = startup.supervisor;
+        let provider_session_hub = startup.hub;
         let provider_endpoints = startup
             .endpoints
             .iter()
@@ -329,6 +386,9 @@ impl CollaborationRuntime {
                 dyn collaboration_service::ProviderConversationBackend,
             > = supervisor.clone();
             identity = identity.with_provider_conversation_backend(provider_backend);
+        }
+        if let Some(hub) = provider_session_hub.clone() {
+            identity = identity.with_provider_session_hub(hub);
         }
         let endpoint = EndpointRef {
             service_id: service_id.clone(),
@@ -346,7 +406,7 @@ impl CollaborationRuntime {
             endpoint,
             gate: publication.admission_gate(),
         };
-        let approval_broker = collaboration_service::ServiceApprovalBroker::load(
+        let approval_broker = collaboration_service::ServiceInteractionBroker::load(
             service_id.clone(),
             native_backend.clone(),
             inputs.directory.join("approval-routes.json"),
@@ -355,28 +415,55 @@ impl CollaborationRuntime {
         .map_err(io::Error::other)?;
         let unmaterialized_threads =
             std::sync::Arc::new(collaboration_service::UnmaterializedThreadHolder::new());
+        let peer_registry_directory = inputs.peer_registry_directory.clone().map_or_else(
+            crate::session_message_route_composition::default_peer_registry_directory,
+            Ok,
+        )?;
+        let identity = identity.with_claude_code_sessions(std::sync::Arc::new(
+            claude_code_peer_messaging::ClaudeCodeSessionRegistry::new(
+                peer_registry_directory.clone(),
+            ),
+        ));
         let message_routes =
             crate::session_message_route_composition::compose_session_message_routes(
-                provider_endpoints,
-                identity.endpoint_directory(),
-                native_backend.clone(),
-                std::sync::Arc::clone(&unmaterialized_threads),
-                external_provider_supervisor.clone(),
-                provider_store.clone(),
-                inputs.peer_registry_directory.clone().map_or_else(
-                    crate::session_message_route_composition::default_peer_registry_directory,
-                    Ok,
-                )?,
+                crate::session_message_route_composition::SessionMessageRouteInputs {
+                    provider_endpoints,
+                    directory: identity.endpoint_directory(),
+                    native_backend: native_backend.clone(),
+                    unmaterialized_threads: std::sync::Arc::clone(&unmaterialized_threads),
+                    provider_supervisor: external_provider_supervisor.clone(),
+                    provider_store: provider_store.clone(),
+                    peer_registry_directory,
+                },
             )?;
         let session_delivery: std::sync::Arc<dyn collaboration_service::SessionMessageDelivery> =
             message_routes.router.clone();
+        let subscription_presence: std::sync::Arc<dyn collaboration_service::TargetPresenceProbe> =
+            message_routes.router.clone();
         let scheduled_run_execution: std::sync::Arc<
             dyn collaboration_service::ScheduledRunExecution,
-        > = message_routes.router;
+        > = message_routes.router.clone();
         let provider_delivery_route = message_routes.provider_route;
-        approval_broker
-            .install_session_delivery(std::sync::Arc::clone(&session_delivery))
-            .map_err(io::Error::other)?;
+        let subscription_clock: std::sync::Arc<dyn collaboration_service::SubscriptionClock> =
+            std::sync::Arc::new(collaboration_service::SystemSubscriptionClock);
+        let subscription_delivery = automation_store.as_ref().map(|push_store| {
+            let board_availability = match board_store.as_ref() {
+                Some(store) => collaboration_service::BoardAvailability::Available(
+                    std::sync::Arc::clone(store),
+                ),
+                None => collaboration_service::BoardAvailability::Unavailable,
+            };
+            collaboration_service::SubscriptionDeliveryService::new(
+                collaboration_service::SubscriptionDeliveryServiceProps {
+                    board_availability,
+                    push_store: std::sync::Arc::clone(push_store),
+                    delivery: std::sync::Arc::clone(&session_delivery),
+                    presence: std::sync::Arc::clone(&subscription_presence),
+                    machine_identity: machine_identity.clone(),
+                    clock: std::sync::Arc::clone(&subscription_clock),
+                },
+            )
+        });
         if let Some(supervisor) = &external_provider_supervisor {
             supervisor
                 .install_approval_broker(std::sync::Arc::clone(&approval_broker))
@@ -386,6 +473,20 @@ impl CollaborationRuntime {
             .with_session_delivery(session_delivery)
             .with_scheduled_run_execution(scheduled_run_execution)
             .with_native_backend(native_backend)
+            .map_err(io::Error::other)?;
+        let identity = if let Some(service) = &subscription_delivery {
+            identity.with_subscription_delivery_service(
+                service.clone(),
+                std::sync::Arc::clone(&subscription_presence),
+            )
+        } else {
+            identity
+        };
+        let delivery_for_approvals = identity
+            .session_message_delivery()
+            .ok_or_else(|| io::Error::other("session delivery unavailable"))?;
+        approval_broker
+            .install_session_delivery(delivery_for_approvals)
             .map_err(io::Error::other)?;
         let identity = identity.with_approval_broker(std::sync::Arc::clone(&approval_broker));
         let endpoint_directory = identity.endpoint_directory();
@@ -411,18 +512,96 @@ impl CollaborationRuntime {
         )?
         .with_connection_budget(std::sync::Arc::clone(&permits));
         let stored = std::sync::Arc::new(collaboration_service::NativeStoredSessions::new(
-            inputs.codex_home,
+            inputs.codex_home.clone(),
             String::from(service_id.clone()),
         ));
-        let acp = collaboration_service::AcpChannelListener::bind(
+        let mut acp = collaboration_service::AcpChannelListener::bind(
             &inputs.directory.join("codex-acp.sock"),
             publication.admission_gate(),
             stored,
-            approval_broker,
+            approval_broker.clone(),
             unmaterialized_threads,
             crate::codex_conversation_recording_composition::adapter_recorder(codex_recorder),
         )?
         .with_connection_budget(permits);
+        let mut provider_app_servers = Vec::new();
+        if !provider_face_endpoints.is_empty() && external_provider_supervisor.is_some() {
+            owner_human_id =
+                crate::owner_identity_resolution::resolve_face_owner_human_id(owner_human_id).await;
+        }
+        if external_provider_supervisor.is_some()
+            && provider_delivery_route.is_some()
+            && provider_session_hub.is_some()
+            && provider_store.is_some()
+        {
+            acp = acp.with_interaction_broker(std::sync::Arc::clone(&approval_broker));
+        }
+        if let (Some(supervisor), Some(delivery), Some(hub), Some(store)) = (
+            &external_provider_supervisor,
+            &provider_delivery_route,
+            &provider_session_hub,
+            &provider_store,
+        ) {
+            let commands: std::sync::Arc<dyn collaboration_service::SessionCommandPort> =
+                std::sync::Arc::new(crate::HostSessionCommandPort::new(
+                    std::sync::Arc::clone(supervisor),
+                    std::sync::Arc::clone(delivery),
+                    std::sync::Arc::clone(hub),
+                    std::sync::Arc::clone(store),
+                ));
+            let events: std::sync::Arc<dyn collaboration_service::SessionEventHub> =
+                std::sync::Arc::clone(hub) as _;
+            let socket_directory = inputs.directory.join("router-sessions");
+            if owner_human_id.is_some() {
+                create_private_socket_directory(&socket_directory)?;
+            }
+            for description in provider_face_endpoints {
+                let Some(catalog) = supervisor.provider_model_catalog(&description.endpoint) else {
+                    continue;
+                };
+                let endpoint = message_board::SessionEndpointRef {
+                    service_id: message_board::ServiceId::try_from(String::from(
+                        description.endpoint.service_id.clone(),
+                    ))
+                    .map_err(io::Error::other)?,
+                    endpoint_id: message_board::EndpointId::try_from(String::from(
+                        description.endpoint.endpoint_id.clone(),
+                    ))
+                    .map_err(io::Error::other)?,
+                };
+                acp = acp.with_provider_session_backend(
+                    endpoint.clone(),
+                    std::sync::Arc::clone(&commands),
+                    std::sync::Arc::clone(&events),
+                );
+                let Some(owner_human_id) = owner_human_id.as_ref() else {
+                    continue;
+                };
+                let context = collaboration_service::RouterSessionAppServerContext::new(
+                    endpoint,
+                    message_board::Identity::Human {
+                        human_id: owner_human_id.clone(),
+                    },
+                    std::sync::Arc::clone(&commands),
+                    std::sync::Arc::clone(&events),
+                    catalog,
+                )
+                .with_interaction_broker(std::sync::Arc::clone(&approval_broker))
+                .with_project_trust(std::sync::Arc::new(
+                    codex_native_integration::CodexHomeProjectTrust::new(inputs.codex_home.clone()),
+                ));
+                let socket_path = socket_directory.join(format!(
+                    "{}.sock",
+                    String::from(description.endpoint.endpoint_id.clone())
+                ));
+                provider_app_servers.push(
+                    collaboration_service::RouterSessionAppServerListener::bind(
+                        &socket_path,
+                        std::sync::Arc::new(context),
+                    )?,
+                );
+            }
+        }
         let publication = publication.with_acp_listener()?;
         if let Some(settings) = settings_backend
             && settings.recover().await.is_err()
@@ -435,7 +614,8 @@ impl CollaborationRuntime {
             &inputs.directory,
             &collaboration_protocol::ServiceManifest {
                 version: 2,
-                service_id: service_id.clone(),
+                service_id: machine_identity.service_id().clone(),
+                machine_label: machine_identity.machine_label().clone(),
                 service_epoch: service_epoch.clone(),
                 control: collaboration_protocol::ControlSelector {
                     transport: collaboration_protocol::ControlTransport::UnixJsonLines,
@@ -446,9 +626,17 @@ impl CollaborationRuntime {
                     transport: collaboration_protocol::McpTransport::StreamableHttp,
                     url: mcp_url,
                 },
+                router_proxy_endpoint,
             },
         )?;
         let shutdown = CancellationToken::new();
+        if let Some(service) = &subscription_delivery
+            && let Err(error) = service.start().await
+        {
+            service.shutdown().await;
+            drop(manifest);
+            return Err(io::Error::other(error));
+        }
         // Binding above establishes this runtime owns the listeners before recovery can mutate state.
         let automation_task = wake_worker.map(|worker| tokio::spawn(worker.run(shutdown.clone())));
         let schedule_task =
@@ -460,6 +648,9 @@ impl CollaborationRuntime {
         tasks.spawn(control.run(shutdown.clone()));
         tasks.spawn(native.run(shutdown.clone()));
         tasks.spawn(acp.run(shutdown.clone()));
+        for app_server in provider_app_servers {
+            tasks.spawn(app_server.run(shutdown.clone()));
+        }
         for (retirement, mut description) in provider_retirements {
             let directory = endpoint_directory.clone();
             provider_retirement_tasks.spawn(async move {
@@ -484,7 +675,9 @@ impl CollaborationRuntime {
             tokio::spawn(async move { maintenance_store.run_maintenance(maintenance_stop).await })
         });
         Ok(Self {
+            owner_human_id,
             board_store,
+            subscription_delivery,
             provider_store,
             external_provider_supervisor,
             provider_delivery_route,
@@ -508,6 +701,11 @@ impl CollaborationRuntime {
             observer_task: None,
             mcp: Some(mcp),
         })
+    }
+
+    #[must_use]
+    pub fn owner_human_id(&self) -> Option<&message_board::HumanId> {
+        self.owner_human_id.as_ref()
     }
 
     #[must_use]
@@ -739,6 +937,9 @@ impl CollaborationRuntime {
             };
             self.manifest.take();
             self.shutdown.cancel();
+            if let Some(service) = &self.subscription_delivery {
+                service.cancel();
+            }
             let _retire = self.publication.admission_gate().retire();
             return failure;
         }
@@ -746,6 +947,9 @@ impl CollaborationRuntime {
     pub async fn shutdown(mut self) -> io::Result<()> {
         self.manifest.take();
         self.shutdown.cancel();
+        if let Some(service) = self.subscription_delivery.take() {
+            service.shutdown().await;
+        }
         let mut failure = None;
         if let Some(mcp) = self.mcp.take()
             && let Err(error) = mcp.shutdown().await
@@ -856,6 +1060,9 @@ impl Drop for CollaborationRuntime {
     fn drop(&mut self) {
         self.manifest.take();
         self.shutdown.cancel();
+        if let Some(service) = &self.subscription_delivery {
+            service.cancel();
+        }
         let _retire = self.publication.admission_gate().retire();
     }
 }
@@ -865,6 +1072,24 @@ fn unix_seconds() -> io::Result<i64> {
         .duration_since(std::time::UNIX_EPOCH)
         .map_err(io::Error::other)?;
     i64::try_from(elapsed.as_secs()).map_err(io::Error::other)
+}
+
+fn create_private_socket_directory(path: &std::path::Path) -> io::Result<()> {
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+    match std::fs::DirBuilder::new().mode(0o700).create(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+            let metadata = std::fs::symlink_metadata(path)?;
+            if metadata.is_dir() && metadata.permissions().mode() & 0o077 == 0 {
+                Ok(())
+            } else {
+                Err(io::Error::other(
+                    "provider socket directory must be private",
+                ))
+            }
+        }
+        Err(error) => Err(error),
+    }
 }
 
 fn current_observation_timestamp() -> io::Result<ObservationTimestamp> {

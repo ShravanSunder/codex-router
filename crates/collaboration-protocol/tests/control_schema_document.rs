@@ -7,15 +7,23 @@ fn complete_schema_pairs_all_methods_and_preserves_protocol_boundaries() {
     let methods = schema["x-methods"]
         .as_object()
         .unwrap_or_else(|| panic!("method map"));
-    assert_eq!(methods.len(), 94);
+    assert_eq!(methods.len(), 108);
     for method in [
         "conversation/create",
         "conversation/load",
+        "conversation/resume",
+        "conversation/close",
         "conversation/prompt",
         "conversation/cancel",
         "conversation/operationShow",
         "conversation/operationWait",
         "conversation/operationReconcile",
+        "conversation/settingsSet",
+        "conversation/settingsAccept",
+        "message/reply",
+        "router/show",
+        "message/inbox",
+        "message/history",
         "automation/configure",
         "automation/status",
         "automation/events",
@@ -52,23 +60,29 @@ fn complete_schema_pairs_all_methods_and_preserves_protocol_boundaries() {
         "instruction/create",
         "instruction/update",
         "instruction/show",
-        "board/threadListen",
         "board/threadWait",
-        "board/threadListenShow",
-        "board/threadListenCancel",
         "board/threadCreate",
         "board/threadJoin",
+        "board/threadSubscribe",
+        "board/threadUnsubscribe",
+        "board/threadSubscriptions",
         "board/threadLeave",
         "board/threadParticipantList",
         "control/initialize",
         "endpoint/list",
         "codex/sessionList",
+        "provider/sessionList",
+        "provider/sessionInspect",
+        "provider/sessionObserve",
+        "provider/sessionListen",
         "codex/sessionInspect",
         "codex/sessionRename",
         "message/send",
         "codex/turnInterrupt",
         "approval/list",
         "approval/decide",
+        "question/list",
+        "question/answer",
         "addressBook/list",
         "lifecycleJournal/read",
         "lifecycleJournal/status",
@@ -84,6 +98,39 @@ fn complete_schema_pairs_all_methods_and_preserves_protocol_boundaries() {
             );
         }
     }
+    for removed in [
+        "board/threadListen",
+        "board/threadListenShow",
+        "board/threadListenCancel",
+    ] {
+        assert!(
+            !methods.contains_key(removed),
+            "legacy method remains: {removed}"
+        );
+    }
+    let wait_method = &methods["board/threadWait"];
+    let wait_request = wait_method["params"]["$ref"]
+        .as_str()
+        .unwrap_or_else(|| panic!("wait request reference"));
+    let wait_result = wait_method["result"]["$ref"]
+        .as_str()
+        .unwrap_or_else(|| panic!("wait result reference"));
+    assert_eq!(
+        schema
+            .pointer(&wait_request.replace('#', ""))
+            .and_then(|definition| definition.get("title"))
+            .and_then(Value::as_str),
+        Some("ThreadSubscriptionWaitRequest"),
+        "board/threadWait request must use the subscription DTO"
+    );
+    assert_eq!(
+        schema
+            .pointer(&wait_result.replace('#', ""))
+            .and_then(|definition| definition.get("title"))
+            .and_then(Value::as_str),
+        Some("ThreadSubscriptionWaitResult"),
+        "board/threadWait result must use the subscription DTO"
+    );
     let validator =
         jsonschema::validator_for(&schema).unwrap_or_else(|error| panic!("compile: {error}"));
     assert!(
@@ -145,6 +192,17 @@ fn native_inspect_and_rename_error_schemas_accept_emitted_diagnostics() {
             "reason":"unknown","nextAction":"retryLater","nativeCode":-32099
         }));
         assert!(validator.is_valid(&unknown), "{method} unknown native code");
+
+        let held_by_another_client = service_error(json!({
+            "kind":"nativeRejected","stage":stage,
+            "message":"Message it from the Codex client that holds it.",
+            "reason":"heldByAnotherClient",
+            "nextAction":"messageFromHoldingCodexClient"
+        }));
+        assert!(
+            validator.is_valid(&held_by_another_client),
+            "{method} active-writer rejection"
+        );
 
         let mut missing_action = rejection.clone();
         missing_action["error"]["data"]

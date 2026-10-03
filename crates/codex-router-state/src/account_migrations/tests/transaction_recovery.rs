@@ -288,7 +288,7 @@ async fn two_writable_openers_serialize_adoption_without_duplicate_history() {
         .fetch_one(&mut connection)
         .await
         .expect("history should query");
-    assert_eq!(history_rows, 2);
+    assert_eq!(history_rows, expected_native_migration_count());
     let account_rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM accounts")
         .fetch_one(&mut connection)
         .await

@@ -191,7 +191,7 @@ pub(super) fn operation_description(name: &str) -> &'static str {
             "Creates a new root thread in an active topic as the supplied actor. It records discussion context, not a Router task or conversation."
         }
         "board_thread_join" => {
-            "Joins the supplied session to an existing thread in its requested participant role. For session-delivered listening, join first with --role participant (CLI: board thread join --root-message-id <thread-id> --actor self --role participant --no-watch --json). Participation records responsibility context but does not grant extra execution authority."
+            "Joins the supplied session to an existing thread in its requested participant role. Set watch to true to subscribe on join (the CLI defaults it on); set false to opt out. Optional mode and whenIdle configure that subscription. Participation records responsibility context but does not grant extra execution authority."
         }
         "board_thread_leave" => {
             "Removes the supplied session's eligible participation from a thread. It does not delete messages or terminate the session."
@@ -199,14 +199,14 @@ pub(super) fn operation_description(name: &str) -> &'static str {
         "board_thread_participant_list" => {
             "Lists current participants and roles for one thread. Read-only and not an authentication result."
         }
-        "board_thread_listen" => {
-            "Creates a bounded board-activity listener for explicit thread/topic selections and reader identity. Session delivery requires an existing thread participant and a fixed lifetime: CLI --lifetime short (25 minutes) or long (75 minutes), or --once (25 minutes); MCP mode must use once.maxWaitSeconds=1500 or repeating.lifetimeSeconds=1500|4500. Join first with board_thread_join as role participant. Listener readiness/delivery observes board activity only; it does not prove model activation, turn completion or reply."
+        "board_thread_subscribe" => {
+            "Creates, updates or reactivates the supplied reader's thread or topic subscription and its watch. Thread scope requires an open participant; topic scope does not. New session subscriptions default to deliver/hold, 120-second quiet, 600-second cap and 24-hour lifetime; new human subscriptions default off. Unspecified fields keep their current values. Human readers cannot use deliver mode. The result reports stored policy and current delivery observations; it does not prove an agent processed activity."
         }
-        "board_thread_listen_show" => {
-            "Reads the supplied reader's active board-listener state. Read-only and does not wait for activity."
+        "board_thread_unsubscribe" => {
+            "Ends the supplied reader's thread or topic subscription as cancelled. The watch remains active, so activity stays available in the inbox until acknowledged."
         }
-        "board_thread_listen_cancel" => {
-            "Cancels the supplied reader's active board listener. It stops future listener delivery but does not unwatch threads or acknowledge activity."
+        "board_thread_subscriptions" => {
+            "Lists the supplied reader's active or draining thread and topic subscriptions, including policy, expiry, pending counts and delivery observations. Read-only; it does not acknowledge inbox activity."
         }
         "board_inbox_fetch" => {
             "Fetches bounded activity for the supplied reader and selected project/board/topic scope. Unread mode initializes reader tracking without acknowledging activity; Latest mode does not initialize it. Fetching does not prove a model processed it."

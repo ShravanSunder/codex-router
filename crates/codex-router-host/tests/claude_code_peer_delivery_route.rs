@@ -9,12 +9,13 @@ use claude_code_peer_messaging::{ClaudeCodePeerSocket, ClaudeCodeSessionRegistry
 use codex_router_host::ClaudeCodePeerDeliveryRoute;
 use collaboration_protocol::{
     AttemptId, CodexGeneration, DeliveryClientReceipt, DeliveryCorrelationId, DeliveryOutcome,
-    DeliveryRejectionReason, EndpointId, EndpointRef, MessageContent, MessageDelivery, MessageText,
-    SessionId, SessionRef, UuidIdentity,
+    DeliveryRejectionReason, EndpointId, EndpointRef, MessageDelivery, MessageText, PushId,
+    SessionId, SessionReachability, SessionRef, UuidIdentity,
 };
 use collaboration_service::{
     AttemptEvidenceSink, AttemptReconciliationContext, DeliveryFuture, DeliveryPrecondition,
-    DeliveryRequest, RouteClaim, SessionDeliveryRoute,
+    RouteClaim, RoutePresence, SessionDeliveryRoute, SessionDeliveryRouter, SessionMessageDelivery,
+    layer_zero::{DeliveryRequest as PreparedDeliveryRequest, PreparedPush},
 };
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
@@ -73,22 +74,50 @@ fn publish_peer(root: &Path, status: Option<&str>) -> std::path::PathBuf {
     socket_path
 }
 
-fn delivery(mode: MessageDelivery) -> DeliveryRequest {
-    DeliveryRequest {
-        target: target(),
-        message: MessageContent::HumanUser {
-            text: MessageText::try_from("hello Claude".to_owned()).expect("message text"),
+fn publish_peer_claim(root: &Path, process_id: u32, name: Option<&str>, cwd: Option<&str>) {
+    let mut record = json!({
+        "pid": process_id,
+        "sessionId": "fixture-session",
+        "peerProtocol": 99,
+    });
+    if let Some(name) = name {
+        record["name"] = json!(name);
+    }
+    if let Some(cwd) = cwd {
+        record["cwd"] = json!(cwd);
+    }
+    std::fs::write(root.join(format!("{process_id}.json")), record.to_string())
+        .expect("registry claim fixture");
+}
+
+fn delivery(mode: MessageDelivery) -> PreparedDeliveryRequest {
+    let target = target();
+    let push_id =
+        PushId::try_from(AttemptId::generate().as_str().to_owned()).expect("UUIDv7 push id");
+    let correlation =
+        DeliveryCorrelationId::try_from(push_id.as_str().to_owned()).expect("push id correlation");
+    let line = MessageText::try_from(format!(
+        "✉️ sender · \"hello Claude\" · router://{}/push/{}",
+        String::from(target.endpoint.service_id.clone()),
+        push_id.as_str()
+    ))
+    .expect("prepared push line");
+    PreparedDeliveryRequest {
+        payload: PreparedPush {
+            push_id,
+            line,
+            load_policy: collaboration_service::LoadPolicy::MayLoad,
         },
+        target,
         mode,
         precondition: DeliveryPrecondition::Unpinned,
-        correlation: DeliveryCorrelationId::try_from("peer-test-correlation".to_owned())
-            .expect("correlation"),
+        correlation,
         attempt: AttemptId::generate(),
     }
 }
 
 #[tokio::test]
-async fn peer_route_writes_origin_and_reply_line_without_claiming_acceptance() {
+async fn prepared_push_reaches_peer_route_as_the_exact_router_line() {
     let root = tempfile::tempdir().expect("registry root");
     let socket_path = publish_peer(root.path(), Some("busy"));
     let listener = tokio::net::UnixListener::bind(&socket_path).expect("peer listener");
@@ -98,51 +127,60 @@ async fn peer_route_writes_origin_and_reply_line_without_claiming_acceptance() {
         let _auth: Value =
             serde_json::from_str(&lines.next_line().await.expect("auth line").expect("auth"))
                 .expect("auth JSON");
-        let user: Value =
-            serde_json::from_str(&lines.next_line().await.expect("user line").expect("user"))
-                .expect("user JSON");
-        user
+        serde_json::from_str::<Value>(&lines.next_line().await.expect("user line").expect("user"))
+            .expect("user JSON")
     });
-    let route = ClaudeCodePeerDeliveryRoute::new(
+    let route = Arc::new(ClaudeCodePeerDeliveryRoute::new(
         target().endpoint,
         Arc::new(ClaudeCodeSessionRegistry::new(root.path().to_owned())),
         Arc::new(ClaudeCodePeerSocket::new(root.path().to_owned())),
-    );
-    let evidence = RecordedPeerEvidence(tokio::sync::Mutex::new(Vec::new()));
-    assert!(matches!(
-        route.claim(&target()).await.expect("peer claim"),
-        RouteClaim::Holds
     ));
-    let mut request = delivery(MessageDelivery::Auto);
-    let mut sender = target();
-    sender.endpoint.endpoint_id =
-        EndpointId::try_from("codex-local".to_owned()).expect("sender endpoint");
-    sender.session_id = SessionId::try_from("sender-session".to_owned()).expect("sender session");
-    request.message = MessageContent::Agent {
-        sender: sender.clone(),
-        text: MessageText::try_from("hello Claude".to_owned()).expect("message"),
+    let router = SessionDeliveryRouter::new(vec![route]);
+    let evidence = RecordedPeerEvidence(tokio::sync::Mutex::new(Vec::new()));
+    let push_id = PushId::try_from("018f47d2-24d5-7a68-b9ec-6f759c39458f".to_owned())
+        .expect("UUIDv7 push id");
+    let line = MessageText::try_from(format!(
+        "✉️ Main · \"S1 is green\" · router://00000000-0000-4000-8000-000000000001/push/{}",
+        push_id.as_str()
+    ))
+    .expect("push line");
+    let correlation =
+        DeliveryCorrelationId::try_from(push_id.as_str().to_owned()).expect("push id correlation");
+    assert_eq!(correlation.as_str(), push_id.as_str());
+    let request = PreparedDeliveryRequest {
+        payload: PreparedPush {
+            push_id,
+            line: line.clone(),
+            load_policy: collaboration_service::LoadPolicy::LoadedOnly,
+        },
+        target: target(),
+        mode: MessageDelivery::Auto,
+        precondition: DeliveryPrecondition::Unpinned,
+        correlation,
+        attempt: AttemptId::generate(),
     };
 
-    let outcome = route.deliver(request, &evidence).await.expect("delivery");
+    let receipt = router
+        .deliver(request, &evidence)
+        .await
+        .expect("prepared push delivery");
 
-    assert_eq!(outcome.outcome, DeliveryOutcome::PeerMessageWritten);
+    assert_eq!(receipt.outcome, DeliveryOutcome::PeerMessageWritten);
+    assert_eq!(
+        receipt.reachability,
+        Some(SessionReachability::ClaudeCodePeer)
+    );
     assert!(matches!(
-        outcome.client,
+        receipt.client,
         Some(DeliveryClientReceipt::ClaudeCodePeer)
     ));
     let user = receiver.await.expect("receiver");
-    let content = user["message"]["content"]
-        .as_str()
-        .expect("peer message content");
-    assert!(content.contains(&serde_json::to_string(&sender).expect("sender JSON")));
-    assert!(content.contains("message_send"));
-    let records = evidence.0.lock().await;
-    assert_eq!(records.len(), 2);
+    assert_eq!(user["message"]["content"], line.as_str());
     assert!(
-        matches!(&records[0], RouteEffectEvidence::ClaudeCodePeer(peer) if peer.write == PeerWriteEffect::Dispatching)
-    );
-    assert!(
-        matches!(&records[1], RouteEffectEvidence::ClaudeCodePeer(peer) if peer.write == PeerWriteEffect::Written)
+        !user["message"]["content"]
+            .as_str()
+            .expect("peer message content")
+            .contains("For follow-up messages")
     );
 }
 
@@ -218,13 +256,74 @@ async fn live_unknown_peer_protocol_reports_live_elsewhere() {
         claim,
         RouteClaim::LiveElsewhere {
             writable: false,
-            detail: Some(reason)
+            detail: Some(reason),
         } if reason.contains("protocol 99")
+    ));
+    assert!(matches!(
+        route.presence(&target()).await.expect("unsupported peer presence"),
+        RoutePresence::LiveElsewhere { detail: Some(reason) } if reason.contains("protocol 99")
     ));
     assert!(
         matches!(receipt.outcome, DeliveryOutcome::Rejected(rejection)
         if rejection.reason == DeliveryRejectionReason::LiveElsewhere)
     );
+    assert!(evidence.0.lock().await.is_empty());
+}
+
+#[tokio::test]
+async fn ambiguous_live_peer_claims_are_preserved_in_the_rejection() {
+    let root = tempfile::tempdir().expect("registry root");
+    let first_process_id = std::process::id();
+    let second_process_id = std::os::unix::process::parent_id();
+    assert_ne!(first_process_id, second_process_id);
+    publish_peer_claim(
+        root.path(),
+        first_process_id,
+        Some("first-live-terminal"),
+        Some("/workspace/first"),
+    );
+    publish_peer_claim(root.path(), second_process_id, None, None);
+
+    let route = Arc::new(ClaudeCodePeerDeliveryRoute::new(
+        target().endpoint,
+        Arc::new(ClaudeCodeSessionRegistry::new(root.path().to_owned())),
+        Arc::new(ClaudeCodePeerSocket::new(root.path().to_owned())),
+    ));
+    let router = SessionDeliveryRouter::new(vec![route]);
+    let evidence = RecordedPeerEvidence(tokio::sync::Mutex::new(Vec::new()));
+    let receipt = router
+        .deliver(delivery(MessageDelivery::Auto), &evidence)
+        .await
+        .expect("ambiguous route rejection");
+
+    let DeliveryOutcome::Rejected(rejection) = receipt.outcome else {
+        panic!(
+            "ambiguous live records must be rejected: {:?}",
+            receipt.outcome
+        );
+    };
+    assert_eq!(
+        receipt.reachability,
+        Some(SessionReachability::ClaudeCodePeer)
+    );
+    assert_eq!(rejection.reason, DeliveryRejectionReason::LiveElsewhere);
+    let claims = serde_json::to_value(&rejection)
+        .expect("rejection encodes")
+        .get("claims")
+        .cloned()
+        .expect("structured peer claims");
+    let claims = claims.as_array().expect("claims array");
+    assert_eq!(claims.len(), 2);
+    assert!(claims.contains(&json!({
+        "pid": first_process_id,
+        "name": "first-live-terminal",
+        "cwd": "/workspace/first"
+    })));
+    assert!(claims.contains(&json!({
+        "pid": second_process_id,
+        "name": null,
+        "cwd": null
+    })));
     assert!(evidence.0.lock().await.is_empty());
 }
 
@@ -261,6 +360,12 @@ async fn every_live_registry_status_allows_auto_and_steer_peer_writes() {
             );
             let evidence = RecordedPeerEvidence(tokio::sync::Mutex::new(Vec::new()));
 
+            assert_eq!(
+                route.presence(&target()).await.expect("peer presence"),
+                RoutePresence::Running,
+                "status={status:?}"
+            );
+
             let outcome = route
                 .deliver(delivery(mode), &evidence)
                 .await
@@ -290,6 +395,13 @@ async fn peer_reconciliation_rejects_evidence_for_another_session() {
         Arc::new(ClaudeCodeSessionRegistry::new(root.path().to_owned())),
         Arc::new(ClaudeCodePeerSocket::new(root.path().to_owned())),
     );
+    assert_eq!(
+        route
+            .presence(&target())
+            .await
+            .expect("absent peer presence"),
+        RoutePresence::NotMine
+    );
     let recorded = RouteEffectEvidence::ClaudeCodePeer(ClaudeCodePeerEffectEvidence {
         session_id: PeerSessionReference::try_from("another-session".to_owned())
             .expect("recorded session"),
@@ -300,7 +412,8 @@ async fn peer_reconciliation_rejects_evidence_for_another_session() {
     let outcome = route
         .reconcile_attempt(AttemptReconciliationContext {
             target: target(),
-            message: delivery(MessageDelivery::Auto).message,
+            prepared_push_id: PushId::try_from("018f47d2-24d5-7a68-b9ec-6f759c39458f".to_owned())
+                .expect("UUIDv7 push id"),
             mode: MessageDelivery::Auto,
             recorded,
         })

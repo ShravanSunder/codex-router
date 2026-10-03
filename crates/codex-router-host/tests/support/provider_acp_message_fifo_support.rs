@@ -2,14 +2,15 @@ use agent_automation::RouteEffectEvidence;
 use codex_router_host::{ExternalProviderLaunch, LiveSessionOwnership, LiveSessionOwnershipCheck};
 use collaboration_protocol::{
     AttemptId, ChannelDescription, CodexGeneration, DeliveryCorrelationId, EndpointAvailability,
-    EndpointDescription, EndpointId, EndpointRef, GenerationNumber, MessageContent,
-    MessageDelivery, MessageText, NonEmptyText, ObservationTimestamp, ProviderBindingId,
-    ProviderBindingIdentity, ProviderCapabilities, ProviderCapability, ProviderCapabilityEvidence,
-    ProviderCapabilityName, ProviderCapabilityStatus, ProviderKind, ProviderRuntimeIdentity,
-    ProviderTransport, SessionId, SessionRef, UuidIdentity,
+    EndpointDescription, EndpointId, EndpointRef, GenerationNumber, MessageDelivery, MessageText,
+    NonEmptyText, ObservationTimestamp, ProviderBindingId, ProviderBindingIdentity,
+    ProviderCapabilities, ProviderCapability, ProviderCapabilityEvidence, ProviderCapabilityName,
+    ProviderCapabilityStatus, ProviderKind, ProviderRuntimeIdentity, ProviderTransport, PushId,
+    SessionId, SessionRef, UuidIdentity,
 };
 use collaboration_service::{
-    AttemptEvidenceSink, DeliveryFuture, DeliveryPrecondition, DeliveryRequest, EndpointDirectory,
+    AttemptEvidenceSink, DeliveryFuture, DeliveryPrecondition, EndpointDirectory,
+    layer_zero::{DeliveryRequest, PreparedPush},
 };
 use std::path::{Path, PathBuf};
 
@@ -129,6 +130,47 @@ sys.stdin.read()
         event_socket.display().to_string()
     );
     ExternalProviderLaunch {
+        persistence_target: acp_client_runtime::ProviderPersistenceTarget::Unspecified,
+        executable: PathBuf::from("/usr/bin/python3"),
+        arguments: vec!["-c".to_owned(), script],
+        environment: Vec::new(),
+    }
+}
+
+pub(super) fn multiblock_queue_fixture(event_socket: &Path) -> ExternalProviderLaunch {
+    let script = format!(
+        r#"
+import json,socket,sys
+request=json.loads(sys.stdin.readline())
+print(json.dumps({{'jsonrpc':'2.0','id':request['id'],'result':{{'protocolVersion':1,'agentCapabilities':{{}},'agentInfo':{{'name':'queue-block-fixture','version':'1'}}}}}})); sys.stdout.flush()
+request=json.loads(sys.stdin.readline())
+assert request['method']=='session/new'
+print(json.dumps({{'jsonrpc':'2.0','id':request['id'],'result':{{'sessionId':'fixture-session'}}}})); sys.stdout.flush()
+request=json.loads(sys.stdin.readline())
+assert request['method']=='session/prompt'
+assert len(request['params']['prompt'])==1, request['params']['prompt']
+assert request['params']['prompt'][0]['type']=='text'
+assert request['params']['prompt'][0]['text']=='first', request['params']['prompt']
+with socket.socket(socket.AF_UNIX,socket.SOCK_STREAM) as event:
+ event.connect({:?})
+ event.sendall(b'first')
+ event.recv(1)
+print(json.dumps({{'jsonrpc':'2.0','id':request['id'],'result':{{'stopReason':'end_turn'}}}})); sys.stdout.flush()
+request=json.loads(sys.stdin.readline())
+assert request['method']=='session/prompt'
+assert request['params']['prompt']==[{{'type':'resource_link','uri':'https://example.test/context','name':'context'}},{{'type':'text','text':'queued text'}}], request['params']['prompt']
+with socket.socket(socket.AF_UNIX,socket.SOCK_STREAM) as event:
+ event.connect({:?})
+ event.sendall(b'blocks-ok')
+ event.recv(1)
+print(json.dumps({{'jsonrpc':'2.0','id':request['id'],'result':{{'stopReason':'end_turn'}}}})); sys.stdout.flush()
+sys.stdin.read()
+"#,
+        event_socket.display().to_string(),
+        event_socket.display().to_string()
+    );
+    ExternalProviderLaunch {
+        persistence_target: acp_client_runtime::ProviderPersistenceTarget::Unspecified,
         executable: PathBuf::from("/usr/bin/python3"),
         arguments: vec!["-c".to_owned(), script],
         environment: Vec::new(),
@@ -151,6 +193,7 @@ for line in sys.stdin:
         load_marker.display().to_string()
     );
     ExternalProviderLaunch {
+        persistence_target: acp_client_runtime::ProviderPersistenceTarget::Unspecified,
         executable: PathBuf::from("/usr/bin/python3"),
         arguments: vec!["-c".to_owned(), script],
         environment: Vec::new(),
@@ -188,6 +231,7 @@ sys.stdin.read()
         event_socket.display().to_string()
     );
     ExternalProviderLaunch {
+        persistence_target: acp_client_runtime::ProviderPersistenceTarget::Unspecified,
         executable: PathBuf::from("/usr/bin/python3"),
         arguments: vec!["-c".to_owned(), script],
         environment: Vec::new(),
@@ -195,14 +239,26 @@ sys.stdin.read()
 }
 
 pub(super) fn request(target: SessionRef, text: &str) -> DeliveryRequest {
+    let push_id =
+        PushId::try_from(AttemptId::generate().as_str().to_owned()).expect("UUIDv7 push id");
+    let correlation =
+        DeliveryCorrelationId::try_from(push_id.as_str().to_owned()).expect("push id correlation");
+    let line = MessageText::try_from(format!(
+        "✉️ sender · \"{text}\" · router://{}/push/{}",
+        String::from(target.endpoint.service_id.clone()),
+        push_id.as_str()
+    ))
+    .expect("prepared push line");
     DeliveryRequest {
-        target,
-        message: MessageContent::HumanUser {
-            text: MessageText::try_from(text.to_owned()).expect("message"),
+        payload: PreparedPush {
+            push_id,
+            line,
+            load_policy: collaboration_service::LoadPolicy::MayLoad,
         },
+        target,
         mode: MessageDelivery::Auto,
         precondition: DeliveryPrecondition::Unpinned,
-        correlation: DeliveryCorrelationId::generate(),
+        correlation,
         attempt: AttemptId::generate(),
     }
 }

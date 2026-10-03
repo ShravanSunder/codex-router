@@ -73,6 +73,9 @@ impl ProviderAcpScheduledRuns {
                         ProviderPromptStopReason::Refusal => Ok(RunSettlement::Failed {
                             reason: "Provider refused the scheduled prompt".into(),
                         }),
+                        ProviderPromptStopReason::Unknown(value) => Ok(RunSettlement::Failed {
+                            reason: unknown_stop_explanation(&value),
+                        }),
                         ProviderPromptStopReason::EndTurn
                         | ProviderPromptStopReason::MaxTokens
                         | ProviderPromptStopReason::MaxTurnRequests => {
@@ -174,10 +177,45 @@ fn settlement_from_stop_reason(reason: ProviderPromptStopReason) -> RunSettlemen
         ProviderPromptStopReason::Refusal => RunSettlement::Failed {
             reason: "Provider refused the scheduled prompt".into(),
         },
+        ProviderPromptStopReason::Unknown(value) => RunSettlement::Failed {
+            reason: unknown_stop_explanation(&value),
+        },
         ProviderPromptStopReason::EndTurn
         | ProviderPromptStopReason::MaxTokens
         | ProviderPromptStopReason::MaxTurnRequests => RunSettlement::Completed {
             summary_source: None,
         },
+    }
+}
+
+fn unknown_stop_explanation(value: &str) -> String {
+    let safe_value = if !value.is_empty()
+        && value.len() <= 32
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte == b'_')
+    {
+        value
+    } else {
+        "unrecognized"
+    };
+    format!(
+        "agent ended the turn with an unrecognized stop reason {safe_value}; outcome not confirmed"
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unknown_agent_stop_reason_never_confirms_scheduled_success() {
+        let settlement =
+            settlement_from_stop_reason(ProviderPromptStopReason::Unknown("future_reason".into()));
+        assert!(matches!(
+            settlement,
+            RunSettlement::Failed { reason }
+                if reason == "agent ended the turn with an unrecognized stop reason future_reason; outcome not confirmed"
+        ));
     }
 }

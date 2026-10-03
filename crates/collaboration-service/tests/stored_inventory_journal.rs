@@ -3,15 +3,146 @@
 mod tests {
     use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
     use collaboration_client::{ClientError, ControlClient, JournalStatus};
-    use collaboration_protocol::{NativeSessionListParams, NativeSessionView};
+    use collaboration_protocol::{
+        MachineId, MachineLabel, NativeSessionListParams, NativeSessionScope, NativeSessionSource,
+        NativeSessionView, PushHeaderFacts, PushId, PushLineInput, PushOrigin, RouterLink,
+        SessionDisplayNameLookup, parse_push_line_header, render_push_line, session_identity,
+    };
     use collaboration_service::{
         LocalControlService, ManifestPublication, NativeControlBackend, NativeGenerationGate,
         ServiceIdentity,
     };
     use lifecycle_observation::{LifecycleStore, ObservationJournal};
     use serde_json::json;
-    use std::{os::unix::fs::DirBuilderExt, path::PathBuf, sync::Arc};
+    use std::{
+        os::unix::fs::{DirBuilderExt, PermissionsExt},
+        path::PathBuf,
+        sync::Arc,
+    };
     use tokio_util::sync::CancellationToken;
+
+    #[tokio::test]
+    async fn stored_inventory_does_not_cache_a_short_title_as_display_name() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let home = root.path().join("native-home");
+        std::fs::create_dir(&home).unwrap();
+        let database = home.join("state_5.sqlite");
+        let options = sqlx::sqlite::SqliteConnectOptions::new()
+            .filename(&database)
+            .create_if_missing(true);
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .unwrap();
+        sqlx::raw_sql("CREATE TABLE threads (id TEXT PRIMARY KEY, rollout_path TEXT, cwd TEXT, model_provider TEXT, model TEXT, reasoning_effort TEXT, source TEXT, thread_source TEXT, git_branch TEXT, git_origin_url TEXT, name TEXT, title TEXT, preview TEXT, first_user_message TEXT NOT NULL DEFAULT '', created_at_ms INTEGER, updated_at_ms INTEGER, recency_at_ms INTEGER, archived INTEGER); CREATE INDEX idx_threads_updated_at_ms ON threads(updated_at_ms DESC, id DESC);")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO threads (id,cwd,model,name,title,preview,first_user_message,updated_at_ms,recency_at_ms,archived) VALUES ('stored-title-only','/private-fixture-workspace','gpt-5.6-sol',NULL,'Fix the retry path','PRIVATE_BODY','PRIVATE_BODY',1000,1000,0)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        pool.close().await;
+
+        let id = "00000000-0000-4000-8000-000000000021";
+        let epoch = "00000000-0000-4000-8000-000000000022";
+        let endpoint: collaboration_protocol::EndpointRef = serde_json::from_value(json!({
+            "serviceId": id,
+            "endpointId": "codex-local"
+        }))
+        .unwrap();
+        let description = serde_json::from_value(json!({
+            "endpoint": endpoint,
+            "label": "Stored title fixture",
+            "availability": {"state": "unprobed"},
+            "channels": [{
+                "kind": "nativeCodex",
+                "transport": "unixWebSocket",
+                "path": "absent-native.sock",
+                "schemaDigest": null,
+                "generation": null
+            }]
+        }))
+        .unwrap();
+        let identity = ServiceIdentity::new(id, epoch, &format!("sha256:{}", "a".repeat(64)))
+            .unwrap()
+            .with_endpoints(vec![description])
+            .unwrap()
+            .with_native_backend(NativeControlBackend {
+                endpoint: endpoint.clone(),
+                gate: NativeGenerationGate::default(),
+                codex_home: home,
+            })
+            .unwrap();
+        let display_names = identity.session_display_name_cache();
+        let listener =
+            LocalControlService::bind(&root.path().join("control.sock"), identity).unwrap();
+        let manifest = serde_json::from_value(json!({
+            "version": 2,
+            "serviceId": id,
+            "serviceEpoch": epoch,
+            "machineLabel":"fixture-host","control": {"transport": "unixJsonLines", "path": "control.sock"},
+            "controlSchemaDigest": format!("sha256:{}", "a".repeat(64)),
+            "mcp": {"transport": "streamableHttp", "url": "http://127.0.0.1:0/mcp"}
+        }))
+        .unwrap();
+        let publication = ManifestPublication::publish(root.path(), &manifest).unwrap();
+        let stop = CancellationToken::new();
+        let server = tokio::spawn(listener.run(stop.clone()));
+        let mut client = ControlClient::connect(root.path(), "stored-title-test", "1")
+            .await
+            .unwrap();
+        let inventory = client
+            .list_sessions(NativeSessionListParams {
+                endpoint: endpoint.clone(),
+                view: NativeSessionView::Stored,
+                scope: NativeSessionScope::Any,
+                source: NativeSessionSource::All,
+                include_empty_sessions: false,
+                query: None,
+                page_size: 10,
+                cursor: None,
+            })
+            .await
+            .unwrap();
+        client.close().await.unwrap();
+        stop.cancel();
+        server.await.unwrap().unwrap();
+        drop(publication);
+
+        let session = inventory
+            .sessions
+            .first()
+            .expect("stored row is visible when its first user message exists");
+        assert_eq!(session.name, None);
+        assert_eq!(session.title, "Fix the retry path");
+        assert!(
+            collaboration_protocol::SessionDisplayName::try_from(session.title.clone()).is_ok()
+        );
+        assert_eq!(display_names.display_name_for(&session.target), Ok(None));
+        let push_id = PushId::try_from("018f47d2-24d5-7a68-b9ec-6f759c39458f".to_owned()).unwrap();
+        let line = render_push_line(&PushLineInput {
+            link: RouterLink::new(
+                MachineId::from(session.target.endpoint.service_id.clone()),
+                push_id,
+            ),
+            machine_label: MachineLabel::try_from("fixture-host".to_owned()).unwrap(),
+            origin: PushOrigin::Session(session.target.clone()),
+            header_facts: PushHeaderFacts::DirectMessage {
+                sender_display_name: None,
+            },
+            body: Some("stored display fallback proof".to_owned()),
+        })
+        .unwrap();
+        let fallback_name = session_identity(&session.target, None);
+        assert!(line.starts_with(&format!("✉️ {fallback_name} @fixture-host → you · ")));
+        assert_eq!(
+            parse_push_line_header(&line).map(|header| header.kind),
+            Some(collaboration_protocol::PushKind::DirectMessage)
+        );
+    }
 
     #[tokio::test]
     async fn paged_stored_discovery_records_addresses_without_claiming_live_state() {
@@ -32,13 +163,15 @@ mod tests {
             .connect_with(options)
             .await
             .unwrap();
-        sqlx::raw_sql("CREATE TABLE threads (id TEXT PRIMARY KEY, rollout_path TEXT, cwd TEXT, model_provider TEXT, model TEXT, reasoning_effort TEXT, source TEXT, thread_source TEXT, git_branch TEXT, git_origin_url TEXT, name TEXT, title TEXT, preview TEXT, first_user_message TEXT, created_at_ms INTEGER, updated_at_ms INTEGER, recency_at_ms INTEGER, archived INTEGER); CREATE INDEX idx_threads_updated_at_ms ON threads(updated_at_ms DESC, id DESC);")
+        sqlx::raw_sql("CREATE TABLE threads (id TEXT PRIMARY KEY, rollout_path TEXT, cwd TEXT, model_provider TEXT, model TEXT, reasoning_effort TEXT, source TEXT, thread_source TEXT, git_branch TEXT, git_origin_url TEXT, name TEXT, title TEXT, preview TEXT, first_user_message TEXT NOT NULL DEFAULT '', created_at_ms INTEGER, updated_at_ms INTEGER, recency_at_ms INTEGER, archived INTEGER); CREATE INDEX idx_threads_updated_at_ms ON threads(updated_at_ms DESC, id DESC);")
             .execute(&pool).await.unwrap();
         let title = "PRIVATE_TITLE".repeat(60_000);
         for (id, time) in [("stored-b", 2000_i64), ("stored-a", 1000_i64)] {
             sqlx::query("INSERT INTO threads (id,cwd,model,reasoning_effort,name,title,preview,first_user_message,updated_at_ms,archived) VALUES (?, '/private-fixture-workspace', 'gpt-5.6-sol', 'medium', ?, 'PRIVATE_TITLE', 'PRIVATE_BODY', 'PRIVATE_BODY', ?, 0)")
                 .bind(id).bind(&title).bind(time).execute(&pool).await.unwrap();
         }
+        sqlx::query("INSERT INTO threads (id,cwd,model,name,title,preview,updated_at_ms,archived) VALUES ('stored-empty', '/private-fixture-workspace', 'gpt-5.6-sol', 'Empty session', 'Empty session', '', 500, 0)")
+            .execute(&pool).await.unwrap();
         pool.close().await;
         let original_catalog = std::fs::read(&database).unwrap();
         let id = "00000000-0000-4000-8000-000000000001";
@@ -66,7 +199,7 @@ mod tests {
             })
             .unwrap();
         let listener = LocalControlService::bind(&root.join("control.sock"), identity).unwrap();
-        let manifest = serde_json::from_value(json!({"version":2,"serviceId":id,"serviceEpoch":epoch,"control":{"transport":"unixJsonLines","path":"control.sock"},"controlSchemaDigest":digest,"mcp":{"transport":"streamableHttp","url":"http://127.0.0.1:0/mcp"}})).unwrap();
+        let manifest = serde_json::from_value(json!({"version":2,"serviceId":id,"serviceEpoch":epoch,"machineLabel":"fixture-host","control":{"transport":"unixJsonLines","path":"control.sock"},"controlSchemaDigest":digest,"mcp":{"transport":"streamableHttp","url":"http://127.0.0.1:0/mcp"}})).unwrap();
         let publication = ManifestPublication::publish(&root, &manifest).unwrap();
         let stop = CancellationToken::new();
         let server = tokio::spawn(listener.run(stop.clone()));
@@ -78,6 +211,7 @@ mod tests {
             view: NativeSessionView::Stored,
             scope: collaboration_protocol::NativeSessionScope::Any,
             source: collaboration_protocol::NativeSessionSource::All,
+            include_empty_sessions: false,
             query: None,
             page_size: 100,
             cursor,
@@ -114,6 +248,22 @@ mod tests {
                 URL_SAFE_NO_PAD.encode(serde_json::to_vec(&malformed).unwrap()),
             )))
             .await;
+        let mut changed_filter_client = ControlClient::connect(&root, "stored-journal-test", "1")
+            .await
+            .unwrap();
+        let changed_empty_filter = changed_filter_client
+            .list_sessions(NativeSessionListParams {
+                endpoint: endpoint.clone(),
+                view: NativeSessionView::Stored,
+                scope: collaboration_protocol::NativeSessionScope::Any,
+                source: collaboration_protocol::NativeSessionSource::All,
+                include_empty_sessions: true,
+                query: None,
+                page_size: 100,
+                cursor: first.next_cursor.clone(),
+            })
+            .await;
+        changed_filter_client.close().await.unwrap();
         client.close().await.unwrap();
         stop.cancel();
         server.await.unwrap().unwrap();
@@ -143,6 +293,14 @@ mod tests {
             "page must shrink to its frame budget"
         );
         assert_eq!(second.sessions.len(), 1);
+        assert!(
+            first
+                .sessions
+                .iter()
+                .chain(&second.sessions)
+                .all(|session| String::from(session.target.session_id.clone()) != "stored-empty"),
+            "an upstream empty-string first_user_message must be hidden by default"
+        );
         assert_eq!(
             first.sessions.first().unwrap().name.as_deref(),
             Some(title.as_str())
@@ -186,6 +344,10 @@ mod tests {
             invalid_cursor,
             Err(ClientError::Rejected { code: -32602, .. })
         ));
+        assert!(matches!(
+            changed_empty_filter,
+            Err(ClientError::Rejected { code: -32602, .. })
+        ));
     }
 
     /// Pages one stored listing to exhaustion through the real Control service.
@@ -225,7 +387,7 @@ mod tests {
             })
             .unwrap();
         let listener = LocalControlService::bind(&root.join("control.sock"), identity).unwrap();
-        let manifest = serde_json::from_value(json!({"version":2,"serviceId":id,"serviceEpoch":epoch,"control":{"transport":"unixJsonLines","path":"control.sock"},"controlSchemaDigest":digest,"mcp":{"transport":"streamableHttp","url":"http://127.0.0.1:0/mcp"}})).unwrap();
+        let manifest = serde_json::from_value(json!({"version":2,"serviceId":id,"serviceEpoch":epoch,"machineLabel":"fixture-host","control":{"transport":"unixJsonLines","path":"control.sock"},"controlSchemaDigest":digest,"mcp":{"transport":"streamableHttp","url":"http://127.0.0.1:0/mcp"}})).unwrap();
         let publication = ManifestPublication::publish(root, &manifest).unwrap();
         let stop = CancellationToken::new();
         let server = tokio::spawn(listener.run(stop.clone()));
@@ -241,6 +403,7 @@ mod tests {
                     view: NativeSessionView::Stored,
                     scope: scope.clone(),
                     source,
+                    include_empty_sessions: false,
                     query: query.map(str::to_owned),
                     page_size,
                     cursor: cursor.take(),
@@ -292,7 +455,7 @@ mod tests {
             .connect_with(options)
             .await
             .unwrap();
-        sqlx::raw_sql("CREATE TABLE threads (id TEXT PRIMARY KEY, rollout_path TEXT, cwd TEXT, model_provider TEXT, model TEXT, reasoning_effort TEXT, source TEXT, thread_source TEXT, git_branch TEXT, git_origin_url TEXT, name TEXT, title TEXT, preview TEXT, first_user_message TEXT, created_at_ms INTEGER, updated_at_ms INTEGER, recency_at_ms INTEGER, archived INTEGER); CREATE INDEX idx_threads_updated_at_ms ON threads(updated_at_ms DESC, id DESC);")
+        sqlx::raw_sql("CREATE TABLE threads (id TEXT PRIMARY KEY, rollout_path TEXT, cwd TEXT, model_provider TEXT, model TEXT, reasoning_effort TEXT, source TEXT, thread_source TEXT, git_branch TEXT, git_origin_url TEXT, name TEXT, title TEXT, preview TEXT, first_user_message TEXT NOT NULL DEFAULT '', created_at_ms INTEGER, updated_at_ms INTEGER, recency_at_ms INTEGER, archived INTEGER); CREATE INDEX idx_threads_updated_at_ms ON threads(updated_at_ms DESC, id DESC);")
             .execute(&pool).await.unwrap();
         for (id, cwd, origin, effort, thread_source, name, time) in [
             (
@@ -343,8 +506,8 @@ mod tests {
                 250,
             ),
         ] {
-            sqlx::query("INSERT INTO threads (id,cwd,model,reasoning_effort,source,thread_source,git_origin_url,name,title,updated_at_ms,recency_at_ms,archived) VALUES (?, ?, 'gpt-5.6-sol', ?, 'cli', ?, ?, ?, 'derived', ?, ?, 0)")
-                .bind(id).bind(cwd).bind(effort).bind(thread_source).bind(origin).bind(name).bind(time).bind(time)
+            sqlx::query("INSERT INTO threads (id,cwd,model,reasoning_effort,source,thread_source,git_origin_url,name,title,first_user_message,updated_at_ms,recency_at_ms,archived) VALUES (?, ?, 'gpt-5.6-sol', ?, 'cli', ?, ?, ?, 'derived', ?, ?, ?, 0)")
+                .bind(id).bind(cwd).bind(effort).bind(thread_source).bind(origin).bind(name).bind(format!("first user message for {id}")).bind(time).bind(time)
                 .execute(&pool).await.unwrap();
         }
         pool.close().await;

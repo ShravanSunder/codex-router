@@ -15,7 +15,7 @@ async fn interrupt_cli_reports_unknown_when_control_disconnects_after_submission
     let service_id = "00000000-0000-4000-8000-000000000001";
     let epoch = "00000000-0000-4000-8000-000000000002";
     let digest = format!("sha256:{}", "a".repeat(64));
-    let manifest = serde_json::from_value(json!({"version":2,"serviceId":service_id,"serviceEpoch":epoch,"control":{"transport":"unixJsonLines","path":"control.sock"},"controlSchemaDigest":digest,"mcp":{"transport":"streamableHttp","url":"http://127.0.0.1:0/mcp"}})).unwrap_or_else(|error| panic!("manifest: {error}"));
+    let manifest = serde_json::from_value(json!({"version":2,"serviceId":service_id,"serviceEpoch":epoch,"machineLabel":"fixture-host","control":{"transport":"unixJsonLines","path":"control.sock"},"controlSchemaDigest":digest,"mcp":{"transport":"streamableHttp","url":"http://127.0.0.1:0/mcp"}})).unwrap_or_else(|error| panic!("manifest: {error}"));
     let publication = collaboration_service::ManifestPublication::publish(&root, &manifest)
         .unwrap_or_else(|error| panic!("publish: {error}"));
     let fixture = tokio::spawn(async move {
@@ -106,7 +106,7 @@ async fn session_inspect_cli_preserves_native_rejection_message() {
     let digest = format!("sha256:{}", "a".repeat(64));
     let manifest = serde_json::from_value(json!({
         "version":2,"serviceId":service_id,"serviceEpoch":epoch,
-        "control":{"transport":"unixJsonLines","path":"control.sock"},
+        "machineLabel":"fixture-host","control":{"transport":"unixJsonLines","path":"control.sock"},
         "controlSchemaDigest":digest,
         "mcp":{"transport":"streamableHttp","url":"http://127.0.0.1:0/mcp"}
     }))
@@ -133,6 +133,29 @@ async fn session_inspect_cli_preserves_native_rejection_message() {
             .write_all(format!("{initialized}\n").as_bytes())
             .await
             .expect("write init");
+        let discovery: Value = serde_json::from_str(
+            &lines
+                .next_line()
+                .await
+                .expect("read discovery")
+                .expect("discovery frame"),
+        )
+        .expect("discovery JSON");
+        assert_eq!(discovery["method"], "endpoint/list");
+        let inventory = json!({"jsonrpc":"2.0","id":discovery["id"],"result":{
+            "serviceEpoch":epoch,"sequence":0,"endpoints":[{
+                "endpoint":{"serviceId":service_id,"endpointId":"codex-local"},
+                "label":"Fixture Codex",
+                "availability":{"state":"available","observedAt":"2026-09-05T12:00:00Z"},
+                "channels":[{"kind":"nativeCodex","transport":"unixWebSocket",
+                    "path":"codex-native.sock","schemaDigest":null,
+                    "generation":{"serviceEpoch":epoch,"generation":1}}]
+            }]
+        }});
+        write
+            .write_all(format!("{inventory}\n").as_bytes())
+            .await
+            .expect("write discovery");
         let inspect: Value = serde_json::from_str(
             &lines
                 .next_line()
@@ -216,7 +239,7 @@ async fn message_cli_retains_target_after_response_loss_and_keeps_refusal_distin
         let digest = format!("sha256:{}", "a".repeat(64));
         let manifest = serde_json::from_value(json!({
             "version":2,"serviceId":service_id,"serviceEpoch":epoch,
-            "control":{"transport":"unixJsonLines","path":"control.sock"},
+            "machineLabel":"fixture-host","control":{"transport":"unixJsonLines","path":"control.sock"},
             "controlSchemaDigest":digest,"mcp":{"transport":"streamableHttp","url":"http://127.0.0.1:0/mcp"}
         }))
         .unwrap_or_else(|error| panic!("manifest: {error}"));
@@ -244,9 +267,23 @@ async fn message_cli_retains_target_after_response_loss_and_keeps_refusal_distin
                         } else {
                             json!({"kind":"unknown"})
                         };
+                        let delivery_state = if kind == "nativeRejected" {
+                            "rejected"
+                        } else {
+                            "outcome-unknown"
+                        };
+                        let push_id = "019f0000-0000-7000-8000-000000000101";
+                        let link = format!("router://{service_id}/push/{push_id}");
                         let response = json!({
                             "jsonrpc":"2.0","id":request["id"],
-                            "result":{"outcome":outcome,"reachability":"codexAppServer","client":null}
+                            "result":{
+                                "pushId":push_id,
+                                "link":link,
+                                "target":request["params"]["target"].clone(),
+                                "targetIdentity":"Codex target",
+                                "deliveryState":delivery_state,
+                                "receipt":{"outcome":outcome,"reachability":"codexAppServer","client":null}
+                            }
                         });
                         write
                             .write_all(format!("{response}\n").as_bytes())
@@ -319,10 +356,19 @@ async fn message_cli_retains_target_after_response_loss_and_keeps_refusal_distin
         > = serde_json::from_value(result.clone()).expect("published finite message record");
         if let Some(kind) = rejection_kind {
             assert_eq!(
-                result["result"]["record"]["reachability"], "codexAppServer",
+                result["result"]["record"]["deliveryState"],
+                if kind == "nativeRejected" {
+                    "rejected"
+                } else {
+                    "outcome-unknown"
+                },
                 "{label}"
             );
-            let outcome = &result["result"]["record"]["outcome"];
+            assert_eq!(
+                result["result"]["record"]["receipt"]["reachability"], "codexAppServer",
+                "{label}"
+            );
+            let outcome = &result["result"]["record"]["receipt"]["outcome"];
             assert_eq!(
                 outcome["kind"],
                 if kind == "nativeRejected" {

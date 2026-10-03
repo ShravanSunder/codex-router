@@ -11,7 +11,7 @@ pub(super) async fn initialize_provider_connection(
         "initialize",
         json!({
             "protocolVersion": 1,
-            "clientCapabilities": {"auth": {"terminal": false}},
+            "clientCapabilities": {"auth": {"terminal": false}, "elicitation": {"form": {}}},
             "clientInfo": {"name": "codex-router", "version": env!("CARGO_PKG_VERSION")},
         }),
     )?;

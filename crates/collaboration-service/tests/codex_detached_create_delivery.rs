@@ -1,16 +1,21 @@
 //! A detached Codex ACP create keeps both its operation evidence and empty native binding.
+#[path = "../../codex-acp-adapter/tests/support/native_permission_echo.rs"]
+mod native_permission_echo;
 use codex_acp_adapter::{AcpConnectionInputs, AcpStoredSessions, serve_acp_connection};
 use codex_native_integration::{NativePayloadSchemas, NativeSchemaBundle};
 use collaboration_protocol::{
     CodexGeneration, EndpointDescription, NonEmptyText, OperationId, SessionRef, UuidIdentity,
 };
 use collaboration_service::{
-    CodexAppServerDeliveryRoute, CodexConversationOperationRecorder, EndpointDirectory,
-    NativeControlBackend, NativeGenerationGate, ProviderOperationStore, ServiceIdentity,
-    SessionDeliveryRoute, SessionDeliveryRouter, SessionMessageDelivery,
-    UnmaterializedThreadHolder, serve_control_connection,
+    BoardAvailability, CodexAppServerDeliveryRoute, CodexConversationOperationRecorder,
+    EndpointDirectory, MachineIdentity, NativeControlBackend, NativeGenerationGate,
+    ProviderOperationStore, ServiceIdentity, SessionDeliveryRoute, SessionDeliveryRouter,
+    SessionMessageDelivery, SubscriptionDeliveryService, SubscriptionDeliveryServiceProps,
+    SystemSubscriptionClock, TargetPresenceProbe, UnmaterializedThreadHolder,
+    serve_control_connection,
 };
 use futures_util::{SinkExt, StreamExt};
+use native_permission_echo::applied_router_sandbox;
 use serde_json::{Value, json};
 use std::{
     collections::BTreeMap, future::Future, io, os::unix::fs::DirBuilderExt, pin::Pin, sync::Arc,
@@ -66,6 +71,7 @@ async fn detached_create_records_target_and_starts_first_message_without_resume(
     let listener = tokio::net::UnixListener::bind(&socket_path)?;
 
     let service_id = UuidIdentity::try_from("00000000-0000-4000-8000-000000000001".to_owned())?;
+    let service_link_id = String::from(service_id.clone());
     let generation: CodexGeneration =
         serde_json::from_value(json!({"serviceEpoch":service_id,"generation":1}))?;
     let target: SessionRef = serde_json::from_value(json!({
@@ -126,22 +132,38 @@ async fn detached_create_records_target_and_starts_first_message_without_resume(
         backend_config.clone(),
         Arc::clone(&holder),
     ));
-    let delivery: Arc<dyn SessionMessageDelivery> =
-        Arc::new(SessionDeliveryRouter::new(vec![route]));
+    let automation_store = Arc::new(tokio::sync::Mutex::new(
+        automation_storage::AutomationStore::open(&root.join("automation.sqlite")).await?,
+    ));
+    let delivery_router = Arc::new(SessionDeliveryRouter::new(vec![route]));
+    let delivery: Arc<dyn SessionMessageDelivery> = delivery_router.clone();
+    let presence: Arc<dyn TargetPresenceProbe> = delivery_router;
+    let machine_identity = MachineIdentity::new(service_id.clone(), None)?;
+    let subscription_delivery =
+        SubscriptionDeliveryService::new(SubscriptionDeliveryServiceProps {
+            board_availability: BoardAvailability::Unavailable,
+            push_store: Arc::clone(&automation_store),
+            delivery: Arc::clone(&delivery),
+            presence: Arc::clone(&presence),
+            machine_identity,
+            clock: Arc::new(SystemSubscriptionClock),
+        });
+    subscription_delivery.start().await?;
     let identity = ServiceIdentity::new(
         &String::from(service_id.clone()),
         &String::from(service_id),
         &format!("sha256:{}", "a".repeat(64)),
     )?
+    .with_automation_store(Arc::clone(&automation_store))
     .with_endpoints(vec![description])?
     .with_native_backend(backend_config)?
     .with_provider_operation_store(Arc::clone(&store))
     .with_codex_conversation_recorder(Arc::clone(&recorder))
-    .with_session_delivery(delivery);
+    .with_session_delivery(delivery)
+    .with_subscription_delivery_service(subscription_delivery.clone(), presence);
 
     let (native_started_tx, native_started_rx) = tokio::sync::oneshot::channel();
     let (release_native_tx, release_native_rx) = tokio::sync::oneshot::channel();
-    let backend_scratch = scratch.display().to_string();
     let native = tokio::spawn(async move {
         let (stream, _) = listener.accept().await?;
         let mut wire = tokio_tungstenite::accept_async(stream).await?;
@@ -160,6 +182,25 @@ async fn detached_create_records_target_and_starts_first_message_without_resume(
                     )
                     .into(),
                 );
+            }
+            if expected == "turn/start" {
+                if request["params"]["threadId"] != "detached-thread" {
+                    return Err(
+                        format!("detached Control message used wrong thread: {request}").into(),
+                    );
+                }
+                let push_id = request["params"]["clientUserMessageId"]
+                    .as_str()
+                    .ok_or("detached Control message omitted push id")?;
+                let text = request["params"]["input"][0]["text"]
+                    .as_str()
+                    .ok_or("detached Control message omitted prepared line")?;
+                if !text.contains("🧑 Owner (unverified) @")
+                    || !text.contains("· \"hello\" ·")
+                    || !text.ends_with(&format!("router://{service_link_id}/push/{push_id}"))
+                {
+                    return Err(format!("unexpected detached push line: {text}").into());
+                }
             }
             if expected == "initialized" {
                 continue;
@@ -181,7 +222,7 @@ async fn detached_create_records_target_and_starts_first_message_without_resume(
                     "cwd":"/work","model":"gpt-5.6-sol","approvalPolicy":"on-request",
                     "approvalsReviewer":"auto_review",
                     "activePermissionProfile":{"id":"router-workspace-write","extends":":workspace"},
-                    "sandbox":{"type":"workspaceWrite","writableRoots":[backend_scratch]},
+                    "sandbox":applied_router_sandbox(&request),
                     "thread":{"id":"detached-thread","cwd":"/work","turns":[]}
                 }),
                 _ => json!({"turn":{"id":"first-turn"}}),
@@ -259,7 +300,7 @@ async fn detached_create_records_target_and_starts_first_message_without_resume(
     {
         return Err(format!("detached create target not recorded: {waited}").into());
     }
-    holder.drain_create_tasks().await;
+    holder.drain_host_tasks().await;
     if !holder.contains("detached-thread") {
         return Err("detached create lost its empty native binding".into());
     }
@@ -269,11 +310,11 @@ async fn detached_create_records_target_and_starts_first_message_without_resume(
         "message",
         "message/send",
         json!({"target":target,"message":{"kind":"humanUser","text":"hello"},
-            "mode":"auto","generationGuard":null,"correlation":null}),
+            "mode":"auto","generationGuard":null}),
     )
     .await?;
-    if sent["result"]["outcome"]["kind"] != "started"
-        || sent["result"]["client"]["kind"] != "codexAppServer"
+    if sent["result"]["receipt"]["outcome"]["kind"] != "started"
+        || sent["result"]["receipt"]["client"]["kind"] != "codexAppServer"
         || holder.contains("detached-thread")
     {
         return Err(format!("first Control message did not start native turn: {sent}").into());
@@ -282,11 +323,20 @@ async fn detached_create_records_target_and_starts_first_message_without_resume(
     drop(control_write);
     serving_control.await??;
     native.await??;
+    subscription_delivery.shutdown().await;
+    drop(subscription_delivery);
+    let automation_store = Arc::try_unwrap(automation_store)
+        .map_err(|_| io::Error::other("service retained automation store"))?
+        .into_inner();
+    automation_store.close().await?;
     drop(store);
     for name in [
         "operations.sqlite",
         "operations.sqlite-wal",
         "operations.sqlite-shm",
+        "automation.sqlite",
+        "automation.sqlite-wal",
+        "automation.sqlite-shm",
         "native.sock",
     ] {
         let file = root.join(name);

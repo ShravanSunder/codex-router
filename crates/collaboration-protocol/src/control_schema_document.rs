@@ -157,22 +157,22 @@ pub fn control_schema_document(
         message_board::ThreadParticipantListRequest,
         message_board::ThreadParticipantListResult,
     >("board/threadParticipantList", &[])?;
-    assembly.add_method::<message_board::ThreadListenRequest, message_board::ThreadListenResult>(
-        "board/threadListen",
+    assembly.add_method::<ThreadSubscribeRequest, ThreadSubscriptionView>(
+        "board/threadSubscribe",
         &[],
     )?;
-    assembly.add_method::<message_board::ThreadWaitRequest, message_board::ThreadWaitResult>(
+    assembly.add_method::<ThreadUnsubscribeRequest, ThreadSubscriptionView>(
+        "board/threadUnsubscribe",
+        &[],
+    )?;
+    assembly.add_method::<ThreadSubscriptionsRequest, ThreadSubscriptionsResult>(
+        "board/threadSubscriptions",
+        &[],
+    )?;
+    assembly.add_method::<ThreadSubscriptionWaitRequest, ThreadSubscriptionWaitResult>(
         "board/threadWait",
         &[],
     )?;
-    assembly.add_method::<
-        message_board::ThreadListenShowRequest,
-        message_board::ThreadListenShowResult,
-    >("board/threadListenShow", &[])?;
-    assembly.add_method::<
-        message_board::ThreadListenCancelRequest,
-        message_board::ThreadListenCancelResult,
-    >("board/threadListenCancel", &[])?;
     assembly.add_method::<message_board::InboxFetchRequest, message_board::InboxFetchResult>(
         "board/inboxFetch",
         &[],
@@ -186,12 +186,22 @@ pub fn control_schema_document(
     assembly.add_type::<ConfigurationFailure>("configuration-failure")?;
     assembly.add_type::<AutomationInspectionFailure>("automation-inspection-failure")?;
     assembly.add_type::<ConversationOperationFailure>("conversation-operation-failure")?;
+    assembly.add_type::<ProviderSettingsFailure>("provider-settings-failure")?;
+    assembly.add_type::<ProviderInspectFailure>("provider-inspect-failure")?;
     assembly.add_method::<ConversationCreateRequest, ConversationOperationSubmission>(
         "conversation/create",
         &[],
     )?;
     assembly.add_method::<ConversationLoadRequest, ConversationOperationSubmission>(
         "conversation/load",
+        &[],
+    )?;
+    assembly.add_method::<ConversationResumeRequest, ConversationOperationSubmission>(
+        "conversation/resume",
+        &[],
+    )?;
+    assembly.add_method::<ConversationCloseRequest, ConversationOperationSubmission>(
+        "conversation/close",
         &[],
     )?;
     assembly.add_method::<ConversationPromptRequest, ConversationOperationSubmission>(
@@ -201,6 +211,26 @@ pub fn control_schema_document(
     assembly.add_method::<ConversationCancelRequest, ConversationOperationSubmission>(
         "conversation/cancel",
         &[],
+    )?;
+    assembly.add_method::<ProviderSettingsSetRequest, ProviderSettingsResult>(
+        "conversation/settingsSet",
+        &[],
+    )?;
+    assembly.add_method::<ProviderSettingsAcceptRequest, ProviderSettingsResult>(
+        "conversation/settingsAccept",
+        &[],
+    )?;
+    assembly.add_method::<ProviderSessionInspectRequest, ProviderSessionInspectResult>(
+        "provider/sessionInspect",
+        &[],
+    )?;
+    assembly.add_method::<BoundedObservationRequest, BoundedObservationResult>(
+        "provider/sessionObserve",
+        &["invalidField", "notFound", "unavailable", "overloaded"],
+    )?;
+    assembly.add_method::<ProviderSessionListenRequest, ProviderSessionListenReady>(
+        "provider/sessionListen",
+        &["invalidField", "notFound", "unavailable", "overloaded"],
     )?;
     assembly.add_method::<ConversationOperationShowRequest, ConversationOperationSnapshot>(
         "conversation/operationShow",
@@ -306,6 +336,16 @@ pub fn control_schema_document(
             "overloaded",
         ],
     )?;
+    assembly.add_method::<ProviderSessionListParams, ProviderSessionListResult>(
+        "provider/sessionList",
+        &[
+            "wrongService",
+            "endpointNotFound",
+            "unsupportedCapability",
+            "unavailable",
+            "overloaded",
+        ],
+    )?;
     assembly.add_method::<NativeInspectParams, NativeInspectResult>(
         "codex/sessionInspect",
         &[
@@ -331,16 +371,50 @@ pub fn control_schema_document(
             "nameMismatch",
         ],
     )?;
-    assembly.add_method::<SessionMessageSendParams, DeliveryReceipt>(
+    assembly.add_method::<SessionMessageSendParams, PushMessageSendResult>(
         "message/send",
         &[
             "wrongService",
             "unavailable",
+            "invalidField",
             "outcomeUnknown",
             "overloaded",
-            "threadNotLoaded",
-            "noActiveTurn",
         ],
+    )?;
+    assembly.add_method::<SessionMessageReplyParams, SessionMessageReplyResult>(
+        "message/reply",
+        &[
+            "wrongService",
+            "unavailable",
+            "invalidField",
+            "notFound",
+            "notPermitted",
+            "foreignMachine",
+            "notDirectMessage",
+            "ownerReplyUnsupported",
+            "outcomeUnknown",
+            "overloaded",
+        ],
+    )?;
+    assembly.add_method::<PushRecordShowParams, PushRecordShowResult>(
+        "router/show",
+        &[
+            "wrongService",
+            "unavailable",
+            "invalidField",
+            "notFound",
+            "notPermitted",
+            "foreignMachine",
+            "overloaded",
+        ],
+    )?;
+    assembly.add_method::<PushRecordListParams, PushRecordListResult>(
+        "message/inbox",
+        &["wrongService", "unavailable", "invalidField", "overloaded"],
+    )?;
+    assembly.add_method::<PushRecordHistoryParams, PushRecordListResult>(
+        "message/history",
+        &["wrongService", "unavailable", "invalidField", "overloaded"],
     )?;
     assembly.add_method::<NativeInterruptParams, NativeInterruptResult>(
         "codex/turnInterrupt",
@@ -355,7 +429,7 @@ pub fn control_schema_document(
             "overloaded",
         ],
     )?;
-    assembly.add_method::<ApprovalListParams, ApprovalListResult>(
+    assembly.add_method::<ApprovalListParams, ApprovalListResponse>(
         "approval/list",
         &["unavailable", "overloaded"],
     )?;
@@ -363,11 +437,30 @@ pub fn control_schema_document(
         "approval/decide",
         &[
             "approvalNotPending",
+            "alreadySettled",
             "wrongActor",
             "selfDecision",
             "decisionNotOffered",
+            "persistentChoiceNotAcknowledged",
+            "invalidSelection",
+            "invalidOptionId",
             "expired",
             "oldGeneration",
+            "unavailable",
+            "overloaded",
+        ],
+    )?;
+    assembly.add_method::<QuestionListParams, QuestionListResult>(
+        "question/list",
+        &["unavailable", "overloaded"],
+    )?;
+    assembly.add_method::<QuestionAnswerParams, QuestionAnswerResult>(
+        "question/answer",
+        &[
+            "questionNotPending",
+            "alreadySettled",
+            "wrongActor",
+            "invalidAnswer",
             "unavailable",
             "overloaded",
         ],
@@ -402,6 +495,10 @@ pub fn control_schema_document(
         .push(reference("endpoint-change-notification"));
     assembly.definitions.insert("wake-change-notification".into(),json!({"type":"object","required":["jsonrpc","method","params"],"additionalProperties":false,"properties":{"jsonrpc":{"const":"2.0"},"method":{"const":"wake/changed"},"params":reference("wake-changed")}}));
     assembly.frames.push(reference("wake-change-notification"));
+    assembly.definitions.insert("provider-session-event-notification".into(),json!({"type":"object","required":["jsonrpc","method","params"],"additionalProperties":false,"properties":{"jsonrpc":{"const":"2.0"},"method":{"const":"provider/sessionEvent"},"params":{"type":"object"}}}));
+    assembly
+        .frames
+        .push(reference("provider-session-event-notification"));
     Ok(json!({
         "$schema":"https://json-schema.org/draft/2020-12/schema",
         "$id":"urn:agent-communication:control:1",
@@ -412,7 +509,7 @@ pub fn control_schema_document(
         "x-protocolVersion":{"major":1,"minor":0},
         "x-nativeSchemaDigest":native_digest,
         "x-methods":assembly.methods,
-        "x-notifications":{"endpoint/changed":reference("endpoint-change-notification"),"wake/changed":reference("wake-change-notification")},
+        "x-notifications":{"endpoint/changed":reference("endpoint-change-notification"),"wake/changed":reference("wake-change-notification"),"provider/sessionEvent":reference("provider-session-event-notification")},
         "x-maxFrameUtf8Bytes":1048576,
         "x-maxPendingRequests":64,
         "x-maxRequestsPerConnection":65536
@@ -505,11 +602,21 @@ fn method_error(method: &str, failures: &[&str]) -> Value {
             !native_control_diagnostics || !matches!(*kind, "nativeRejected" | "nameMismatch")
         })
         .collect();
-    let properties = Map::from_iter([
+    let mut properties = Map::from_iter([
         ("kind".to_owned(), json!({"enum":general_failures})),
         ("stage".to_owned(), json!({"enum":stages})),
         ("message".to_owned(), text.clone()),
     ]);
+    if method == "approval/decide" {
+        properties.insert(
+            "offeredOptions".to_owned(),
+            json!({"type":"array","items":{"type":"string"}}),
+        );
+        properties.insert("persistentTarget".to_owned(), text.clone());
+    }
+    if method == "question/answer" {
+        properties.insert("fieldId".to_owned(), json!({"type":"string"}));
+    }
     let required = vec!["kind", "stage", "message"];
     let method_data = json!({"type":"object","required":required,
         "additionalProperties":false,"properties":properties});
@@ -522,8 +629,8 @@ fn method_error(method: &str, failures: &[&str]) -> Value {
                 "kind":{"const":"nativeRejected"},
                 "stage":{"enum":if method == "codex/sessionInspect" { vec!["inspect"] } else { vec!["rename"] }},
                 "message":text,
-                "reason":{"enum":["childThread","busy","notResumable","permissionDenied","unsupportedCapability","unknown"]},
-                "nextAction":{"enum":["inspectTarget","useDeliverySteer","requestApproval","correctRequest","retryLater"]},
+                "reason":{"enum":["childThread","busy","heldByAnotherClient","notResumable","permissionDenied","unsupportedCapability","unknown"]},
+                "nextAction":{"enum":["inspectTarget","useDeliverySteer","messageFromHoldingCodexClient","requestApproval","correctRequest","retryLater"]},
                 "nativeCode":{"type":"integer"}
             }
         }));
@@ -563,6 +670,15 @@ fn method_error(method: &str, failures: &[&str]) -> Value {
     }
     if method.starts_with("conversation/") {
         data = vec![reference("conversation-operation-failure")];
+    }
+    if matches!(
+        method,
+        "conversation/settingsSet" | "conversation/settingsAccept"
+    ) {
+        data = vec![reference("provider-settings-failure")];
+    }
+    if method == "provider/sessionInspect" {
+        data = vec![reference("provider-inspect-failure")];
     }
     if matches!(
         method,

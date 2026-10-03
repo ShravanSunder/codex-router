@@ -14,6 +14,9 @@ use std::{
 };
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio_tungstenite::tungstenite::Message;
+#[path = "support/native_permission_echo.rs"]
+mod native_permission_echo;
+use native_permission_echo::applied_router_sandbox;
 #[path = "support/conversation_operation_recorder.rs"]
 mod conversation_operation_recorder;
 use conversation_operation_recorder::AcceptingConversationRecorder;
@@ -44,7 +47,7 @@ impl UnmaterializedBindingStore for TestBindingHolder {
         self.hold(binding);
     }
     fn finish(&self, _session_id: &str) {}
-    fn create_tasks(&self) -> tokio_util::task::TaskTracker {
+    fn host_tasks(&self) -> tokio_util::task::TaskTracker {
         self.tasks.clone()
     }
 }
@@ -77,6 +80,7 @@ async fn rejected_interrupt_stays_blocked_through_active_reload_and_clears_after
                     "initialize",
                     "initialized",
                     "thread/start",
+                    "thread/read",
                     "turn/start",
                     "turn/interrupt",
                 ]
@@ -94,7 +98,7 @@ async fn rejected_interrupt_stays_blocked_through_active_reload_and_clears_after
                     "initialize" => json!({}),
                     "turn/start" => json!({"turn":{"id":"target","status":"inProgress"}}),
                     _ => {
-                        json!({"cwd":"/work","model":"gpt-5.6-sol","approvalPolicy":"on-request","approvalsReviewer":"auto_review","activePermissionProfile":{"id":"router-workspace-write","extends":":workspace"},"sandbox":{"type":"workspaceWrite","writableRoots":[TEST_SCRATCH]},"thread":{"id":"thread-a","cwd":"/work","status":{"type":if phase==1 {"active"} else {"idle"}},"turns":if phase==1 {json!([{"id":"target","status":"inProgress","items":[]}])} else {json!([])}}})
+                        json!({"cwd":"/work","model":"gpt-5.6-sol","approvalPolicy":"on-request","approvalsReviewer":"auto_review","activePermissionProfile":{"id":"router-workspace-write","extends":":workspace"},"sandbox":applied_router_sandbox(&request),"thread":{"id":"thread-a","cwd":"/work","status":{"type":if phase==1 {"active"} else {"idle"}},"turns":if phase==1 {json!([{"id":"target","status":"inProgress","items":[]}])} else {json!([])}}})
                     }
                 };
                 let reply = if *method == "turn/interrupt" {

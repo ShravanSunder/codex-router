@@ -9,15 +9,16 @@ use codex_router_host::{
 use collaboration_protocol::{
     AttemptId, ChannelDescription, CodexGeneration, DeliveryClientReceipt, DeliveryCorrelationId,
     DeliveryOutcome, EndpointAvailability, EndpointDescription, EndpointId, EndpointRef,
-    GenerationNumber, MessageContent, MessageDelivery, MessageText, NonEmptyText,
-    ObservationTimestamp, ProviderBindingId, ProviderBindingIdentity, ProviderCapabilities,
-    ProviderCapability, ProviderCapabilityEvidence, ProviderCapabilityName,
-    ProviderCapabilityStatus, ProviderKind, ProviderRequestedPolicy, ProviderRuntimeIdentity,
-    ProviderTransport, ProviderWorkingDirectory, RouterAccess, SessionId, SessionRef, UuidIdentity,
+    GenerationNumber, MessageDelivery, MessageText, NonEmptyText, ObservationTimestamp,
+    ProviderBindingId, ProviderBindingIdentity, ProviderCapabilities, ProviderCapability,
+    ProviderCapabilityEvidence, ProviderCapabilityName, ProviderCapabilityStatus, ProviderKind,
+    ProviderRequestedPolicy, ProviderRuntimeIdentity, ProviderTransport, ProviderWorkingDirectory,
+    PushId, RouterAccess, SessionId, SessionRef, UuidIdentity,
 };
 use collaboration_service::{
-    AttemptEvidenceSink, DeliveryFuture, DeliveryPrecondition, DeliveryRequest, EndpointDirectory,
+    AttemptEvidenceSink, DeliveryFuture, DeliveryPrecondition, EndpointDirectory,
     ProviderOperationStore, ProviderSessionRecord, SessionDeliveryRoute,
+    layer_zero::{DeliveryRequest, PreparedPush},
 };
 use std::{
     path::{Path, PathBuf},
@@ -66,6 +67,7 @@ sys.stdin.read()
         event_socket.display().to_string()
     );
     ExternalProviderLaunch {
+        persistence_target: acp_client_runtime::ProviderPersistenceTarget::Unspecified,
         executable: PathBuf::from("/usr/bin/python3"),
         arguments: vec!["-c".to_owned(), script],
         environment: Vec::new(),
@@ -140,8 +142,8 @@ async fn idle_explicit_queue_is_accepted_and_drains_for_both_providers() {
                 requested_policy: ProviderRequestedPolicy {
                     access: RouterAccess::WriteRestricted,
                 },
-                created_by: target.clone(),
-                approver: target.clone(),
+                created_by: (target.clone()).into(),
+                approver: (target.clone()).into(),
                 updated_at_ms: 1,
             })
             .await
@@ -184,17 +186,28 @@ async fn idle_explicit_queue_is_accepted_and_drains_for_both_providers() {
         );
         let evidence = RecordedEvidence(tokio::sync::Mutex::new(Vec::new()));
         let attempt = AttemptId::generate();
+        let push_id = PushId::try_from(attempt.as_str().to_owned()).expect("UUIDv7 push id");
+        let correlation = DeliveryCorrelationId::try_from(push_id.as_str().to_owned())
+            .expect("push id correlation");
+        let line = MessageText::try_from(format!(
+            "✉️ sender · \"queued work\" · router://{}/push/{}",
+            String::from(target.endpoint.service_id.clone()),
+            push_id.as_str()
+        ))
+        .expect("prepared push line");
 
         let receipt = route
             .deliver(
                 DeliveryRequest {
-                    target,
-                    message: MessageContent::HumanUser {
-                        text: MessageText::try_from("queued work".to_owned()).expect("message"),
+                    payload: PreparedPush {
+                        push_id,
+                        line,
+                        load_policy: collaboration_service::LoadPolicy::MayLoad,
                     },
+                    target,
                     mode: MessageDelivery::Queue,
                     precondition: DeliveryPrecondition::Unpinned,
-                    correlation: DeliveryCorrelationId::generate(),
+                    correlation,
                     attempt: attempt.clone(),
                 },
                 &evidence,

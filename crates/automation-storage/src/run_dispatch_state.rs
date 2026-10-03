@@ -76,7 +76,10 @@ impl AutomationStore {
                     && before.generation == after.generation
                     && before.binding == after.binding
                     && before.attempt_id == after.attempt_id
-                    && before.submission == SubmissionEffect::NotDispatched
+                    && matches!(
+                        before.submission,
+                        SubmissionEffect::NotDispatched | SubmissionEffect::Rejected
+                    )
                     && after.submission == SubmissionEffect::Dispatching
             }
             (

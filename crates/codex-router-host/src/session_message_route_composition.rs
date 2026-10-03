@@ -14,15 +14,28 @@ pub(crate) struct SessionMessageRouteComposition {
     pub(crate) provider_route: Option<Arc<ProviderAcpDeliveryRoute>>,
 }
 
+pub(crate) struct SessionMessageRouteInputs {
+    pub(crate) provider_endpoints: HashSet<EndpointRef>,
+    pub(crate) directory: EndpointDirectory,
+    pub(crate) native_backend: NativeControlBackend,
+    pub(crate) unmaterialized_threads: Arc<collaboration_service::UnmaterializedThreadHolder>,
+    pub(crate) provider_supervisor: Option<Arc<ExternalProviderSupervisor>>,
+    pub(crate) provider_store: Option<Arc<Mutex<ProviderOperationStore>>>,
+    pub(crate) peer_registry_directory: PathBuf,
+}
+
 pub(crate) fn compose_session_message_routes(
-    provider_endpoints: HashSet<EndpointRef>,
-    directory: EndpointDirectory,
-    native_backend: NativeControlBackend,
-    unmaterialized_threads: Arc<collaboration_service::UnmaterializedThreadHolder>,
-    provider_supervisor: Option<Arc<ExternalProviderSupervisor>>,
-    provider_store: Option<Arc<Mutex<ProviderOperationStore>>>,
-    peer_registry_directory: PathBuf,
+    inputs: SessionMessageRouteInputs,
 ) -> io::Result<SessionMessageRouteComposition> {
+    let SessionMessageRouteInputs {
+        provider_endpoints,
+        directory,
+        native_backend,
+        unmaterialized_threads,
+        provider_supervisor,
+        provider_store,
+        peer_registry_directory,
+    } = inputs;
     let service_id = native_backend.endpoint.service_id.clone();
     let codex_route: Arc<dyn SessionDeliveryRoute> =
         Arc::new(collaboration_service::CodexAppServerDeliveryRoute::new(

@@ -171,6 +171,22 @@ async fn provider_run_stop_waits_for_exact_operation_settlement()
         })
         .await?;
     if store
+        .begin_run_dispatch::<String, String, String, String>(RunDispatchIntent {
+            run_id: run_id.clone(),
+            effects: provider_evidence(
+                attempt_id.clone(),
+                SubmissionEffect::Dispatching,
+                ProviderSettlementEffect::NotObserved,
+            )?,
+            configured_timeout_seconds: 3600,
+            now_ms: 62001,
+        })
+        .await
+        .is_ok()
+    {
+        return Err("in-flight provider submission was admitted a second time".into());
+    }
+    if store
         .record_run_submission::<String, String, String, String>(RunSubmissionResult {
             run_id: run_id.clone(),
             effects: provider_evidence(

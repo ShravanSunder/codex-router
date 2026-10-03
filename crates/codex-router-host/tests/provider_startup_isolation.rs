@@ -17,6 +17,8 @@ fn runtime_inputs(directory: &Path) -> CollaborationRuntimeInputs {
         mcp_bind: std::net::SocketAddr::from(([127, 0, 0, 1], 0)),
         native_schema: None,
         peer_registry_directory: None,
+        remote_control_server_name: None,
+        owner_human_id: None,
     }
 }
 
@@ -91,6 +93,17 @@ async fn missing_executable_isolated_from_other_provider_and_codex() {
     ));
     let claude = endpoint(&inventory.endpoints, "claude-local");
     assert!(claude.channels.is_empty());
+    assert!(
+        !root
+            .path()
+            .join("router-sessions/claude-local.sock")
+            .exists()
+    );
+    assert!(
+        root.path()
+            .join("router-sessions/cursor-local.sock")
+            .exists()
+    );
     let EndpointAvailability::Unavailable { reason, fix, .. } = &claude.availability else {
         panic!("missing executable must be unavailable")
     };
@@ -137,6 +150,17 @@ async fn failed_initialize_isolated_from_other_provider() {
         endpoint(&inventory.endpoints, "cursor-local").availability,
         EndpointAvailability::Available { .. }
     ));
+    assert!(
+        !root
+            .path()
+            .join("router-sessions/claude-local.sock")
+            .exists()
+    );
+    assert!(
+        root.path()
+            .join("router-sessions/cursor-local.sock")
+            .exists()
+    );
     runtime.shutdown().await.expect("shutdown");
 }
 
@@ -171,6 +195,17 @@ async fn disabled_provider_is_listed_without_a_transport() {
 
     let claude = endpoint(&inventory.endpoints, "claude-local");
     assert!(claude.channels.is_empty());
+    assert!(
+        !root
+            .path()
+            .join("router-sessions/claude-local.sock")
+            .exists()
+    );
+    assert!(
+        root.path()
+            .join("router-sessions/cursor-local.sock")
+            .exists()
+    );
     let EndpointAvailability::Unavailable { reason, fix, .. } = &claude.availability else {
         panic!("disabled provider must be unavailable")
     };

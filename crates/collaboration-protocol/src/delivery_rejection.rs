@@ -7,6 +7,8 @@ use serde::{Deserialize, Serialize};
 pub enum DeliveryRejectionReason {
     ChildThread,
     Busy,
+    HeldByAnotherClient,
+    SettingsUnresolved,
     NotResumable,
     PermissionDenied,
     UnsupportedCapability,
@@ -26,9 +28,19 @@ pub enum DeliveryRejectionReason {
 pub enum DeliveryNextAction {
     InspectTarget,
     UseDeliverySteer,
+    MessageFromHoldingCodexClient,
     RequestApproval,
     CorrectRequest,
     RetryLater,
+}
+
+/// One live Claude registry record claiming a target session.
+#[derive(Clone, Debug, Eq, PartialEq, JsonSchema, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DeliveryPeerClaim {
+    pub pid: u32,
+    pub name: Option<String>,
+    pub cwd: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, JsonSchema, Serialize, Deserialize)]
@@ -38,4 +50,7 @@ pub struct DeliveryRejection {
     pub next_action: DeliveryNextAction,
     pub client_code: Option<i64>,
     pub detail: Option<String>,
+    /// Full claims for an ambiguous live Claude session; absent for other rejections.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claims: Option<Vec<DeliveryPeerClaim>>,
 }

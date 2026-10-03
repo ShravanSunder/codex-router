@@ -50,9 +50,9 @@ use codex_router_core::ids::AccountId;
 use codex_router_core::redaction::SecretString;
 use codex_router_secret_store::SecretStore;
 use codex_router_secret_store::account_tokens::AccountCredentialBundle;
-use codex_router_secret_store::account_tokens::account_credential_bundle_key;
+use codex_router_secret_store::account_tokens::openai_account_credential_bundle_key;
 use codex_router_secret_store::account_tokens::upstream_access_token_key;
-use codex_router_secret_store::file_backend::FileSecretStore;
+use codex_router_secret_store::encrypted_credential_store::EncryptedCredentialStore;
 use codex_router_state::account::AccountRecord;
 use codex_router_state::account::AccountStatus;
 use codex_router_state::quota_snapshot::PersistedQuotaSnapshot;
@@ -1298,8 +1298,9 @@ const SMOKE_SELECTOR_STALE_AFTER_SECONDS: u64 = 300;
 fn seed_router_state(state_path: &Path, secret_root: &Path) -> Result<SmokeSeed, String> {
     let state = SqliteStateStore::open(state_path)
         .map_err(|error| format!("failed to open smoke SQLite state: {error}"))?;
-    let secrets = FileSecretStore::open(secret_root)
-        .map_err(|error| format!("failed to open smoke secret store: {error}"))?;
+    let secrets =
+        codex_router_secret_store::test_support::open_encrypted_credential_store(secret_root)
+            .map_err(|error| format!("failed to open smoke secret store: {error}"))?;
     let token_service = LocalRouterTokenService::new(secrets.clone());
     let local_token = token_service
         .rotate()
@@ -1351,8 +1352,9 @@ fn seed_quota_reconnect_router_state(
 ) -> Result<(), String> {
     let state = SqliteStateStore::open(state_path)
         .map_err(|error| format!("failed to open quota reconnect SQLite state: {error}"))?;
-    let secrets = FileSecretStore::open(secret_root)
-        .map_err(|error| format!("failed to open quota reconnect secret store: {error}"))?;
+    let secrets =
+        codex_router_secret_store::test_support::open_encrypted_credential_store(secret_root)
+            .map_err(|error| format!("failed to open quota reconnect secret store: {error}"))?;
     disable_accounts_outside_fixtures(
         &state,
         &[primary_fixture, QUOTA_RECONNECT_FALLBACK],
@@ -1373,8 +1375,9 @@ fn seed_s8_overlap_quota_router_state(
     secret_root: &Path,
 ) -> Result<SmokeSeed, String> {
     seed_quota_reconnect_router_state(state_path, secret_root, QUOTA_RECONNECT_PRIMARY)?;
-    let secrets = FileSecretStore::open(secret_root)
-        .map_err(|error| format!("failed to open S8 overlap quota secret store: {error}"))?;
+    let secrets =
+        codex_router_secret_store::test_support::open_encrypted_credential_store(secret_root)
+            .map_err(|error| format!("failed to open S8 overlap quota secret store: {error}"))?;
     let token_service = LocalRouterTokenService::new(secrets);
     let local_token = token_service
         .rotate()
@@ -1462,6 +1465,7 @@ fn disable_accounts_outside_fixtures(
             continue;
         }
         let mut disabled_account = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
             account.account_id().clone(),
             account.label().to_owned(),
             AccountStatus::Disabled,
@@ -1482,7 +1486,7 @@ fn disable_accounts_outside_fixtures(
 
 fn seed_smoke_account(
     state: &SqliteStateStore,
-    secrets: &FileSecretStore,
+    secrets: &EncryptedCredentialStore,
     fixture: SmokeAccountFixture,
 ) -> Result<(), String> {
     let account_id = account_id(fixture.account_id)?;
@@ -1491,8 +1495,13 @@ fn seed_smoke_account(
     let weekly_reset_unix_seconds = observed_unix_seconds.saturating_add(fixture.weekly_reset);
     let stale_after_unix_seconds =
         observed_unix_seconds.saturating_add(SMOKE_SELECTOR_STALE_AFTER_SECONDS);
-    let account = AccountRecord::new(account_id.clone(), fixture.label, AccountStatus::Enabled)
-        .with_active_credential_generation(1);
+    let account = AccountRecord::new(
+        codex_router_core::provider::Provider::Openai,
+        account_id.clone(),
+        fixture.label,
+        AccountStatus::Enabled,
+    )
+    .with_active_credential_generation(1);
     AccountStateRepository::upsert_account(state, &account)
         .map_err(|error| format!("failed to seed smoke account {}: {error}", fixture.label))?;
     let snapshot =
@@ -1539,7 +1548,7 @@ fn seed_smoke_account(
             fixture.label
         )
     })?;
-    let credential_key = account_credential_bundle_key(&account_id, 1)
+    let credential_key = openai_account_credential_bundle_key(&account_id, 1)
         .map_err(|error| format!("failed to build account credential key: {error}"))?;
     let credential_bundle =
         AccountCredentialBundle::imported_codex_auth(fixture.upstream_token, None)
@@ -6458,8 +6467,7 @@ impl Drop for SmokeTempRoot {
 mod tests {
     use codex_router_secret_store::SecretStore;
     use codex_router_secret_store::account_tokens::AccountCredentialBundle;
-    use codex_router_secret_store::account_tokens::account_credential_bundle_key;
-    use codex_router_secret_store::file_backend::FileSecretStore;
+    use codex_router_secret_store::account_tokens::openai_account_credential_bundle_key;
     use codex_router_state::sqlite::SqliteStateStore;
     use std::borrow::Cow;
     use std::fs;
@@ -6505,12 +6513,15 @@ mod tests {
         let root = SmokeTempRoot::new("access-forwarding-no-refresh").expect("fixture root");
         let state =
             SqliteStateStore::open(&root.path().join("state.sqlite")).expect("fixture state");
-        let secrets = FileSecretStore::open(root.path().join("secrets")).expect("fixture secrets");
+        let secrets = codex_router_secret_store::test_support::open_encrypted_credential_store(
+            root.path().join("secrets"),
+        )
+        .expect("fixture secrets");
         seed_smoke_account(&state, &secrets, QUOTA_RECONNECT_PRIMARY)
             .expect("smoke account should seed");
         let account_id = codex_router_core::ids::AccountId::new(QUOTA_RECONNECT_PRIMARY.account_id)
             .expect("fixture account id");
-        let key = account_credential_bundle_key(&account_id, 1).expect("bundle key");
+        let key = openai_account_credential_bundle_key(&account_id, 1).expect("bundle key");
         let bundle = AccountCredentialBundle::from_secret_string(
             secrets.read_secret(&key).expect("seeded bundle"),
         )

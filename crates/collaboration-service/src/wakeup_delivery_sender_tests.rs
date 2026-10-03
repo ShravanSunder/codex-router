@@ -4,13 +4,13 @@
 use super::WakeDeliverySender;
 use crate::{
     AttemptEvidenceSink, AttemptReconciliation, AttemptReconciliationContext,
-    AutomationConfigurationHandle, DeliveryFuture, DeliveryRequest, SessionMessageDelivery,
+    AutomationConfigurationHandle, DeliveryFuture, SessionMessageDelivery,
 };
-use agent_automation::{ExpiryRule, TimingRule};
+use agent_automation::{ExpiryRule, OperationId, TimingRule};
 use automation_storage::{AutomationStore, WakeCreate, WakeEvaluation};
 use collaboration_protocol::{
     CodexGeneration, DeliveryNextAction, DeliveryOutcome, DeliveryReceipt, DeliveryRejection,
-    DeliveryRejectionReason, OperationId, SavedMessage, SessionReachability, SessionRef,
+    DeliveryRejectionReason, SavedMessage, SessionReachability, SessionRef,
 };
 use serde_json::json;
 use std::sync::Arc;
@@ -21,7 +21,7 @@ struct ProviderSessionNotFound;
 impl SessionMessageDelivery for ProviderSessionNotFound {
     fn deliver<'a>(
         &'a self,
-        _request: DeliveryRequest,
+        _request: crate::layer_zero::DeliveryRequest,
         _evidence: &'a dyn AttemptEvidenceSink,
     ) -> DeliveryFuture<'a, DeliveryReceipt> {
         Box::pin(async {
@@ -31,7 +31,9 @@ impl SessionMessageDelivery for ProviderSessionNotFound {
                     next_action: DeliveryNextAction::CorrectRequest,
                     client_code: Some(-32002),
                     detail: Some("this session never started a turn and did not survive the provider restart; create a new conversation".to_owned()),
-                }),
+                    claims: None,
+
+                    }),
                 reachability: Some(SessionReachability::ProviderAcp),
                 client: None,
             })
@@ -82,7 +84,11 @@ async fn provider_session_not_found_finishes_wake_after_one_attempt() {
             .expect("due wake inventory");
         assert_eq!(due_ids.as_slice(), std::slice::from_ref(&wakeup_id));
         match store
-            .evaluate_wakeup::<SavedMessage>(&wakeup_id, now_ms + 5_000)
+            .evaluate_wakeup::<SavedMessage>(
+                &wakeup_id,
+                now_ms + 5_000,
+                super::build_wake_push_draft,
+            )
             .await
             .expect("wake evaluation")
         {
@@ -93,6 +99,11 @@ async fn provider_session_not_found_finishes_wake_after_one_attempt() {
     let sender = WakeDeliverySender {
         delivery: Arc::new(ProviderSessionNotFound),
         configuration: AutomationConfigurationHandle::default(),
+        machine_identity: crate::MachineIdentity::new(
+            wake.definition.message.target.endpoint.service_id.clone(),
+            None,
+        )
+        .expect("machine identity"),
     };
 
     sender

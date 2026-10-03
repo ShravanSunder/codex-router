@@ -4,11 +4,12 @@ use codex_acp_adapter::{
     BrokeredApprovalRequest, PendingPermission,
 };
 use collaboration_protocol::{
-    ApprovalDecision, CodexGeneration, EndpointDescription, EndpointRef, RouterAccess, SessionRef,
+    ApprovalDecision, CodexGeneration, EndpointDescription, EndpointRef, MachineId, PushLineInput,
+    RouterAccess, RouterLink, RouterOriginRef, SessionRef, render_push_line,
 };
 use collaboration_service::{
-    EndpointDirectory, LocalControlService, ManifestPublication, NativeControlBackend,
-    NativeGenerationGate, ServiceApprovalBroker, ServiceIdentity,
+    EndpointDirectory, LocalControlService, MachineIdentity, ManifestPublication,
+    NativeControlBackend, NativeGenerationGate, ServiceIdentity, ServiceInteractionBroker,
 };
 use futures_util::{SinkExt, StreamExt};
 use reqwest::header::{ACCEPT, CONTENT_TYPE};
@@ -32,7 +33,8 @@ const SERVICE_EPOCH: &str = "00000000-0000-4000-8000-000000000012";
 
 struct ApprovalFixture {
     directory: tempfile::TempDir,
-    broker: Arc<ServiceApprovalBroker>,
+    broker: Arc<ServiceInteractionBroker>,
+    _automation_store: Arc<tokio::sync::Mutex<automation_storage::AutomationStore>>,
     generation: CodexGeneration,
     requester: SessionRef,
     approver: SessionRef,
@@ -45,14 +47,53 @@ struct ApprovalFixture {
     publication: ManifestPublication,
 }
 
+struct ApprovalDeliveryCapture {
+    requester: SessionRef,
+    approver: SessionRef,
+    automation_store: Arc<tokio::sync::Mutex<automation_storage::AutomationStore>>,
+    broker: Arc<ServiceInteractionBroker>,
+    machine_identity: MachineIdentity,
+}
+
+struct AcceptedTypedNoticeDelivery;
+
+impl collaboration_service::SessionMessageDelivery for AcceptedTypedNoticeDelivery {
+    fn deliver<'a>(
+        &'a self,
+        _: collaboration_service::layer_zero::DeliveryRequest,
+        _: &'a dyn collaboration_service::AttemptEvidenceSink,
+    ) -> collaboration_service::DeliveryFuture<'a, collaboration_protocol::DeliveryReceipt> {
+        Box::pin(async {
+            Ok(collaboration_protocol::DeliveryReceipt {
+                outcome: collaboration_protocol::DeliveryOutcome::Started,
+                reachability: Some(collaboration_protocol::SessionReachability::CodexAppServer),
+                client: None,
+            })
+        })
+    }
+
+    fn reconcile_attempt(
+        &self,
+        _: collaboration_service::AttemptReconciliationContext,
+    ) -> collaboration_service::DeliveryFuture<'_, collaboration_service::AttemptReconciliation>
+    {
+        Box::pin(async { Ok(collaboration_service::AttemptReconciliation::StillUnknown) })
+    }
+}
+
 impl ApprovalFixture {
     async fn start(delivery_count: usize) -> Self {
-        Self::start_with_dropped_decision_reply(delivery_count, false).await
+        Self::start_with_dropped_decision_reply(delivery_count, false, false).await
+    }
+
+    async fn start_typed() -> Self {
+        Self::start_with_dropped_decision_reply(0, false, true).await
     }
 
     async fn start_with_dropped_decision_reply(
         delivery_count: usize,
         drop_decision_reply: bool,
+        typed_notice: bool,
     ) -> Self {
         let directory = tempfile::tempdir_in("/tmp").expect("private service directory");
         #[cfg(unix)]
@@ -61,8 +102,16 @@ impl ApprovalFixture {
             std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700))
                 .expect("private permissions");
         }
+        let automation_path = directory.path().join("automation.sqlite");
+        let automation_store = Arc::new(tokio::sync::Mutex::new(
+            automation_storage::AutomationStore::open(&automation_path)
+                .await
+                .expect("automation store"),
+        ));
         let service_id: collaboration_protocol::UuidIdentity =
             SERVICE_ID.to_owned().try_into().expect("service id");
+        let machine_identity = MachineIdentity::new(service_id.clone(), Some("Permission fixture"))
+            .expect("machine identity");
         let endpoint = EndpointRef {
             service_id: service_id.clone(),
             endpoint_id: "codex-local".to_owned().try_into().expect("endpoint id"),
@@ -84,12 +133,6 @@ impl ApprovalFixture {
         let backend_path = directory.path().join("native.sock");
         let backend_listener = tokio::net::UnixListener::bind(&backend_path).expect("native bind");
         let (delivery_tx, delivery_rx) = tokio::sync::mpsc::unbounded_channel();
-        let backend_task = tokio::spawn(serve_approval_deliveries(
-            backend_listener,
-            delivery_count,
-            approver.clone(),
-            delivery_tx,
-        ));
         let gate = NativeGenerationGate::default();
         gate.activate(
             generation.clone(),
@@ -116,7 +159,7 @@ impl ApprovalFixture {
             gate: gate.clone(),
             codex_home: directory.path().to_owned(),
         };
-        let broker = ServiceApprovalBroker::load(
+        let broker = ServiceInteractionBroker::load(
             service_id.clone(),
             native_backend.clone(),
             directory.path().join("approval-routes.json"),
@@ -130,10 +173,15 @@ impl ApprovalFixture {
                 native_backend.clone(),
                 Arc::new(collaboration_service::UnmaterializedThreadHolder::new()),
             ));
+        let delivery: Arc<dyn collaboration_service::SessionMessageDelivery> = if typed_notice {
+            Arc::new(AcceptedTypedNoticeDelivery)
+        } else {
+            Arc::new(collaboration_service::SessionDeliveryRouter::new(vec![
+                route,
+            ]))
+        };
         broker
-            .install_session_delivery(Arc::new(collaboration_service::SessionDeliveryRouter::new(
-                vec![route],
-            )))
+            .install_session_delivery(delivery)
             .expect("delivery injection");
         broker
             .register_route(ApprovalRoute {
@@ -146,13 +194,28 @@ impl ApprovalFixture {
             })
             .await
             .expect("approval route");
+        let backend_task = tokio::spawn(serve_approval_deliveries(
+            backend_listener,
+            delivery_count,
+            ApprovalDeliveryCapture {
+                requester: requester.clone(),
+                approver: approver.clone(),
+                automation_store: Arc::clone(&automation_store),
+                broker: Arc::clone(&broker),
+                machine_identity: machine_identity.clone(),
+            },
+            delivery_tx,
+        ));
         let digest = format!("sha256:{}", "a".repeat(64));
         let identity = ServiceIdentity::new(SERVICE_ID, SERVICE_EPOCH, &digest)
             .expect("service identity")
             .with_endpoints(vec![description])
             .expect("service endpoint")
+            .with_machine_identity(machine_identity)
+            .expect("machine identity")
             .with_native_backend(native_backend)
             .expect("native backend")
+            .with_automation_store(Arc::clone(&automation_store))
             .with_approval_broker(Arc::clone(&broker));
         let control_path = directory.path().join(if drop_decision_reply {
             "broker-control.sock"
@@ -172,7 +235,7 @@ impl ApprovalFixture {
         });
         let manifest = serde_json::from_value(json!({
             "version":2, "serviceId":SERVICE_ID, "serviceEpoch":SERVICE_EPOCH,
-            "control":{"transport":"unixJsonLines","path":"control.sock"},
+            "machineLabel":"fixture-host","control":{"transport":"unixJsonLines","path":"control.sock"},
             "controlSchemaDigest":digest,
             "mcp":{"transport":"streamableHttp","url":"http://127.0.0.1:0/mcp"}
         }))
@@ -184,6 +247,7 @@ impl ApprovalFixture {
         Self {
             directory,
             broker,
+            _automation_store: automation_store,
             generation,
             requester,
             approver,
@@ -330,7 +394,7 @@ fn native_message_schemas() -> (Arc<codex_native_integration::NativePayloadSchem
 async fn serve_approval_deliveries(
     listener: tokio::net::UnixListener,
     delivery_count: usize,
-    approver: SessionRef,
+    capture: ApprovalDeliveryCapture,
     delivery_tx: tokio::sync::mpsc::UnboundedSender<usize>,
 ) {
     for index in 0..delivery_count {
@@ -353,7 +417,7 @@ async fn serve_approval_deliveries(
             let result = match expected_method {
                 "initialize" => json!({"userAgent":"permission-fixture"}),
                 "thread/read" => json!({"thread":{
-                    "id":String::from(approver.session_id.clone()), "cwd":"/tmp",
+                    "id":String::from(capture.approver.session_id.clone()), "cwd":"/tmp",
                     "status":{"type":"idle"}, "createdAt":1, "updatedAt":1,
                     "sandbox":{"type":"workspaceWrite"}, "approvalPolicy":"on-request",
                     "approvalsReviewer":"auto_review"
@@ -361,31 +425,114 @@ async fn serve_approval_deliveries(
                 "turn/start" => {
                     let text = request["params"]["input"][0]["text"]
                         .as_str()
-                        .expect("approval delivery text");
-                    let record: collaboration_protocol::ApprovalRequestRecord =
-                        serde_json::from_str(
-                            text.rsplit_once("\n\n").map_or(text, |(_, value)| value),
-                        )
-                        .expect("delivered approval record");
-                    assert_eq!(record.approver, approver);
+                        .expect("push delivery line");
+                    let (_, link_text) = text.rsplit_once(" · ").expect("push link suffix");
+                    let link = RouterLink::parse(link_text).expect("valid router push link");
                     assert_eq!(
-                        String::from(record.requester.session_id.clone()),
-                        "permission-requester"
+                        link.machine_id(),
+                        &MachineId::from(capture.machine_identity.service_id().clone())
                     );
-                    assert_eq!(
-                        serde_json::to_value(&record.generation).expect("generation JSON")["generation"],
-                        if delivery_count == 2 && index == 1 {
-                            6
-                        } else {
-                            7
+                    assert!(!text.contains("Self-declared sender:"));
+                    assert!(!text.contains("Intended recipient:"));
+
+                    let push = capture
+                        .automation_store
+                        .lock()
+                        .await
+                        .get_push_record(link.push_id())
+                        .await
+                        .expect("read delivered push")
+                        .expect("stored delivered push");
+                    assert_eq!(&push.push_id, link.push_id());
+                    assert_eq!(push.target, capture.approver);
+                    let expected_line = render_push_line(&PushLineInput {
+                        link,
+                        machine_label: capture.machine_identity.machine_label().clone(),
+                        origin: push.origin.clone(),
+                        header_facts: push.header_facts.clone(),
+                        body: push.body.clone(),
+                    })
+                    .expect("render stored push line");
+                    assert_eq!(text, expected_line);
+                    assert_eq!(text.lines().count(), 1);
+                    let origin = RouterOriginRef::parse_canonical(
+                        push.origin_router_ref
+                            .as_deref()
+                            .expect("interaction origin reference"),
+                    )
+                    .expect("canonical interaction origin");
+                    let RouterOriginRef::Interaction { interaction_id, .. } = origin else {
+                        panic!("interaction origin expected");
+                    };
+                    let body = push.body.as_deref().expect("stored push body");
+                    assert!(body.contains(interaction_id.as_str()));
+                    match push.kind {
+                        collaboration_protocol::PushKind::Approval => {
+                            assert!(text.starts_with("❓ Router approval @Permission fixture"));
+                            assert_eq!(
+                                push.origin,
+                                collaboration_protocol::PushOrigin::Router(
+                                    collaboration_protocol::PushKind::Approval,
+                                )
+                            );
+                            assert!(matches!(
+                                &push.header_facts,
+                                collaboration_protocol::PushHeaderFacts::Approval {
+                                    requester: push_requester,
+                                    ..
+                                } if push_requester == &capture.requester
+                            ));
+                            assert!(body.contains("Allow this operation once (allow once)"));
+                            assert!(body.contains("agent-collaboration approval decide"));
+                            let approval = capture
+                                .broker
+                                .list(false)
+                                .await
+                                .approvals
+                                .into_iter()
+                                .find(|record| record.request_id == interaction_id.as_str())
+                                .expect("approval associated with delivered push");
+                            assert_eq!(approval.requester, capture.requester);
+                            assert_eq!(approval.approver, capture.approver);
+                            assert_eq!(
+                                serde_json::to_value(&approval.generation)
+                                    .expect("generation JSON")["generation"],
+                                if delivery_count == 2 && index == 1 {
+                                    6
+                                } else {
+                                    7
+                                }
+                            );
+                            assert!(
+                                approval.operation["params"]["toolCall"]["content"][0]
+                                    ["content"]["text"]
+                                    .as_str()
+                                    .is_some_and(|text| text
+                                        .contains("Requested permissions:")
+                                        && text.contains("\"enabled\": true"))
+                            );
                         }
-                    );
-                    assert!(
-                        record.operation["params"]["toolCall"]["content"][0]["content"]["text"]
-                            .as_str()
-                            .is_some_and(|text| text.contains("Requested permissions:")
-                                && text.contains("\"enabled\": true"))
-                    );
+                        collaboration_protocol::PushKind::Question => {
+                            assert!(text.starts_with("❓ Router question @Permission fixture"));
+                            assert_eq!(
+                                push.origin,
+                                collaboration_protocol::PushOrigin::Router(
+                                    collaboration_protocol::PushKind::Question,
+                                )
+                            );
+                            assert!(matches!(
+                                &push.header_facts,
+                                collaboration_protocol::PushHeaderFacts::Question {
+                                    requester: push_requester,
+                                    ..
+                                } if push_requester == &capture.requester
+                            ));
+                            assert!(body.contains("Question: Choose settings"));
+                            assert!(body.contains("mcp-question"));
+                            assert!(body.contains("agent-collaboration question answer"));
+                        }
+                        _ => panic!("approval or question push expected"),
+                    }
                     json!({"turn":{"id":format!("approval-delivery-{index}")}})
                 }
                 _ => json!({}),
@@ -470,7 +617,7 @@ async fn run_cli_decision(directory: &Path, request_id: &str, actor: &SessionRef
 
 #[tokio::test]
 async fn cli_decision_response_loss_after_real_broker_effect_is_unknown_without_replay() {
-    let fixture = ApprovalFixture::start_with_dropped_decision_reply(1, true).await;
+    let fixture = ApprovalFixture::start_with_dropped_decision_reply(1, true, false).await;
     let request = fixture.begin_permission_request("cli-response-loss").await;
     let pending = fixture.pending_record().await;
     fixture.await_delivery(0).await;
@@ -614,6 +761,111 @@ async fn mcp_call(
 }
 
 #[tokio::test]
+async fn provider_session_approval_uses_legacy_default_list_and_safe_decision() {
+    let fixture = ApprovalFixture::start_typed().await;
+    let requester: message_board::SessionRef =
+        serde_json::from_value(serde_json::to_value(&fixture.requester).expect("requester JSON"))
+            .expect("board requester");
+    let approver: message_board::SessionRef =
+        serde_json::from_value(serde_json::to_value(&fixture.approver).expect("approver JSON"))
+            .expect("board approver");
+    let request = serde_json::from_value(json!({
+        "requestId":"provider-legacy-approval", "title":"Run command",
+        "options":[
+            {"optionId":"allow-once","label":"Allow once","choice":{"effect":"allow","scope":"once"}},
+            {"optionId":"allow-always","label":"Always allow","choice":{"effect":"allow","scope":{"persistent":{"where_stored":"provider settings"}}}}
+        ]
+    })).expect("provider approval");
+    let receiver = fixture
+        .broker
+        .request_typed_approval(
+            requester,
+            message_board::Identity::Session { session: approver },
+            request,
+            CancellationToken::new(),
+            CancellationToken::new(),
+            Some(collaboration_service::TypedApprovalLegacyContext {
+                operation_id: collaboration_protocol::OperationId::generate(),
+                target: fixture.requester.clone(),
+                generation: fixture.generation.clone(),
+                requested_by: fixture.requester.clone().into(),
+            }),
+        )
+        .await
+        .expect("provider approval pending");
+    let listener = CollaborationMcpListener::start(CollaborationMcpListenerConfig {
+        bind_address: LoopbackBindAddress::parse("127.0.0.1:0").expect("loopback bind"),
+        service_directory: fixture.service_directory().to_owned(),
+        allowed_origins: vec!["http://localhost".to_owned()],
+    })
+    .await
+    .expect("MCP listener");
+    let client = reqwest::Client::new();
+    let initialize = client
+        .post(listener.local_url())
+        .header(CONTENT_TYPE, "application/json")
+        .header(ACCEPT, "application/json, text/event-stream")
+        .json(
+            &json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{
+                "protocolVersion":"2025-11-25","capabilities":{},
+                "clientInfo":{"name":"provider-approval-fixture","version":"1"}
+            }}),
+        )
+        .send()
+        .await
+        .expect("initialize");
+    let session_id = initialize
+        .headers()
+        .get("mcp-session-id")
+        .cloned()
+        .expect("MCP session");
+    let _ = initialize.text().await.expect("initialize body");
+    let initialized = client
+        .post(listener.local_url())
+        .header(CONTENT_TYPE, "application/json")
+        .header(ACCEPT, "application/json, text/event-stream")
+        .header("mcp-session-id", session_id.clone())
+        .json(&json!({"jsonrpc":"2.0","method":"notifications/initialized"}))
+        .send()
+        .await
+        .expect("initialized");
+    assert!(initialized.status().is_success());
+    let listed = mcp_call(
+        &client,
+        &listener.local_url(),
+        &session_id,
+        2,
+        "approval_list",
+        json!({"pending":true}),
+    )
+    .await;
+    let row = &listed["result"]["structuredContent"]["approvals"][0];
+    assert_eq!(row["requestId"], "provider-legacy-approval");
+    assert_eq!(row["approver"], json!(fixture.approver));
+    assert_eq!(row["generation"], json!(fixture.generation));
+    assert!(row["expiresAt"].is_string());
+    assert!(row["operation"]["target"].is_object());
+    assert!(row.get("optionsOrigin").is_none());
+    let decided = mcp_call(
+        &client,
+        &listener.local_url(),
+        &session_id,
+        3,
+        "approval_decide",
+        json!({"requestId":"provider-legacy-approval",
+            "decision":"allow","actor":fixture.approver}),
+    )
+    .await;
+    assert_eq!(decided["result"]["isError"], false);
+    assert_eq!(decided["result"]["structuredContent"]["state"], "decided");
+    assert!(matches!(receiver.await.expect("agent resolution"),
+        collaboration_service::TypedApprovalResolution::Selected(selected)
+            if selected.option_id.as_str() == "allow-once"));
+    listener.shutdown().await.expect("MCP shutdown");
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
 async fn streamable_http_entry_authorizes_real_broker_permission_by_actor_target_and_generation() {
     let fixture = ApprovalFixture::start(1).await;
     let listener = CollaborationMcpListener::start(CollaborationMcpListenerConfig {
@@ -670,11 +922,36 @@ async fn streamable_http_entry_authorizes_real_broker_permission_by_actor_target
     assert_eq!(listed["requestId"], pending.request_id);
     assert_eq!(listed["requester"], serde_json::json!(fixture.requester));
     assert_eq!(listed["approver"], serde_json::json!(fixture.approver));
-    assert_eq!(listed["generation"], serde_json::json!(fixture.generation));
+    assert!(listed.get("optionsOrigin").is_none());
+    let detailed = mcp_call(
+        &client,
+        &listener.local_url(),
+        &session_id,
+        20,
+        "approval_list",
+        json!({"pending":true,"includeOptions":true}),
+    )
+    .await;
+    let listed = &detailed["result"]["structuredContent"]["approvals"][0];
+    assert_eq!(
+        listed["approver"],
+        json!({"kind":"session","session":fixture.approver})
+    );
+    let options = listed["options"].as_array().expect("offered options");
     assert!(
-        listed["operation"]["params"]["toolCall"]["content"][0]["content"]["text"]
-            .as_str()
-            .is_some_and(|text| text.contains("Requested permissions:"))
+        options
+            .iter()
+            .any(|option| option["optionId"] == "native-accept")
+    );
+    assert!(
+        options
+            .iter()
+            .any(|option| option["optionId"] == "native-accept-session")
+    );
+    assert!(
+        options
+            .iter()
+            .any(|option| option["optionId"] == "native-decline")
     );
 
     let wrong_actor: SessionRef = serde_json::from_value(json!({
@@ -732,10 +1009,107 @@ async fn streamable_http_entry_authorizes_real_broker_permission_by_actor_target
     fixture.shutdown().await;
 }
 
+// R18: MCP presents the typed form and forwards the Approver's answer to the
+// waiting broker request through the same public Control path as the CLI.
+#[tokio::test]
+async fn streamable_http_question_form_reaches_the_waiting_agent() {
+    let fixture = ApprovalFixture::start(1).await;
+    let requester =
+        serde_json::from_value(serde_json::to_value(&fixture.requester).expect("requester JSON"))
+            .expect("typed requester");
+    let approver = serde_json::from_value(json!({"kind":"session","session":fixture.approver}))
+        .expect("typed approver");
+    let question = serde_json::from_value(json!({
+        "requestId":"mcp-question", "prompt":"Choose settings", "fields":[
+            {"kind":"number","fieldId":"count","label":"Count","description":null,"required":true},
+            {"kind":"boolean","fieldId":"dryRun","label":"Dry run","description":null,"required":true},
+            {"kind":"singleChoice","fieldId":"color","label":"Color","description":null,"required":true,"options":[{"optionId":"red","label":"Red"},{"optionId":"blue","label":"Blue"}]}
+        ]
+    })).expect("question");
+    let agent_reply = fixture
+        .broker
+        .request_question(requester, approver, question, None)
+        .await
+        .expect("pending question");
+    fixture.await_delivery(0).await;
+    let listener = CollaborationMcpListener::start(CollaborationMcpListenerConfig {
+        bind_address: LoopbackBindAddress::parse("127.0.0.1:0").expect("loopback bind"),
+        service_directory: fixture.service_directory().to_owned(),
+        allowed_origins: vec!["http://localhost".to_owned()],
+    })
+    .await
+    .expect("MCP listener");
+    let client = reqwest::Client::new();
+    let initialize = client
+        .post(listener.local_url())
+        .header(CONTENT_TYPE, "application/json")
+        .header(ACCEPT, "application/json, text/event-stream")
+        .json(
+            &json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{
+                "protocolVersion":"2025-11-25","capabilities":{},
+                "clientInfo":{"name":"question-integration","version":"1"}
+            }}),
+        )
+        .send()
+        .await
+        .expect("initialize");
+    let session_id = initialize
+        .headers()
+        .get("mcp-session-id")
+        .cloned()
+        .expect("MCP session id");
+    let _ = initialize.text().await.expect("initialize body");
+    let initialized = client
+        .post(listener.local_url())
+        .header(CONTENT_TYPE, "application/json")
+        .header(ACCEPT, "application/json, text/event-stream")
+        .header("mcp-session-id", session_id.clone())
+        .json(&json!({"jsonrpc":"2.0","method":"notifications/initialized"}))
+        .send()
+        .await
+        .expect("initialized notification");
+    assert!(initialized.status().is_success());
+    let listed = mcp_call(
+        &client,
+        &listener.local_url(),
+        &session_id,
+        2,
+        "question_list",
+        json!({"pending":true}),
+    )
+    .await;
+    let question = &listed["result"]["structuredContent"]["questions"][0];
+    assert_eq!(question["prompt"], "Choose settings");
+    assert_eq!(question["fields"][0]["kind"], "number");
+    let answered = mcp_call(
+        &client,
+        &listener.local_url(),
+        &session_id,
+        3,
+        "question_answer",
+        json!({
+            "requestId":"mcp-question", "actor":fixture.approver,
+            "response":{"action":"answered","content":{"count":3,"dryRun":true,"color":{"selectedOptionIds":["blue"]}}}
+        }),
+    )
+    .await;
+    assert_eq!(answered["result"]["isError"], false);
+    assert_eq!(answered["result"]["structuredContent"]["state"], "answered");
+    let response = agent_reply.await.expect("agent response");
+    assert_eq!(
+        serde_json::to_value(response).expect("response JSON"),
+        json!({
+            "action":"answered","content":{"count":3,"dryRun":true,"color":{"selectedOptionIds":["blue"]}}
+        })
+    );
+    listener.shutdown().await.expect("MCP shutdown");
+    fixture.shutdown().await;
+}
+
 #[tokio::test]
 async fn initialized_http_decision_response_loss_after_real_broker_effect_is_unknown_without_replay()
  {
-    let fixture = ApprovalFixture::start_with_dropped_decision_reply(1, true).await;
+    let fixture = ApprovalFixture::start_with_dropped_decision_reply(1, true, false).await;
     let listener = CollaborationMcpListener::start(CollaborationMcpListenerConfig {
         bind_address: LoopbackBindAddress::parse("127.0.0.1:0").expect("loopback bind"),
         service_directory: fixture.service_directory().to_owned(),
@@ -889,7 +1263,8 @@ async fn initialized_http_create_reports_manifest_preflight_without_creation_unc
             assert!(
                 response["result"]["content"][0]["text"]
                     .as_str()
-                    .is_some_and(|message| message.contains("expected struct SessionRef"))
+                    .is_some_and(|message| message.contains("expected struct SessionRef")),
+                "{response}"
             );
             assert!(response["result"].get("structuredContent").is_none());
             continue;

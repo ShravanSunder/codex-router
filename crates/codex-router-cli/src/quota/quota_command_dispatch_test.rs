@@ -300,9 +300,17 @@ async fn non_interactive_dispatch_never_constructs_an_injected_reset_session() {
         fn create(
             &self,
             _router_root: &Path,
+            _credential_store: codex_router_secret_store::encrypted_credential_store::EncryptedCredentialStore,
         ) -> Result<crate::quota_reset::InteractiveResetSession, crate::quota_reset::QuotaResetError>
         {
             panic!("non-interactive quota dispatch must not construct a reset session");
+        }
+
+        fn credit_usage_refresher(
+            &self,
+            _router_root: &Path,
+        ) -> crate::presentation::quota::CreditUsageRefresher {
+            panic!("non-interactive quota dispatch must not compose a credit refresher");
         }
     }
 

@@ -7,15 +7,23 @@ use std::sync::atomic::Ordering;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
+use codex_router_core::credit_usage::CreditAvailability;
+use codex_router_core::credit_usage::CreditBalance;
+use codex_router_core::credit_usage::CreditProviderLimitReason;
+use codex_router_core::credit_usage::CreditProviderObservation;
+use codex_router_core::credit_usage::CreditSpendControl;
 use codex_router_core::ids::AccountId;
 use codex_router_secret_store::account_tokens::AccountCredentialBundle;
-use codex_router_secret_store::account_tokens::account_credential_bundle_key;
+use codex_router_secret_store::account_tokens::openai_account_credential_bundle_key;
 use codex_router_secret_store::backend::SecretStore;
-use codex_router_secret_store::file_backend::FileSecretStore;
 use codex_router_state::account::AccountRecord;
 use codex_router_state::account::AccountStatus;
+use codex_router_state::quota_snapshot::PersistedQuotaHistoryObservation;
 use codex_router_state::quota_snapshot::PersistedQuotaSnapshot;
+use codex_router_state::quota_snapshot::PersistedSelectorQuotaWindow;
+use codex_router_state::quota_snapshot::QuotaHistoryRefreshOutcome;
 use codex_router_state::quota_snapshot::QuotaSnapshotSource;
+use codex_router_state::quota_snapshot::SelectorQuotaWindowStatus;
 use codex_router_state::sqlite::AsyncSqliteStateStore;
 use sha2::Digest;
 use sha2::Sha256;
@@ -76,8 +84,13 @@ impl QuotaResetFixture {
             let account_id = AccountId::new(account_id)?;
             state
                 .upsert_account(
-                    &AccountRecord::new(account_id.clone(), label, AccountStatus::Enabled)
-                        .with_active_credential_generation(generation),
+                    &AccountRecord::new(
+                        codex_router_core::provider::Provider::Openai,
+                        account_id.clone(),
+                        label,
+                        AccountStatus::Enabled,
+                    )
+                    .with_active_credential_generation(generation),
                 )
                 .await?;
             state
@@ -120,10 +133,90 @@ impl QuotaResetFixture {
             self.state_bytes_before == state_bytes_after,
             "reset workflow changed fixture state bytes",
         )?;
+        self.assert_secrets_unchanged()
+    }
+
+    pub(super) fn assert_secrets_unchanged(&self) -> TestResult<()> {
         ensure(
             self.secret_manifest_before == recursive_manifest(&self.root.join("secrets"))?,
-            "reset workflow changed fixture secret manifest",
+            "quota TUI changed fixture secret manifest",
         )
+    }
+
+    pub(super) async fn seed_cached_credit_observation(
+        &self,
+        account_id: &AccountId,
+        credential_generation: u64,
+    ) -> TestResult<()> {
+        let state = AsyncSqliteStateStore::open(&self.root.join("state.sqlite")).await?;
+        let observed_unix_seconds = current_unix_seconds().saturating_sub(30);
+        let stale_after_unix_seconds = observed_unix_seconds.saturating_add(3_600);
+        let attempt = state
+            .begin_credit_refresh_attempt(account_id, credential_generation)
+            .await?;
+        let windows = [18_000_u64, 604_800_u64].map(|window_seconds| {
+            PersistedSelectorQuotaWindow::new(
+                account_id.clone(),
+                "responses",
+                window_seconds,
+                SelectorQuotaWindowStatus::Eligible,
+            )
+            .with_remaining_headroom(80)
+            .with_effective(true)
+            .with_observed_unix_seconds(observed_unix_seconds)
+            .with_reset_unix_seconds(observed_unix_seconds.saturating_add(window_seconds))
+        });
+        let history = windows
+            .iter()
+            .map(|window| {
+                PersistedQuotaHistoryObservation::new(
+                    account_id.clone(),
+                    account_id.as_str(),
+                    "responses",
+                    window.limit_window_seconds(),
+                    observed_unix_seconds,
+                    window.remaining_headroom(),
+                )
+                .with_reset_unix_seconds(
+                    observed_unix_seconds.saturating_add(window.limit_window_seconds()),
+                )
+                .with_effective(window.effective())
+                .with_window_status(window.status())
+                .with_refresh_source(QuotaSnapshotSource::OpenAiEndpoint)
+                .with_refresh_outcome(QuotaHistoryRefreshOutcome::Success)
+            })
+            .collect::<Vec<_>>();
+        let snapshot =
+            PersistedQuotaSnapshot::new(account_id.clone(), QuotaSnapshotSource::OpenAiEndpoint)
+                .with_observed_unix_seconds(observed_unix_seconds)
+                .with_route_band("responses", 80)
+                .with_reset_unix_seconds(observed_unix_seconds.saturating_add(604_800))
+                .with_stale_penalty(false);
+        let observation = CreditProviderObservation::new(
+            CreditAvailability::Available {
+                balance: Some(CreditBalance::new("42.00")?),
+            },
+            CreditSpendControl::Clear,
+            Some(CreditProviderLimitReason::RateLimitReached),
+        );
+        ensure(
+            state
+                .record_responses_refresh_success(
+                    codex_router_state::credit_store::ResponsesRefreshSuccessCommit {
+                        attempt: &attempt,
+                        selector_windows: &windows,
+                        observed_unix_seconds,
+                        stale_after_unix_seconds,
+                        provider_observation: &observation,
+                        history_observations: &history,
+                        snapshot: &snapshot,
+                    },
+                )
+                .await?,
+            "cached credit fixture should commit under its allocated attempt",
+        )?;
+        state.close().await?;
+        Ok(())
     }
 }
 
@@ -148,8 +241,10 @@ fn write_fixture_credential(
     .with_expires_unix_seconds(current_unix_seconds().saturating_add(86_400))
     .with_chatgpt_account_id(routing_id)
     .to_secret_string()?;
-    let store = FileSecretStore::open(root.join("secrets"))?;
-    let key = account_credential_bundle_key(account_id, generation)?;
+    let store = codex_router_secret_store::test_support::open_encrypted_credential_store(
+        root.join("secrets"),
+    )?;
+    let key = openai_account_credential_bundle_key(account_id, generation)?;
     store.write_secret(&key, &bundle)?;
     Ok(())
 }

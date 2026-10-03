@@ -39,11 +39,20 @@ impl HostCoordinationPaths {
     pub fn instance_lock(&self) -> &Path {
         &self.instance_lock
     }
+
+    /// Returns the pooled credential directory under the same router root.
+    #[must_use]
+    pub fn router_secret_root(&self) -> Option<PathBuf> {
+        self.instance_lock
+            .parent()
+            .map(|router_root| router_root.join("secrets"))
+    }
 }
 
 /// Validated host inputs with router-owned and Codex-owned paths kept separate.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct HostConfig {
+    owner_human_id: Option<message_board::HumanId>,
     collaboration_directory: Option<PathBuf>,
     collaboration_codex_home: Option<PathBuf>,
     coordination_paths: HostCoordinationPaths,
@@ -76,6 +85,7 @@ impl HostConfig {
     #[must_use]
     pub fn new(inputs: HostConfigInputs) -> Self {
         Self {
+            owner_human_id: None,
             collaboration_directory: None,
             collaboration_codex_home: None,
             coordination_paths: inputs.coordination_paths,
@@ -87,6 +97,15 @@ impl HostConfig {
             provider_operation_retention_days: DEFAULT_PROVIDER_OPERATION_RETENTION_DAYS,
             deadlines: inputs.deadlines,
         }
+    }
+    #[must_use]
+    pub fn with_owner_human_id(mut self, owner_human_id: message_board::HumanId) -> Self {
+        self.owner_human_id = Some(owner_human_id);
+        self
+    }
+    #[must_use]
+    pub fn owner_human_id(&self) -> Option<&message_board::HumanId> {
+        self.owner_human_id.as_ref()
     }
     #[must_use]
     pub fn with_external_provider_startup(

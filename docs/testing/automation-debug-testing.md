@@ -65,6 +65,53 @@ The test uses each root once. After a failure, inspect its private `proof-events
 
 Stop the foreground debug Host with Ctrl-C when finished. It shuts down its retained children. The private test artifacts remain for inspection, and Codex retains its ordinary session records. No directory deletion or production restart is part of this procedure.
 
+## Run the recipient-observed delivery matrix
+
+This matrix uses the foreground CLI Host with an isolated `HOME`, `CODEX_HOME`, Router root, sockets, and workspace. It never reads the owner's Codex or Claude session registry. The setup test creates a fresh owner-private direct child of `/tmp`, a non-secret debug profile, a symlink to the installed Codex executable, and `providers.json` pointing at the repository's scripted Cursor ACP fixture. It copies no credentials. The CLI Host reads `providers.json` through its normal provider configuration path. Announce the shared 43127 port before starting; stop only this foreground Host with Ctrl-C and release both ports when done.
+
+```sh
+CODEX_AUTOMATION_PROOF_ROOT="$proof_root" \
+  cargo test -p agent-collaboration --test delivery_matrix_debug_acceptance \
+  prepare_delivery_matrix_provider_fixture \
+  -- --ignored --exact --nocapture
+```
+
+Start the Host in a separate foreground terminal after setup:
+
+```sh
+env HOME="$proof_root/home" CODEX_HOME="$proof_root/codex-home" \
+  CODEX_ROUTER_DEBUG_APP_SERVER_SOCKET="$proof_root/native-socket/app-server.sock" \
+  ./target/debug/codex-router host --router-root "$proof_root" \
+  --port 43127 --mcp-bind 127.0.0.1:43128 --require-debug-isolation
+```
+
+Require `codex-router host status --router-root "$proof_root" --port 43127 --require-debug-isolation` to report router and app-server ready, and confirm `cursor-local` advertises the scripted fixture. If the isolated home or private Router lacks model access, report that state without copying account data or switching to the owner Codex home.
+
+```sh
+matrix_cargo_home="${CARGO_HOME:-$HOME/.cargo}"
+matrix_rustup_home="${RUSTUP_HOME:-$HOME/.rustup}"
+env HOME="$proof_root/home" CODEX_HOME="$proof_root/codex-home" \
+  CODEX_AUTOMATION_PROOF_ROOT="$proof_root" \
+  CARGO_HOME="$matrix_cargo_home" RUSTUP_HOME="$matrix_rustup_home" \
+  cargo test -p agent-collaboration --test delivery_matrix_debug_acceptance \
+  delivery_matrix_reaches_codex_and_fixture_claude_peer \
+  -- --ignored --exact --nocapture
+```
+
+The suite exercises CLI and MCP messages, fired wakes, scheduled runs, Board Thread Listen pushes, and approval notices. Its Codex ACP load-route cell runs CLI `conversation create` then `conversation prompt --to` on separate connections with provider routes present; it rejects any failure before prompt dispatch. The isolated home has no model authentication, so that cell proves load routing, not prompt completion. The approval requester is the scripted Cursor ACP fixture; native Codex approvals under the owner's `auto_review` reviewer do not reach Router. It counts a Codex message cell only after the exact input appears in `thread/read(includeTurns=true)`, and a Claude peer cell only after its fixture socket reads the user frame. Approval cells also require a pending broker record before the approver decides. The suite compares owner `~/.codex/config.toml` and `~/.claude/settings.json` hashes at entry, after each cell, and at exit; a change fails the run and must be reported without restoration. A five-minute Board Listen debounce makes the complete run longer than a typical smoke test.
+
+For a quick load-route regression check, use a separate freshly prepared matrix root and run the ignored `codex_acp_cli_create_then_prompt_load_route` test with the same environment and foreground Host. Its CLI create and prompt calls use separate ACP connections, so a missing `_meta.router.sessionRef` fails at load before the model is invoked.
+
+For the Router-hosted ACP target column, use a **different fresh root** and run `prepare_delivery_matrix_acp_target_fixture` instead of `prepare_delivery_matrix_provider_fixture`. Start the same isolated CLI Host as above, then run `delivery_matrix_reaches_scripted_acp_target` with the same private `HOME`, `CODEX_HOME`, `CODEX_AUTOMATION_PROOF_ROOT`, `CARGO_HOME`, and `RUSTUP_HOME` environment. This variant starts two scripted providers: Cursor receives the six producer inputs, while Claude requests permission from Cursor as Approver. The fixture records each actual `session/prompt` frame and requires each marker in exactly one prompt. The test verifies the approval is still pending after its notice reaches Cursor, then decides deny-once so the requester can settle. The additional busy-target cell requires an `auto` CLI send to return `queued`, then observes its one prompt after the held turn settles, matching the manual's deferred-input contract. Keep the owner settings hash sentinel and stop the foreground Host after the suite.
+
+The ACP column does not attest the Host's `HOME` or `CODEX_HOME`. It relies on `--require-debug-isolation` (launchctl-free), the documented launch environment, and the owner settings hash sentinel; the Host does not yet report its PID or resolved homes (product gap logged).
+
+A Codex thread active in another app-server or desktop client remains a separate target row needing recipient-observed proof.
+
+The materialized existing Codex target is a pending matrix cell in this isolated run: the private Codex home has no model authentication to finish an initial turn and return the thread to idle. A default-run fake app-server integration test covers its declared cwd and scheduled turn/start. Recipient-observed live proof remains for the post-release real-session run.
+
+After the owner replaces production with a release containing this suite's fixes, repeat one documented pass against real sessions: read the Codex recipient's exact input through `thread/read`, and obtain an explicit receipt confirmation from the Claude Code recipient. Keep that live result separate from the isolated fixture matrix.
+
 ### Restart the Host for board persistence proof
 
 Build the board test binary, start a fresh debug Host as above, and run phase one:
@@ -186,6 +233,66 @@ carrier's frame bound; oversized or missing required context fails explicitly.
 
 An exact queue entry can recover a lost queue receipt. Queue absence cannot establish non-submission because the entry may already have been consumed. Reconciliation retains uncertainty when original operation/resume evidence or native identities are insufficient.
 
+## Check Claude routed-session discovery and preflight
+
+Use a fresh private Router root, isolated `HOME` and `CODEX_HOME`, and unused loopback ports. This keeps the
+check away from the installed Host and the owner's Claude session registry. Build the debug binaries from
+the repository root:
+
+```sh
+cargo build -p codex-router-cli --bin codex-router \
+  -p agent-collaboration --bin agent-sessions
+```
+
+Create a new root and its isolated homes and socket directory:
+
+```sh
+claude_proof_root="$(mktemp -d /tmp/claude-routing-proof.XXXXXX)"
+mkdir -p "$claude_proof_root/home" "$claude_proof_root/codex-home" \
+  "$claude_proof_root/native-socket"
+chmod 700 "$claude_proof_root" "$claude_proof_root/home" \
+  "$claude_proof_root/codex-home" "$claude_proof_root/native-socket"
+```
+
+In a foreground terminal, start the Host on two unused loopback ports. The Router proxy port below is an
+example; use the same port consistently for this run:
+
+```sh
+env HOME="$claude_proof_root/home" CODEX_HOME="$claude_proof_root/codex-home" \
+  CODEX_ROUTER_DEBUG_APP_SERVER_SOCKET="$claude_proof_root/native-socket/app-server.sock" \
+  ./target/debug/codex-router host --router-root "$claude_proof_root" \
+  --port 43131 --mcp-bind 127.0.0.1:43132 --require-debug-isolation
+```
+
+The Host owns this unused Router port, provisions the local token before starting `serve`, and publishes its
+configured proxy endpoint in `agent-communication/service.json`. Confirm the endpoint before running the
+session commands:
+
+```sh
+rg -o '"routerProxyEndpoint":"[^"]+"' \
+  "$claude_proof_root/agent-communication/service.json"
+```
+
+In another terminal, list Claude sessions and inspect the launch arguments. The debug root environment makes
+`agent-sessions` use the same service directory as the Host:
+
+```sh
+env HOME="$claude_proof_root/home" CODEX_HOME="$claude_proof_root/codex-home" \
+  CODEX_ROUTER_DEBUG_ROUTER_ROOT="$claude_proof_root" \
+  ./target/debug/agent-sessions --provider claude --list --format json
+
+env HOME="$claude_proof_root/home" CODEX_HOME="$claude_proof_root/codex-home" \
+  CODEX_ROUTER_DEBUG_ROUTER_ROOT="$claude_proof_root" \
+  ./target/debug/agent-sessions --provider claude --new --dry-run
+```
+
+The list combines active Router sessions with stored transcript metadata under the isolated `HOME`; it does
+not read transcript content. Dry-run prints the `claude` command and does not contact Router or start Claude.
+To check the stopped-Router boundary, stop this foreground Host with Ctrl-C, then run a non-dry routed launch
+with the same environment and confirm it exits nonzero with the endpoint-not-published or Router-not-ready
+error before Claude starts. The real-client request path through a fake Anthropic upstream remains the PR7
+acceptance proof; listing and dry-run do not establish that request path.
+
 ## Automated gates
 
 The permanent SQLite, filesystem, CLI and scripted-native tests exercise failure/recovery cases without paid model calls. They remain distinct from the opt-in live journey above.
@@ -201,4 +308,4 @@ python3 -m unittest scripts.tests.test_update_homebrew_formula -v
 
 CI also builds the router with all features, checks an isolated Cargo installation, and runs the quota-reset PTY harness. Preserve those gates when preparing the PR.
 
-Source: [debug Host launcher](../../crates/codex-router-host/examples/automation-debug-host.rs), [live acceptance test](../../crates/agent-collaboration/tests/debug_luna_acceptance.rs), [scheduled workflow requirements](../specs/2026-09-07-scheduled-agent-workflows/2026-09-07-scheduled-agent-workflows-requirements.md).
+Source: [debug Host launcher](../../crates/codex-router-host/examples/automation-debug-host.rs), [Claude launch target](../../crates/agent-collaboration/src/session_commands/claude_launch_target.rs), [Claude launch target tests](../../crates/agent-collaboration/src/session_commands/claude_launch_target_tests.rs), [Host Claude launch environment](../../crates/codex-router-host/src/claude_provider_launch_environment.rs), [Host token startup](../../crates/codex-router-host/src/lifecycle_owner/startup_convergence.rs), [live acceptance test](../../crates/agent-collaboration/tests/debug_luna_acceptance.rs), [scheduled workflow requirements](../specs/2026-09-07-scheduled-agent-workflows/2026-09-07-scheduled-agent-workflows-requirements.md).

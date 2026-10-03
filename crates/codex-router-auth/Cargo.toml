@@ -10,19 +10,24 @@ workspace = true
 
 [features]
 sync-rusqlite-fixtures = ["codex-router-state/sync-rusqlite-fixtures"]
+test-support = []
 
 [dependencies]
+base64.workspace = true
 codex-router-core.workspace = true
 codex-router-secret-store = { path = "../codex-router-secret-store", version = "0.1.4" }
 codex-router-state = { path = "../codex-router-state", version = "0.1.4" }
+getrandom.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+codex-router-secret-store = { path = "../codex-router-secret-store", version = "0.1.4", features = ["keychain-test-guard", "test-support"] }
 codex-router-state = { path = "../codex-router-state", version = "0.1.4", features = ["sync-rusqlite-fixtures"] }
 sqlx.workspace = true

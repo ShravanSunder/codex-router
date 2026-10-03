@@ -268,14 +268,20 @@ pub(super) async fn validate_table_constraints(
             .await
             .map_err(crate::sqlite::sqlx_error)?;
     let tokens = schema_tokens(&sql);
-    let forbidden = tokens.iter().any(|token| {
-        matches!(
-            token.as_str(),
-            "references" | "unique" | "without" | "strict" | "collate"
-        )
-    }) || tokens
-        .windows(2)
-        .any(|window| window == ["foreign", "key"] || window == ["on", "conflict"]);
+    let permits_account_foreign_key = matches!(
+        table_name,
+        "account_window_observations"
+            | "account_window_rejections"
+            | "account_credit_policies"
+            | "account_credit_observations"
+    );
+    let has_foreign_key = tokens.iter().any(|token| token == "references")
+        || tokens.windows(2).any(|window| window == ["foreign", "key"]);
+    let forbidden = tokens
+        .iter()
+        .any(|token| matches!(token.as_str(), "unique" | "without" | "strict" | "collate"))
+        || tokens.windows(2).any(|window| window == ["on", "conflict"])
+        || (has_foreign_key && !permits_account_foreign_key);
     let check_count = tokens
         .iter()
         .filter(|token| token.as_str() == "check")
@@ -288,13 +294,21 @@ pub(super) async fn validate_table_constraints(
         table_name,
         "quota_history_observations" | "active_session_events"
     );
+    let has_expected_check_count = match table_name {
+        "account_routing_policies" | "account_credit_policies" => check_count == 1,
+        _ => check_count == 0,
+    };
     if forbidden
-        || (table_name == "account_routing_policies" && check_count != 1)
-        || (table_name != "account_routing_policies" && check_count != 0)
+        || !has_expected_check_count
+        || (table_name == "account_credit_policies"
+            && !has_exact_boolean_check(&tokens, "allow_credits"))
         || (expected_autoincrement && autoincrement_count != 1)
         || (!expected_autoincrement && autoincrement_count != 0)
     {
         return incompatible_schema();
+    }
+    if permits_account_foreign_key {
+        validate_account_foreign_key(connection, table_name).await?;
     }
 
     let indexes = sqlx::query("SELECT [unique], origin FROM pragma_index_list(?1)")
@@ -305,6 +319,59 @@ pub(super) async fn validate_table_constraints(
     if indexes
         .iter()
         .any(|row| row.get::<i64, _>(0) != 0 && row.get::<String, _>(1) != "pk")
+    {
+        return incompatible_schema();
+    }
+    Ok(())
+}
+
+fn has_exact_boolean_check(tokens: &[String], column_name: &str) -> bool {
+    const CHECK_TOKEN_COUNT: usize = 9;
+    let expected = ["check", "(", column_name, "in", "(", "0", "1", ")", ")"];
+    tokens.windows(CHECK_TOKEN_COUNT).any(|window| {
+        window
+            .iter()
+            .map(String::as_str)
+            .zip(expected)
+            .all(|(actual, expected)| actual == expected)
+    })
+}
+
+async fn validate_account_foreign_key(
+    connection: &mut SqliteConnection,
+    table_name: &'static str,
+) -> Result<(), StateStoreError> {
+    let query = match table_name {
+        "account_window_observations" => "PRAGMA foreign_key_list('account_window_observations')",
+        "account_window_rejections" => "PRAGMA foreign_key_list('account_window_rejections')",
+        "account_credit_policies" => "PRAGMA foreign_key_list('account_credit_policies')",
+        "account_credit_observations" => "PRAGMA foreign_key_list('account_credit_observations')",
+        _ => return incompatible_schema(),
+    };
+    let rows = sqlx::query(query)
+        .fetch_all(connection)
+        .await
+        .map_err(crate::sqlite::sqlx_error)?;
+    if rows.len() != 1 {
+        return incompatible_schema();
+    }
+    let Some(foreign_key) = rows.first() else {
+        return incompatible_schema();
+    };
+    if foreign_key.get::<i64, _>("id") != 0
+        || foreign_key.get::<i64, _>("seq") != 0
+        || foreign_key.get::<String, _>("table") != "accounts"
+        || foreign_key.get::<String, _>("from") != "account_id"
+        || foreign_key.get::<String, _>("to") != "account_id"
+        || !foreign_key
+            .get::<String, _>("on_update")
+            .eq_ignore_ascii_case("no action")
+        || !foreign_key
+            .get::<String, _>("on_delete")
+            .eq_ignore_ascii_case("cascade")
+        || !foreign_key
+            .get::<String, _>("match")
+            .eq_ignore_ascii_case("none")
     {
         return incompatible_schema();
     }

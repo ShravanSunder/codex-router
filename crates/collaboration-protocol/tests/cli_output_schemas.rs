@@ -83,7 +83,6 @@ fn published_envelopes_carry_pages_records_and_effects_without_wrapper_keys() {
         "state":"open",
         "watchStatus":{"watching":true}
     });
-    let listen = serde_json::json!({"listenId":"01a0a9aa-0393-7a30-aeca-c7c77d679777"});
     let samples = [
         (
             "list",
@@ -91,7 +90,7 @@ fn published_envelopes_carry_pages_records_and_effects_without_wrapper_keys() {
         ),
         ("messageShow", serde_json::json!({"record":message})),
         ("threadShow", serde_json::json!({"record":thread})),
-        ("listenShow", serde_json::json!({"record":listen})),
+        ("threadWait", serde_json::json!({"batch":null})),
         (
             "mutation",
             serde_json::json!({"record":{"rootMessageId":"01a0a9aa-0393-7a30-aeca-c7c77d679774"},
@@ -108,10 +107,6 @@ fn published_envelopes_carry_pages_records_and_effects_without_wrapper_keys() {
             serde_json::json!({"record":{"turnId":"turn-a","kind":"interruptCompleted"},
                 "effects":{"kind":"interruptCompleted"}}),
         ),
-        (
-            "listenCancel",
-            serde_json::json!({"record":&listen,"effects":{"reason":"cancelled"}}),
-        ),
     ];
 
     for (kind, result) in samples {
@@ -120,7 +115,7 @@ fn published_envelopes_carry_pages_records_and_effects_without_wrapper_keys() {
 
         // Assert: the envelope validates and names no entity wrapper.
         assert!(envelope.is_valid(&published), "{kind} envelope");
-        for wrapper in ["message", "thread", "listen", "sessions"] {
+        for wrapper in ["message", "thread", "sessions"] {
             assert!(
                 published.pointer(&format!("/result/{wrapper}")).is_none(),
                 "{kind}: result must not wrap its entity in {wrapper}"
@@ -141,9 +136,6 @@ fn published_envelopes_carry_pages_records_and_effects_without_wrapper_keys() {
     for wrapper in [
         r#""MessageShowResult":{"properties":{"message""#,
         r#""ThreadShowResult":{"properties":{"thread""#,
-        r#""ThreadListenShowResult":{"properties":{"listen""#,
-        r#""ThreadListenCancelResult":{"properties":{"listen""#,
-        r#""ThreadListenResult":{"properties":{"listen""#,
     ] {
         assert!(
             !definitions.contains(wrapper),

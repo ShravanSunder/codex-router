@@ -1,4 +1,8 @@
 use super::*;
+use codex_router_core::credit_usage::CreditProviderObservation;
+use codex_router_core::credit_usage::CreditUsagePolicy;
+use codex_router_core::provider::Provider;
+use codex_router_secret_store::model::CredentialMigrationFailure;
 
 pub(super) struct QuotaStatusReport {
     pub(super) app_version: String,
@@ -7,12 +11,61 @@ pub(super) struct QuotaStatusReport {
     pub(super) preferred_next_account_id: Option<AccountId>,
     pub(super) selection_projection_source: SelectionProjectionSource,
     pub(super) now_unix_seconds: u64,
+    pub(super) credential_store_availability: CredentialStoreAvailability,
     pub(super) rows: Vec<QuotaStatusRow>,
 }
 
 impl QuotaStatusReport {
     pub(super) fn rows(&self) -> &[QuotaStatusRow] {
         &self.rows
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) enum CredentialStoreAvailability {
+    Ready,
+    KeychainLocked,
+    MigrationIncomplete {
+        accounts: Vec<String>,
+        failure: CredentialMigrationFailure,
+    },
+    Unavailable,
+}
+
+impl CredentialStoreAvailability {
+    pub(super) const fn as_json_status(&self) -> &'static str {
+        match self {
+            Self::Ready => "ready",
+            Self::KeychainLocked => "keychain_locked",
+            Self::MigrationIncomplete { .. } => "migration_incomplete",
+            Self::Unavailable => "credential_store_unavailable",
+        }
+    }
+
+    pub(super) fn unavailable_accounts(&self) -> &[String] {
+        match self {
+            Self::MigrationIncomplete { accounts, .. } => accounts,
+            _ => &[],
+        }
+    }
+
+    pub(super) const fn is_ready(&self) -> bool {
+        matches!(self, Self::Ready)
+    }
+
+    pub(super) fn status_label(&self) -> String {
+        match self {
+            Self::Ready => "ready".to_owned(),
+            Self::KeychainLocked => "keychain_locked".to_owned(),
+            Self::MigrationIncomplete { accounts, failure } => {
+                if accounts.is_empty() {
+                    format!("migration_incomplete ({failure})")
+                } else {
+                    format!("migration_incomplete ({failure}): {}", accounts.join(", "))
+                }
+            }
+            Self::Unavailable => "credential_store_unavailable".to_owned(),
+        }
     }
 }
 
@@ -42,13 +95,60 @@ impl SelectionProjectionSource {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum CreditUsageFreshness {
+    Fresh,
+    Stale,
+    #[default]
+    Unknown,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct CreditUsageStatus {
+    pub(crate) policy: CreditUsagePolicy,
+    pub(crate) provider_observation: CreditProviderObservation,
+    pub(crate) freshness: CreditUsageFreshness,
+    pub(crate) age_label: String,
+}
+
+impl Default for CreditUsageStatus {
+    fn default() -> Self {
+        Self {
+            policy: CreditUsagePolicy::Disallow,
+            provider_observation: CreditProviderObservation::missing(),
+            freshness: CreditUsageFreshness::Unknown,
+            age_label: "unknown".to_owned(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn migration_incomplete_label_names_the_failure_reason() {
+        let availability = CredentialStoreAvailability::MigrationIncomplete {
+            accounts: vec!["acct_unconverted".to_owned()],
+            failure: CredentialMigrationFailure::MetadataReadFailed,
+        };
+
+        assert_eq!(
+            availability.status_label(),
+            "migration_incomplete (credential migration metadata could not be read): acct_unconverted"
+        );
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct QuotaStatusAccountInput {
+    pub(super) provider: Provider,
     pub(super) account_label: String,
     pub(super) account_status: String,
     pub(super) account_id: AccountId,
     pub(super) active_credential_generation: Option<u64>,
     pub(super) reset_credits_available: Option<u32>,
+    pub(super) credit_usage: CreditUsageStatus,
     pub(super) updated: String,
     pub(super) active_clients: ActiveClientMirrorStatus,
     pub(super) windows: Vec<DisplayQuotaWindow>,
@@ -59,6 +159,7 @@ pub(super) struct QuotaStatusAccountInput {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct QuotaStatusRow {
+    pub(super) provider: Provider,
     pub(super) account_id: AccountId,
     pub(super) active_credential_generation: Option<u64>,
     pub(super) account_label: String,
@@ -73,6 +174,7 @@ pub(super) struct QuotaStatusRow {
     pub(super) active_clients_source: &'static str,
     pub(super) reset_credits_available: String,
     pub(super) reset_credits_available_value: Option<u32>,
+    pub(super) credit_usage: CreditUsageStatus,
     pub(super) routing: String,
     pub(super) next_use: String,
     pub(super) weekly_pace: Option<QuotaPaceSnapshot>,
@@ -103,6 +205,7 @@ impl QuotaStatusRow {
         unicode_bars: bool,
     ) -> Self {
         Self {
+            provider: input.provider,
             account_id: input.account_id.clone(),
             active_credential_generation: input.active_credential_generation,
             account_label: assessment.account_label().to_owned(),
@@ -127,6 +230,7 @@ impl QuotaStatusRow {
             active_clients_source: input.active_clients.source(),
             reset_credits_available: format_reset_credits(input.reset_credits_available),
             reset_credits_available_value: input.reset_credits_available,
+            credit_usage: input.credit_usage.clone(),
             routing: format_routing_cell(assessment),
             next_use: format_next_use(assessment).to_owned(),
             weekly_pace: input.weekly_pace,
@@ -184,6 +288,32 @@ pub(super) struct DisplayQuotaWindow {
 }
 
 impl DisplayQuotaWindow {
+    pub(super) fn from_claude_observation(
+        observation: &codex_router_state::window_observation::WindowObservation,
+        now_unix_seconds: u64,
+    ) -> Self {
+        Self {
+            window_seconds: match observation.window_kind() {
+                codex_router_core::route_profile::WindowKind::FiveHour => V1_SHORT_WINDOW_SECONDS,
+                codex_router_core::route_profile::WindowKind::Weekly => V1_WEEKLY_WINDOW_SECONDS,
+            },
+            status: match observation.freshness_at(now_unix_seconds) {
+                codex_router_selection::burn_down::QuotaEvidenceFreshness::Fresh => {
+                    QuotaWindowStatus::Eligible
+                }
+                codex_router_selection::burn_down::QuotaEvidenceFreshness::Stale
+                | codex_router_selection::burn_down::QuotaEvidenceFreshness::Unknown => {
+                    QuotaWindowStatus::Stale
+                }
+            },
+            remaining_headroom: observation.remaining_basis_points() / 100,
+            reset_unix_seconds: observation.reset_unix_seconds(),
+            observed_unix_seconds: observation.observation_started_at(),
+            effective: true,
+            run_rate_estimate: QuotaRunRateEstimate::unknown(),
+        }
+    }
+
     pub(super) fn from_selector_window(window: &PersistedSelectorQuotaWindow) -> Self {
         Self {
             window_seconds: window.limit_window_seconds(),
@@ -249,5 +379,34 @@ impl ActiveClientMirrorStatus {
             Self::MirrorFresh { .. } => "sqlx_mirror",
             Self::Unavailable => "unavailable",
         }
+    }
+}
+
+#[cfg(test)]
+mod freshness_tests {
+    use super::*;
+    use codex_router_core::ids::AccountId;
+    use codex_router_core::route_profile::WindowKind;
+    use codex_router_state::window_observation::WindowObservation;
+    use codex_router_state::window_observation::WindowObservationProps;
+
+    #[test]
+    fn claude_status_uses_the_persisted_freshness_deadline() {
+        let account_id = AccountId::new("claude_status_freshness")
+            .unwrap_or_else(|error| panic!("test account id should validate: {error}"));
+        let observation = WindowObservation::new(
+            WindowObservationProps::new(account_id, WindowKind::FiveHour, 5_000, 100)
+                .with_fresh_until_unix_seconds(620),
+        )
+        .unwrap_or_else(|error| panic!("test observation should validate: {error}"));
+
+        assert_eq!(
+            DisplayQuotaWindow::from_claude_observation(&observation, 620).status,
+            QuotaWindowStatus::Eligible
+        );
+        assert_eq!(
+            DisplayQuotaWindow::from_claude_observation(&observation, 621).status,
+            QuotaWindowStatus::Stale
+        );
     }
 }

@@ -39,11 +39,15 @@ pub(super) fn provider_matches(
     match provider {
         SessionsProvider::Any => true,
         SessionsProvider::Current => record.provider == request.current_provider,
+        SessionsProvider::ClaudeCode => false,
         SessionsProvider::Id(provider_id) => record.provider.as_ref() == Some(provider_id),
     }
 }
 
 pub(super) fn source_matches(source: SessionsSource, record: &SessionPickerRecord) -> bool {
+    if record.identity.is_provider() {
+        return true;
+    }
     match source {
         SessionsSource::All => true,
         SessionsSource::Interactive => {

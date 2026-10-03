@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM subscription_windows WHERE reader_key=? AND root_id IN ( SELECT root.message_id FROM board_messages root WHERE root.root_id IS NULL AND root.topic_id=? AND NOT EXISTS(SELECT 1 FROM thread_subscriptions thread_override WHERE thread_override.reader_key=? AND thread_override.scope_kind='thread' AND thread_override.scope_id=root.message_id))",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "509aab82f92b11bd535775ebf29fcfaaff2beacc40302e1e07dd1861a7b79f65"
+}

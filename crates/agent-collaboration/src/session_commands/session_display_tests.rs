@@ -31,6 +31,58 @@ fn missing_explicit_session_name_keeps_the_previous_display_fallback() {
     assert_eq!(picker_record.title, "previous title");
 }
 
+#[test]
+fn plain_preview_text_is_not_promoted_to_a_session_title() {
+    assert_eq!(
+        display_title_from_session_fields(None, None, Some("private preview"), None),
+        None
+    );
+}
+
+#[test]
+fn router_push_title_uses_the_header_and_keeps_it_on_the_target_session() {
+    let target_session_id = "recipient-session";
+    let header = "✉️ ✳️ claude-local/sender-sess @Sunbook-Pro-M4 → you";
+    let push_id = "018f47d2-24d5-7a68-b9ec-6f759c39458f";
+    let line = format!(
+        "{header} · \"Private message preview\" · router://018f47d2-24d5-7a68-b9ec-6f759c39458f/push/{push_id}"
+    );
+    let mut record = search_consistency_record(None, None);
+    record.session_id = target_session_id.to_owned();
+    record.title = Some(line);
+    record.preview = Some("Private message preview".to_owned());
+
+    let picker_record = SessionPickerRecord::from_record(&record);
+
+    assert_eq!(picker_record.session_id, target_session_id);
+    assert_eq!(picker_record.title, header);
+    assert!(!picker_record.title.contains("Private message preview"));
+    assert!(!picker_record.title.contains(push_id));
+}
+
+#[test]
+fn router_push_header_in_first_user_message_keeps_rename_and_excludes_preview() {
+    let header = "🗓 Router schedule 018f47d2 @Sunbook-Pro-M4 · run 018f47d2";
+    let line = format!(
+        "{header} · \"Review the weekly summary\" · router://018f47d2-24d5-7a68-b9ec-6f759c39458f/push/018f47d2-24d5-7a68-b9ec-6f759c39458f"
+    );
+    let mut record = search_consistency_record(None, None);
+    record.session_id = "scheduled-target".to_owned();
+    record.name = Some("Weekly report thread".to_owned());
+    record.title = Some("Agent communication".to_owned());
+    record.first_user_message = Some(line);
+    record.preview = Some("Review the weekly summary".to_owned());
+
+    let picker_record = SessionPickerRecord::from_record(&record);
+
+    assert_eq!(
+        picker_record.title,
+        format!("Weekly report thread | {header}")
+    );
+    assert_eq!(picker_record.session_id, "scheduled-target");
+    assert!(!picker_record.title.contains("Review the weekly summary"));
+}
+
 #[cfg(unix)]
 #[test]
 fn picker_record_normalizes_existing_cwd_before_interactive_matching() {

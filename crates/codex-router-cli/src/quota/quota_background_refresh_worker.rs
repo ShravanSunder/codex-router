@@ -132,6 +132,9 @@ where
                             &quota_provider,
                             QuotaRefreshObservationContext {
                                 observed_unix_seconds,
+                                schedule: QuotaRefreshSchedule::Background {
+                                    interval_seconds: interval.as_secs(),
+                                },
                                 weekly_floor_observer: quota_floor_notifier.as_deref(),
                             },
                         ),
@@ -163,11 +166,12 @@ where
 pub(crate) fn start_background_quota_refresh_worker(
     state_db: PathBuf,
     secret_root: PathBuf,
+    credential_store: crate::secret_store_factory::CliRuntimeSecretStore,
     base_url: String,
     interval: Duration,
     quota_floor_notifier: WebSocketQuotaFloorNotifier,
 ) -> Result<BackgroundQuotaRefreshWorker, QuotaCommandError> {
-    let resolver = CliCredentialResolver::open(&state_db, &secret_root)?;
+    let resolver = CliCredentialResolver::open_with_secret_store(&state_db, credential_store)?;
     let provider = HttpQuotaRefreshProvider::new()?;
     Ok(start_background_quota_refresh_worker_with_reporter(
         state_db,

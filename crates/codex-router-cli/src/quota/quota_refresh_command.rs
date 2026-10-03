@@ -23,6 +23,7 @@ pub(super) async fn refresh_quota(
         current_unix_seconds(),
     )
     .await
+    .map(|_report| ())
 }
 
 pub(crate) fn is_allowed_quota_refresh_base_url(base_url: &str) -> bool {

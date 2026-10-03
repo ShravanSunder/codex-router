@@ -1,4 +1,5 @@
 use super::*;
+use crate::quota::QuotaWindowHeadroom;
 use sqlx::Connection;
 
 pub(super) struct FaultingFloorRefreshProvider {
@@ -40,25 +41,26 @@ impl QuotaRefreshProvider for FaultingFloorRefreshProvider {
             windows: vec![
                 QuotaRefreshProviderWindow {
                     limit_window_seconds: 18_000,
-                    remaining_headroom: 90,
+                    headroom: QuotaWindowHeadroom::Percent(90),
                     reset_unix_seconds: Some(20_000),
                     effective: true,
                 },
                 QuotaRefreshProviderWindow {
                     limit_window_seconds: 604_800,
-                    remaining_headroom: 8,
+                    headroom: QuotaWindowHeadroom::Percent(8),
                     reset_unix_seconds: Some(614_800),
                     effective: false,
                 },
             ],
             reset_credits_available: None,
+            ..Default::default()
         })
     }
 }
 
 #[test]
-fn required_history_failure_sends_no_floor_signal_but_snapshot_failure_follows_signal() {
-    for (stage, should_signal) in [("history", false), ("snapshot", true)] {
+fn responses_observation_transaction_failure_sends_no_floor_signal_or_windows() {
+    for stage in ["history", "snapshot"] {
         let test_root = TestRoot::new(&format!("floor-refresh-{stage}-fault"));
         must_ok(fs::create_dir(test_root.path()));
         let state_path = test_root.path().join("state.sqlite");
@@ -67,11 +69,18 @@ fn required_history_failure_sends_no_floor_signal_but_snapshot_failure_follows_s
         let account_id = account_id("floor-fault-account");
         must_ok(AccountStateRepository::upsert_account(
             &state,
-            &AccountRecord::new(account_id.clone(), "floor-fault", AccountStatus::Enabled)
-                .with_active_credential_generation(1),
+            &AccountRecord::new(
+                codex_router_core::provider::Provider::Openai,
+                account_id.clone(),
+                "floor-fault",
+                AccountStatus::Enabled,
+            )
+            .with_active_credential_generation(1),
         ));
-        let secrets = must_ok(FileSecretStore::open(&secret_root));
-        let key = must_ok(account_credential_bundle_key(&account_id, 1));
+        let secrets = must_ok(
+            codex_router_secret_store::test_support::open_encrypted_credential_store(&secret_root),
+        );
+        let key = must_ok(openai_account_credential_bundle_key(&account_id, 1));
         must_ok(
             secrets.write_secret(
                 &key,
@@ -85,16 +94,18 @@ fn required_history_failure_sends_no_floor_signal_but_snapshot_failure_follows_s
                 ),
             ),
         );
-        let mutation = must_ok(
-            test_async_runtime().block_on(AsyncWeeklyQuotaFloorMutationStore::open(&state_path)),
-        );
-        must_ok(
-            test_async_runtime().block_on(mutation.set_weekly_quota_floor_by_account_id(
-                &account_id,
-                Some(must_ok(WeeklyQuotaFloorBasisPoints::new(500))),
-            )),
-        );
-        test_async_runtime().block_on(mutation.close());
+        test_async_runtime().block_on(async {
+            let mutation = must_ok(AsyncWeeklyQuotaFloorMutationStore::open(&state_path).await);
+            must_ok(
+                mutation
+                    .set_weekly_quota_floor_by_account_id(
+                        &account_id,
+                        Some(must_ok(WeeklyQuotaFloorBasisPoints::new(500))),
+                    )
+                    .await,
+            );
+            mutation.close().await;
+        });
         let resolver =
             RouterCredentialResolver::new(&state, &secrets, NoopCredentialRefreshClient, 1_000);
         let provider = FaultingFloorRefreshProvider {
@@ -112,14 +123,12 @@ fn required_history_failure_sends_no_floor_signal_but_snapshot_failure_follows_s
             &provider,
             QuotaRefreshObservationContext {
                 observed_unix_seconds: 1_100,
+                schedule: crate::quota::QuotaRefreshSchedule::Manual,
                 weekly_floor_observer: Some(&observer),
             },
         ));
         assert!(error.to_string().contains("sqlite state store failed"));
-        assert_eq!(
-            lock_test_mutex(&observer.account_ids, "weekly floor observer").len() == 1,
-            should_signal,
-        );
+        assert!(lock_test_mutex(&observer.account_ids, "weekly floor observer").is_empty());
         let windows = must_ok(SelectorQuotaRepository::selector_inputs_for_route_band(
             &state,
             "responses",
@@ -131,7 +140,7 @@ fn required_history_failure_sends_no_floor_signal_but_snapshot_failure_follows_s
             .any(|window| {
                 window.limit_window_seconds() == 604_800 && window.observed_unix_seconds() == 1_100
             });
-        assert_eq!(saved_new_weekly, should_signal);
+        assert!(!saved_new_weekly);
     }
 }
 
@@ -143,11 +152,20 @@ fn quota_refresh_writes_selector_windows_for_runtime_selection() {
     must_ok(fs::create_dir_all(&router_root));
     let state = must_ok(SqliteStateStore::open(&router_root.join("state.sqlite")));
     let account_id = account_id("acct_quota_selector");
-    let account = AccountRecord::new(account_id.clone(), "selector", AccountStatus::Enabled)
-        .with_active_credential_generation(1);
+    let account = AccountRecord::new(
+        codex_router_core::provider::Provider::Openai,
+        account_id.clone(),
+        "selector",
+        AccountStatus::Enabled,
+    )
+    .with_active_credential_generation(1);
     must_ok(AccountStateRepository::upsert_account(&state, &account));
-    let secrets = must_ok(FileSecretStore::open(router_root.join("secrets")));
-    let bundle_key = must_ok(account_credential_bundle_key(&account_id, 1));
+    let secrets = must_ok(
+        codex_router_secret_store::test_support::open_encrypted_credential_store(
+            router_root.join("secrets"),
+        ),
+    );
+    let bundle_key = must_ok(openai_account_credential_bundle_key(&account_id, 1));
     must_ok(
         secrets.write_secret(
             &bundle_key,
@@ -166,28 +184,32 @@ fn quota_refresh_writes_selector_windows_for_runtime_selection() {
     let provider = StaticQuotaRefreshProvider::new(vec![
         QuotaRefreshProviderWindow {
             limit_window_seconds: 18_000,
-            remaining_headroom: 37,
+            headroom: QuotaWindowHeadroom::Percent(37),
             reset_unix_seconds: Some(20_000),
             effective: true,
         },
         QuotaRefreshProviderWindow {
             limit_window_seconds: 604_800,
-            remaining_headroom: 15,
+            headroom: QuotaWindowHeadroom::Percent(15),
             reset_unix_seconds: Some(614_800),
             effective: false,
         },
     ]);
     let mut stdout = Vec::new();
-    let mutation = must_ok(test_async_runtime().block_on(
-        AsyncWeeklyQuotaFloorMutationStore::open(&router_root.join("state.sqlite")),
-    ));
-    must_ok(
-        test_async_runtime().block_on(mutation.set_weekly_quota_floor_by_account_id(
-            &account_id,
-            Some(must_ok(WeeklyQuotaFloorBasisPoints::new(1_500))),
-        )),
-    );
-    test_async_runtime().block_on(mutation.close());
+    test_async_runtime().block_on(async {
+        let mutation = must_ok(
+            AsyncWeeklyQuotaFloorMutationStore::open(&router_root.join("state.sqlite")).await,
+        );
+        must_ok(
+            mutation
+                .set_weekly_quota_floor_by_account_id(
+                    &account_id,
+                    Some(must_ok(WeeklyQuotaFloorBasisPoints::new(1_500))),
+                )
+                .await,
+        );
+        mutation.close().await;
+    });
 
     let floor_observer = RecordingWeeklyFloorObserver::default();
 
@@ -200,6 +222,7 @@ fn quota_refresh_writes_selector_windows_for_runtime_selection() {
         &provider,
         QuotaRefreshObservationContext {
             observed_unix_seconds: 1_100,
+            schedule: crate::quota::QuotaRefreshSchedule::Manual,
             weekly_floor_observer: Some(&floor_observer),
         },
     ));
@@ -264,12 +287,14 @@ fn quota_refresh_signals_floor_after_saved_history_before_next_account() {
     let floor_account_id = account_id("acct_a_floor");
     let healthy_account_id = account_id("acct_b_healthy");
     let floor_account = AccountRecord::new(
+        codex_router_core::provider::Provider::Openai,
         floor_account_id.clone(),
         "floor-account",
         AccountStatus::Enabled,
     )
     .with_active_credential_generation(1);
     let healthy_account = AccountRecord::new(
+        codex_router_core::provider::Provider::Openai,
         healthy_account_id.clone(),
         "healthy-account",
         AccountStatus::Enabled,
@@ -283,12 +308,16 @@ fn quota_refresh_signals_floor_after_saved_history_before_next_account() {
         &state,
         &healthy_account,
     ));
-    let secrets = must_ok(FileSecretStore::open(router_root.join("secrets")));
+    let secrets = must_ok(
+        codex_router_secret_store::test_support::open_encrypted_credential_store(
+            router_root.join("secrets"),
+        ),
+    );
     for (account_id, access_token) in [
         (&floor_account_id, "floor-access-token"),
         (&healthy_account_id, "healthy-access-token"),
     ] {
-        let bundle_key = must_ok(account_credential_bundle_key(account_id, 1));
+        let bundle_key = must_ok(openai_account_credential_bundle_key(account_id, 1));
         must_ok(
             secrets.write_secret(
                 &bundle_key,
@@ -305,16 +334,20 @@ fn quota_refresh_signals_floor_after_saved_history_before_next_account() {
     }
     let resolver =
         RouterCredentialResolver::new(&state, &secrets, NoopCredentialRefreshClient, 1_000);
-    let mutation = must_ok(test_async_runtime().block_on(
-        AsyncWeeklyQuotaFloorMutationStore::open(&router_root.join("state.sqlite")),
-    ));
-    must_ok(
-        test_async_runtime().block_on(mutation.set_weekly_quota_floor_by_account_id(
-            &floor_account_id,
-            Some(must_ok(WeeklyQuotaFloorBasisPoints::new(500))),
-        )),
-    );
-    test_async_runtime().block_on(mutation.close());
+    test_async_runtime().block_on(async {
+        let mutation = must_ok(
+            AsyncWeeklyQuotaFloorMutationStore::open(&router_root.join("state.sqlite")).await,
+        );
+        must_ok(
+            mutation
+                .set_weekly_quota_floor_by_account_id(
+                    &floor_account_id,
+                    Some(must_ok(WeeklyQuotaFloorBasisPoints::new(500))),
+                )
+                .await,
+        );
+        mutation.close().await;
+    });
     let floor_observer = Arc::new(RecordingWeeklyFloorObserver::default());
     let provider = FloorNotificationOrderingQuotaProvider::new(
         floor_account_id.clone(),
@@ -333,6 +366,7 @@ fn quota_refresh_signals_floor_after_saved_history_before_next_account() {
         &provider,
         QuotaRefreshObservationContext {
             observed_unix_seconds: 1_100,
+            schedule: crate::quota::QuotaRefreshSchedule::Manual,
             weekly_floor_observer: Some(floor_observer.as_ref()),
         },
     ));
@@ -360,11 +394,18 @@ fn saved_quota_observations_switch_clear_and_floor_disable_intents() {
     let account_id = account_id("acct_switch_intent");
     must_ok(AccountStateRepository::upsert_account(
         &state,
-        &AccountRecord::new(account_id.clone(), "switch-intent", AccountStatus::Enabled)
-            .with_active_credential_generation(1),
+        &AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
+            account_id.clone(),
+            "switch-intent",
+            AccountStatus::Enabled,
+        )
+        .with_active_credential_generation(1),
     ));
-    let secrets = must_ok(FileSecretStore::open(&secret_root));
-    let key = must_ok(account_credential_bundle_key(&account_id, 1));
+    let secrets = must_ok(
+        codex_router_secret_store::test_support::open_encrypted_credential_store(&secret_root),
+    );
+    let key = must_ok(openai_account_credential_bundle_key(&account_id, 1));
     let bundle = AccountCredentialBundle::imported_codex_auth(
         "switch-intent-access",
         Some("switch-intent-refresh".to_owned()),
@@ -373,33 +414,41 @@ fn saved_quota_observations_switch_clear_and_floor_disable_intents() {
     must_ok(secrets.write_secret(&key, &must_ok(bundle.to_secret_string())));
     let resolver =
         RouterCredentialResolver::new(&state, &secrets, NoopCredentialRefreshClient, 1_000);
-    let mutation = must_ok(
-        test_async_runtime().block_on(AsyncWeeklyQuotaFloorMutationStore::open(&state_path)),
-    );
-    must_ok(
-        test_async_runtime().block_on(mutation.set_weekly_quota_floor_by_account_id(
-            &account_id,
-            Some(must_ok(WeeklyQuotaFloorBasisPoints::new(500))),
-        )),
-    );
+    test_async_runtime().block_on(async {
+        let mutation = must_ok(AsyncWeeklyQuotaFloorMutationStore::open(&state_path).await);
+        must_ok(
+            mutation
+                .set_weekly_quota_floor_by_account_id(
+                    &account_id,
+                    Some(must_ok(WeeklyQuotaFloorBasisPoints::new(500))),
+                )
+                .await,
+        );
+        mutation.close().await;
+    });
     let observer = RecordingWeeklyFloorObserver::default();
     for (index, remaining) in [8, 9, 8, 8].into_iter().enumerate() {
         if index == 3 {
-            must_ok(
-                test_async_runtime()
-                    .block_on(mutation.set_weekly_quota_floor_by_account_id(&account_id, None)),
-            );
+            test_async_runtime().block_on(async {
+                let mutation = must_ok(AsyncWeeklyQuotaFloorMutationStore::open(&state_path).await);
+                must_ok(
+                    mutation
+                        .set_weekly_quota_floor_by_account_id(&account_id, None)
+                        .await,
+                );
+                mutation.close().await;
+            });
         }
         let provider = StaticQuotaRefreshProvider::new(vec![
             QuotaRefreshProviderWindow {
                 limit_window_seconds: 18_000,
-                remaining_headroom: 100,
+                headroom: QuotaWindowHeadroom::Percent(100),
                 reset_unix_seconds: Some(20_000),
                 effective: true,
             },
             QuotaRefreshProviderWindow {
                 limit_window_seconds: 604_800,
-                remaining_headroom: remaining,
+                headroom: QuotaWindowHeadroom::Percent(remaining),
                 reset_unix_seconds: Some(604_800),
                 effective: false,
             },
@@ -415,6 +464,7 @@ fn saved_quota_observations_switch_clear_and_floor_disable_intents() {
             &provider,
             QuotaRefreshObservationContext {
                 observed_unix_seconds,
+                schedule: crate::quota::QuotaRefreshSchedule::Manual,
                 weekly_floor_observer: Some(&observer),
             },
         ));
@@ -440,7 +490,6 @@ fn saved_quota_observations_switch_clear_and_floor_disable_intents() {
             WeeklyQuotaFloorIntent::Clear,
         ]
     );
-    test_async_runtime().block_on(mutation.close());
 }
 
 #[test]
@@ -451,11 +500,20 @@ fn quota_refresh_weekly_only_response_is_known_with_five_hour_no_data() {
     must_ok(fs::create_dir_all(&router_root));
     let state = must_ok(SqliteStateStore::open(&router_root.join("state.sqlite")));
     let account_id = account_id("acct_quota_partial");
-    let account = AccountRecord::new(account_id.clone(), "partial", AccountStatus::Enabled)
-        .with_active_credential_generation(1);
+    let account = AccountRecord::new(
+        codex_router_core::provider::Provider::Openai,
+        account_id.clone(),
+        "partial",
+        AccountStatus::Enabled,
+    )
+    .with_active_credential_generation(1);
     must_ok(AccountStateRepository::upsert_account(&state, &account));
-    let secrets = must_ok(FileSecretStore::open(router_root.join("secrets")));
-    let bundle_key = must_ok(account_credential_bundle_key(&account_id, 1));
+    let secrets = must_ok(
+        codex_router_secret_store::test_support::open_encrypted_credential_store(
+            router_root.join("secrets"),
+        ),
+    );
+    let bundle_key = must_ok(openai_account_credential_bundle_key(&account_id, 1));
     must_ok(
         secrets.write_secret(
             &bundle_key,
@@ -473,7 +531,7 @@ fn quota_refresh_weekly_only_response_is_known_with_five_hour_no_data() {
         RouterCredentialResolver::new(&state, &secrets, NoopCredentialRefreshClient, 1_000);
     let provider = StaticQuotaRefreshProvider::new(vec![QuotaRefreshProviderWindow {
         limit_window_seconds: 604_800,
-        remaining_headroom: 80,
+        headroom: QuotaWindowHeadroom::Percent(80),
         reset_unix_seconds: Some(20_000),
         effective: true,
     }]);
@@ -556,11 +614,20 @@ fn quota_refresh_missing_reset_response_is_unknown_fallback() {
     must_ok(fs::create_dir_all(&router_root));
     let state = must_ok(SqliteStateStore::open(&router_root.join("state.sqlite")));
     let account_id = account_id("acct_quota_missing_reset");
-    let account = AccountRecord::new(account_id.clone(), "missing-reset", AccountStatus::Enabled)
-        .with_active_credential_generation(1);
+    let account = AccountRecord::new(
+        codex_router_core::provider::Provider::Openai,
+        account_id.clone(),
+        "missing-reset",
+        AccountStatus::Enabled,
+    )
+    .with_active_credential_generation(1);
     must_ok(AccountStateRepository::upsert_account(&state, &account));
-    let secrets = must_ok(FileSecretStore::open(router_root.join("secrets")));
-    let bundle_key = must_ok(account_credential_bundle_key(&account_id, 1));
+    let secrets = must_ok(
+        codex_router_secret_store::test_support::open_encrypted_credential_store(
+            router_root.join("secrets"),
+        ),
+    );
+    let bundle_key = must_ok(openai_account_credential_bundle_key(&account_id, 1));
     must_ok(
         secrets.write_secret(
             &bundle_key,
@@ -579,13 +646,13 @@ fn quota_refresh_missing_reset_response_is_unknown_fallback() {
     let provider = StaticQuotaRefreshProvider::new(vec![
         QuotaRefreshProviderWindow {
             limit_window_seconds: 18_000,
-            remaining_headroom: 80,
+            headroom: QuotaWindowHeadroom::Percent(80),
             reset_unix_seconds: Some(20_000),
             effective: true,
         },
         QuotaRefreshProviderWindow {
             limit_window_seconds: 604_800,
-            remaining_headroom: 90,
+            headroom: QuotaWindowHeadroom::Percent(90),
             reset_unix_seconds: None,
             effective: false,
         },

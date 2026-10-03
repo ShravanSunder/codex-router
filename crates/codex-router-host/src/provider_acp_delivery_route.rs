@@ -1,8 +1,17 @@
 //! ACP provider message delivery, evidence, and reconciliation.
+mod provider_active_turn_cancel;
+mod provider_content_commands;
+mod provider_delivery_request;
 mod provider_queue_submission;
+mod session_delivery_route;
+pub use provider_active_turn_cancel::ProviderCancelActiveTurnError;
+pub use provider_content_commands::{
+    ProviderPromptContentsError, ProviderQueueAdmissionError, ProviderSteerContentsError,
+};
+use provider_delivery_request::{ProviderDeliveryContent, ProviderDeliveryRequest};
 
-use crate::external_provider_supervisor::ProviderPromptDispatch;
-use crate::provider_acp_message_fifo::ProviderAcpMessageFifo;
+use crate::external_provider_supervisor::{ProviderPromptContentsRequest, ProviderPromptDispatch};
+use crate::provider_acp_message_fifo::{ProviderAcpMessageFifo, ProviderQueuedPrompt};
 use crate::provider_acp_route_claim::ProviderAcpRouteClaim;
 use crate::provider_acp_session_loading::{
     ProviderSessionLoadOutcome, ProviderSessionLoadRejection, ensure_provider_session_loaded,
@@ -16,16 +25,13 @@ use agent_automation::{
     RouteEffectEvidence, SubmissionEffect,
 };
 use collaboration_protocol::{
-    CodexGeneration, ConversationPromptRequest, DeliveryClientReceipt, DeliveryNextAction,
-    DeliveryOutcome, DeliveryReceipt, DeliveryRejection, DeliveryRejectionReason, MessageContent,
-    MessageDelivery, OperationId, ProviderOperationEffect, ProviderOperationStage,
-    SessionReachability, SessionRef, UuidIdentity, render_message,
+    CodexGeneration, DeliveryClientReceipt, DeliveryNextAction, DeliveryOutcome, DeliveryReceipt,
+    DeliveryRejection, DeliveryRejectionReason, MessageDelivery, OperationId, ProviderIdentity,
+    ProviderOperationEffect, SessionReachability, SessionRef, UuidIdentity,
 };
 use collaboration_service::{
-    AttemptEvidenceSink, AttemptReconciliation, AttemptReconciliationContext,
-    DeliveryContractError, DeliveryFuture, DeliveryPrecondition, DeliveryRequest,
-    EndpointDirectory, ProviderConversationBackend, ProviderOperationStore, RouteClaim,
-    SessionDeliveryRoute,
+    AttemptEvidenceSink, DeliveryContractError, DeliveryPrecondition, EndpointDirectory,
+    LoadPolicy, NOT_LOADED_REASON, ProviderConversationBackend, ProviderOperationStore, RouteClaim,
 };
 use std::{
     collections::{HashMap, HashSet},
@@ -44,6 +50,21 @@ pub struct ProviderAcpDeliveryRoute {
 }
 
 impl ProviderAcpDeliveryRoute {
+    #[must_use]
+    pub fn queue_list(&self, session: &SessionRef) -> Vec<crate::ProviderQueuedInput> {
+        self.supervisor.queued_operation_registry().list(session)
+    }
+
+    pub fn queue_cancel(
+        &self,
+        session: &SessionRef,
+        input_id: &session_event_model::InputId,
+    ) -> Result<(), crate::ProviderQueueCancellationError> {
+        self.supervisor
+            .queued_operation_registry()
+            .cancel(session, input_id)
+    }
+
     #[must_use]
     pub fn new(
         service_id: UuidIdentity,
@@ -119,6 +140,7 @@ impl ProviderAcpDeliveryRoute {
                 next_action,
                 client_code: None,
                 detail: Some(detail.to_owned()),
+                claims: None,
             }),
             None,
         )
@@ -135,7 +157,7 @@ impl ProviderAcpDeliveryRoute {
     }
 
     fn effect(
-        request: &DeliveryRequest,
+        request: &ProviderDeliveryRequest,
         binding: &collaboration_protocol::ProviderBindingIdentity,
         submission: SubmissionEffect,
     ) -> Result<RouteEffectEvidence<SessionRef, CodexGeneration>, DeliveryContractError> {
@@ -156,9 +178,10 @@ impl ProviderAcpDeliveryRoute {
 
     async fn deliver_provider<'a>(
         &'a self,
-        request: DeliveryRequest,
+        request: ProviderDeliveryRequest,
         sink: &'a dyn AttemptEvidenceSink,
     ) -> Result<DeliveryReceipt, DeliveryContractError> {
+        let input_id = request.input_id()?;
         if !self.serves(&request.target) {
             return Ok(Self::rejected(
                 DeliveryRejectionReason::NoRoute,
@@ -183,11 +206,12 @@ impl ProviderAcpDeliveryRoute {
         let _session_guard = session_lock.lock().await;
         let claim = self.claim.claim(&request.target).await;
         match claim {
-            RouteClaim::Holds | RouteClaim::CanLoad => {}
+            RouteClaim::Holds => {}
+            RouteClaim::CanLoad => {}
             RouteClaim::Unavailable { reason, retryable } => {
                 return Ok(Self::not_submitted(reason.reason, retryable));
             }
-            RouteClaim::LiveElsewhere { .. } => {
+            RouteClaim::Rejected { .. } | RouteClaim::LiveElsewhere { .. } => {
                 return Ok(Self::not_submitted("session is live elsewhere", true));
             }
             RouteClaim::NotMine => {
@@ -203,6 +227,12 @@ impl ProviderAcpDeliveryRoute {
             return Ok(Self::not_submitted("provider runtime is unavailable", true));
         };
         let provider_session_id = String::from(request.target.session_id.clone());
+        if runtime.settings_unresolved(&provider_session_id).await {
+            return Ok(Self::rejected(
+                DeliveryRejectionReason::SettingsUnresolved,
+                "settingsUnresolved: set requested settings or accept current values before prompt, steer or queue",
+            ));
+        }
         let capabilities = runtime.capability_report(&provider_session_id).await;
         if request.mode == MessageDelivery::Steer && !capabilities.supports_steering {
             return Ok(Self::rejected(
@@ -223,6 +253,12 @@ impl ProviderAcpDeliveryRoute {
             }
         };
         if request.mode == MessageDelivery::Queue
+            && request.load_policy == LoadPolicy::LoadedOnly
+            && activity == ProviderSessionActivity::NotLoaded
+        {
+            return Ok(Self::not_submitted(NOT_LOADED_REASON, true));
+        }
+        if request.mode == MessageDelivery::Queue
             || (!capabilities.supports_steering
                 && request.mode == MessageDelivery::Auto
                 && activity == ProviderSessionActivity::Running)
@@ -238,10 +274,16 @@ impl ProviderAcpDeliveryRoute {
             &self.store,
             self.ownership.as_ref(),
             &request.target,
+            request.load_policy,
         )
         .await
         {
-            ProviderSessionLoadOutcome::Ready => {}
+            ProviderSessionLoadOutcome::Ready | ProviderSessionLoadOutcome::AlreadyLoaded => {}
+            ProviderSessionLoadOutcome::NotLoaded => {
+                return self
+                    .finish_known_none(&request, sink, &mut effect, NOT_LOADED_REASON, true)
+                    .await;
+            }
             ProviderSessionLoadOutcome::UnsupportedLoad => {
                 return self
                     .finish_known_none(&request, sink, &mut effect, "unsupported: load", false)
@@ -291,22 +333,15 @@ impl ProviderAcpDeliveryRoute {
                 .await;
         }
         if capabilities.supports_steering {
-            let prompt = match render_message(&request.target, &request.message) {
-                Ok(prompt) => prompt,
-                Err(_) => {
-                    return self
-                        .finish_known_none(
-                            &request,
-                            sink,
-                            &mut effect,
-                            "provider prompt exceeds the frame limit",
-                            false,
-                        )
-                        .await;
-                }
+            let prompt_text = match &request.content {
+                ProviderDeliveryContent::PreparedPush { line, .. } => line.as_str().to_owned(),
             };
             match runtime
-                .steer_session(String::from(request.target.session_id.clone()), prompt.text)
+                .steer_session_with_input(
+                    String::from(request.target.session_id.clone()),
+                    input_id.clone(),
+                    prompt_text,
+                )
                 .await
             {
                 Ok(ProviderSteeringOutcome::Injected {
@@ -375,21 +410,24 @@ impl ProviderAcpDeliveryRoute {
             }
             Err(_) => return self.finish_unknown(sink, &mut effect).await,
         };
-        let requested_by = match &request.message {
-            MessageContent::Agent { sender, .. } => sender.clone(),
-            MessageContent::HumanUser { .. } | MessageContent::Router { .. } => record.created_by,
+        let requested_by = match &request.content {
+            ProviderDeliveryContent::PreparedPush { .. } => record.created_by.clone(),
         };
-        let dispatch = self
-            .supervisor
-            .submit_delivery_prompt(ConversationPromptRequest {
-                operation_id: operation_id.clone(),
-                target: request.target.clone(),
-                generation: Some(binding.generation),
-                requested_by,
-                approver: record.approver,
-                prompt: request.message.clone(),
-            })
-            .await;
+        let dispatch = match &request.content {
+            ProviderDeliveryContent::PreparedPush { line, .. } => {
+                let contents_request = ProviderPromptContentsRequest::from_prepared_push(
+                    operation_id.clone(),
+                    input_id,
+                    request.target.clone(),
+                    requested_by,
+                    record.approver,
+                    line,
+                )?;
+                self.supervisor
+                    .submit_delivery_prompt_contents(contents_request)
+                    .await
+            }
+        };
         match dispatch {
             Ok(ProviderPromptDispatch::Submitted) => {
                 update_submission(&mut effect, SubmissionEffect::Accepted);
@@ -427,7 +465,7 @@ impl ProviderAcpDeliveryRoute {
 
     async fn finish_known_none(
         &self,
-        _request: &DeliveryRequest,
+        _request: &ProviderDeliveryRequest,
         sink: &dyn AttemptEvidenceSink,
         effect: &mut RouteEffectEvidence<SessionRef, CodexGeneration>,
         reason: impl Into<String>,
@@ -468,6 +506,7 @@ impl ProviderAcpDeliveryRoute {
                 next_action,
                 client_code,
                 detail,
+                claims: None,
             }),
             None,
         ))
@@ -490,89 +529,5 @@ fn update_submission(
 ) {
     if let RouteEffectEvidence::ProviderAcp(provider) = effect {
         provider.submission = submission;
-    }
-}
-
-impl SessionDeliveryRoute for ProviderAcpDeliveryRoute {
-    fn scheduled_runs(&self) -> Option<Arc<dyn collaboration_service::ScheduledRunRoute>> {
-        Some(Arc::new(
-            crate::provider_acp_scheduled_runs::ProviderAcpScheduledRuns::new(
-                self.service_id.clone(),
-                Arc::clone(&self.supervisor),
-                Arc::clone(&self.store),
-                Arc::clone(&self.ownership),
-            ),
-        ))
-    }
-
-    fn reachability(&self) -> SessionReachability {
-        SessionReachability::ProviderAcp
-    }
-
-    fn claim(&self, target: &SessionRef) -> DeliveryFuture<'_, RouteClaim> {
-        let target = target.clone();
-        Box::pin(async move { Ok(self.claim.claim(&target).await) })
-    }
-
-    fn deliver<'a>(
-        &'a self,
-        request: DeliveryRequest,
-        sink: &'a dyn AttemptEvidenceSink,
-    ) -> DeliveryFuture<'a, DeliveryReceipt> {
-        Box::pin(async move { self.deliver_provider(request, sink).await })
-    }
-
-    fn reconcile_attempt(
-        &self,
-        context: AttemptReconciliationContext,
-    ) -> DeliveryFuture<'_, AttemptReconciliation> {
-        Box::pin(async move {
-            let RouteEffectEvidence::ProviderAcp(provider) = context.recorded else {
-                return Err(DeliveryContractError::InvalidEvidence);
-            };
-            if provider.target != context.target {
-                return Err(DeliveryContractError::InvalidEvidence);
-            }
-            let operation_id = OperationId::try_from(provider.attempt_id.as_str().to_owned())
-                .map_err(|_| DeliveryContractError::InvalidEvidence)?;
-            let record = self
-                .store
-                .lock()
-                .await
-                .inspect(&operation_id)
-                .await
-                .map_err(|_| DeliveryContractError::ClientOperation)?;
-            let Some(record) = record else {
-                return Ok(if provider.submission == SubmissionEffect::RouterQueued {
-                    AttemptReconciliation::KnownNotSubmitted
-                } else {
-                    AttemptReconciliation::StillUnknown
-                });
-            };
-            let matching_binding = record.binding.external_provider().is_some_and(|binding| {
-                binding.generation == provider.generation
-                    && String::from(binding.binding_id.clone()) == provider.binding.as_str()
-            });
-            if !matching_binding {
-                return Ok(AttemptReconciliation::KnownNotSubmitted);
-            }
-            Ok(match (record.stage, record.effect) {
-                (ProviderOperationStage::Terminal, ProviderOperationEffect::Applied) => {
-                    let outcome = if provider.submission == SubmissionEffect::RouterQueued {
-                        DeliveryOutcome::Queued
-                    } else {
-                        DeliveryOutcome::Started
-                    };
-                    AttemptReconciliation::Accepted(Box::new(Self::receipt(
-                        outcome,
-                        Some(operation_id),
-                    )))
-                }
-                (ProviderOperationStage::Terminal, ProviderOperationEffect::None) => {
-                    AttemptReconciliation::KnownNotSubmitted
-                }
-                _ => AttemptReconciliation::StillUnknown,
-            })
-        })
     }
 }

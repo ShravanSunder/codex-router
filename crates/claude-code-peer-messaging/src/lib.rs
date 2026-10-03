@@ -4,5 +4,6 @@ mod claude_code_session_registry;
 
 pub use claude_code_peer_socket::{ClaudeCodePeerSocket, PeerSocketWriteOutcome};
 pub use claude_code_session_registry::{
-    ClaudeCodeSessionRegistry, PeerSessionLookup, PeerSessionRecord, PeerSessionStatus,
+    ClaudeCodeSessionRegistry, PeerClaim, PeerSessionInventory, PeerSessionLookup,
+    PeerSessionRecord, PeerSessionStatus, PeerSessionSummary,
 };

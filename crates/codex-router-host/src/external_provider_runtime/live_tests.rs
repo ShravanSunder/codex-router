@@ -2,10 +2,10 @@ use super::*;
 use collaboration_client::ControlClient;
 use collaboration_protocol::{
     ApprovalDecideParams, ApprovalDecision, EndpointDescription, EndpointId, EndpointRef,
-    GenerationNumber, OperationId, SessionId, UuidIdentity,
+    GenerationNumber, OperationId, RouterOriginRef, SessionId, UuidIdentity,
 };
 use collaboration_service::{
-    EndpointDirectory, NativeControlBackend, NativeGenerationGate, ServiceApprovalBroker,
+    EndpointDirectory, NativeControlBackend, NativeGenerationGate, ServiceInteractionBroker,
 };
 use futures_util::{SinkExt as _, StreamExt as _};
 use serde_json::{Value, json};
@@ -13,6 +13,15 @@ use std::{collections::BTreeMap, sync::Arc};
 use tokio_tungstenite::tungstenite::Message;
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
+
+use super::approval_push_fixture;
+
+fn approval_actor(session: &collaboration_protocol::SessionRef) -> message_board::Identity {
+    message_board::Identity::Session {
+        session: serde_json::from_value(serde_json::to_value(session).expect("session JSON"))
+            .expect("board session"),
+    }
+}
 
 #[test]
 fn provider_output_classifier_reports_only_bounded_uuid_metadata() {
@@ -123,6 +132,7 @@ fn provider_output_classifier_reports_only_bounded_uuid_metadata() {
 
 fn owned_host_endpoint_fixture() -> ExternalProviderLaunch {
     ExternalProviderLaunch {
+        persistence_target: acp_client_runtime::ProviderPersistenceTarget::Unspecified,
         executable: PathBuf::from("/usr/bin/python3"),
         arguments: vec![
             "-c".to_owned(),
@@ -157,8 +167,8 @@ async fn approval_broker_fixture(
     service_id: &UuidIdentity,
     approver: &SessionRef,
 ) -> TestResult<(
-    Arc<ServiceApprovalBroker>,
-    tokio::task::JoinHandle<Result<(), Box<dyn std::error::Error + Send + Sync>>>,
+    Arc<ServiceInteractionBroker>,
+    tokio::task::JoinHandle<Result<String, Box<dyn std::error::Error + Send + Sync>>>,
 )> {
     let socket_path = root.path().join("native-approver.sock");
     let listener = tokio::net::UnixListener::bind(&socket_path)?;
@@ -212,7 +222,7 @@ async fn approval_broker_fixture(
         endpoint: approver.endpoint.clone(),
         gate,
     };
-    let broker = ServiceApprovalBroker::load(
+    let broker = ServiceInteractionBroker::load(
         service_id.clone(),
         native_backend.clone(),
         root.path().join("approval-routes.json"),
@@ -228,9 +238,17 @@ async fn approval_broker_fixture(
     broker.install_session_delivery(Arc::new(
         collaboration_service::SessionDeliveryRouter::new(vec![route]),
     ))?;
+    let push_fixture =
+        approval_push_fixture::ApprovalPushFixture::compose(root.path(), service_id, &broker)
+            .await?;
+    let captured_approver = approver.clone();
+    let captured_broker = Arc::clone(&broker);
     let approver_task = tokio::spawn(async move {
-        let (stream, _) = listener.accept().await?;
+        let (stream, _) = tokio::time::timeout(Duration::from_secs(5), listener.accept())
+            .await
+            .map_err(|_| "native approval push did not connect")??;
         let mut socket = tokio_tungstenite::accept_async(stream).await?;
+        let mut offered_option_id = None;
         for expected_method in ["initialize", "initialized", "thread/read", "turn/start"] {
             let frame = tokio::time::timeout(Duration::from_secs(5), socket.next())
                 .await?
@@ -244,14 +262,51 @@ async fn approval_broker_fixture(
                     .pointer("/params/input/0/text")
                     .and_then(Value::as_str)
                     .ok_or("approval notice text missing")?;
-                if !delivered_text.contains("session/request_permission")
-                    || !delivered_text.contains("externalProviderPermission")
+                let record = push_fixture
+                    .captured_approval(delivered_text, &captured_approver)
+                    .await?;
+                let RouterOriginRef::Interaction { interaction_id, .. } =
+                    RouterOriginRef::parse_canonical(
+                        record
+                            .origin_router_ref
+                            .as_deref()
+                            .ok_or("approval push omitted its interaction reference")?,
+                    )?
+                else {
+                    return Err("approval push reference does not identify an interaction".into());
+                };
+                let body = record.body.ok_or("stored approval push omitted its body")?;
+                let pending = captured_broker
+                    .list_typed_approvals(true)
+                    .await
+                    .into_iter()
+                    .find(|approval| approval.request_id == interaction_id.as_str())
+                    .ok_or("stored notice did not identify its pending approval")?;
+                if !body.contains(&format!("Approval request: {}\n", pending.title))
+                    || !body.contains(&format!("Request ID: {}\n", pending.request_id))
                 {
                     return Err(
-                        "approval notice did not reach the approver with its request details"
-                            .into(),
+                        "stored approval body omitted its reviewed title or request ID".into(),
                     );
                 }
+                let option_id = pending
+                    .options
+                    .iter()
+                    .next()
+                    .ok_or("pending approval omitted offered option ID")?
+                    .option_id
+                    .as_str();
+                let command = body
+                    .lines()
+                    .find_map(|line| line.strip_prefix("To choose: "))
+                    .ok_or("stored approval body omitted decision command")?;
+                if !command.contains("agent-collaboration approval decide")
+                    || !command.contains(&format!("--option-id '{option_id}'"))
+                    || !body.contains(&format!("Option {option_id} — "))
+                {
+                    return Err("typed approval notice did not explain how to decide".into());
+                }
+                offered_option_id = Some(option_id.to_owned());
             }
             if expected_method == "initialized" {
                 continue;
@@ -269,7 +324,7 @@ async fn approval_broker_fixture(
                 ))
                 .await?;
         }
-        Ok::<_, Box<dyn std::error::Error + Send + Sync>>(())
+        offered_option_id.ok_or_else(|| "approval notice was not observed".into())
     });
     Ok((broker, approver_task))
 }
@@ -296,6 +351,7 @@ send({'jsonrpc':'2.0','id':prompt['id'],'result':{'stopReason':'end_turn'}})
 sys.stdin.read()
 "#;
     ExternalProviderLaunch {
+        persistence_target: acp_client_runtime::ProviderPersistenceTarget::Unspecified,
         executable: PathBuf::from("/usr/bin/python3"),
         arguments: vec![
             "-c".to_owned(),
@@ -319,11 +375,13 @@ prompt=json.loads(sys.stdin.readline())
 send({'jsonrpc':'2.0','id':92,'method':'session/request_permission','params':{'sessionId':'fixture-refusal-session','toolCall':{'toolCallId':'refused-command','title':'Run an unapproved command','kind':'execute'},'options':[{'optionId':'reject','name':'Reject once','kind':'reject_once'}]}})
 permission=json.loads(sys.stdin.readline())
 assert permission['id']==92
-assert permission['result']['outcome']['outcome']=='cancelled'
+assert permission['result']['outcome']['outcome']=='selected'
+assert permission['result']['outcome']['optionId']=='reject'
 send({'jsonrpc':'2.0','id':prompt['id'],'result':{'stopReason':'cancelled'}})
 sys.stdin.read()
 "#;
     ExternalProviderLaunch {
+        persistence_target: acp_client_runtime::ProviderPersistenceTarget::Unspecified,
         executable: PathBuf::from("/usr/bin/python3"),
         arguments: vec!["-c".to_owned(), fixture.to_owned()],
         environment: Vec::new(),
@@ -355,8 +413,8 @@ async fn fixture_acp_permission_notice_reaches_approver_and_allow_executes_comma
             format!("Run `echo {endpoint_id}-ok` and report its output."),
             ExternalProviderApprovalContext {
                 // The creator is also the prompt sender and default approver.
-                requester: approver.clone(),
-                approver: approver.clone(),
+                requester: (approver.clone()).into(),
+                approver: (approver.clone()).into(),
                 target,
                 operation_id: OperationId::generate(),
                 binding_generation: generation.clone(),
@@ -364,26 +422,46 @@ async fn fixture_acp_permission_notice_reaches_approver_and_allow_executes_comma
             },
         );
         tokio::pin!(prompt);
-        tokio::select! {
+        let noticed_option_id = tokio::select! {
             biased;
             result = &mut prompt => return Err(format!("{endpoint_id} fixture prompt settled before approval notice: {result:?}").into()),
-            result = &mut approver_task => result.map_err(|error| format!("approver fixture task: {error}"))??,
-        }
+            result = &mut approver_task => {
+                let option_id = result.map_err(|error| format!("approver fixture task: {error}"))??;
+                if option_id != "allow" {
+                    return Err(format!("notice offered unexpected option ID: {option_id}").into());
+                }
+                option_id
+            },
+            () = tokio::time::sleep(Duration::from_secs(8)) => {
+                return Err(format!("{endpoint_id} approval notice did not reach native approver within 8 seconds").into());
+            }
+        };
         let pending = broker
-            .list(true)
+            .list_detailed(true)
             .await
+            .map_err(|error| format!("typed approval list: {error}"))?
             .approvals
             .into_iter()
             .next()
             .ok_or("delivered approval missing from approval list")?;
-        if pending.approver != approver {
+        if pending.approver != approval_actor(&approver) {
             return Err("approval notice delivery did not reach the configured approver".into());
+        }
+        if !pending
+            .options
+            .iter()
+            .any(|option| option.option_id == noticed_option_id)
+        {
+            return Err("noticed option ID was absent from the typed pending request".into());
         }
         broker
             .decide(ApprovalDecideParams {
                 request_id: pending.request_id.clone(),
-                decision: ApprovalDecision::Allow,
-                actor: approver.clone(),
+                decision: None,
+                option_id: Some(noticed_option_id),
+                acknowledge_persistent: false,
+                note: None,
+                actor: approval_actor(&approver),
             })
             .await
             .map_err(|error| format!("approval decide: {error}"))?;
@@ -399,7 +477,11 @@ async fn fixture_acp_permission_notice_reaches_approver_and_allow_executes_comma
         {
             return Err(format!("{endpoint_id} fixture ACP permission was not selected").into());
         }
-        let history = broker.list(false).await.approvals;
+        let history = broker
+            .list_detailed(false)
+            .await
+            .map_err(|error| format!("typed approval history: {error}"))?
+            .approvals;
         if history.len() != 1 || history[0].state != collaboration_protocol::ApprovalState::Decided
         {
             return Err(format!(
@@ -414,7 +496,7 @@ async fn fixture_acp_permission_notice_reaches_approver_and_allow_executes_comma
 
 #[cfg(unix)]
 #[tokio::test]
-async fn fixture_acp_permission_without_allow_records_visible_refusal_reason() -> TestResult {
+async fn reject_only_offer_reaches_approver_and_returns_selected_id() -> TestResult {
     let root = tempfile::tempdir()?;
     let service_id = UuidIdentity::try_from("0ff962c5-7fa3-4c18-a5ca-1bbe8db09e89".to_owned())?;
     let approver = session_ref(&service_id, "codex-local", "approver")?;
@@ -424,43 +506,65 @@ async fn fixture_acp_permission_without_allow_records_visible_refusal_reason() -
     };
     let runtime =
         ExternalProviderRuntime::initialize(fixture_acp_permission_without_allow_agent()).await?;
-    let (broker, _approver_task) = approval_broker_fixture(&root, &service_id, &approver).await?;
+    let (broker, mut approver_task) =
+        approval_broker_fixture(&root, &service_id, &approver).await?;
     runtime.install_approval_broker(Arc::clone(&broker)).await;
 
     let provider_session_id = runtime.create_session(root.path().to_owned()).await?;
     let target = session_ref(&service_id, "cursor-local", &provider_session_id)?;
-    let outcome = runtime
-        .prompt_with_approval_context(
-            provider_session_id,
-            "Run a command requiring permission.".to_owned(),
-            ExternalProviderApprovalContext {
-                requester: approver.clone(),
-                approver,
-                target,
-                operation_id: OperationId::generate(),
-                binding_generation: generation,
-                binding_retirement: CancellationToken::new(),
-            },
-        )
-        .await?;
-
-    let history = broker.list(false).await.approvals;
-    if history.len() != 1
-        || history[0].state != collaboration_protocol::ApprovalState::Cancelled
-        || history[0].reason.as_deref() != Some("no one-time allow option is available")
-    {
-        return Err(
-            format!("permission refusal was not recorded with its reason: {history:?}").into(),
-        );
+    let prompt = runtime.prompt_with_approval_context(
+        provider_session_id,
+        "Run a command requiring permission.".to_owned(),
+        ExternalProviderApprovalContext {
+            requester: (approver.clone()).into(),
+            approver: (approver.clone()).into(),
+            target,
+            operation_id: OperationId::generate(),
+            binding_generation: generation,
+            binding_retirement: CancellationToken::new(),
+        },
+    );
+    tokio::pin!(prompt);
+    let offered_option_id = tokio::select! {
+        result = &mut prompt => return Err(format!("reject-only prompt settled before notice: {result:?}").into()),
+        result = &mut approver_task => result.map_err(|error| format!("approver fixture task: {error}"))??,
+        () = tokio::time::sleep(Duration::from_secs(8)) => return Err("reject-only notice did not arrive within 8 seconds".into()),
+    };
+    if offered_option_id != "reject" {
+        return Err(format!("reject-only notice offered {offered_option_id}").into());
     }
-    if history[0].offered_options.len() != 1
-        || history[0].offered_options[0].option_id != "reject"
-        || history[0].offered_options[0].scope
-            != collaboration_protocol::ApprovalOptionScope::RejectOnce
+    let pending = broker
+        .list_detailed(true)
+        .await
+        .map_err(|error| format!("typed approval list: {error}"))?
+        .approvals;
+    if pending.len() != 1
+        || pending[0].options.len() != 1
+        || pending[0].options[0].option_id != offered_option_id
     {
-        return Err(
-            format!("refusal history did not preserve the offered option: {history:?}").into(),
-        );
+        return Err(format!("reject-only offer was not preserved: {pending:?}").into());
+    }
+    broker
+        .decide(ApprovalDecideParams {
+            request_id: pending[0].request_id.clone(),
+            decision: None,
+            option_id: Some(offered_option_id),
+            acknowledge_persistent: false,
+            note: None,
+            actor: approval_actor(&approver),
+        })
+        .await?;
+    let outcome = tokio::time::timeout(Duration::from_secs(5), prompt)
+        .await
+        .map_err(|_| "reject-only permission prompt did not settle")??;
+
+    let history = broker
+        .list_detailed(false)
+        .await
+        .map_err(|error| format!("typed approval history: {error}"))?
+        .approvals;
+    if history.len() != 1 || history[0].state != collaboration_protocol::ApprovalState::Decided {
+        return Err(format!("reject-only decision was not recorded: {history:?}").into());
     }
     if outcome.stop_reason != ProviderPromptStopReason::Cancelled {
         return Err(
@@ -508,6 +612,8 @@ async fn live_composed_cursor_native_mcp_requires_typed_call_and_router_result()
             mcp_bind: std::net::SocketAddr::from(([127, 0, 0, 1], 0)),
             native_schema: None,
             peer_registry_directory: None,
+            remote_control_server_name: None,
+            owner_human_id: None,
         },
         vec![crate::ExternalProviderStartup::Launch(
             crate::ExternalProviderLaunchBinding::claude(
@@ -539,6 +645,7 @@ async fn live_composed_cursor_native_mcp_requires_typed_call_and_router_result()
     };
     let runtime = ExternalProviderRuntime::initialize_with_mcp_http(
         ExternalProviderLaunch {
+            persistence_target: acp_client_runtime::ProviderPersistenceTarget::Unspecified,
             executable,
             arguments,
             environment: Vec::new(),
@@ -574,8 +681,8 @@ async fn live_composed_cursor_native_mcp_requires_typed_call_and_router_result()
             "Call router-collaboration-endpoints_list once. In its JSON result, select the endpoints item whose endpoint.endpointId is claude-local, then return only endpoint.serviceId, without backticks or explanation. Do not use serviceEpoch."
                 .to_owned(),
             ExternalProviderApprovalContext {
-                requester,
-                approver: approver.clone(),
+                requester: requester.into(),
+                approver: (approver.clone()).into(),
                 target,
                 operation_id,
                 binding_generation: generation,
@@ -591,10 +698,13 @@ async fn live_composed_cursor_native_mcp_requires_typed_call_and_router_result()
                         if let Some(pending) = broker.list(true).await.approvals.into_iter().next() {
                             broker.decide(ApprovalDecideParams {
                                 request_id: pending.request_id,
-                                decision: ApprovalDecision::Allow,
-                                actor: approver.clone(),
+                                decision: Some(ApprovalDecision::Allow),
+                                option_id: None,
+                                acknowledge_persistent: false,
+                                note: None,
+                                actor: approval_actor(&approver),
                             }).await.map_err(|error| {
-                                ExternalProviderRuntimeError::Operation(error.to_owned())
+                                ExternalProviderRuntimeError::Operation(error.to_string())
                             })?;
                         }
                     }
@@ -617,7 +727,7 @@ async fn live_composed_cursor_native_mcp_requires_typed_call_and_router_result()
             .as_ref()
             .ok()
             .and_then(|result| result.as_ref().ok())
-            .map(|outcome| outcome.stop_reason);
+            .map(|outcome| outcome.stop_reason.clone());
         let identity_corroborated = prompt_result
             .as_ref()
             .ok()
@@ -662,7 +772,10 @@ async fn live_composed_cursor_native_mcp_requires_typed_call_and_router_result()
 
     runtime.shutdown().await;
     let approver_result: TestResult = if approver_task.is_finished() {
-        approver_task.await.map_err(|error| error.to_string())?
+        approver_task
+            .await
+            .map_err(|error| error.to_string())?
+            .map(|_| ())
     } else {
         approver_task.abort();
         let joined = approver_task.await;

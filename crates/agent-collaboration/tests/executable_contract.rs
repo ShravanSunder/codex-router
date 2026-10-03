@@ -109,19 +109,21 @@ fn session_tui_uses_the_singular_executable_name() {
 #[test]
 #[cfg(debug_assertions)]
 fn debug_dry_run_preserves_isolated_socket_and_never_executes_codex() {
-    // Arrange: deliberately no executable search path; dry-run must not launch Codex.
+    // Arrange: all state paths stay inside an isolated root; dry-run must not launch Codex.
+    let root = tempfile::tempdir().expect("isolated debug dry-run root");
+    let home = root.path().join("codex-home");
+    let router_root = root.path().join("router");
+    let owner_socket = root.path().join("owner").join("backend.sock");
+    let router_socket = router_root
+        .join("agent-communication")
+        .join("codex-native.sock");
     let output = Command::new(env!("CARGO_BIN_EXE_agent-collaboration"))
         .env_remove("CODEX_ROUTER_USE_HOME_DEFAULT")
         .env_remove("CODEX_HOME")
-        .env(
-            "CODEX_ROUTER_DEBUG_ROUTER_ROOT",
-            "/tmp/session-proof-router",
-        )
+        .env("HOME", &home)
+        .env("CODEX_ROUTER_DEBUG_ROUTER_ROOT", &router_root)
         .env("PATH", "")
-        .env(
-            "CODEX_ROUTER_DEBUG_APP_SERVER_SOCKET",
-            "/tmp/session-proof-owner/backend.sock",
-        )
+        .env("CODEX_ROUTER_DEBUG_APP_SERVER_SOCKET", &owner_socket)
         .args(["--new", "--dry-run"])
         // Act
         .output()
@@ -134,9 +136,7 @@ fn debug_dry_run_preserves_isolated_socket_and_never_executes_codex() {
     );
     let launch = String::from_utf8_lossy(&output.stdout);
     assert!(launch.contains("--profile codex-router-debug"));
-    assert!(launch.contains(
-        "--remote unix:///tmp/session-proof-router/agent-communication/codex-native.sock"
-    ));
+    assert!(launch.contains(&format!("--remote unix://{}", router_socket.display())));
     assert!(output.stderr.is_empty());
 }
 

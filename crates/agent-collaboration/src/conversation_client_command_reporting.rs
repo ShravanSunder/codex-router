@@ -82,6 +82,12 @@ pub(super) fn emit_create_outcome(
                 "created: {}",
                 serde_json::to_string(target).map_err(io::Error::other)?
             ),
+            ConversationCreateOutcome::CreatedWithoutSettings { target, failed, .. } => writeln!(
+                io::stdout(),
+                "created without requested settings: {}; failed: {}",
+                serde_json::to_string(target).map_err(io::Error::other)?,
+                serde_json::to_string(failed).map_err(io::Error::other)?,
+            ),
             ConversationCreateOutcome::Pending { .. } => writeln!(io::stdout(), "pending"),
         }
     }
@@ -234,11 +240,14 @@ pub(super) fn report_create_operation_failure(
 ) -> i32 {
     let exit_code = match failure.kind {
         ConversationOperationFailureKind::InvalidRequest
+        | ConversationOperationFailureKind::InvalidSetting
         | ConversationOperationFailureKind::UnsupportedCapability
         | ConversationOperationFailureKind::ProtocolViolation => 2,
-        ConversationOperationFailureKind::AuthenticationRequired
+        ConversationOperationFailureKind::Overloaded
+        | ConversationOperationFailureKind::AuthenticationRequired
         | ConversationOperationFailureKind::Unavailable => 3,
         ConversationOperationFailureKind::PermissionRejected
+        | ConversationOperationFailureKind::SettingsUnresolved
         | ConversationOperationFailureKind::Busy
         | ConversationOperationFailureKind::NotFound
         | ConversationOperationFailureKind::StaleGeneration
@@ -376,6 +385,11 @@ pub(super) fn emit_operation_outcome(
     outcome: &ConversationOperationResult,
     json_output: bool,
 ) -> io::Result<()> {
+    if let ConversationOperationResult::Running { follow_up, .. } = outcome
+        && !json_output
+    {
+        writeln!(io::stderr(), "{follow_up}")?;
+    }
     let encoded = if json_output {
         serde_json::to_string(outcome)
     } else {
@@ -393,6 +407,7 @@ pub(super) fn operation_result_exit(outcome: &ConversationOperationResult) -> i3
             _ => 0,
         },
         ConversationOperationResult::Pending { .. } => 0,
+        ConversationOperationResult::Running { .. } => 0,
     }
 }
 

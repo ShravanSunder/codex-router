@@ -8,9 +8,10 @@ pub(crate) struct NativeControlRequest<'a> {
     pub params: Value,
     pub id: Value,
     pub service_id: &'a UuidIdentity,
+    pub display_names: &'a crate::SessionDisplayNameCache,
     pub backend: Option<&'a NativeControlBackend>,
     pub endpoints: &'a [EndpointDescription],
     pub stored_observation:
         Option<crate::stored_inventory_observation::StoredInventoryObservation<'a>>,
-    pub access_routes: Option<&'a crate::ServiceApprovalBroker>,
+    pub access_routes: Option<&'a crate::ServiceInteractionBroker>,
 }

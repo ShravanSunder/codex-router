@@ -28,6 +28,7 @@ use std::time::UNIX_EPOCH;
 
 use bytes::Bytes;
 use futures_util::future::BoxFuture;
+use futures_util::stream;
 use http::HeaderMap;
 use http::Method as HttpMethod;
 use http::Request as HttpRequest;
@@ -37,6 +38,7 @@ use http::Uri;
 use http_body_util::BodyExt;
 use http_body_util::Empty;
 use http_body_util::Full;
+use http_body_util::StreamBody;
 use http_body_util::combinators::BoxBody;
 use hyper::body::Body as HyperBody;
 use hyper::body::Frame;
@@ -50,16 +52,28 @@ use tokio::task::JoinError;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
+use tracing::instrument::WithSubscriber;
 
 use codex_router_core::affinity::hash_previous_response_id;
 use codex_router_core::audit::AuditFileSink;
 use codex_router_core::audit::RouteKind as AuditRouteKind;
 use codex_router_core::audit::TransportKind;
+use codex_router_core::ids::AccountId;
 use codex_router_core::local_auth::LocalAuthError;
 use codex_router_core::local_auth::LocalRouterAuth;
 use codex_router_core::local_auth::LocalRouterTokenRecord;
+use codex_router_core::redaction::safe_account_label;
+use codex_router_core::route_profile::ClaudeFiveHourReservePercent;
+use codex_router_core::route_profile::DEFAULT_CLAUDE_FIVE_HOUR_RESERVE_PERCENT;
+use codex_router_core::route_profile::RouteProfile;
 use codex_router_core::router_compatibility::RouterCompatibility;
 use codex_router_core::routes::RouteBand;
+use codex_router_secret_store::encrypted_credential_store::EncryptedCredentialStore;
+use codex_router_secret_store::encrypted_credential_store::EncryptedCredentialStoreStatus;
+use codex_router_selection::selection_outcome::CredentialStoreAvailability;
+use codex_router_selection::selection_outcome::HeadroomTimestamp;
+use codex_router_selection::selection_outcome::SelectionHoldReason;
+use codex_router_selection::selection_outcome::UnavailableReason;
 use codex_router_state::account::AccountRecord;
 use codex_router_state::account::AccountStatus;
 use codex_router_state::affinity_owner::AffinitySourceTransport;
@@ -71,15 +85,17 @@ use crate::account_selection::AsyncAccountSelectorRuntimeState;
 use crate::account_selection::AsyncRepositoryBackedAccountSelector;
 use crate::account_selection::DEFAULT_ACCOUNT_HOLD_COOLDOWN_SECONDS;
 use crate::account_selection::RouteBandAccountHolds;
+use crate::account_selection::RouteBandPostExhaustionOutcomeInput;
 use crate::account_selection::RouteBandQueueHealth;
 use crate::account_selection::RouteBandReservationBooks;
 use crate::account_selection::RouteBandRuntimeExhaustions;
 use crate::account_selection::RouteBandWeightedSelectors;
-use crate::account_selection::RuntimeFloorSwitchPeerAssessor;
+use crate::account_selection::RuntimeAccountAdmissionAssessor;
 use crate::account_selection::SelectionReservationLock;
 use crate::account_selection::SqliteActiveClientLeaseReporter;
 use crate::account_selection::mark_runtime_quota_exhausted;
 use crate::account_selection::route_band_post_exhaustion_outcome;
+use crate::claude_edge::server_pipeline::ClaudeServerRuntime;
 use crate::credential_runtime::AsyncProxyCredentialResolverFactory;
 use crate::credential_runtime::ProxyRuntimeCredentialResources;
 use crate::credential_runtime::ProxyRuntimeCredentialResourcesOpenError;
@@ -124,8 +140,12 @@ use crate::provider_error::record_provider_error_observation;
 use crate::routes::Method;
 use crate::routes::RouteClass;
 use crate::routes::classify_route;
+use crate::routes::is_claude_edge_path;
+use crate::session_account_affinity_cache::DEFAULT_SESSION_PIN_IDLE_TTL;
 use crate::session_account_affinity_cache::SessionAccountAffinityCache;
 use crate::session_account_affinity_cache::SharedSessionAccountAffinityCache;
+#[cfg(debug_assertions)]
+use crate::upstream::ClaudeUpstreamEndpoint;
 use crate::upstream::HyperHttpUpstreamTransport;
 use crate::upstream::UpstreamEndpoint;
 use crate::websocket::AsyncWebSocketTunnel;
@@ -334,16 +354,27 @@ fn is_websocket_upgrade(headers: &HeaderMap) -> bool {
     has_upgrade_header && has_connection_upgrade
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ClaudeEdgeRuntimeConfig {
+    local_token: LocalRouterTokenRecord,
+    quota_refresh_interval: Duration,
+}
+
 /// Runtime configuration for the assembled loopback router.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LoopbackRouterRuntimeConfig {
     bind_address: LoopbackBindAddress,
     upstream_endpoint: UpstreamEndpoint,
+    #[cfg(debug_assertions)]
+    debug_claude_upstream_endpoint: Option<ClaudeUpstreamEndpoint>,
     state_database_path: PathBuf,
     secret_store_root: PathBuf,
     local_token: Option<LocalRouterTokenRecord>,
+    claude_edge_runtime_config: Option<ClaudeEdgeRuntimeConfig>,
     fixed_now_unix_seconds: Option<u64>,
     max_snapshot_age_seconds: u64,
+    session_pin_idle_ttl: Duration,
+    claude_five_hour_reserve_percent: ClaudeFiveHourReservePercent,
     audit_file_path: Option<PathBuf>,
     websocket_registry_report_file: Option<PathBuf>,
 }
@@ -403,11 +434,16 @@ impl LoopbackRouterRuntimeConfig {
         Self {
             bind_address,
             upstream_endpoint,
+            #[cfg(debug_assertions)]
+            debug_claude_upstream_endpoint: None,
             state_database_path,
             secret_store_root,
             local_token: Some(local_token),
+            claude_edge_runtime_config: None,
             fixed_now_unix_seconds: None,
             max_snapshot_age_seconds: 300,
+            session_pin_idle_ttl: DEFAULT_SESSION_PIN_IDLE_TTL,
+            claude_five_hour_reserve_percent: DEFAULT_CLAUDE_FIVE_HOUR_RESERVE_PERCENT,
             audit_file_path: None,
             websocket_registry_report_file: None,
         }
@@ -424,11 +460,16 @@ impl LoopbackRouterRuntimeConfig {
         Self {
             bind_address,
             upstream_endpoint,
+            #[cfg(debug_assertions)]
+            debug_claude_upstream_endpoint: None,
             state_database_path,
             secret_store_root,
             local_token: None,
+            claude_edge_runtime_config: None,
             fixed_now_unix_seconds: None,
             max_snapshot_age_seconds: 300,
+            session_pin_idle_ttl: DEFAULT_SESSION_PIN_IDLE_TTL,
+            claude_five_hour_reserve_percent: DEFAULT_CLAUDE_FIVE_HOUR_RESERVE_PERCENT,
             audit_file_path: None,
             websocket_registry_report_file: None,
         }
@@ -438,6 +479,28 @@ impl LoopbackRouterRuntimeConfig {
     #[must_use]
     pub fn with_required_local_token(mut self, local_token: LocalRouterTokenRecord) -> Self {
         self.local_token = Some(local_token);
+        self
+    }
+
+    /// Requires a local bearer token and freshness interval for Claude edge requests.
+    #[must_use]
+    pub fn with_claude_edge_local_token(
+        mut self,
+        local_token: LocalRouterTokenRecord,
+        quota_refresh_interval: Duration,
+    ) -> Self {
+        self.claude_edge_runtime_config = Some(ClaudeEdgeRuntimeConfig {
+            local_token,
+            quota_refresh_interval,
+        });
+        self
+    }
+
+    /// Applies a validated Claude destination only for an isolated debug runtime.
+    #[cfg(debug_assertions)]
+    #[must_use]
+    pub fn with_debug_claude_upstream_endpoint(mut self, endpoint: ClaudeUpstreamEndpoint) -> Self {
+        self.debug_claude_upstream_endpoint = Some(endpoint);
         self
     }
 
@@ -451,6 +514,27 @@ impl LoopbackRouterRuntimeConfig {
         self.fixed_now_unix_seconds = Some(now_unix_seconds);
         self.max_snapshot_age_seconds = max_snapshot_age_seconds;
         self
+    }
+
+    /// Sets the shared provider session-pin idle lifetime.
+    #[must_use]
+    pub const fn with_session_pin_idle_ttl(mut self, idle_ttl: Duration) -> Self {
+        self.session_pin_idle_ttl = idle_ttl;
+        self
+    }
+
+    /// Sets the Claude five-hour Reserve threshold used by the route profile.
+    #[must_use]
+    pub const fn with_claude_five_hour_reserve_percent(
+        mut self,
+        percent: ClaudeFiveHourReservePercent,
+    ) -> Self {
+        self.claude_five_hour_reserve_percent = percent;
+        self
+    }
+
+    fn session_account_affinity_cache(&self) -> SharedSessionAccountAffinityCache {
+        SessionAccountAffinityCache::shared(self.session_pin_idle_ttl)
     }
 
     /// Sets the private audit JSONL file path.
@@ -471,14 +555,18 @@ impl LoopbackRouterRuntimeConfig {
 /// Assembled loopback router runtime for HTTP/SSE forwarding.
 pub struct LoopbackRouterRuntime {
     runtime: Option<tokio::runtime::Runtime>,
+    caller_dispatcher: tracing::dispatcher::Dispatch,
     server: AsyncLoopbackServerRuntime,
     credential_state_store: AsyncSqliteStateStore,
     provider_error_state_store: AsyncSqliteStateStore,
     selection_state_store: AsyncSqliteStateStore,
+    credential_store_availability: CredentialStoreAvailability,
     credential_factory: AsyncProxyCredentialResolverFactory,
     affinity_secret_provider: RuntimeAffinitySecretProvider,
     affinity_owner_recorder: Arc<dyn AsyncHttpAffinityOwnerRecorder>,
     auth_gate: crate::local_auth::ProxyLocalAuthGate,
+    claude_edge_auth_gate: Option<crate::local_auth::ProxyLocalAuthGate>,
+    claude_edge_runtime_config: Option<ClaudeEdgeRuntimeConfig>,
     local_model_authentication_required: bool,
     upstream: HyperHttpUpstreamTransport,
     upstream_endpoint: UpstreamEndpoint,
@@ -489,6 +577,7 @@ pub struct LoopbackRouterRuntime {
     active_reservations: RouteBandReservationBooks,
     selection_reservation_lock: SelectionReservationLock,
     session_affinity_cache: SharedSessionAccountAffinityCache,
+    claude_five_hour_reserve_percent: ClaudeFiveHourReservePercent,
     runtime_exhaustions: RouteBandRuntimeExhaustions,
     route_band_queue_health: RouteBandQueueHealth,
     db_write_actor: DbWriteActor,
@@ -508,35 +597,79 @@ impl Drop for LoopbackRouterRuntime {
 }
 
 impl LoopbackRouterRuntime {
-    /// Opens router-owned state/secrets and binds the loopback listener.
-    pub fn start(config: LoopbackRouterRuntimeConfig) -> Result<Self, LoopbackRouterRuntimeError> {
-        Self::start_with_test_maintenance_completion_sender(config, None)
+    /// Opens router-owned state and binds using the process-owned encrypted credential handle.
+    pub fn start(
+        config: LoopbackRouterRuntimeConfig,
+        credential_store: EncryptedCredentialStore,
+    ) -> Result<Self, LoopbackRouterRuntimeError> {
+        let caller_dispatcher = tracing::dispatcher::get_default(|dispatcher| dispatcher.clone());
+        Self::start_with_test_maintenance_completion_sender(
+            config,
+            credential_store,
+            None,
+            caller_dispatcher,
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn start_for_test(
+        config: LoopbackRouterRuntimeConfig,
+    ) -> Result<Self, LoopbackRouterRuntimeError> {
+        let credential_store = test_credential_store_for_config(&config)?;
+        Self::start(config, credential_store)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn start_for_test_with_maintenance_completion_sender(
+        config: LoopbackRouterRuntimeConfig,
+        completion_sender: std::sync::mpsc::Sender<crate::maintenance_actor::MaintenanceCompletion>,
+    ) -> Result<Self, LoopbackRouterRuntimeError> {
+        let credential_store = test_credential_store_for_config(&config)?;
+        Self::start_with_maintenance_completion_sender(config, credential_store, completion_sender)
     }
 
     #[cfg(test)]
     pub(crate) fn start_with_maintenance_completion_sender(
         config: LoopbackRouterRuntimeConfig,
+        credential_store: EncryptedCredentialStore,
         completion_sender: std::sync::mpsc::Sender<crate::maintenance_actor::MaintenanceCompletion>,
     ) -> Result<Self, LoopbackRouterRuntimeError> {
-        Self::start_with_test_maintenance_completion_sender(config, Some(completion_sender))
+        let caller_dispatcher = tracing::dispatcher::get_default(|dispatcher| dispatcher.clone());
+        Self::start_with_test_maintenance_completion_sender(
+            config,
+            credential_store,
+            Some(completion_sender),
+            caller_dispatcher,
+        )
     }
 
     fn start_with_test_maintenance_completion_sender(
         config: LoopbackRouterRuntimeConfig,
+        credential_store: EncryptedCredentialStore,
         #[cfg(test)] completion_sender: Option<
             std::sync::mpsc::Sender<crate::maintenance_actor::MaintenanceCompletion>,
         >,
         #[cfg(not(test))] _completion_sender: Option<()>,
+        caller_dispatcher: tracing::dispatcher::Dispatch,
     ) -> Result<Self, LoopbackRouterRuntimeError> {
+        let session_affinity_cache = config.session_account_affinity_cache();
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
             .map_err(LoopbackRouterRuntimeError::TokioRuntime)?;
         let fixed_now_unix_seconds = config.fixed_now_unix_seconds;
-        let credential_resources = ProxyRuntimeCredentialResources::open(
-            &config.secret_store_root,
-            fixed_now_unix_seconds,
-        )?;
+        let claude_edge_runtime_config = config.claude_edge_runtime_config.clone();
+        let credential_store_availability = match credential_store.status() {
+            EncryptedCredentialStoreStatus::Ready => CredentialStoreAvailability::Available,
+            EncryptedCredentialStoreStatus::KeyUnavailable => {
+                CredentialStoreAvailability::KeyUnreadable
+            }
+            EncryptedCredentialStoreStatus::MigrationIncomplete { .. } => {
+                CredentialStoreAvailability::MigrationIncomplete
+            }
+        };
+        let credential_resources =
+            ProxyRuntimeCredentialResources::open(credential_store, fixed_now_unix_seconds)?;
         let affinity_secret_provider = credential_resources.affinity_secret_provider();
         let credential_factory = credential_resources.credential_factory();
         let writable_state_stores = runtime.block_on(open_runtime_writable_state_stores(
@@ -553,14 +686,26 @@ impl LoopbackRouterRuntime {
             )),
             None => crate::local_auth::ProxyLocalAuthGate::disabled(),
         };
+        let claude_edge_auth_gate = claude_edge_runtime_config
+            .as_ref()
+            .map(|claude_edge_config| {
+                crate::local_auth::ProxyLocalAuthGate::required(LocalRouterAuth::new(
+                    claude_edge_config.local_token.clone(),
+                    Vec::new(),
+                ))
+            });
         let upstream_endpoint = config.upstream_endpoint;
         let upstream = HyperHttpUpstreamTransport::new(upstream_endpoint.clone());
+        #[cfg(debug_assertions)]
+        let upstream = match config.debug_claude_upstream_endpoint {
+            Some(endpoint) => upstream.with_debug_claude_upstream_endpoint(endpoint),
+            None => upstream,
+        };
         let server = runtime.block_on(AsyncLoopbackServerRuntime::bind(config.bind_address))?;
         let audit_sink = config.audit_file_path.map(AuditFileSink::new);
         let websocket_revocations = WebSocketRevocationRegistry::new();
         let route_band_queue_health = RouteBandQueueHealth::default();
         let selection_reservation_lock = SelectionReservationLock::default();
-        let session_affinity_cache = SessionAccountAffinityCache::shared();
         let db_write_actor = DbWriteActor::start_on_handle(
             runtime.handle(),
             Arc::new(SqliteDbWriteRepository::new(
@@ -583,13 +728,17 @@ impl LoopbackRouterRuntime {
 
         let loopback_runtime = Self {
             runtime: Some(runtime),
+            caller_dispatcher,
             server,
             credential_state_store: writable_state_stores.credential_state_store,
             provider_error_state_store: writable_state_stores.db_write_state_store,
             selection_state_store,
+            credential_store_availability,
             affinity_secret_provider,
             affinity_owner_recorder,
             auth_gate,
+            claude_edge_auth_gate,
+            claude_edge_runtime_config,
             local_model_authentication_required,
             upstream,
             upstream_endpoint,
@@ -600,6 +749,7 @@ impl LoopbackRouterRuntime {
             active_reservations: Default::default(),
             selection_reservation_lock,
             session_affinity_cache,
+            claude_five_hour_reserve_percent: config.claude_five_hour_reserve_percent,
             runtime_exhaustions: Default::default(),
             route_band_queue_health,
             db_write_actor,
@@ -627,6 +777,8 @@ impl LoopbackRouterRuntime {
     pub fn local_auth_reloader(&self) -> LocalAuthReloader {
         LocalAuthReloader {
             auth_gate: self.auth_gate.clone(),
+            claude_edge_auth_gate: self.claude_edge_auth_gate.clone(),
+            codex_local_token_authentication_required: self.local_model_authentication_required,
             websocket_revocations: self.websocket_revocations.clone(),
         }
     }
@@ -674,7 +826,10 @@ impl LoopbackRouterRuntime {
                     "router runtime unavailable",
                 ))
             })?
-            .block_on(self.serve_protocol_connections_async(max_connections, None))
+            .block_on(
+                self.serve_protocol_connections_async(max_connections, None)
+                    .with_subscriber(self.caller_dispatcher.clone()),
+            )
     }
 
     /// Serves HTTP/SSE or WebSocket connections until the bound or cancellation.
@@ -690,7 +845,10 @@ impl LoopbackRouterRuntime {
                     "router runtime unavailable",
                 ))
             })?
-            .block_on(self.serve_protocol_connections_async(max_connections, Some(shutdown)))
+            .block_on(
+                self.serve_protocol_connections_async(max_connections, Some(shutdown))
+                    .with_subscriber(self.caller_dispatcher.clone()),
+            )
     }
 
     #[cfg(test)]
@@ -707,6 +865,17 @@ impl LoopbackRouterRuntime {
     #[must_use]
     pub(crate) fn with_credential_refresh_shutdown_drain(mut self, limit: Duration) -> Self {
         self.credential_refresh_shutdown_drain = limit;
+        self
+    }
+
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn with_test_claude_refresh_client<C>(mut self, refresh_client: C) -> Self
+    where
+        C: codex_router_auth::resolver::CredentialRefreshClient + Clone + Send + Sync + 'static,
+    {
+        self.credential_factory
+            .set_test_claude_refresh_client(refresh_client);
         self
     }
 
@@ -778,8 +947,10 @@ impl LoopbackRouterRuntime {
                 break;
             };
             let handler_context = Arc::clone(&connection_handler);
-            let handler =
-                tokio::spawn(async move { handler_context.handle_hyper_connection(stream).await });
+            let handler = tokio::spawn(
+                async move { handler_context.handle_hyper_connection(stream).await }
+                    .with_subscriber(self.caller_dispatcher.clone()),
+            );
             if max_connections == usize::MAX && shutdown.is_none() {
                 supervise_detached_connection_handler(
                     handler,
@@ -837,11 +1008,14 @@ impl LoopbackRouterRuntime {
             credential_state_store: self.credential_state_store.clone(),
             provider_error_state_store: self.provider_error_state_store.clone(),
             selection_state_store: self.selection_state_store.clone(),
+            credential_store_availability: self.credential_store_availability,
             credential_factory: self.credential_factory.clone(),
             affinity_secret_provider: self.affinity_secret_provider.clone(),
             affinity_owner_recorder: Arc::clone(&self.affinity_owner_recorder),
             affinity_record_tasks,
             auth_gate: self.auth_gate.clone(),
+            claude_edge_auth_gate: self.claude_edge_auth_gate.clone(),
+            claude_edge_runtime_config: self.claude_edge_runtime_config.clone(),
             local_model_authentication_required: self.local_model_authentication_required,
             upstream: self.upstream.clone(),
             upstream_endpoint: self.upstream_endpoint.clone(),
@@ -852,6 +1026,7 @@ impl LoopbackRouterRuntime {
             active_reservations: Arc::clone(&self.active_reservations),
             selection_reservation_lock: Arc::clone(&self.selection_reservation_lock),
             session_affinity_cache: Arc::clone(&self.session_affinity_cache),
+            claude_five_hour_reserve_percent: self.claude_five_hour_reserve_percent,
             runtime_exhaustions: Arc::clone(&self.runtime_exhaustions),
             route_band_queue_health: Arc::clone(&self.route_band_queue_health),
             db_write_actor: self.db_write_actor.clone(),
@@ -919,6 +1094,20 @@ impl LoopbackRouterRuntime {
                     });
         }
     }
+}
+
+#[cfg(test)]
+fn test_credential_store_for_config(
+    config: &LoopbackRouterRuntimeConfig,
+) -> Result<EncryptedCredentialStore, LoopbackRouterRuntimeError> {
+    codex_router_secret_store::test_support::open_encrypted_credential_store(
+        &config.secret_store_root,
+    )
+    .map_err(|error| {
+        LoopbackRouterRuntimeError::CredentialResources(
+            ProxyRuntimeCredentialResourcesOpenError::SecretStore(error),
+        )
+    })
 }
 
 fn active_session_event_compaction_before(now_unix_seconds: u64) -> u64 {
@@ -1115,11 +1304,14 @@ struct LoopbackProtocolConnectionHandler {
     credential_state_store: AsyncSqliteStateStore,
     provider_error_state_store: AsyncSqliteStateStore,
     selection_state_store: AsyncSqliteStateStore,
+    credential_store_availability: CredentialStoreAvailability,
     credential_factory: AsyncProxyCredentialResolverFactory,
     affinity_secret_provider: RuntimeAffinitySecretProvider,
     affinity_owner_recorder: Arc<dyn AsyncHttpAffinityOwnerRecorder>,
     affinity_record_tasks: TaskTracker,
     auth_gate: crate::local_auth::ProxyLocalAuthGate,
+    claude_edge_auth_gate: Option<crate::local_auth::ProxyLocalAuthGate>,
+    claude_edge_runtime_config: Option<ClaudeEdgeRuntimeConfig>,
     local_model_authentication_required: bool,
     upstream: HyperHttpUpstreamTransport,
     upstream_endpoint: UpstreamEndpoint,
@@ -1130,6 +1322,7 @@ struct LoopbackProtocolConnectionHandler {
     active_reservations: RouteBandReservationBooks,
     selection_reservation_lock: SelectionReservationLock,
     session_affinity_cache: SharedSessionAccountAffinityCache,
+    claude_five_hour_reserve_percent: ClaudeFiveHourReservePercent,
     runtime_exhaustions: RouteBandRuntimeExhaustions,
     route_band_queue_health: RouteBandQueueHealth,
     db_write_actor: DbWriteActor,
@@ -1186,6 +1379,9 @@ impl LoopbackProtocolConnectionHandler {
         ) {
             return response;
         }
+        if let Some(response) = self.preflight_claude_edge_request(&request) {
+            return response;
+        }
         match HyperProtocolSwitchpoint::classify(request.method(), request.uri(), request.headers())
         {
             HyperProtocolDispatch::WebSocketUpgrade => {
@@ -1193,6 +1389,75 @@ impl LoopbackProtocolConnectionHandler {
                     .await
             }
             HyperProtocolDispatch::Http => self.handle_hyper_http_request(request).await,
+        }
+    }
+
+    fn preflight_claude_edge_local_auth(
+        &self,
+        request: &HttpRequest<Incoming>,
+    ) -> Option<HttpResponse<BoxBody<Bytes, AsyncHttpBodyError>>> {
+        let path = request
+            .uri()
+            .path_and_query()
+            .map_or("/", http::uri::PathAndQuery::as_str);
+        let router_token = header_value(request.headers(), "x-codex-router-token");
+        let authorization = header_value(request.headers(), "authorization");
+        let cookie = header_value(request.headers(), "cookie");
+        let presented_token = extract_presented_local_token_from_request(
+            router_token.as_deref(),
+            authorization.as_deref(),
+            cookie.as_deref(),
+            path,
+            &[],
+            false,
+        );
+        let authorization_result = match presented_token {
+            Err(reason) => Err(reason),
+            Ok(presented_token) => match &self.claude_edge_auth_gate {
+                Some(auth_gate) => auth_gate.authorize(presented_token),
+                None => Err(LocalAuthError::Missing),
+            },
+        };
+        match authorization_result {
+            Ok(_generation) => None,
+            Err(reason) => {
+                self.emit_claude_edge_local_auth_rejection(reason);
+                Some(empty_response(StatusCode::UNAUTHORIZED))
+            }
+        }
+    }
+
+    fn preflight_claude_edge_request(
+        &self,
+        request: &HttpRequest<Incoming>,
+    ) -> Option<HttpResponse<BoxBody<Bytes, AsyncHttpBodyError>>> {
+        let path = request.uri().path();
+        if !is_claude_edge_path(path) {
+            return None;
+        }
+
+        match classify_route(
+            method_from_hyper(request.method()),
+            path,
+            is_websocket_upgrade(request.headers()),
+        ) {
+            RouteClass::Supported(crate::routes::RouteKind::ClaudeMessages) => {
+                self.preflight_claude_edge_local_auth(request)
+            }
+            RouteClass::Supported(_) | RouteClass::Rejected { .. } => {
+                Some(unsupported_claude_path_response(path))
+            }
+        }
+    }
+
+    fn emit_claude_edge_local_auth_rejection(&self, reason: LocalAuthError) {
+        if let Some(audit_sink) = &self.audit_sink {
+            let event = local_auth_rejection_audit_event(
+                TransportKind::Http,
+                AuditRouteKind::ClaudeMessages,
+                reason,
+            );
+            append_audit_event_with_reporter(audit_sink, &event, &StderrAuditFailureReporter);
         }
     }
 
@@ -1259,7 +1524,7 @@ impl LoopbackProtocolConnectionHandler {
                 Arc::clone(&self.selection_reservation_lock),
                 Arc::clone(&self.session_affinity_cache),
             );
-        let floor_switch_peer_assessor = RuntimeFloorSwitchPeerAssessor::new(
+        let account_admission_assessor = RuntimeAccountAdmissionAssessor::new(
             self.selection_state_store.clone(),
             &selection_runtime_state,
             self.runtime_clock(),
@@ -1270,6 +1535,7 @@ impl LoopbackProtocolConnectionHandler {
             DEFAULT_ACCOUNT_HOLD_COOLDOWN_SECONDS,
             self.runtime_clock(),
         )
+        .with_claude_five_hour_reserve_percent(self.claude_five_hour_reserve_percent)
         .with_active_client_lease_reporter(Arc::new(SqliteActiveClientLeaseReporter::new(
             self.db_write_actor.clone(),
             self.runtime_clock(),
@@ -1296,7 +1562,7 @@ impl LoopbackProtocolConnectionHandler {
             )
         }
         .with_revocation_registry(self.websocket_revocations.clone())
-        .with_floor_switch_peer_assessor(Arc::new(floor_switch_peer_assessor))
+        .with_account_admission_assessor(Arc::new(account_admission_assessor))
         .with_session_shutdown(self.session_shutdown.clone())
         .with_affinity_secret_provider(&self.affinity_secret_provider)
         .with_async_affinity_owner_recorder(Arc::clone(&self.affinity_owner_recorder))
@@ -1366,6 +1632,9 @@ impl LoopbackProtocolConnectionHandler {
         self: Arc<Self>,
         request: HttpRequest<Incoming>,
     ) -> HttpResponse<BoxBody<Bytes, AsyncHttpBodyError>> {
+        if is_claude_edge_path(request.uri().path()) {
+            return self.handle_claude_messages_request(request).await;
+        }
         let (request, body, full_replay_body) =
             match hyper_request_to_streaming_proxy_request(request).await {
                 Ok(request) => request,
@@ -1446,6 +1715,45 @@ impl LoopbackProtocolConnectionHandler {
             self.selection_state_store.list_accounts().await,
         )
     }
+
+    async fn handle_claude_messages_request(
+        &self,
+        request: HttpRequest<Incoming>,
+    ) -> HttpResponse<BoxBody<Bytes, AsyncHttpBodyError>> {
+        let Some(claude_edge_config) = &self.claude_edge_runtime_config else {
+            tracing::error!("codex_router.claude_edge_configuration_missing_after_auth_preflight");
+            return empty_response(StatusCode::INTERNAL_SERVER_ERROR);
+        };
+        ClaudeServerRuntime {
+            auth_gate: self.claude_edge_auth_gate.clone(),
+            upstream: self.upstream.clone(),
+            selection_state_store: self.selection_state_store.clone(),
+            provider_error_state_store: self.provider_error_state_store.clone(),
+            credential_resolver: self
+                .credential_factory
+                .resolver_for_state(self.credential_state_store.clone()),
+            credential_store_availability: self.credential_store_availability,
+            selector_runtime_state:
+                AsyncAccountSelectorRuntimeState::new_with_selection_lock_and_affinity_cache(
+                    Arc::clone(&self.weighted_selectors),
+                    Arc::clone(&self.account_holds),
+                    Arc::clone(&self.active_reservations),
+                    Arc::clone(&self.runtime_exhaustions),
+                    Arc::clone(&self.route_band_queue_health),
+                    Arc::clone(&self.selection_reservation_lock),
+                    Arc::clone(&self.session_affinity_cache),
+                ),
+            session_affinity_cache: Arc::clone(&self.session_affinity_cache),
+            claude_five_hour_reserve_percent: self.claude_five_hour_reserve_percent,
+            quota_refresh_interval: claude_edge_config.quota_refresh_interval,
+            db_write_actor: self.db_write_actor.clone(),
+            clock: self.runtime_clock(),
+            affinity_record_tasks: self.affinity_record_tasks.clone(),
+            audit_sink: self.audit_sink.clone(),
+        }
+        .handle_request(request)
+        .await
+    }
 }
 
 fn router_compatibility_response(
@@ -1506,6 +1814,7 @@ impl LoopbackProtocolConnectionHandler {
             DEFAULT_ACCOUNT_HOLD_COOLDOWN_SECONDS,
             self.runtime_clock(),
         )
+        .with_claude_five_hour_reserve_percent(self.claude_five_hour_reserve_percent)
         .with_active_client_lease_reporter(Arc::new(SqliteActiveClientLeaseReporter::new(
             self.db_write_actor.clone(),
             self.runtime_clock(),
@@ -1668,6 +1977,8 @@ fn current_unix_seconds() -> Result<u64, std::time::SystemTimeError> {
 #[derive(Clone, Debug)]
 pub struct LocalAuthReloader {
     auth_gate: crate::local_auth::ProxyLocalAuthGate,
+    claude_edge_auth_gate: Option<crate::local_auth::ProxyLocalAuthGate>,
+    codex_local_token_authentication_required: bool,
     websocket_revocations: WebSocketRevocationRegistry,
 }
 
@@ -1675,9 +1986,14 @@ impl LocalAuthReloader {
     /// Replaces local auth from an already loaded auth snapshot.
     pub fn reload_auth(&self, auth: LocalRouterAuth) {
         let active_generation = auth.current_generation();
-        self.auth_gate.replace(auth);
-        self.websocket_revocations
-            .close_all_except(active_generation);
+        if self.codex_local_token_authentication_required {
+            self.auth_gate.replace(auth.clone());
+            self.websocket_revocations
+                .close_all_except(active_generation);
+        }
+        if let Some(claude_edge_auth_gate) = &self.claude_edge_auth_gate {
+            claude_edge_auth_gate.replace(auth);
+        }
     }
 
     /// Replaces local auth and closes WebSocket connections authenticated with old generations.
@@ -1933,7 +2249,7 @@ fn precommit_probe_should_continue_for_success_status(buffered: &[u8]) -> bool {
     trimmed.starts_with(b"event: error") && !trimmed.windows(2).any(|window| window == b"\n\n")
 }
 
-fn box_body_from_bytes(bytes: Vec<u8>) -> BoxBody<Bytes, AsyncHttpBodyError> {
+pub(crate) fn box_body_from_bytes(bytes: Vec<u8>) -> BoxBody<Bytes, AsyncHttpBodyError> {
     Full::new(Bytes::from(bytes))
         .map_err(|never: Infallible| -> AsyncHttpBodyError { match never {} })
         .boxed()
@@ -2036,7 +2352,7 @@ fn prefix_frames_size_hint(
     size_hint
 }
 
-fn method_from_hyper(method: &HttpMethod) -> Method {
+pub(crate) fn method_from_hyper(method: &HttpMethod) -> Method {
     match *method {
         HttpMethod::GET => Method::Get,
         HttpMethod::POST => Method::Post,
@@ -2182,7 +2498,7 @@ fn trim_ascii_bytes(bytes: &[u8]) -> &[u8] {
     }
 }
 
-fn hold_active_reservation_until_body_drop(
+pub(crate) fn hold_active_reservation_until_body_drop(
     body: BoxBody<Bytes, AsyncHttpBodyError>,
     active_reservation_guard: Option<crate::account_selection::ActiveReservationGuard>,
 ) -> BoxBody<Bytes, AsyncHttpBodyError> {
@@ -2257,7 +2573,7 @@ fn spawn_async_provider_error_observation(
     });
 }
 
-fn incoming_body_error(error: hyper::Error) -> AsyncHttpBodyError {
+pub(crate) fn incoming_body_error(error: hyper::Error) -> AsyncHttpBodyError {
     Box::new(error)
 }
 
@@ -2303,7 +2619,9 @@ fn sanitize_error_for_log(error: &LoopbackRouterRuntimeError) -> String {
     }
 }
 
-fn http_error_response(error: HttpProxyError) -> HttpResponse<BoxBody<Bytes, AsyncHttpBodyError>> {
+pub(crate) fn http_error_response(
+    error: HttpProxyError,
+) -> HttpResponse<BoxBody<Bytes, AsyncHttpBodyError>> {
     match error {
         HttpProxyError::LocalAuth { .. } => empty_response(StatusCode::UNAUTHORIZED),
         HttpProxyError::Selection {
@@ -2317,10 +2635,200 @@ fn http_error_response(error: HttpProxyError) -> HttpResponse<BoxBody<Bytes, Asy
     }
 }
 
-fn empty_response(status: StatusCode) -> HttpResponse<BoxBody<Bytes, AsyncHttpBodyError>> {
+/// A complete, bounded provider rejection retained only when Claude cannot select attempt two.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct CapturedClaudeProviderErrorResponse {
+    pub(crate) status: u16,
+    pub(crate) headers: HeaderCollection,
+    pub(crate) body: Vec<Bytes>,
+    pub(crate) evidence_prefix: Bytes,
+    pub(crate) evidence_complete: bool,
+}
+
+/// Renders Claude's ordered no-account result without changing the shared Codex mapping.
+pub(crate) fn claude_selection_unavailable_response(
+    reason: UnavailableReason,
+    account_labels: &[(AccountId, String)],
+    now_unix_seconds: u64,
+    provider_usage_limit_response: Option<CapturedClaudeProviderErrorResponse>,
+) -> HttpResponse<BoxBody<Bytes, AsyncHttpBodyError>> {
+    if let (UnavailableReason::AllExhausted { .. }, Some(response)) =
+        (&reason, provider_usage_limit_response)
+    {
+        return captured_claude_provider_response(response);
+    }
+
+    match reason {
+        UnavailableReason::NoneConfiguredOrEnabled => claude_api_error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "api_error",
+            "No Claude account is configured or enabled in Router.".to_owned(),
+            None,
+            None,
+        ),
+        UnavailableReason::KeyUnreadable => claude_api_error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "api_error",
+            "Router cannot unlock its Claude credentials because the Keychain key is unreadable."
+                .to_owned(),
+            None,
+            None,
+        ),
+        UnavailableReason::MigrationIncomplete => claude_api_error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "api_error",
+            "Router cannot unlock its Claude credentials because pooled-credential migration is incomplete."
+                .to_owned(),
+            None,
+            None,
+        ),
+        UnavailableReason::AllNeedLogin { accounts } => {
+            let account_names = accounts
+                .iter()
+                .map(|account_id| claude_account_name(account_id, account_labels))
+                .collect::<Vec<_>>();
+            claude_api_error_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "api_error",
+                format!(
+                    "These Claude accounts need account login before Router can use them: {}.",
+                    account_names.join(", ")
+                ),
+                None,
+                None,
+            )
+        }
+        UnavailableReason::AllExhausted { earliest_headroom } => {
+            let retry_after_seconds = earliest_headroom
+                .map(HeadroomTimestamp::unix_seconds)
+                .map(|headroom| headroom.saturating_sub(now_unix_seconds));
+            let message = match retry_after_seconds {
+                Some(seconds) => format!(
+                    "Claude usage limit reached. Router expects quota headroom in {seconds} seconds."
+                ),
+                None => "Claude usage limit reached.".to_owned(),
+            };
+            claude_api_error_response(
+                StatusCode::TOO_MANY_REQUESTS,
+                "rate_limit_error",
+                message,
+                Some("usage_limit_reached"),
+                retry_after_seconds,
+            )
+        }
+        UnavailableReason::HeldByFloors { accounts } => {
+            let held_accounts = accounts
+                .iter()
+                .map(|account| {
+                    let reason = match account.reason() {
+                        SelectionHoldReason::HardFloor => "at the configured hard quota floor",
+                        SelectionHoldReason::WaitingForFreshWeeklyObservation => {
+                            "waiting for a fresh weekly quota observation under its configured floor"
+                        }
+                    };
+                    format!(
+                        "{} ({reason})",
+                        claude_account_name(account.account_id(), account_labels)
+                    )
+                })
+                .collect::<Vec<_>>();
+            claude_api_error_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "api_error",
+                format!(
+                    "These Claude accounts are held by quota floors: {}.",
+                    held_accounts.join(", ")
+                ),
+                None,
+                None,
+            )
+        }
+    }
+}
+
+fn claude_account_name(account_id: &AccountId, account_labels: &[(AccountId, String)]) -> String {
+    account_labels
+        .iter()
+        .find(|(candidate_id, _label)| candidate_id == account_id)
+        .map(|(_account_id, label)| safe_account_label(label, account_id).to_string())
+        .unwrap_or_else(|| safe_account_label("account", account_id).to_string())
+}
+
+fn claude_api_error_response(
+    status: StatusCode,
+    error_type: &'static str,
+    message: String,
+    error_code: Option<&'static str>,
+    retry_after_seconds: Option<u64>,
+) -> HttpResponse<BoxBody<Bytes, AsyncHttpBodyError>> {
+    let error = match error_code {
+        Some(error_code) => serde_json::json!({
+            "type": error_type,
+            "message": message,
+            "code": error_code,
+        }),
+        None => serde_json::json!({
+            "type": error_type,
+            "message": message,
+        }),
+    };
+    let body = serde_json::to_vec(&serde_json::json!({
+        "type": "error",
+        "error": error,
+    }))
+    .unwrap_or_else(|_error| {
+        br#"{"type":"error","error":{"type":"api_error","message":"Claude request unavailable."}}"#
+            .to_vec()
+    });
+    let mut builder = HttpResponse::builder()
+        .status(status)
+        .header(http::header::CONTENT_TYPE, "application/json");
+    if let Some(retry_after_seconds) = retry_after_seconds {
+        builder = builder.header(http::header::RETRY_AFTER, retry_after_seconds.to_string());
+    }
+    builder
+        .body(box_body_from_bytes(body))
+        .unwrap_or_else(|_error| empty_response(StatusCode::BAD_GATEWAY))
+}
+
+fn captured_claude_provider_response(
+    response: CapturedClaudeProviderErrorResponse,
+) -> HttpResponse<BoxBody<Bytes, AsyncHttpBodyError>> {
+    let mut builder = HttpResponse::builder()
+        .status(StatusCode::from_u16(response.status).unwrap_or(StatusCode::BAD_GATEWAY));
+    for header in response.headers.as_slice() {
+        builder = builder.header(header.name(), header.value());
+    }
+    let body = StreamBody::new(stream::iter(
+        response
+            .body
+            .into_iter()
+            .map(|chunk| Ok::<_, Infallible>(Frame::data(chunk))),
+    ))
+    .map_err(|never: Infallible| -> AsyncHttpBodyError { match never {} })
+    .boxed();
+    builder
+        .body(body)
+        .unwrap_or_else(|_error| empty_response(StatusCode::BAD_GATEWAY))
+}
+
+pub(crate) fn empty_response(
+    status: StatusCode,
+) -> HttpResponse<BoxBody<Bytes, AsyncHttpBodyError>> {
     HttpResponse::builder()
         .status(status)
         .body(empty_body())
+        .unwrap_or_else(|_error| HttpResponse::new(empty_body()))
+}
+
+fn unsupported_claude_path_response(
+    path: &str,
+) -> HttpResponse<BoxBody<Bytes, AsyncHttpBodyError>> {
+    let body = format!("Path {path} is unsupported by Router");
+    HttpResponse::builder()
+        .status(StatusCode::NOT_FOUND)
+        .header(http::header::CONTENT_TYPE, "text/plain; charset=utf-8")
+        .body(box_body_from_bytes(body.into_bytes()))
         .unwrap_or_else(|_error| HttpResponse::new(empty_body()))
 }
 
@@ -2472,6 +2980,7 @@ impl AsyncProviderErrorObserver for AsyncSqliteProviderErrorObserver {
         &'a self,
         exhausted_account_id: codex_router_core::ids::AccountId,
         route_band: RouteBand,
+        route_profile: RouteProfile,
         observed_unix_seconds: u64,
     ) -> BoxFuture<
         'a,
@@ -2481,15 +2990,16 @@ impl AsyncProviderErrorObserver for AsyncSqliteProviderErrorObserver {
         >,
     > {
         Box::pin(async move {
-            route_band_post_exhaustion_outcome(
-                &self.selection_state_store,
-                Some(&self.active_reservations),
-                Some(&self.runtime_exhaustions),
-                Some(&self.route_band_queue_health),
+            route_band_post_exhaustion_outcome(RouteBandPostExhaustionOutcomeInput {
+                state_repository: &self.selection_state_store,
+                active_reservations: Some(&self.active_reservations),
+                runtime_exhaustions: Some(&self.runtime_exhaustions),
+                route_band_queue_health: Some(&self.route_band_queue_health),
                 route_band,
-                &exhausted_account_id,
-                observed_unix_seconds,
-            )
+                route_profile,
+                excluded_account_id: &exhausted_account_id,
+                now_unix_seconds: observed_unix_seconds,
+            })
             .await
             .map_err(ProviderErrorObservationError::from)
         })
@@ -2516,8 +3026,8 @@ mod tests {
     use codex_router_core::redaction::SecretString;
     use codex_router_secret_store::SecretStore;
     use codex_router_secret_store::account_tokens::AccountCredentialBundle;
-    use codex_router_secret_store::account_tokens::account_credential_bundle_key;
-    use codex_router_secret_store::file_backend::FileSecretStore;
+    use codex_router_secret_store::account_tokens::openai_account_credential_bundle_key;
+    use codex_router_secret_store::encrypted_credential_store::EncryptedCredentialStore;
     use codex_router_secret_store::model::SecretKey;
     use codex_router_secret_store::model::SecretStoreError;
     use codex_router_state::credential_maintenance::CredentialMaintenanceState;
@@ -2529,6 +3039,156 @@ mod tests {
     use tokio::io::AsyncWriteExt;
 
     static TEMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+    fn local_router_token(token: &str, generation: u64) -> LocalRouterTokenRecord {
+        LocalRouterTokenRecord::new(
+            SecretString::new(token),
+            codex_router_core::ids::TokenGeneration::new(generation),
+        )
+    }
+
+    fn send_loopback_http_request(
+        address: SocketAddr,
+        path: &str,
+        authorization: Option<&str>,
+    ) -> String {
+        use std::io::Read as _;
+        use std::io::Write as _;
+        use std::net::TcpStream;
+        use std::time::Duration;
+
+        let mut stream = TcpStream::connect(address)
+            .unwrap_or_else(|error| panic!("loopback client should connect: {error}"));
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap_or_else(|error| panic!("loopback read timeout should set: {error}"));
+        let authorization_header =
+            authorization.map_or(String::new(), |value| format!("Authorization: {value}\r\n"));
+        let request = format!(
+            "POST {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\nContent-Length: 2\r\n{authorization_header}\r\n{{}}"
+        );
+        stream
+            .write_all(request.as_bytes())
+            .unwrap_or_else(|error| panic!("loopback request should write: {error}"));
+        stream
+            .shutdown(std::net::Shutdown::Write)
+            .unwrap_or_else(|error| panic!("loopback client write side should close: {error}"));
+
+        let mut response = String::new();
+        stream
+            .read_to_string(&mut response)
+            .unwrap_or_else(|error| panic!("loopback response should read: {error}"));
+        response
+    }
+
+    #[test]
+    fn claude_edge_local_token_is_scoped_and_reloaded_without_enabling_codex_auth() {
+        use codex_router_core::local_auth::LocalRouterAuth;
+        use std::io::ErrorKind;
+        use std::net::TcpListener;
+
+        let upstream_listener =
+            TcpListener::bind("127.0.0.1:0").expect("test upstream listener should bind");
+        upstream_listener
+            .set_nonblocking(true)
+            .expect("test upstream listener should be nonblocking");
+        let upstream_address = upstream_listener
+            .local_addr()
+            .expect("test upstream listener address should be available");
+        let bind_address = LoopbackBindAddress::new("127.0.0.1", 0)
+            .expect("router loopback address should validate");
+        let database_path = test_database_path("claude_local_token_admission");
+        let secret_root = database_path.with_extension("secrets");
+        let config = LoopbackRouterRuntimeConfig::new_tokenless(
+            bind_address,
+            UpstreamEndpoint::new(format!("http://{upstream_address}/v1"))
+                .expect("test upstream endpoint should validate"),
+            database_path,
+            secret_root,
+        )
+        .with_claude_edge_local_token(
+            local_router_token("initial-token", 1),
+            Duration::from_secs(400),
+        );
+        let runtime = LoopbackRouterRuntime::start_for_test(config)
+            .expect("router runtime should start for token-scope test");
+        let router_address = runtime.local_addr();
+        let local_auth_reloader = runtime.local_auth_reloader();
+        let server_thread = std::thread::spawn(move || runtime.serve_http_connections(6));
+
+        let unsupported_claude =
+            send_loopback_http_request(router_address, "/anthropic/v1/messages/count_tokens", None);
+        let unsupported_claude_body = unsupported_claude
+            .split_once("\r\n\r\n")
+            .map_or("", |(_headers, body)| body);
+        assert!(
+            unsupported_claude.starts_with("HTTP/1.1 404 Not Found\r\n"),
+            "unsupported Claude paths should return 404 without authentication: {unsupported_claude}"
+        );
+        assert!(
+            unsupported_claude_body.contains("/anthropic/v1/messages/count_tokens")
+                && unsupported_claude_body.contains("unsupported by Router"),
+            "unsupported Claude response should name its path: {unsupported_claude_body}"
+        );
+
+        let unauthenticated_claude =
+            send_loopback_http_request(router_address, "/anthropic/v1/messages", None);
+        assert!(
+            unauthenticated_claude.starts_with("HTTP/1.1 401 Unauthorized\r\n"),
+            "missing Claude token should reject before selection: {unauthenticated_claude}"
+        );
+
+        let unauthenticated_codex =
+            send_loopback_http_request(router_address, "/v1/responses", None);
+        assert!(
+            unauthenticated_codex.starts_with("HTTP/1.1 503 Service Unavailable\r\n"),
+            "Codex with optional local auth should reach its no-account result: {unauthenticated_codex}"
+        );
+
+        local_auth_reloader.reload_auth(LocalRouterAuth::new(
+            local_router_token("reloaded-token", 2),
+            Vec::new(),
+        ));
+
+        let stale_claude = send_loopback_http_request(
+            router_address,
+            "/anthropic/v1/messages",
+            Some("Bearer initial-token"),
+        );
+        assert!(
+            stale_claude.starts_with("HTTP/1.1 401 Unauthorized\r\n"),
+            "the replaced Claude token should reject: {stale_claude}"
+        );
+
+        let reloaded_claude = send_loopback_http_request(
+            router_address,
+            "/anthropic/v1/messages",
+            Some("Bearer reloaded-token"),
+        );
+        assert!(
+            reloaded_claude.starts_with("HTTP/1.1 503 Service Unavailable\r\n"),
+            "the reloaded Claude token should pass admission and reach selection: {reloaded_claude}"
+        );
+
+        let codex_after_reload = send_loopback_http_request(router_address, "/v1/responses", None);
+        assert!(
+            codex_after_reload.starts_with("HTTP/1.1 503 Service Unavailable\r\n"),
+            "token watcher reload must leave optional Codex auth disabled: {codex_after_reload}"
+        );
+
+        assert_eq!(
+            server_thread
+                .join()
+                .unwrap_or_else(|error| panic!("router server thread should join: {error:?}"))
+                .expect("router should serve all six test requests"),
+            6
+        );
+        match upstream_listener.accept() {
+            Err(error) if error.kind() == ErrorKind::WouldBlock => {}
+            Ok((_stream, _peer)) => panic!("no test request should reach upstream"),
+            Err(error) => panic!("upstream listener check should succeed: {error}"),
+        }
+    }
 
     #[derive(Clone)]
     struct HeldProxyRefreshClient {
@@ -2565,19 +3225,31 @@ mod tests {
     fn proxy_refresh_fixture(
         case: &str,
         drain_limit: Duration,
-    ) -> (LoopbackRouterRuntime, AccountId, PathBuf, FileSecretStore) {
+    ) -> (
+        LoopbackRouterRuntime,
+        AccountId,
+        PathBuf,
+        EncryptedCredentialStore,
+    ) {
         let database_path = test_database_path(case);
         let secret_root = database_path.with_extension("secrets");
         let account_id = AccountId::new("proxy-shutdown-account").expect("account id");
         let state = SqliteStateStore::open(&database_path).expect("fixture state");
         AccountStateRepository::upsert_account(
             &state,
-            &AccountRecord::new(account_id.clone(), "shutdown", AccountStatus::Enabled)
-                .with_active_credential_generation(1),
+            &AccountRecord::new(
+                codex_router_core::provider::Provider::Openai,
+                account_id.clone(),
+                "shutdown",
+                AccountStatus::Enabled,
+            )
+            .with_active_credential_generation(1),
         )
         .expect("fixture account");
-        let secrets = FileSecretStore::open(&secret_root).expect("fixture secrets");
-        let active_key = account_credential_bundle_key(&account_id, 1).expect("active key");
+        let secrets =
+            codex_router_secret_store::test_support::open_encrypted_credential_store(&secret_root)
+                .expect("fixture secrets");
+        let active_key = openai_account_credential_bundle_key(&account_id, 1).expect("active key");
         let active_bundle = AccountCredentialBundle::imported_codex_auth(
             "expired-access-canary",
             Some("old-refresh-canary".to_owned()),
@@ -2596,10 +3268,49 @@ mod tests {
             secret_root,
         )
         .with_quota_clock(1_000, 300);
-        let router = LoopbackRouterRuntime::start(config)
+        let router = LoopbackRouterRuntime::start(config, secrets.clone())
             .expect("fixture router should start")
             .with_credential_refresh_shutdown_drain(drain_limit);
         (router, account_id, database_path, secrets)
+    }
+
+    #[test]
+    fn runtime_affinity_cache_uses_configured_session_pin_idle_ttl() {
+        let configured_ttl = Duration::from_secs(30 * 60);
+        let config = LoopbackRouterRuntimeConfig::new_tokenless(
+            LoopbackBindAddress::new("127.0.0.1", 0).expect("loopback bind"),
+            UpstreamEndpoint::new("http://127.0.0.1:1/v1").expect("fixture upstream"),
+            PathBuf::from("unused-state.sqlite"),
+            PathBuf::from("unused-secrets"),
+        )
+        .with_session_pin_idle_ttl(configured_ttl);
+        let runtime_cache = config.session_account_affinity_cache();
+        let account_id = AccountId::new("runtime-pin-account").expect("account id");
+
+        let selection = crate::session_account_affinity_cache::publish_session_account_affinity(
+            &runtime_cache,
+            codex_router_core::provider::Provider::Openai,
+            "runtime-pin-session",
+            &account_id,
+            RouteBand::Responses,
+            None,
+            1_000,
+        )
+        .expect("runtime cache should publish the pin");
+        drop(selection);
+
+        for (now_unix_seconds, expected_fresh) in [(2_799, true), (2_800, false)] {
+            let lookup = crate::session_account_affinity_cache::lookup_session_account_affinity(
+                &runtime_cache,
+                codex_router_core::provider::Provider::Openai,
+                "runtime-pin-session",
+                RouteBand::Responses,
+                None,
+                now_unix_seconds,
+            )
+            .expect("runtime cache lookup should succeed");
+            assert_eq!(lookup.is_some(), expected_fresh, "time={now_unix_seconds}");
+        }
     }
 
     fn open_read_only_after_shutdown(
@@ -2653,7 +3364,10 @@ mod tests {
                     .handle()
                     .spawn(async move {
                         resolver
-                            .resolve_provider_credentials(&account_for_task)
+                            .resolve_provider_credentials(
+                                &account_for_task,
+                                codex_router_core::provider::Provider::Openai,
+                            )
                             .await
                     });
             entered_receiver
@@ -2735,7 +3449,7 @@ mod tests {
 
     #[derive(Clone)]
     struct HeldProxySecretWriteStore {
-        inner: FileSecretStore,
+        inner: EncryptedCredentialStore,
         entered_sender: mpsc::Sender<()>,
         release_receiver: Arc<Mutex<mpsc::Receiver<()>>>,
     }
@@ -2757,6 +3471,10 @@ mod tests {
                     .expect("secret write should be released");
             }
             self.inner.write_secret(key, secret)
+        }
+
+        fn delete_staged(&self, key: &SecretKey) -> Result<(), SecretStoreError> {
+            self.inner.delete_staged(key)
         }
 
         fn read_secret(&self, key: &SecretKey) -> Result<SecretString, SecretStoreError> {
@@ -2790,7 +3508,10 @@ mod tests {
             .handle()
             .spawn(async move {
                 resolver
-                    .resolve_provider_credentials(&account_for_task)
+                    .resolve_provider_credentials(
+                        &account_for_task,
+                        codex_router_core::provider::Provider::Openai,
+                    )
                     .await
             });
         entered_receiver
@@ -4009,7 +4730,9 @@ impl LoopbackHttpServer {
 }
 
 #[cfg(test)]
-fn read_http_request(stream: &mut TcpStream) -> Result<HttpProxyRequest, ServerConnectionError> {
+pub(crate) fn read_http_request(
+    stream: &mut TcpStream,
+) -> Result<HttpProxyRequest, ServerConnectionError> {
     let mut request_bytes = Vec::new();
     let parsed_head = loop {
         if request_bytes.len() > MAX_HTTP_HEADER_BYTES {

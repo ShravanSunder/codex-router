@@ -1,10 +1,13 @@
 //! SQLite persistence for local automation, independent of the Host executable.
 mod automation_connection;
 pub use automation_connection::{AutomationStore, StorageError};
+mod automation_retention;
+pub use collaboration_protocol::{PushDeliveryState, PushRecord, PushRecordDraft};
 mod instruction_repository;
 mod instruction_revision_read;
 mod instruction_updates;
 pub use instruction_revision_read::InstructionRevisionRecord;
+mod push_record_rows;
 mod schema_initialization;
 mod schema_validation;
 pub use instruction_updates::InstructionUpdate;
@@ -32,6 +35,11 @@ mod wakeup_worker_inventory;
 pub use delivery_preparation::DeliveryPreparation;
 mod delivery_inspection;
 pub use delivery_inspection::DeliveryRecord;
+mod direct_message_recovery;
+mod push_records;
+pub use push_records::{
+    DirectMessageHistoryQuery, MAX_PUSH_LIST_LIMIT, MAX_PUSH_PRUNE_BATCH, PushInboxQuery,
+};
 mod wakeup_observation;
 pub use wakeup_observation::WakeTransition;
 mod wakeup_listing;
@@ -59,7 +67,9 @@ mod run_dispatch_state;
 mod run_inspection;
 pub use run_dispatch_state::RunDispatchIntent;
 mod run_submission_outcomes;
-pub use run_submission_outcomes::{RunSubmissionOutcome, RunSubmissionResult};
+pub use run_submission_outcomes::{
+    RunSubmissionOutcome, RunSubmissionResult, ScheduleRunPushUpdate,
+};
 mod run_completion_state;
 pub use run_completion_state::RunCompletion;
 

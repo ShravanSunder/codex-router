@@ -365,12 +365,36 @@ pub(crate) async fn validate_reader_activity_boundaries(
         validate_stored_boundary(watch.starts_after_activity, 0, latest, resource)?;
     }
 
+    let topic_watches = sqlx::query!(
+        "SELECT watch.topic_id,watch.starts_after_activity,watch.active \
+         FROM topic_watches watch \
+         JOIN board_topics topic ON topic.topic_id=watch.topic_id \
+         JOIN project_boards board ON board.board_id=topic.board_id \
+         WHERE watch.reader_key=? AND board.project_id=?",
+        reader_key,
+        project_id,
+    )
+    .fetch_all(&mut **transaction)
+    .await
+    .map_err(storage_error)?;
+    for watch in topic_watches {
+        let topic_id = TopicId::try_from(watch.topic_id).map_err(|_| invalid_record())?;
+        let resource = ResourceIdentity::Topic {
+            topic_id: topic_id.clone(),
+        };
+        if watch.active != 0 && watch.active != 1 {
+            return Err(BoardError::invalid_record(resource));
+        }
+        validate_topic_watch_boundary(watch.starts_after_activity, latest, &topic_id)?;
+    }
+
     let delivered_positions = sqlx::query!(
         "SELECT position.root_id,position.delivered_through,watch.starts_after_activity, \
            EXISTS(SELECT 1 FROM board_activity activity \
              WHERE activity.activity_sequence=position.delivered_through \
-               AND activity.root_id=position.root_id \
-               AND activity.kind='threadMessageCreated') AS valid_scope \
+               AND ((activity.root_id=position.root_id AND activity.kind='threadMessageCreated') \
+                 OR (activity.message_id=position.root_id AND activity.kind='mainMessageCreated'))) \
+             AS valid_scope \
          FROM thread_delivery_positions position \
          JOIN thread_watches watch ON watch.reader_key=position.reader_key AND watch.root_id=position.root_id \
          JOIN board_messages message ON message.message_id=position.root_id \
@@ -446,6 +470,49 @@ pub(crate) async fn validate_reader_activity_boundaries(
         if bookmark.valid_scope == 0 {
             return Err(BoardError::invalid_record(resource));
         }
+    }
+    Ok(())
+}
+
+pub(crate) async fn validate_existing_topic_watch_boundary(
+    transaction: &mut BoardTransaction<'_>,
+    reader_key: &str,
+    topic_id: &TopicId,
+    latest: i64,
+) -> Result<(), BoardError> {
+    let boundary = sqlx::query_scalar!(
+        "SELECT starts_after_activity FROM topic_watches WHERE reader_key=? AND topic_id=?",
+        reader_key,
+        topic_id.as_str(),
+    )
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(storage_error)?;
+    if let Some(boundary) = boundary {
+        validate_topic_watch_boundary(boundary, latest, topic_id)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_topic_watch_boundary(
+    boundary: i64,
+    latest: i64,
+    topic_id: &TopicId,
+) -> Result<(), BoardError> {
+    if boundary < 0 || boundary > latest {
+        return Err(BoardError {
+            kind: BoardFailureKind::InvalidRecord,
+            stage: BoardFailureStage::Inspection,
+            message: "Stored Topic Watch activity boundary is invalid.".to_owned(),
+            next_action: BoardNextAction::InspectResource,
+            details: BoardErrorDetails::FieldConstraint {
+                field: "startsAfterActivity".to_owned(),
+                requirement: format!(
+                    "must be from 0 through activity sequence {latest} for Topic {}",
+                    topic_id.as_str()
+                ),
+            },
+        });
     }
     Ok(())
 }

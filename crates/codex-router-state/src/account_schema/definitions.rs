@@ -32,6 +32,13 @@ pub(super) const ACCOUNTS: &[ColumnSpec] = &[
     column!("status", "TEXT", true, 0),
     column!("active_credential_generation", "INTEGER", false, 0),
 ];
+pub(super) const CURRENT_ACCOUNTS: &[ColumnSpec] = &[
+    column!("account_id", "TEXT", true, 1),
+    column!("label", "TEXT", true, 0),
+    column!("status", "TEXT", true, 0),
+    column!("active_credential_generation", "INTEGER", false, 0),
+    column!("provider", "TEXT", true, 0),
+];
 pub(super) const QUOTA_SNAPSHOTS: &[ColumnSpec] = &[
     column!("account_id", "TEXT", true, 1),
     column!("source", "TEXT", true, 0),
@@ -167,10 +174,53 @@ pub(super) const ACCOUNT_ROUTING_POLICIES: &[ColumnSpec] = &[
     column!("account_id", "TEXT", true, 1),
     column!("weekly_quota_floor_basis_points", "INTEGER", true, 0),
 ];
+pub(super) const ACCOUNT_CREDIT_POLICIES: &[ColumnSpec] = &[
+    column!("account_id", "TEXT", true, 1),
+    column!("allow_credits", "INTEGER", true, 0),
+];
+pub(super) const ACCOUNT_CREDIT_OBSERVATIONS: &[ColumnSpec] = &[
+    column!("account_id", "TEXT", true, 1),
+    column!("credential_generation", "INTEGER", true, 0),
+    column!("latest_started_attempt", "INTEGER", true, 0),
+    column!("committed_attempt", "INTEGER", false, 0),
+    column!("observed_unix_seconds", "INTEGER", false, 0),
+    column!("stale_after_unix_seconds", "INTEGER", false, 0),
+    column!("availability", "TEXT", true, 0),
+    column!("balance", "TEXT", false, 0),
+    column!("spend_control_state", "TEXT", true, 0),
+    column!("provider_limit_reason", "TEXT", false, 0),
+];
+pub(super) const ACCOUNT_WINDOW_OBSERVATIONS: &[ColumnSpec] = &[
+    column!("account_id", "TEXT", true, 1),
+    column!("window_kind", "TEXT", true, 2),
+    column!("remaining_basis_points", "INTEGER", true, 0),
+    column!("reset_unix_seconds", "INTEGER", false, 0),
+    column!("observation_started_at", "INTEGER", true, 0),
+    column!("fresh_until_unix_seconds", "INTEGER", false, 0),
+];
+pub(super) const ACCOUNT_WINDOW_REJECTIONS: &[ColumnSpec] = &[
+    column!("account_id", "TEXT", true, 1),
+    column!("window_kind", "TEXT", true, 2),
+    column!("rejected_at", "INTEGER", true, 0),
+    column!("reported_reset", "INTEGER", false, 0),
+];
 pub(super) const SESSION_ACCOUNT_AFFINITIES: &[ColumnSpec] = &[
     column!("session_id", "TEXT", true, 1),
     column!("account_id", "TEXT", true, 0),
     column!("last_seen_unix_seconds", "INTEGER", true, 0),
+];
+pub(super) const CURRENT_SESSION_ACCOUNT_AFFINITIES: &[ColumnSpec] = &[
+    column!("provider", "TEXT", true, 1),
+    column!("session_id", "TEXT", true, 2),
+    column!("account_id", "TEXT", false, 0),
+    column!("last_seen_unix_seconds", "INTEGER", true, 0),
+    ColumnSpec {
+        name: "pin_version",
+        declared_type: "INTEGER",
+        not_null: true,
+        primary_key_position: 0,
+        accepted_defaults: NO_OR_ZERO_DEFAULT,
+    },
 ];
 pub(super) const CREDENTIAL_MAINTENANCE: &[ColumnSpec] = &[
     column!("account_id", "TEXT", true, 1),
@@ -180,6 +230,9 @@ pub(super) const CREDENTIAL_MAINTENANCE: &[ColumnSpec] = &[
     column!("last_success_unix_seconds", "INTEGER", false, 0),
     column!("next_attempt_unix_seconds", "INTEGER", false, 0),
     column!("claimed_successor_generation", "INTEGER", false, 0),
+    column!("claim_purpose", "TEXT", false, 0),
+    column!("claim_started_unix_seconds", "INTEGER", false, 0),
+    column!("claim_prior_state", "TEXT", false, 0),
     ColumnSpec {
         name: "consecutive_failures",
         declared_type: "INTEGER",

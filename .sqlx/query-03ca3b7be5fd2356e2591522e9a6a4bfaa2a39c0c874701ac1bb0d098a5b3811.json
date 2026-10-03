@@ -1,0 +1,50 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT subscription.reader_key,subscription.mode,subscription.state FROM thread_subscriptions subscription WHERE subscription.state IN ('active','draining') AND subscription.expires_at>? AND ((subscription.scope_kind='thread' AND subscription.scope_id=?) OR (subscription.scope_kind='topic' AND subscription.scope_id=? AND NOT EXISTS(SELECT 1 FROM thread_subscriptions thread_override WHERE thread_override.reader_key=subscription.reader_key AND thread_override.scope_kind='thread' AND thread_override.scope_id=?))) ORDER BY subscription.reader_key",
+  "describe": {
+    "columns": [
+      {
+        "name": "reader_key",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "thread_subscriptions",
+            "name": "reader_key"
+          }
+        }
+      },
+      {
+        "name": "mode",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "thread_subscriptions",
+            "name": "mode"
+          }
+        }
+      },
+      {
+        "name": "state",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "thread_subscriptions",
+            "name": "state"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "03ca3b7be5fd2356e2591522e9a6a4bfaa2a39c0c874701ac1bb0d098a5b3811"
+}

@@ -6,7 +6,7 @@ use crate::{
 };
 use codex_router_proxy::{
     server::{LoopbackRouterRuntimeError, ServerBindError},
-    upstream::UpstreamEndpointError,
+    upstream::{ClaudeUpstreamEndpointError, UpstreamEndpointError},
 };
 use std::ffi::OsString;
 use thiserror::Error;
@@ -17,6 +17,9 @@ pub enum CliError {
     /// Background OAuth upkeep could not start.
     #[error(transparent)]
     CredentialUpkeep(#[from] CredentialUpkeepStartError),
+    /// Encrypted credential store could not be opened for this process.
+    #[error("encrypted credential store could not be opened")]
+    CredentialStoreOpen,
     /// Command name is unknown.
     #[error("unknown command: {command}")]
     UnknownCommand {
@@ -79,6 +82,26 @@ pub enum CliError {
         value: String,
     },
 
+    /// Numeric option must be nonzero.
+    #[error("value for {option} must be greater than zero: {value}")]
+    ZeroNumericOption {
+        /// Option name.
+        option: &'static str,
+        /// Raw option value.
+        value: String,
+    },
+    /// Percentage option is outside its inclusive supported range.
+    #[error("value for {option} must be between {minimum} and {maximum}: {value}")]
+    NumericOptionOutOfRange {
+        /// Option name.
+        option: &'static str,
+        /// Raw option value.
+        value: String,
+        /// Lowest accepted value.
+        minimum: u8,
+        /// Highest accepted value.
+        maximum: u8,
+    },
     /// CLI argument is not UTF-8.
     #[error("non-UTF-8 CLI argument: {value:?}")]
     NonUtf8Argument {
@@ -147,6 +170,12 @@ pub enum CliError {
     #[error(transparent)]
     UpstreamEndpoint(#[from] UpstreamEndpointError),
 
+    /// Debug-only Claude upstream endpoint was invalid or lacked isolation.
+    #[error(
+        "debug Claude upstream override from CODEX_ROUTER_DEBUG_CLAUDE_UPSTREAM_BASE_URL (option --debug-claude-upstream-base-url) failed: {0}"
+    )]
+    ClaudeUpstreamEndpoint(#[from] ClaudeUpstreamEndpointError),
+
     /// Router runtime failed.
     #[error(transparent)]
     Runtime(#[from] LoopbackRouterRuntimeError),
@@ -171,4 +200,29 @@ pub enum CliError {
     /// Stderr write failed.
     #[error("failed to write stderr: {0}")]
     Stderr(std::io::Error),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::CliError;
+    use codex_router_proxy::upstream::ClaudeUpstreamEndpointError;
+
+    #[test]
+    fn debug_claude_endpoint_errors_name_the_setting_and_keep_values_redacted() {
+        let invalid_url = CliError::from(ClaudeUpstreamEndpointError::InvalidBaseUrl);
+        let invalid_url_message = invalid_url.to_string();
+        assert!(invalid_url_message.contains("--debug-claude-upstream-base-url"));
+        assert!(invalid_url_message.contains("CODEX_ROUTER_DEBUG_CLAUDE_UPSTREAM_BASE_URL"));
+        assert!(invalid_url_message.contains("absolute HTTP(S) base URL"));
+
+        let missing_isolation = CliError::from(ClaudeUpstreamEndpointError::DebugIsolationRequired);
+        let missing_isolation_message = missing_isolation.to_string();
+        assert!(missing_isolation_message.contains("--debug-claude-upstream-base-url"));
+        assert!(missing_isolation_message.contains("CODEX_ROUTER_DEBUG_CLAUDE_UPSTREAM_BASE_URL"));
+        assert!(missing_isolation_message.contains("requires debug isolation"));
+
+        let supplied_value = "http://user:token@127.0.0.1:18888?secret=value";
+        assert!(!invalid_url_message.contains(supplied_value));
+        assert!(!missing_isolation_message.contains(supplied_value));
+    }
 }

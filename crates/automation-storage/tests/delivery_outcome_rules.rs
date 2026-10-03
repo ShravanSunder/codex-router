@@ -7,6 +7,8 @@ use automation_storage::{
     WakeEvaluation,
 };
 use serde::{Deserialize, Serialize};
+#[path = "support/wake_push_draft.rs"]
+mod wake_push_test_support;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Message {
     target: String,
@@ -85,7 +87,11 @@ async fn cancellation_retains_latest_acceptance_and_current_uncertainty()
     for occurrence in 1..=3 {
         let now_ms = occurrence * 60000;
         let id = match store
-            .evaluate_wakeup::<Message>(&wake.definition.wakeup_id, now_ms)
+            .evaluate_wakeup::<Message>(
+                &wake.definition.wakeup_id,
+                now_ms,
+                wake_push_test_support::build_test_wake_push_draft,
+            )
             .await?
         {
             WakeEvaluation::Fired { delivery_id, .. } => delivery_id,
@@ -179,7 +185,11 @@ async fn known_nonsubmission_retries_but_uncertainty_never_does()
         })
         .await?;
     let id = match store
-        .evaluate_wakeup::<Message>(&wake.definition.wakeup_id, 1000)
+        .evaluate_wakeup::<Message>(
+            &wake.definition.wakeup_id,
+            1000,
+            wake_push_test_support::build_test_wake_push_draft,
+        )
         .await?
     {
         WakeEvaluation::Fired { delivery_id, .. } => delivery_id,
@@ -353,7 +363,11 @@ async fn pause_during_dispatch_prevents_late_rejection_from_resurrecting_message
         })
         .await?;
     let id = match store
-        .evaluate_wakeup::<Message>(&wake.definition.wakeup_id, 60000)
+        .evaluate_wakeup::<Message>(
+            &wake.definition.wakeup_id,
+            60000,
+            wake_push_test_support::build_test_wake_push_draft,
+        )
         .await?
     {
         WakeEvaluation::Fired { delivery_id, .. } => delivery_id,
@@ -431,7 +445,11 @@ async fn pause_preserves_late_acceptance_and_unknown_effects()
             })
             .await?;
         let id = match store
-            .evaluate_wakeup::<Message>(&wake.definition.wakeup_id, 60000)
+            .evaluate_wakeup::<Message>(
+                &wake.definition.wakeup_id,
+                60000,
+                wake_push_test_support::build_test_wake_push_draft,
+            )
             .await?
         {
             WakeEvaluation::Fired { delivery_id, .. } => delivery_id,

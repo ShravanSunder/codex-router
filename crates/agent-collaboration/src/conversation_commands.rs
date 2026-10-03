@@ -7,11 +7,12 @@ use collaboration_client::protocol::{
 };
 use collaboration_client::{
     AcpConversation, ClientError, ControlClient, ConversationCancelInput, ConversationClient,
-    ConversationClientError, ConversationCreateInput, ConversationCreatePromptInput,
-    ConversationCreatePromptOutcome, ConversationCreateRequest, ConversationEnd, ConversationEvent,
-    ConversationLoadInput, ConversationOperationResult, ConversationPromptInput,
-    ConversationPromptRequest, ConversationStopReason, OperationEffect, OperationFailure,
-    OperationFailureKind, PublicPromptContent, operation_failure_from_client_error,
+    ConversationClientError, ConversationCreateActor, ConversationCreateInput,
+    ConversationCreatePromptInput, ConversationCreatePromptOutcome, ConversationCreateRequest,
+    ConversationEnd, ConversationEvent, ConversationLoadInput, ConversationOperationResult,
+    ConversationPromptInput, ConversationPromptRequest, ConversationStopReason, OperationEffect,
+    OperationFailure, OperationFailureKind, PublicPromptContent,
+    operation_failure_from_client_error,
 };
 use std::{
     ffi::OsString,
@@ -40,17 +41,24 @@ struct ConversationArguments {
 enum ConversationCommand {
     /// Create a conversation and return its stable SessionRef without submitting a prompt.
     #[command(
-        long_about = "Create a conversation and return its stable SessionRef without submitting a prompt. --model and --effort are required for Codex endpoints and rejected for provider endpoints. Example: agent-collaboration conversation create --endpoint codex-local --model gpt-5.6 --effort medium --access workspace-write --cwd /path/to/project"
+        long_about = "Create a conversation and return its stable SessionRef without submitting a prompt. --model and --effort are required for Codex endpoints; provider endpoints accept advertised --mode, --model and --effort values. Example: agent-collaboration conversation create --endpoint codex-local --model gpt-5.6 --effort medium --access workspace-write --cwd /path/to/project"
     )]
     Create(CreateArguments),
-    /// Run an ACP prompt and wait for settlement. For an empty conversation returned by
+    /// Run an ACP prompt and wait up to the caller deadline. A detached Codex turn
+    /// returns `running` with exit code 0 and a follow-up command. For an empty conversation returned by
     /// `conversation create`, submit its first input with `message send`; alternatively use
     /// `conversation prompt --new`. Permission requests are never automatically approved.
     Prompt(PromptArguments),
     /// Load an existing conversation binding and wait for its settlement.
     Load(LoadArguments),
+    /// Resume an advertised provider Session without replaying history.
+    Resume(LoadArguments),
+    /// Close an advertised provider Session after its running Turn settles.
+    Close(CloseArguments),
     /// Cancel one exact active provider operation.
     Cancel(CancelArguments),
+    /// Set or accept the effective settings of a provider Session.
+    Settings(crate::conversation_settings_commands::SettingsArguments),
     /// Inspect, wait for, or reconcile one exact conversation operation.
     Operation {
         #[command(subcommand)]
@@ -61,10 +69,13 @@ enum ConversationCommand {
 struct CreateArguments {
     #[arg(long)]
     endpoint: String,
-    /// Required for Codex endpoints; rejected for provider endpoints.
+    /// Provider mode option value advertised by the agent.
+    #[arg(long)]
+    mode: Option<String>,
+    /// Required for Codex endpoints; provider value must be advertised by the agent.
     #[arg(long)]
     model: Option<String>,
-    /// Required for Codex endpoints; rejected for provider endpoints.
+    /// Required for Codex endpoints; provider value must be advertised by the agent.
     #[arg(long)]
     effort: Option<String>,
     #[arg(long)]
@@ -75,12 +86,15 @@ struct CreateArguments {
     operation_id: Option<String>,
     #[arg(long)]
     access: ConversationAccess,
-    /// Exact SessionRef JSON for this caller. Defaults to the unique active Codex, Claude Code, or Cursor harness.
+    /// SessionRef or typed Identity JSON for this creator. Defaults to the active agent Session.
     #[arg(long)]
     from: Option<String>,
-    /// Exact SessionRef JSON for the client approval authority. Defaults to this caller.
-    #[arg(long)]
+    /// SessionRef or typed Identity JSON for the Approver. Defaults to this creator.
+    #[arg(long, conflicts_with = "approver_owner")]
     approver: Option<String>,
+    /// Use the local OS owner as the Human Approver for a provider Session.
+    #[arg(long, conflicts_with = "approver")]
+    approver_owner: bool,
     #[arg(long)]
     root_message_id: Option<String>,
     #[arg(long)]
@@ -186,6 +200,24 @@ struct CancelArguments {
     #[arg(long)]
     json: bool,
 }
+
+#[derive(Args)]
+struct CloseArguments {
+    #[arg(long)]
+    target: String,
+    #[arg(long)]
+    generation: Option<String>,
+    #[arg(long)]
+    operation_id: Option<String>,
+    #[arg(long)]
+    from: Option<String>,
+    #[arg(long)]
+    approver: Option<String>,
+    #[arg(long)]
+    service_directory: Option<PathBuf>,
+    #[arg(long)]
+    json: bool,
+}
 #[derive(Clone, Copy, ValueEnum)]
 enum ConversationAccess {
     WriteRestricted,
@@ -210,7 +242,10 @@ pub fn run_conversation_command(arguments: Vec<OsString>) -> i32 {
         ConversationCommand::Create(args) => client_commands::run_create(args),
         ConversationCommand::Prompt(args) => run_prompt(args),
         ConversationCommand::Load(args) => client_commands::run_load(args),
+        ConversationCommand::Resume(args) => client_commands::run_resume(args),
+        ConversationCommand::Close(args) => client_commands::run_close(args),
         ConversationCommand::Cancel(args) => client_commands::run_cancel(args),
+        ConversationCommand::Settings(args) => crate::conversation_settings_commands::run(args),
         ConversationCommand::Operation { command } => {
             crate::conversation_operation_commands::run_conversation_operation_command(command)
         }
@@ -361,6 +396,26 @@ fn run_prompt(args: PromptArguments) -> i32 {
         }.await;
         signal_task.abort();let _joined=signal_task.await;
         match result{
+            Ok(ConversationEnd::Detached) => match target {
+                Some(target) => {
+                    let outcome = ConversationOperationResult::running_codex_turn(target);
+                    if let ConversationOperationResult::Running { follow_up, .. } = &outcome
+                        && !args.json
+                    {
+                        let _written = writeln!(io::stderr(), "{follow_up}");
+                    }
+                    let encoded = if args.json {
+                        serde_json::to_string(&outcome)
+                    } else {
+                        serde_json::to_string_pretty(&outcome)
+                    };
+                    match encoded {
+                        Ok(encoded) => writeln!(io::stdout(), "{encoded}").map_or(3, |()| 0),
+                        Err(_) => 3,
+                    }
+                }
+                None => 3,
+            },
             Ok(end) => conversation_end_exit(end),
             Err(error)=>{
                 if let Some(exit) = permission_exit {
@@ -409,6 +464,7 @@ const fn conversation_end_exit(end: ConversationEnd) -> i32 {
         ConversationEnd::Completed => 0,
         ConversationEnd::TimedOut => 124,
         ConversationEnd::Cancelled => 130,
+        ConversationEnd::Detached => 0,
     }
 }
 fn prepare(args: &PromptArguments) -> Result<(PathBuf, String), String> {
@@ -572,6 +628,7 @@ fn emit_record(event: ConversationEvent, machine: bool) -> Result<(), ClientErro
                     ConversationEnd::Cancelled | ConversationEnd::Completed => {
                         ConversationTerminalReason::Cancelled
                     }
+                    ConversationEnd::Detached => return Ok(()),
                 };
                 let record = settlement_record(target, terminal_reason, result);
                 if machine {
@@ -745,6 +802,34 @@ mod tests {
     }
 
     #[test]
+    fn provider_lifecycle_commands_accept_exact_targets_and_operation_ids() {
+        let resume = ConversationArguments::try_parse_from([
+            "agent-collaboration conversation",
+            "resume",
+            "--target",
+            "target-json",
+            "--cwd",
+            "/tmp/project",
+            "--access",
+            "workspace-write",
+            "--operation-id",
+            "019f0000-0000-7000-8000-000000000011",
+        ])
+        .expect("resume arguments");
+        assert!(matches!(resume.command, ConversationCommand::Resume(_)));
+        let close = ConversationArguments::try_parse_from([
+            "agent-collaboration conversation",
+            "close",
+            "--target",
+            "target-json",
+            "--operation-id",
+            "019f0000-0000-7000-8000-000000000012",
+        ])
+        .expect("close arguments");
+        assert!(matches!(close.command, ConversationCommand::Close(_)));
+    }
+
+    #[test]
     fn create_accepts_from_session_ref_override() {
         let parsed = ConversationArguments::try_parse_from([
             "agent-collaboration conversation",
@@ -775,7 +860,10 @@ mod tests {
             }
             ConversationCommand::Prompt(_)
             | ConversationCommand::Load(_)
+            | ConversationCommand::Resume(_)
+            | ConversationCommand::Close(_)
             | ConversationCommand::Cancel(_)
+            | ConversationCommand::Settings(_)
             | ConversationCommand::Operation { .. } => {
                 panic!("create parse selected another command")
             }
@@ -855,6 +943,10 @@ mod tests {
         assert_eq!(
             conversation_end_exit(collaboration_client::ConversationEnd::TimedOut),
             124
+        );
+        assert_eq!(
+            conversation_end_exit(collaboration_client::ConversationEnd::Detached),
+            0
         );
     }
 }

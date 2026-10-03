@@ -5,8 +5,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use codex_router_secret_store::account_tokens::AccountCredentialBundle;
-use codex_router_secret_store::account_tokens::account_credential_bundle_key;
-use codex_router_secret_store::file_backend::FileSecretStore;
+use codex_router_secret_store::account_tokens::openai_account_credential_bundle_key;
+use codex_router_secret_store::encrypted_credential_store::EncryptedCredentialStore;
 use codex_router_state::account::AccountRecord;
 use codex_router_state::account::AccountStatus;
 use codex_router_state::sqlite::AsyncSqliteStateStore;
@@ -231,7 +231,7 @@ async fn credential_authority_fails_closed_and_binds_only_provider_effective_fie
     assert!(matches!(
         load_reset_credential_authority(
             &fixture.database_path,
-            &fixture.secret_root,
+            &fixture.secret_store,
             &missing_account,
             expected_generation,
             200,
@@ -365,15 +365,20 @@ async fn wal_reader_never_observes_uncommitted_generation_and_refreshes_after_co
 
 #[tokio::test]
 async fn authority_read_does_not_create_absent_state_or_secret_roots() {
-    let root = unique_test_root("absent-roots");
-    let database_path = root.join("missing-state").join("state.sqlite");
-    let secret_root = root.join("missing-secrets");
+    let missing_state_root = unique_test_root("absent-state-root");
+    let database_path = missing_state_root.join("state.sqlite");
+    let test_secret_root = unique_test_root("existing-authority-secret-root");
+    fs::create_dir_all(&test_secret_root)
+        .unwrap_or_else(|error| panic!("test secret root should create: {error}"));
+    let credential_store =
+        codex_router_secret_store::test_support::open_encrypted_credential_store(&test_secret_root)
+            .unwrap_or_else(|error| panic!("fixture encrypted store should open: {error}"));
     let account_id = AccountId::new("acct_absent")
         .unwrap_or_else(|error| panic!("fixture account id should parse: {error}"));
 
     let result = load_reset_credential_authority(
         &database_path,
-        &secret_root,
+        &credential_store,
         &account_id,
         ActiveCredentialGeneration::new(1),
         100,
@@ -381,13 +386,67 @@ async fn authority_read_does_not_create_absent_state_or_secret_roots() {
     .await;
 
     assert!(result.is_err());
-    assert!(!root.exists());
+    assert!(!missing_state_root.exists());
+}
+
+#[tokio::test]
+async fn claude_account_cannot_read_an_openai_quota_reset_bundle() {
+    let fixture = AuthorityFixture::new("provider-boundary").await;
+    let claude_id = AccountId::new("acct_claude_authority")
+        .unwrap_or_else(|error| panic!("Claude account id should parse: {error}"));
+    let state = AsyncSqliteStateStore::open(&fixture.database_path)
+        .await
+        .unwrap_or_else(|error| panic!("fixture state should open: {error}"));
+    state
+        .upsert_account(
+            &AccountRecord::new(
+                codex_router_core::provider::Provider::Claude,
+                claude_id.clone(),
+                "Claude authority",
+                AccountStatus::Enabled,
+            )
+            .with_active_credential_generation(1),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("Claude account should persist: {error}"));
+    state
+        .close()
+        .await
+        .unwrap_or_else(|error| panic!("state should close: {error}"));
+    let openai_key = openai_account_credential_bundle_key(&claude_id, 1)
+        .unwrap_or_else(|error| panic!("OpenAI fixture key should parse: {error}"));
+    let openai_bundle = AccountCredentialBundle::imported_codex_auth(
+        "openai-authority-token",
+        Some("openai-authority-refresh".to_owned()),
+    )
+    .with_chatgpt_account_id("openai-routing-id")
+    .to_secret_string()
+    .unwrap_or_else(|error| panic!("OpenAI bundle should serialize: {error}"));
+    fixture
+        .secret_store
+        .write_secret(&openai_key, &openai_bundle)
+        .unwrap_or_else(|error| panic!("OpenAI bundle fixture should write: {error}"));
+
+    let result = load_reset_credential_authority(
+        &fixture.database_path,
+        &fixture.secret_store,
+        &claude_id,
+        ActiveCredentialGeneration::new(1),
+        200,
+    )
+    .await;
+
+    assert!(matches!(
+        result,
+        Err(CredentialAuthorityError::AccountUnavailable)
+    ));
 }
 
 struct AuthorityFixture {
     root: PathBuf,
     database_path: PathBuf,
     secret_root: PathBuf,
+    secret_store: EncryptedCredentialStore,
     account_id: AccountId,
 }
 
@@ -398,12 +457,16 @@ impl AuthorityFixture {
             .unwrap_or_else(|error| panic!("fixture root should create: {error}"));
         let database_path = root.join("state.sqlite");
         let secret_root = root.join("secrets");
+        let secret_store =
+            codex_router_secret_store::test_support::open_encrypted_credential_store(&secret_root)
+                .unwrap_or_else(|error| panic!("fixture encrypted store should open: {error}"));
         let account_id = AccountId::new("acct_authority")
             .unwrap_or_else(|error| panic!("fixture account id should parse: {error}"));
         let fixture = Self {
             root,
             database_path,
             secret_root,
+            secret_store,
             account_id,
         };
         fixture.set_account(AccountStatus::Enabled, Some(7)).await;
@@ -422,7 +485,12 @@ impl AuthorityFixture {
         let state = AsyncSqliteStateStore::open(&self.database_path)
             .await
             .unwrap_or_else(|error| panic!("fixture state should open: {error}"));
-        let mut account = AccountRecord::new(self.account_id.clone(), "authority", status);
+        let mut account = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
+            self.account_id.clone(),
+            "authority",
+            status,
+        );
         if let Some(generation) = generation {
             account = account.with_active_credential_generation(generation);
         }
@@ -444,8 +512,13 @@ impl AuthorityFixture {
             .unwrap_or_else(|error| panic!("fixture decoy id should parse: {error}"));
         state
             .upsert_account(
-                &AccountRecord::new(decoy_id, "decoy", AccountStatus::Enabled)
-                    .with_active_credential_generation(99),
+                &AccountRecord::new(
+                    codex_router_core::provider::Provider::Openai,
+                    decoy_id,
+                    "decoy",
+                    AccountStatus::Enabled,
+                )
+                .with_active_credential_generation(99),
             )
             .await
             .unwrap_or_else(|error| panic!("fixture decoy should write: {error}"));
@@ -509,11 +582,9 @@ impl AuthorityFixture {
     }
 
     fn write_serialized_bundle(&self, generation: u64, serialized: &SecretString) {
-        let store = FileSecretStore::open(&self.secret_root)
-            .unwrap_or_else(|error| panic!("fixture secret store should open: {error}"));
-        let key = account_credential_bundle_key(&self.account_id, generation)
+        let key = openai_account_credential_bundle_key(&self.account_id, generation)
             .unwrap_or_else(|error| panic!("fixture secret key should parse: {error}"));
-        store
+        self.secret_store
             .write_secret(&key, serialized)
             .unwrap_or_else(|error| panic!("fixture secret should write: {error}"));
     }
@@ -524,7 +595,7 @@ impl AuthorityFixture {
     ) -> Result<PinnedResetAuthority, CredentialAuthorityError> {
         load_reset_credential_authority(
             &self.database_path,
-            &self.secret_root,
+            &self.secret_store,
             &self.account_id,
             expected_generation,
             200,

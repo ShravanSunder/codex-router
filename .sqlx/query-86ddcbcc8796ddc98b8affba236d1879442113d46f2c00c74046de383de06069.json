@@ -1,0 +1,21 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT strftime('%Y-%m-%dT%H:%M:%fZ','now') AS \"migration_time!: String\"",
+  "describe": {
+    "columns": [
+      {
+        "name": "migration_time!: String",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "86ddcbcc8796ddc98b8affba236d1879442113d46f2c00c74046de383de06069"
+}

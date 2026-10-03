@@ -6,6 +6,10 @@ use super::*;
 mod reporting;
 use reporting::*;
 
+#[path = "conversation_client_lifecycle.rs"]
+mod lifecycle;
+pub(super) use lifecycle::{run_close, run_resume};
+
 pub(super) fn run_create(args: CreateArguments) -> i32 {
     if let Err(failure) = validate_create_endpoint_options(&args) {
         return crate::endpoint_commands::report_failure(
@@ -23,6 +27,10 @@ pub(super) fn run_create(args: CreateArguments) -> i32 {
     };
     if !args.cwd.is_absolute()
         || args
+            .mode
+            .as_deref()
+            .is_some_and(|value| validate_choice_value(value, "--mode").is_err())
+        || args
             .model
             .as_deref()
             .is_some_and(|value| validate_choice_value(value, "--model").is_err())
@@ -33,7 +41,7 @@ pub(super) fn run_create(args: CreateArguments) -> i32 {
     {
         return crate::endpoint_commands::report_failure(
             "invalidField",
-            "Create requires an absolute --cwd and non-empty supplied --model/--effort",
+            "Create requires an absolute --cwd and non-empty supplied --mode/--model/--effort",
             2,
             args.json,
         );
@@ -100,37 +108,63 @@ pub(super) fn run_create(args: CreateArguments) -> i32 {
             Ok(value) => value,
             Err(error) => return report_create_client_error(error, &operation_id, args.json),
         };
-        let creator = match current_session_ref(&endpoint.service_id, args.from.as_deref()) {
-            Ok(value) => value,
-            Err(_) => {
-                let message = if args.from.is_some() {
-                    "invalid --from SessionRef"
-                } else {
-                    "current session identity unavailable; run agent-collaboration whoami --json or pass --from SessionRef JSON"
-                };
-                return report_conversation_failure(
-                    operation_failure_from_client_error(
-                        ClientError::Protocol(message),
-                        OperationEffect::None,
-                    ),
-                    None,
-                    args.json,
-                );
-            }
-        };
-        let approver = match args.approver.as_deref() {
-            Some(value) => match serde_json::from_str(value) {
-                Ok(value) => Some(value),
+        let creator = match args.from.as_deref() {
+            Some(value) => match serde_json::from_str::<ConversationCreateActor>(value) {
+                Ok(value) => value,
                 Err(_) => {
                     return crate::endpoint_commands::report_failure(
                         "invalidField",
-                        "invalid --approver SessionRef",
+                        "--from must be a SessionRef or typed Identity JSON",
                         2,
                         args.json,
                     );
                 }
             },
-            None => Some(creator.clone()),
+            None => match current_session_ref(&endpoint.service_id, None) {
+                Ok(value) => value.into(),
+                Err(_) => {
+                    return report_conversation_failure(
+                        operation_failure_from_client_error(
+                            ClientError::Protocol(
+                                "current session identity unavailable; run agent-collaboration whoami --json or pass --from SessionRef JSON",
+                            ),
+                            OperationEffect::None,
+                        ),
+                        None,
+                        args.json,
+                    );
+                }
+            },
+        };
+        let approver = if args.approver_owner {
+            match collaboration_client::resolve_owner_human_id().await {
+                Ok(human_id) => Some(ConversationCreateActor::Typed(
+                    message_board::Identity::Human { human_id },
+                )),
+                Err(_) => {
+                    return crate::endpoint_commands::report_failure(
+                        "unavailable",
+                        "owner identity lookup failed; use explicit --approver Identity JSON or retry",
+                        3,
+                        args.json,
+                    );
+                }
+            }
+        } else {
+            match args.approver.as_deref() {
+                Some(value) => match serde_json::from_str::<ConversationCreateActor>(value) {
+                    Ok(value) => Some(value),
+                    Err(_) => {
+                        return crate::endpoint_commands::report_failure(
+                            "invalidField",
+                            "--approver must be a SessionRef or typed Identity JSON",
+                            2,
+                            args.json,
+                        );
+                    }
+                },
+                None => Some(creator.clone()),
+            }
         };
         let root_message_id = match args.root_message_id.map(TryInto::try_into).transpose() {
             Ok(value) => value,
@@ -150,6 +184,7 @@ pub(super) fn run_create(args: CreateArguments) -> i32 {
             fork,
             generation,
             model: args.model,
+            mode: args.mode,
             effort: args.effort,
             access: match args.access {
                 ConversationAccess::WriteRestricted => RouterAccess::WriteRestricted,
@@ -172,7 +207,13 @@ pub(super) fn run_create(args: CreateArguments) -> i32 {
             }
         };
         match client.create(request, timeout).await {
-            Ok(outcome) => emit_create_outcome(&outcome, args.json).map_or(3, |()| 0),
+            Ok(outcome) => emit_create_outcome(&outcome, args.json).map_or(3, |()| {
+                if matches!(outcome, ConversationCreateOutcome::CreatedWithoutSettings { .. }) {
+                    4
+                } else {
+                    0
+                }
+            }),
             Err(error) => report_create_client_error(error, &operation_id, args.json),
         }
     })
@@ -313,10 +354,11 @@ pub(super) fn run_new_prompt(args: PromptArguments) -> i32 {
             endpoint,
             working_directory: cwd,
             access,
-            created_by: creator,
-            approver,
+            created_by: creator.into(),
+            approver: approver.map(Into::into),
             generation,
             model: args.model,
+            mode: None,
             effort: args.effort.clone(),
             fork: None,
             root_message_id,
@@ -345,6 +387,7 @@ pub(super) fn run_new_prompt(args: PromptArguments) -> i32 {
             Ok(outcome) => {
                 emit_create_prompt_outcome(&outcome, args.json).map_or(3, |()| match &outcome {
                     ConversationCreatePromptOutcome::CreatePending { .. } => 0,
+                    ConversationCreatePromptOutcome::CreatedWithoutSettings { .. } => 4,
                     ConversationCreatePromptOutcome::Prompt { prompt, .. } => {
                         operation_result_exit(prompt)
                     }

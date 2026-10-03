@@ -143,8 +143,9 @@ fn seed_retry_accounts(
 ) -> Result<(), String> {
     let state = SqliteStateStore::open(state_path)
         .map_err(|error| format!("failed to open retry integration state: {error}"))?;
-    let secrets = FileSecretStore::open(secret_root)
-        .map_err(|error| format!("failed to open retry integration secrets: {error}"))?;
+    let secrets =
+        codex_router_secret_store::test_support::open_encrypted_credential_store(secret_root)
+            .map_err(|error| format!("failed to open retry integration secrets: {error}"))?;
     let weekly_exhausted = matches!(scenario, RetryScenario::WeeklyTerminal);
     let account_count = if matches!(
         scenario,
@@ -157,6 +158,7 @@ fn seed_retry_accounts(
     for (index, token) in TEST_ACCOUNT_TOKENS.iter().take(account_count).enumerate() {
         let account_id = account_id(&format!("acct_retry_integration_{index}"))?;
         let account = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
             account_id.clone(),
             format!("retry-integration-{index}"),
             AccountStatus::Enabled,
@@ -196,7 +198,7 @@ fn seed_retry_accounts(
             now_unix_seconds.saturating_add(300),
         )
         .map_err(|error| format!("failed to seed retry quota windows: {error}"))?;
-        let credential_key = account_credential_bundle_key(&account_id, 1)
+        let credential_key = openai_account_credential_bundle_key(&account_id, 1)
             .map_err(|error| format!("failed to build retry credential key: {error}"))?;
         let credential = AccountCredentialBundle::imported_codex_auth(*token, None)
             .to_secret_string()

@@ -11,6 +11,9 @@ use tokio_tungstenite::{
     WebSocketStream,
     tungstenite::{Message, protocol::Role},
 };
+#[path = "support/native_permission_echo.rs"]
+mod native_permission_echo;
+use native_permission_echo::applied_router_sandbox;
 #[path = "support/conversation_operation_recorder.rs"]
 mod conversation_operation_recorder;
 use conversation_operation_recorder::AcceptingConversationRecorder;
@@ -121,7 +124,7 @@ async fn new_session_mints_scoped_configuration_receipt_and_checks_effective_cwd
                 assert_eq!(request["method"], "thread/resume");
                 assert_eq!(request["params"], json!({"threadId":"new-thread"}));
             }
-            server.send(Message::Text(json!({"id":request["id"],"result":{"cwd":effective_cwd,"model":"gpt-5.6-sol","approvalPolicy":"on-request","approvalsReviewer":effective_reviewer,"activePermissionProfile":{"id":"router-write-restricted","extends":":read-only"},"sandbox":{"type":"workspaceWrite","writableRoots":[TEST_SCRATCH,"/work/project/docs/wip","/work/project/tmp"],"excludeTmpdirEnvVar":true,"excludeSlashTmp":true},"thread":{"id":"new-thread","cwd":effective_cwd,"turns":[{"id":"old-turn","items":[{"type":"agentMessage","id":"message","text":"previous answer"}]}]}}}).to_string().into())).await.unwrap_or_else(|error| panic!("send: {error}"));
+            server.send(Message::Text(json!({"id":request["id"],"result":{"cwd":effective_cwd,"model":"gpt-5.6-sol","approvalPolicy":"on-request","approvalsReviewer":effective_reviewer,"activePermissionProfile":{"id":"router-write-restricted","extends":":read-only"},"sandbox":applied_router_sandbox(&request),"thread":{"id":"new-thread","cwd":effective_cwd,"status":{"type":"idle"},"turns":[{"id":"old-turn","items":[{"type":"agentMessage","id":"message","text":"previous answer"}]}]}}}).to_string().into())).await.unwrap_or_else(|error| panic!("send: {error}"));
         });
         let result = if creating {
             AcpSessionBinding::create(
@@ -309,10 +312,11 @@ async fn fork_session_sends_exact_model_choice_to_native_runtime() {
                         "approvalPolicy": "on-request",
                         "approvalsReviewer": "auto_review",
                         "activePermissionProfile":{"id":"router-workspace-write","extends":":workspace"},
-                        "sandbox":{"type":"workspaceWrite","writableRoots":[TEST_SCRATCH]},
+                        "sandbox":applied_router_sandbox(&request),
                         "thread": {
                             "id": "forked-thread",
                             "cwd": "/work/project",
+                            "status": {"type": "idle"},
                             "turns": []
                         }
                     }

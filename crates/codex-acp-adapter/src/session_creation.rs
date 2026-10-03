@@ -16,6 +16,10 @@ use std::{
 
 #[derive(Debug, thiserror::Error)]
 pub enum SessionSetupError {
+    #[error("native session has an active turn")]
+    Busy,
+    #[error("native resume returned invalid thread activity status")]
+    NativeThreadStatusUnavailable,
     #[error("native cancellation remains unresolved")]
     CancellationUnresolved,
     #[error("invalid ACP session parameters")]
@@ -40,9 +44,14 @@ pub enum SessionSetupError {
     Unavailable,
     #[error("session schema unavailable")]
     SchemaUnavailable,
+    #[error("Router host location {location} is unavailable for session grants")]
+    HostLocationsUnavailable { location: String },
 }
+mod router_permission_profile;
 /// Retains one connection and a receipt minted only by successful fresh thread/start.
 mod session_load_adoption;
+use router_permission_profile::{RouterSessionProfile, access_name};
+pub(crate) use session_load_adoption::{NativeThreadActivity, native_thread_activity};
 
 pub struct AcpSessionBinding {
     pub(crate) session_id: String,
@@ -212,7 +221,7 @@ impl AcpSessionBinding {
             .and_then(Value::as_str)
             .ok_or(SessionSetupError::InvalidParameters)?;
         let choice = router_model_choice(&inputs.params)?;
-        let expected_cwd = normalized_directory(cwd)?;
+        let expected_cwd = normalized_directory(cwd).await?;
         let servers = inputs
             .params
             .get("mcpServers")
@@ -220,19 +229,22 @@ impl AcpSessionBinding {
             .ok_or(SessionSetupError::InvalidParameters)?;
         let configuration = McpConfiguration::parse(catalog, servers)
             .map_err(|_| SessionSetupError::InvalidParameters)?;
-        let directories = match inputs.params.get("additionalDirectories") {
-            None => Vec::new(),
-            Some(value) => value
+        let mut directories = Vec::new();
+        if let Some(value) = inputs.params.get("additionalDirectories") {
+            for directory in value
                 .as_array()
                 .ok_or(SessionSetupError::InvalidParameters)?
-                .iter()
-                .map(|value| {
+            {
+                directories.push(
                     normalized_directory(
-                        value.as_str().ok_or(SessionSetupError::InvalidParameters)?,
+                        directory
+                            .as_str()
+                            .ok_or(SessionSetupError::InvalidParameters)?,
                     )
-                })
-                .collect::<Result<Vec<_>, _>>()?,
-        };
+                    .await?,
+                );
+            }
+        }
         // A fork without an explicit choice inherits the source thread's own
         // model and reasoning effort, read once before the fork is dispatched.
         let inherited = match choice.fork_thread_id {
@@ -253,7 +265,7 @@ impl AcpSessionBinding {
             None => inherited.effort.clone(),
         };
         let mut native = json!({
-            "cwd":cwd,
+            "cwd":expected_cwd,
             "experimentalRawEvents":false,
             "model":model,
             "allowProviderModelFallback":false,
@@ -269,11 +281,13 @@ impl AcpSessionBinding {
         let fields = native
             .as_object_mut()
             .ok_or(SessionSetupError::InvalidParameters)?;
-        let profile = match choice.access {
-            RouterAccess::WriteRestricted => "router-write-restricted",
-            RouterAccess::WorkspaceWrite => "router-workspace-write",
-        };
-        fields.insert("permissions".into(), json!(profile));
+        let profile = RouterSessionProfile::for_session(
+            choice.access,
+            &expected_cwd,
+            Path::new(choice.scratch_path),
+        )
+        .await?;
+        fields.insert("permissions".into(), json!(profile.name()));
         if let Some(config) = configuration.native_overrides() {
             let target = fields
                 .get_mut("config")
@@ -284,35 +298,11 @@ impl AcpSessionBinding {
                 .ok_or(SessionSetupError::InvalidParameters)?;
             target.extend(values.clone());
         }
-        let config = fields
+        fields
             .get_mut("config")
             .and_then(Value::as_object_mut)
-            .ok_or(SessionSetupError::InvalidParameters)?;
-        config.insert("default_permissions".into(), json!(profile));
-        let mut filesystem = serde_json::Map::new();
-        filesystem.insert(choice.scratch_path.to_owned(), json!("write"));
-        if choice.access == RouterAccess::WriteRestricted {
-            filesystem.insert(
-                expected_cwd.join("tmp").to_string_lossy().into_owned(),
-                json!("write"),
-            );
-            filesystem.insert(
-                expected_cwd.join("docs/wip").to_string_lossy().into_owned(),
-                json!("write"),
-            );
-        }
-        config.insert(
-            format!("permissions.{profile}.extends"),
-            json!(if choice.access == RouterAccess::WriteRestricted {
-                ":read-only"
-            } else {
-                ":workspace"
-            }),
-        );
-        config.insert(
-            format!("permissions.{profile}.filesystem"),
-            Value::Object(filesystem),
-        );
+            .ok_or(SessionSetupError::InvalidParameters)?
+            .extend(profile.native_config());
         if !directories.is_empty() {
             fields.insert("runtimeWorkspaceRoots".into(), json!(directories));
         }
@@ -356,18 +346,12 @@ impl AcpSessionBinding {
             },
             Some(choice.access),
         );
-        validate_observed_settings(
-            &result,
-            choice.access,
-            &expected_cwd,
-            Path::new(choice.scratch_path),
-            profile,
-        )?;
+        profile.validate_observed(&result)?;
         let effective_cwd = result
             .get("cwd")
             .and_then(Value::as_str)
             .ok_or(SessionSetupError::OutcomeUnknown)?;
-        if normalized_directory(effective_cwd)? != expected_cwd {
+        if normalized_directory(effective_cwd).await? != expected_cwd {
             return Err(SessionSetupError::ConfigurationMismatch);
         }
         let thread = result
@@ -378,24 +362,28 @@ impl AcpSessionBinding {
                 .get("cwd")
                 .and_then(Value::as_str)
                 .ok_or(SessionSetupError::OutcomeUnknown)?,
-        )? != expected_cwd
+        )
+        .await?
+            != expected_cwd
         {
             return Err(SessionSetupError::ConfigurationMismatch);
         }
         if !directories.is_empty() {
-            let actual = result
+            let values = result
                 .get("runtimeWorkspaceRoots")
                 .and_then(Value::as_array)
-                .ok_or(SessionSetupError::ConfigurationMismatch)?
-                .iter()
-                .map(|value| {
+                .ok_or(SessionSetupError::ConfigurationMismatch)?;
+            let mut actual = Vec::with_capacity(values.len());
+            for value in values {
+                actual.push(
                     normalized_directory(
                         value
                             .as_str()
                             .ok_or(SessionSetupError::ConfigurationMismatch)?,
                     )
-                })
-                .collect::<Result<Vec<_>, _>>()?;
+                    .await?,
+                );
+            }
             if actual != directories {
                 return Err(SessionSetupError::ConfigurationMismatch);
             }
@@ -495,7 +483,8 @@ impl AcpSessionBinding {
                 .get("cwd")
                 .and_then(Value::as_str)
                 .ok_or(SessionSetupError::InvalidParameters)?,
-        )?;
+        )
+        .await?;
         let route = inputs
             .approval_broker
             .route(&session_id)
@@ -524,6 +513,15 @@ impl AcpSessionBinding {
         let response = session
             .resume_with_receipt(catalog, &inputs.generation, &inputs.params)
             .await?;
+        match session_load_adoption::native_thread_activity(&response) {
+            session_load_adoption::NativeThreadActivity::Idle => {}
+            session_load_adoption::NativeThreadActivity::Active => {
+                return Err(SessionSetupError::Busy);
+            }
+            session_load_adoption::NativeThreadActivity::Invalid => {
+                return Err(SessionSetupError::NativeThreadStatusUnavailable);
+            }
+        }
         session.persisted_effort = response
             .pointer("/thread/reasoningEffort")
             .or_else(|| response.get("reasoningEffort"))
@@ -583,20 +581,6 @@ fn unavailable_settings(reason: SettingsUnavailableReason) -> SettingsObservatio
     SettingsObservation::Unavailable { reason }
 }
 
-const fn access_name(access: RouterAccess) -> &'static str {
-    match access {
-        RouterAccess::WriteRestricted => "write-restricted",
-        RouterAccess::WorkspaceWrite => "workspace-write",
-    }
-}
-
-const fn profile_name(access: RouterAccess) -> &'static str {
-    match access {
-        RouterAccess::WriteRestricted => "router-write-restricted",
-        RouterAccess::WorkspaceWrite => "router-workspace-write",
-    }
-}
-
 fn validate_scratch(
     scratch_path: &str,
     scratch_scope: &str,
@@ -632,66 +616,7 @@ fn validate_scratch(
     }
     Ok(())
 }
-
-fn validate_observed_settings(
-    response: &Value,
-    access: RouterAccess,
-    cwd: &Path,
-    scratch: &Path,
-    profile: &str,
-) -> Result<(), SessionSetupError> {
-    let profile_id = response
-        .pointer("/activePermissionProfile/id")
-        .and_then(Value::as_str)
-        .ok_or(SessionSetupError::ConfigurationMismatch)?;
-    let roots = response
-        .pointer("/sandbox/writableRoots")
-        .and_then(Value::as_array)
-        .ok_or(SessionSetupError::ConfigurationMismatch)?;
-    let actual = roots
-        .iter()
-        .map(|root| {
-            root.as_str()
-                .map(str::to_owned)
-                .ok_or(SessionSetupError::ConfigurationMismatch)
-        })
-        .collect::<Result<std::collections::BTreeSet<_>, _>>()?;
-    let exclude_tmpdir_env_var = response
-        .pointer("/sandbox/excludeTmpdirEnvVar")
-        .and_then(Value::as_bool);
-    let exclude_slash_tmp = response
-        .pointer("/sandbox/excludeSlashTmp")
-        .and_then(Value::as_bool);
-    let restricted_temporary_writes_excluded = access != RouterAccess::WriteRestricted
-        || (exclude_tmpdir_env_var == Some(true) && exclude_slash_tmp == Some(true));
-    let mut expected = std::collections::BTreeSet::from([scratch
-        .to_str()
-        .ok_or(SessionSetupError::ConfigurationMismatch)?
-        .to_owned()]);
-    match access {
-        RouterAccess::WriteRestricted => {
-            expected.insert(cwd.join("tmp").to_string_lossy().into_owned());
-            expected.insert(cwd.join("docs/wip").to_string_lossy().into_owned());
-        }
-        RouterAccess::WorkspaceWrite => {}
-    }
-    if profile_id != profile || actual != expected || !restricted_temporary_writes_excluded {
-        let effective = match access {
-            RouterAccess::WriteRestricted => format!(
-                "profile={profile_id}, roots={actual:?}, excludeTmpdirEnvVar={exclude_tmpdir_env_var:?}, excludeSlashTmp={exclude_slash_tmp:?}"
-            ),
-            RouterAccess::WorkspaceWrite => {
-                format!("profile={profile_id}, roots={actual:?}")
-            }
-        };
-        return Err(SessionSetupError::AccessMismatch {
-            requested: access_name(access).to_owned(),
-            effective,
-        });
-    }
-    Ok(())
-}
-fn normalized_directory(value: &str) -> Result<PathBuf, SessionSetupError> {
+async fn normalized_directory(value: &str) -> Result<PathBuf, SessionSetupError> {
     let path = Path::new(value);
     if !path.is_absolute() || value.contains('\0') {
         return Err(SessionSetupError::InvalidParameters);
@@ -706,7 +631,15 @@ fn normalized_directory(value: &str) -> Result<PathBuf, SessionSetupError> {
             other => normalized.push(other.as_os_str()),
         }
     }
-    Ok(normalized)
+    tokio::task::spawn_blocking(move || match std::fs::canonicalize(&normalized) {
+        Ok(canonical) => Ok(canonical),
+        // Native setup will reject an absent cwd. Keep lexical normalization
+        // here so a native rejection retains its existing error category.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(normalized),
+        Err(_) => Err(SessionSetupError::InvalidParameters),
+    })
+    .await
+    .map_err(|_| SessionSetupError::Unavailable)?
 }
 fn map_native_failure(error: NativeConnectionError) -> SessionSetupError {
     match error {
@@ -721,7 +654,32 @@ fn map_native_failure(error: NativeConnectionError) -> SessionSetupError {
 #[cfg(test)]
 mod access_validation_tests {
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::fs::{PermissionsExt, symlink};
+
+    #[tokio::test]
+    async fn cwd_comparison_resolves_existing_directory_symlinks() {
+        let root = std::env::temp_dir().join(format!("acp-cwd-alias-{}", std::process::id()));
+        let real = root.join("real");
+        let alias = root.join("alias");
+        std::fs::create_dir_all(&real).unwrap();
+        symlink(&real, &alias).unwrap();
+        assert_eq!(
+            normalized_directory(alias.to_str().unwrap()).await.unwrap(),
+            normalized_directory(real.to_str().unwrap()).await.unwrap()
+        );
+        std::fs::remove_file(alias).unwrap();
+        std::fs::remove_dir(real).unwrap();
+        std::fs::remove_dir(root).unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn cwd_comparison_resolves_the_system_tmp_symlink() {
+        assert_eq!(
+            normalized_directory("/tmp").await.unwrap(),
+            normalized_directory("/private/tmp").await.unwrap()
+        );
+    }
 
     #[test]
     fn scratch_metadata_is_required_private_and_scope_bound() {
@@ -744,86 +702,6 @@ mod access_validation_tests {
                 path.to_str().unwrap(),
                 scope,
                 Some("00000000-0000-4000-8000-000000000099")
-            )
-            .is_err()
-        );
-    }
-
-    #[test]
-    fn managed_setup_refuses_missing_or_incompatible_native_settings() {
-        let cwd = Path::new("/repo");
-        let scratch = Path::new("/owner/scratch/root");
-        assert!(
-            validate_observed_settings(
-                &json!({}),
-                RouterAccess::WriteRestricted,
-                cwd,
-                scratch,
-                "router-write-restricted"
-            )
-            .is_err()
-        );
-        let workspace_projection = json!({
-            "activePermissionProfile":{"id":"router-workspace-write"},
-            "sandbox":{"writableRoots":["/owner/scratch/root"]}
-        });
-        assert!(
-            validate_observed_settings(
-                &workspace_projection,
-                RouterAccess::WorkspaceWrite,
-                cwd,
-                scratch,
-                "router-workspace-write"
-            )
-            .is_ok()
-        );
-        let workspace_with_unexpected_root = json!({
-            "activePermissionProfile":{"id":"router-workspace-write"},
-            "sandbox":{"writableRoots":["/owner/scratch/root","/other/write-root"]}
-        });
-        assert!(
-            validate_observed_settings(
-                &workspace_with_unexpected_root,
-                RouterAccess::WorkspaceWrite,
-                cwd,
-                scratch,
-                "router-workspace-write"
-            )
-            .is_err()
-        );
-        let wrong = json!({
-            "activePermissionProfile":{"id":"router-write-restricted"},
-            "sandbox":{"writableRoots":["/owner/scratch/root","/repo/tmp"]}
-        });
-        assert!(
-            validate_observed_settings(
-                &wrong,
-                RouterAccess::WriteRestricted,
-                cwd,
-                scratch,
-                "router-write-restricted"
-            )
-            .is_err()
-        );
-        let broad_temporary_access = json!({
-            "activePermissionProfile":{"id":"router-write-restricted"},
-            "sandbox":{
-                "writableRoots":[
-                    "/owner/scratch/root",
-                    "/repo/docs/wip",
-                    "/repo/tmp"
-                ],
-                "excludeTmpdirEnvVar":false,
-                "excludeSlashTmp":false
-            }
-        });
-        assert!(
-            validate_observed_settings(
-                &broad_temporary_access,
-                RouterAccess::WriteRestricted,
-                cwd,
-                scratch,
-                "router-write-restricted"
             )
             .is_err()
         );

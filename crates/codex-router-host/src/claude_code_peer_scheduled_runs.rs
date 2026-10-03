@@ -4,7 +4,7 @@ use agent_automation::{PeerWriteEffect, RouteEffectEvidence};
 use claude_code_peer_messaging::{PeerSessionLookup, PeerSocketWriteOutcome};
 use collaboration_protocol::{
     CodexGeneration, DeliveryClientReceipt, DeliveryNextAction, DeliveryOutcome, DeliveryReceipt,
-    DeliveryRejection, DeliveryRejectionReason, MessageContent, RunExecution, ScheduleFailureKind,
+    DeliveryRejection, DeliveryRejectionReason, RouterLink, RunExecution, ScheduleFailureKind,
     SessionRef,
 };
 use collaboration_service::{
@@ -13,7 +13,8 @@ use collaboration_service::{
     RunEvidenceSink, RunObservationContext, RunReconciliation, RunSettlement, RunSubmission,
     RunSummarySource, ScheduleCapability, ScheduleDestination, SchedulePreparationFailure,
     SchedulePreparationOutcome, SchedulePreparationRequest, ScheduleSupport, ScheduledRunExecution,
-    ScheduledRunRoute, ScheduledRunSubmission, SettlementEvidence, StopRequestOutcome,
+    ScheduledRunPayload, ScheduledRunRoute, ScheduledRunSubmission, SettlementEvidence,
+    StopRequestOutcome,
 };
 
 impl ClaudeCodePeerDeliveryRoute {
@@ -127,6 +128,7 @@ impl ScheduledRunExecution for ClaudeCodePeerDeliveryRoute {
     fn prepare_existing_target<'a>(
         &'a self,
         target: &SessionRef,
+        _declared_cwd: &str,
         sink: &'a dyn RunEvidenceSink,
     ) -> DeliveryFuture<'a, PreparedTarget> {
         let target = target.clone();
@@ -156,6 +158,15 @@ impl ScheduledRunExecution for ClaudeCodePeerDeliveryRoute {
         sink: &'a dyn RunEvidenceSink,
     ) -> DeliveryFuture<'a, RunSubmission> {
         Box::pin(async move {
+            let prepared = match run.payload {
+                ScheduledRunPayload::Existing { prepared } => prepared,
+                ScheduledRunPayload::Fresh { .. } => {
+                    return Err(DeliveryContractError::ClientOperation);
+                }
+            };
+            if !prepared_push_link_matches_id(&prepared) {
+                return Err(DeliveryContractError::InvalidEvidence);
+            }
             let RouteEffectEvidence::ClaudeCodePeer(recorded) = &run.recorded else {
                 return Err(DeliveryContractError::InvalidEvidence);
             };
@@ -171,7 +182,7 @@ impl ScheduledRunExecution for ClaudeCodePeerDeliveryRoute {
             }
             let peer = match self.lookup(&run.target).await {
                 PeerSessionLookup::Writable(peer) if peer.process_id == recorded.process_id => peer,
-                PeerSessionLookup::LiveUnsupported { .. } => {
+                PeerSessionLookup::LiveUnsupported { .. } | PeerSessionLookup::Ambiguous { .. } => {
                     return Ok(rejected(
                         DeliveryRejectionReason::LiveElsewhere,
                         DeliveryNextAction::InspectTarget,
@@ -186,10 +197,6 @@ impl ScheduledRunExecution for ClaudeCodePeerDeliveryRoute {
                     ));
                 }
             };
-            let rendered = Self::render_peer_message(
-                &run.target,
-                &MessageContent::Router { text: run.message },
-            )?;
             let dispatch = Self::evidence(&peer, PeerWriteEffect::Dispatching)?;
             if matches!(
                 sink.record(dispatch).await?,
@@ -197,7 +204,7 @@ impl ScheduledRunExecution for ClaudeCodePeerDeliveryRoute {
             ) {
                 return Ok(RunSubmission::NotStartedBusy);
             }
-            let outcome = self.write_peer_message(&peer, &rendered).await;
+            let outcome = self.write_peer_message(&peer, prepared.line.as_str()).await;
             let (write, result) = match outcome {
                 PeerSocketWriteOutcome::Written => {
                     let written_at = chrono::Utc::now()
@@ -296,6 +303,18 @@ impl ScheduledRunExecution for ClaudeCodePeerDeliveryRoute {
     }
 }
 
+fn prepared_push_link_matches_id(
+    prepared: &collaboration_service::layer_zero::PreparedPush,
+) -> bool {
+    prepared
+        .line
+        .as_str()
+        .split_whitespace()
+        .last()
+        .and_then(|link| RouterLink::parse(link).ok())
+        .is_some_and(|link| link.push_id() == &prepared.push_id)
+}
+
 fn rejected(
     reason: DeliveryRejectionReason,
     next_action: DeliveryNextAction,
@@ -306,5 +325,6 @@ fn rejected(
         next_action,
         client_code: None,
         detail: Some(detail.to_owned()),
+        claims: None,
     })
 }

@@ -1,3 +1,5 @@
+> listen was replaced by thread subscriptions in #112; see docs/specs/2026-09-28-thread-subscriptions/.
+
 # Thread listen: wake an agent on board-thread activity
 
 Date: 2026-09-14. Status: owner-accepted design, ready to implement on branch `listening`. Author: Fable design session on the owner's behalf. Owner decisions are marked **(owner)**; everything else is design derived from current source.

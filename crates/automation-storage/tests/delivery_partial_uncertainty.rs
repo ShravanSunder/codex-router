@@ -7,6 +7,8 @@ use automation_storage::{
     WakeEvaluation,
 };
 use serde::{Deserialize, Serialize};
+#[path = "support/wake_push_draft.rs"]
+mod wake_push_test_support;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Message {
     target: String,
@@ -63,7 +65,11 @@ async fn unknown_resume_effect_is_retained_even_when_input_was_not_dispatched()
         })
         .await?;
     let id = match store
-        .evaluate_wakeup::<Message>(&wake.definition.wakeup_id, 1000)
+        .evaluate_wakeup::<Message>(
+            &wake.definition.wakeup_id,
+            1000,
+            wake_push_test_support::build_test_wake_push_draft,
+        )
         .await?
     {
         WakeEvaluation::Fired { delivery_id, .. } => delivery_id,

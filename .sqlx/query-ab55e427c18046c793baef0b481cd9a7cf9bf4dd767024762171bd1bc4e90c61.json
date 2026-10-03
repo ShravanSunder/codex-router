@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT scope_kind,scope_id FROM thread_subscriptions WHERE reader_key=? AND state IN ('active','draining') ORDER BY scope_kind,scope_id",
+  "describe": {
+    "columns": [
+      {
+        "name": "scope_kind",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "thread_subscriptions",
+            "name": "scope_kind"
+          }
+        }
+      },
+      {
+        "name": "scope_id",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "thread_subscriptions",
+            "name": "scope_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "ab55e427c18046c793baef0b481cd9a7cf9bf4dd767024762171bd1bc4e90c61"
+}

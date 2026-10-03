@@ -1,27 +1,44 @@
 //! Codex app-server delivery owns native admission and its recorded effects.
+use crate::native_message_dispatch::{
+    NativeMessageBody, NativeMessageParams, NativeThreadStatus, NativeThreadStatusReadError,
+    read_native_thread_status,
+};
 use crate::{
     AttemptEvidenceSink, AttemptReconciliation, AttemptReconciliationContext,
     DeliveryClientReceipt, DeliveryContractError, DeliveryFuture, DeliveryPrecondition,
-    DeliveryReceipt, DeliveryRequest, EndpointDirectory, NativeControlBackend, RouteClaim,
-    RouteUnavailableReason, SessionDeliveryRoute,
+    DeliveryReceipt, EndpointDirectory, LoadPolicy, NOT_LOADED_REASON, NativeControlBackend,
+    RouteClaim, RoutePresence, RouteUnavailableReason, SessionDeliveryRoute,
 };
 use agent_automation::{
     CessationEvidence, NativeEffectEvidence, PreparationEffect, RouteEffectEvidence,
     SubmissionEffect,
 };
 use codex_acp_adapter::{HeldBindingCheckout, UnmaterializedBindingStore};
+use codex_native_integration::NativeProtocolConnection;
 use collaboration_protocol::{
-    AcceptedResumeEffect, CodexGeneration, DeliveryNextAction, DeliveryOutcome, DeliveryRejection,
-    DeliveryRejectionReason, MessageDelivery, NativeSendAcceptance, NativeSendParams,
-    SessionReachability, SessionRef, UuidIdentity,
+    AcceptedResumeEffect, ChannelDescription, CodexGeneration, DeliveryCorrelationId,
+    DeliveryNextAction, DeliveryOutcome, DeliveryRejection, DeliveryRejectionReason, MachineId,
+    MessageDelivery, NativeSendAcceptance, RouterLink, SessionReachability, SessionRef,
+    UuidIdentity,
 };
 use serde_json::{Value, json};
+use std::time::Duration;
 
 pub struct CodexAppServerDeliveryRoute {
     service_id: UuidIdentity,
     endpoints: EndpointDirectory,
     backend: NativeControlBackend,
     holder: std::sync::Arc<crate::UnmaterializedThreadHolder>,
+}
+
+struct NativeRouteDeliveryRequest {
+    target: SessionRef,
+    body: NativeMessageBody,
+    mode: MessageDelivery,
+    load_policy: LoadPolicy,
+    precondition: DeliveryPrecondition,
+    correlation: DeliveryCorrelationId,
+    attempt: agent_automation::AttemptId,
 }
 
 impl CodexAppServerDeliveryRoute {
@@ -42,7 +59,7 @@ impl CodexAppServerDeliveryRoute {
 
     async fn deliver_native(
         &self,
-        request: DeliveryRequest,
+        request: NativeRouteDeliveryRequest,
         sink: &dyn AttemptEvidenceSink,
     ) -> Result<DeliveryReceipt, DeliveryContractError> {
         let Ok(admission) = self.backend.gate.acquire() else {
@@ -78,10 +95,11 @@ impl CodexAppServerDeliveryRoute {
             .and_then(|subscription| subscription.snapshot())
             .map_err(|_| DeliveryContractError::ClientOperation)?
             .endpoints;
-        let params = NativeSendParams {
+        let load_policy = request.load_policy;
+        let params = NativeMessageParams {
             target: request.target.clone(),
             generation: generation.clone(),
-            message: request.message,
+            body: request.body,
             delivery: request.mode,
             client_user_message_id: Some(
                 request
@@ -97,7 +115,10 @@ impl CodexAppServerDeliveryRoute {
             .checkout(&String::from(request.target.session_id.clone()));
         let (response, held_idle_submission) = match checked_out {
             HeldBindingCheckout::Ready(mut binding) => {
-                let mut checkout = HeldBindingCleanup::new(&self.holder, binding.session_id());
+                let mut checkout = crate::unmaterialized_thread_holder::HeldBindingCleanup::new(
+                    &self.holder,
+                    binding.session_id(),
+                );
                 if binding.generation() != &generation {
                     checkout.finish();
                     effects.submission = SubmissionEffect::NotDispatched;
@@ -114,6 +135,7 @@ impl CodexAppServerDeliveryRoute {
                         backend: &self.backend,
                         endpoints: &endpoints,
                         held_connection: Some(binding.connection_mut()),
+                        load_policy,
                     },
                 )
                 .await;
@@ -158,6 +180,7 @@ impl CodexAppServerDeliveryRoute {
                         backend: &self.backend,
                         endpoints: &endpoints,
                         held_connection: None,
+                        load_policy,
                     },
                 )
                 .await;
@@ -183,33 +206,105 @@ impl CodexAppServerDeliveryRoute {
         }
         Ok(receipt)
     }
-}
 
-struct HeldBindingCleanup<'a> {
-    holder: &'a crate::UnmaterializedThreadHolder,
-    session_id: String,
-    active: bool,
-}
-impl<'a> HeldBindingCleanup<'a> {
-    fn new(holder: &'a crate::UnmaterializedThreadHolder, session_id: &str) -> Self {
-        Self {
-            holder,
-            session_id: session_id.into(),
-            active: true,
+    async fn inspect_thread_presence(&self, target: &SessionRef) -> RoutePresence {
+        if target.endpoint != self.backend.endpoint {
+            return RoutePresence::NotMine;
         }
-    }
-    fn disarm(&mut self) {
-        self.active = false;
-    }
-    fn finish(&mut self) {
-        self.holder.finish(&self.session_id);
-        self.disarm();
-    }
-}
-impl Drop for HeldBindingCleanup<'_> {
-    fn drop(&mut self) {
-        if self.active {
-            self.holder.finish(&self.session_id);
+        let session_id = String::from(target.session_id.clone());
+        if self.holder.contains(&session_id) {
+            return RoutePresence::Running;
+        }
+        let Ok(admission) = self.backend.gate.acquire() else {
+            return RoutePresence::Unreachable {
+                reason: "native backend is unavailable".to_owned(),
+            };
+        };
+        let Some(schemas) = admission.schemas() else {
+            return RoutePresence::Unreachable {
+                reason: "native thread/read is not supported".to_owned(),
+            };
+        };
+        let endpoint_snapshot = self
+            .endpoints
+            .subscribe()
+            .and_then(|subscription| subscription.snapshot());
+        let Some(endpoint) = endpoint_snapshot.ok().and_then(|snapshot| {
+            snapshot
+                .endpoints
+                .into_iter()
+                .find(|entry| entry.endpoint == target.endpoint)
+        }) else {
+            return RoutePresence::Unreachable {
+                reason: "Codex endpoint is not available".to_owned(),
+            };
+        };
+        let schema_matches = endpoint.channels.iter().any(|channel| {
+            matches!(
+                channel,
+                ChannelDescription::NativeCodex {
+                    schema_digest: Some(digest),
+                    generation: Some(generation),
+                    ..
+                } if generation == admission.generation()
+                    && String::from(digest.clone()) == schemas.schema_digest()
+            )
+        });
+        if !schema_matches {
+            return RoutePresence::Unreachable {
+                reason: "native thread/read schema is unavailable".to_owned(),
+            };
+        }
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        let retired = admission.retirement();
+        let connection = tokio::time::timeout_at(deadline, async {
+            tokio::select! {
+                biased;
+                _ = retired.cancelled() => Err(codex_native_integration::NativeConnectionError::Unavailable),
+                result = NativeProtocolConnection::connect(admission.backend_path()) => result,
+            }
+        })
+        .await
+        .unwrap_or(Err(
+            codex_native_integration::NativeConnectionError::Unavailable,
+        ));
+        let Ok(mut connection) = connection else {
+            return RoutePresence::Unreachable {
+                reason: "native backend is unavailable".to_owned(),
+            };
+        };
+        let session_id = String::from(target.session_id.clone());
+        match read_native_thread_status(&mut connection, &schemas, &session_id, deadline, &retired)
+            .await
+        {
+            Ok(snapshot) if snapshot.status == NativeThreadStatus::NotLoaded => {
+                RoutePresence::Wakeable
+            }
+            Ok(snapshot)
+                if matches!(
+                    snapshot.status,
+                    NativeThreadStatus::Idle | NativeThreadStatus::Active
+                ) =>
+            {
+                RoutePresence::Running
+            }
+            Ok(_) => RoutePresence::Unreachable {
+                reason: "Codex thread status is unavailable".to_owned(),
+            },
+            Err(NativeThreadStatusReadError::Missing) => RoutePresence::Unreachable {
+                reason: "Codex thread is missing".to_owned(),
+            },
+            Err(
+                NativeThreadStatusReadError::Rejected { .. }
+                | NativeThreadStatusReadError::Unsupported
+                | NativeThreadStatusReadError::Unavailable,
+            ) => RoutePresence::Unreachable {
+                reason: "Codex thread could not be read".to_owned(),
+            },
+            Err(NativeThreadStatusReadError::InvalidResponse) => RoutePresence::Unreachable {
+                reason: "Codex thread status is unavailable".to_owned(),
+            },
         }
     }
 }
@@ -217,7 +312,10 @@ impl Drop for HeldBindingCleanup<'_> {
 impl SessionDeliveryRoute for CodexAppServerDeliveryRoute {
     fn scheduled_runs(&self) -> Option<std::sync::Arc<dyn crate::ScheduledRunRoute>> {
         Some(std::sync::Arc::new(
-            crate::CodexAppServerScheduledRuns::new(self.backend.clone()),
+            crate::CodexAppServerScheduledRuns::new(
+                self.backend.clone(),
+                std::sync::Arc::clone(&self.holder),
+            ),
         ))
     }
 
@@ -242,12 +340,48 @@ impl SessionDeliveryRoute for CodexAppServerDeliveryRoute {
         Box::pin(async move { Ok(claim) })
     }
 
+    fn presence(&self, target: &SessionRef) -> DeliveryFuture<'_, RoutePresence> {
+        let target = target.clone();
+        Box::pin(async move { Ok(self.inspect_thread_presence(&target).await) })
+    }
+
     fn deliver<'a>(
         &'a self,
-        request: DeliveryRequest,
+        request: crate::layer_zero::DeliveryRequest,
         sink: &'a dyn AttemptEvidenceSink,
     ) -> DeliveryFuture<'a, DeliveryReceipt> {
-        Box::pin(async move { self.deliver_native(request, sink).await })
+        Box::pin(async move {
+            let push_id = &request.payload.push_id;
+            let expected_link =
+                RouterLink::new(MachineId::from(self.service_id.clone()), push_id.clone())
+                    .to_string();
+            let prepared_header = request
+                .payload
+                .line
+                .as_str()
+                .lines()
+                .next()
+                .unwrap_or_default();
+            let line_has_expected_link = prepared_header
+                .rsplit_once(" · ")
+                .is_some_and(|(_, link)| link == expected_link);
+            if request.correlation.as_str() != push_id.as_str() || !line_has_expected_link {
+                return Err(DeliveryContractError::InvalidEvidence);
+            }
+            self.deliver_native(
+                NativeRouteDeliveryRequest {
+                    target: request.target,
+                    body: NativeMessageBody::PreparedPush(request.payload.line),
+                    mode: request.mode,
+                    load_policy: request.payload.load_policy,
+                    precondition: request.precondition,
+                    correlation: request.correlation,
+                    attempt: request.attempt,
+                },
+                sink,
+            )
+            .await
+        })
     }
 
     fn reconcile_attempt(
@@ -361,6 +495,14 @@ fn interpret_native_response(
                     },
                     None,
                 )
+            } else if kind == NOT_LOADED_REASON {
+                (
+                    DeliveryOutcome::NotSubmitted {
+                        retryable: true,
+                        reason: NOT_LOADED_REASON.into(),
+                    },
+                    None,
+                )
             } else if kind == "nativeRejected" || kind == "unsupportedCapability" {
                 let reason = data
                     .and_then(|value| value.get("reason"))
@@ -379,7 +521,13 @@ fn interpret_native_response(
                         client_code: data
                             .and_then(|value| value.get("clientCode"))
                             .and_then(Value::as_i64),
-                        detail: None,
+                        detail: (reason == DeliveryRejectionReason::HeldByAnotherClient).then(
+                            || {
+                                crate::message_effect_state::HELD_BY_ANOTHER_CLIENT_GUIDANCE
+                                    .to_owned()
+                            },
+                        ),
+                        claims: None,
                     }),
                     None,
                 )

@@ -58,13 +58,16 @@ async fn dirty_native_history_rejects_without_repair() {
 async fn legacy_and_native_read_only_openers_never_create_history() {
     let legacy_database = TemporaryDatabase::new("legacy_read_only");
     create_legacy_v13_database(legacy_database.path(), "legacy-read-only").await;
-    let legacy_reader = AsyncSqliteStateStore::open_read_only(legacy_database.path())
+    let legacy_error = AsyncSqliteStateStore::open_read_only(legacy_database.path())
         .await
-        .expect("legacy v13 should remain readable");
-    legacy_reader
-        .close()
-        .await
-        .expect("legacy reader should close");
+        .expect_err("pre-provider schema requires a writable migration");
+    assert_eq!(
+        legacy_error,
+        crate::sqlite::StateStoreError::MissingReadOnlySchemaObject {
+            object_kind: "column",
+            object_name: "provider",
+        }
+    );
     assert_legacy_database_unchanged(legacy_database.path(), "legacy-read-only").await;
 
     let native_database = TemporaryDatabase::new("native_read_only");

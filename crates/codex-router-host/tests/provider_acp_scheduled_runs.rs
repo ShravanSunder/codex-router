@@ -12,20 +12,22 @@ use collaboration_protocol::{
     ChannelDescription, CodexGeneration, ConversationOperationWaitOutput,
     ConversationOperationWaitRequest, ConversationPromptRequest, DeliveryOutcome,
     DestinationPreparation, EndpointAvailability, EndpointDescription, EndpointId, EndpointRef,
-    GenerationNumber, MessageContent, MessageText, NonEmptyText, ObservationTimestamp, OperationId,
-    PositiveSeconds, ProviderBindingId, ProviderBindingIdentity, ProviderCapabilities,
-    ProviderCapability, ProviderCapabilityEvidence, ProviderCapabilityName,
+    GenerationNumber, MachineId, MachineLabel, MessageContent, MessageText, NonEmptyText,
+    ObservationTimestamp, OperationId, PositiveSeconds, ProviderBindingId, ProviderBindingIdentity,
+    ProviderCapabilities, ProviderCapability, ProviderCapabilityEvidence, ProviderCapabilityName,
     ProviderCapabilityStatus, ProviderKind, ProviderRequestedPolicy, ProviderRuntimeIdentity,
-    ProviderTransport, ProviderWorkingDirectory, RouterAccess, RunExecution, SessionId, SessionRef,
-    UuidIdentity,
+    ProviderTransport, ProviderWorkingDirectory, PushHeaderFacts, PushId, PushKind, PushLineInput,
+    PushOrigin, RouterAccess, RouterLink, RunExecution, SessionId, SessionRef, UuidIdentity,
+    render_push_line,
 };
 use collaboration_service::{
-    DeliveryContractError, DeliveryFuture, DeliveryPrecondition, EndpointDirectory,
+    DeliveryContractError, DeliveryFuture, DeliveryPrecondition, EndpointDirectory, LoadPolicy,
     PreparationEvidenceSink, PreparedTarget, ProviderConversationBackend, ProviderOperationStore,
     ProviderSessionRecord, RunEvidenceDisposition, RunEvidenceSink, RunObservationContext,
     RunReconciliation, RunSettlement, RunSubmission, ScheduleCapability, ScheduleDestination,
     SchedulePreparationOutcome, SchedulePreparationRequest, ScheduleSupport, ScheduledRunExecution,
-    ScheduledRunSubmission, SessionDeliveryRoute, SessionDeliveryRouter, SettlementEvidence,
+    ScheduledRunPayload, ScheduledRunSubmission, SessionDeliveryRoute, SessionDeliveryRouter,
+    SettlementEvidence, layer_zero::PreparedPush,
 };
 use serde_json::json;
 use std::{
@@ -33,7 +35,7 @@ use std::{
     sync::Arc,
     time::Duration,
 };
-use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+use tokio::io::{AsyncBufReadExt as _, AsyncReadExt as _, AsyncWriteExt as _, BufReader};
 
 struct NoLivePeer;
 impl LiveSessionOwnershipCheck for NoLivePeer {
@@ -102,7 +104,41 @@ impl PreparationEvidenceSink for RecordedPreparationIntent {
     }
 }
 
-fn fixture_launch(event_socket: &Path) -> ExternalProviderLaunch {
+fn rendered_schedule_push(
+    run_id: &RunId,
+    target: &SessionRef,
+    push_id: PushId,
+    body: &str,
+) -> PreparedPush {
+    PreparedPush {
+        line: rendered_schedule_line(run_id, target, push_id.clone(), body),
+        push_id,
+        load_policy: LoadPolicy::MayLoad,
+    }
+}
+
+fn rendered_schedule_line(
+    run_id: &RunId,
+    target: &SessionRef,
+    push_id: PushId,
+    body: &str,
+) -> MessageText {
+    let rendered = render_push_line(&PushLineInput {
+        link: RouterLink::new(MachineId::from(target.endpoint.service_id.clone()), push_id),
+        machine_label: MachineLabel::try_from("schedule-fixture".to_owned())
+            .expect("machine label"),
+        origin: PushOrigin::Router(PushKind::ScheduleRun),
+        header_facts: PushHeaderFacts::ScheduleRun {
+            schedule_id: agent_automation::ScheduleId::generate(),
+            run_id: run_id.clone(),
+        },
+        body: Some(body.to_owned()),
+    })
+    .expect("rendered schedule push line");
+    MessageText::try_from(rendered).expect("schedule push text")
+}
+
+fn fixture_launch(event_socket: &Path, expected_scheduled_prompt: &str) -> ExternalProviderLaunch {
     let script = format!(
         r#"
 import json,socket,sys
@@ -120,6 +156,11 @@ with socket.socket(socket.AF_UNIX,socket.SOCK_STREAM) as event:
 print(json.dumps({{'jsonrpc':'2.0','id':active['id'],'result':{{'stopReason':'end_turn'}}}})); sys.stdout.flush()
 scheduled=json.loads(sys.stdin.readline())
 assert scheduled['method']=='session/prompt'
+assert scheduled['params']['prompt']==[{{'type':'text','text':{:?}}}]
+with socket.socket(socket.AF_UNIX,socket.SOCK_STREAM) as observed:
+ observed.connect({:?})
+ observed.sendall((json.dumps(scheduled['params'])+'\n').encode())
+ observed.recv(1)
 print(json.dumps({{'jsonrpc':'2.0','method':'session/update','params':{{'sessionId':'scheduled-session','update':{{'sessionUpdate':'agent_message_chunk','content':{{'type':'text','text':'provider summary text'}}}}}}}})); sys.stdout.flush()
 print(json.dumps({{'jsonrpc':'2.0','id':scheduled['id'],'result':{{'stopReason':'end_turn'}}}})); sys.stdout.flush()
 cancelled=json.loads(sys.stdin.readline())
@@ -140,9 +181,12 @@ cancel=json.loads(sys.stdin.readline())
 assert cancel['method']=='session/cancel'
 sys.stdin.read()
 "#,
+        event_socket.display().to_string(),
+        expected_scheduled_prompt,
         event_socket.display().to_string()
     );
     ExternalProviderLaunch {
+        persistence_target: acp_client_runtime::ProviderPersistenceTarget::Unspecified,
         executable: PathBuf::from("/usr/bin/python3"),
         arguments: vec!["-c".to_owned(), script],
         environment: Vec::new(),
@@ -153,6 +197,7 @@ sys.stdin.read()
 async fn busy_provider_run_starts_when_idle_and_finishes_without_summary() {
     let root = tempfile::tempdir().expect("fixture root");
     let event_socket = root.path().join("active.sock");
+    let push_id = PushId::try_from(uuid::Uuid::now_v7().to_string()).expect("scheduled push");
     let listener = tokio::net::UnixListener::bind(&event_socket).expect("active event listener");
     let service_id = UuidIdentity::try_from("0ff962c5-7fa3-4c18-a5ca-1bbe8db09e89".to_owned())
         .expect("service ID");
@@ -164,6 +209,8 @@ async fn busy_provider_run_starts_when_idle_and_finishes_without_summary() {
         endpoint: endpoint.clone(),
         session_id: SessionId::try_from("scheduled-session".to_owned()).expect("session"),
     };
+    let run_id = RunId::generate();
+    let prepared_push = rendered_schedule_push(&run_id, &target, push_id.clone(), "Check work");
     let generation = CodexGeneration {
         service_epoch: UuidIdentity::try_from("1ff962c5-7fa3-4c18-a5ca-1bbe8db09e80".to_owned())
             .expect("epoch"),
@@ -199,9 +246,12 @@ async fn busy_provider_run_starts_when_idle_and_finishes_without_summary() {
         generation: generation.clone(),
         capabilities: capabilities.clone(),
     };
-    let runtime = ExternalProviderRuntime::initialize(fixture_launch(&event_socket))
-        .await
-        .expect("runtime");
+    let runtime = ExternalProviderRuntime::initialize(fixture_launch(
+        &event_socket,
+        prepared_push.line.as_str(),
+    ))
+    .await
+    .expect("runtime");
     runtime
         .create_session(PathBuf::from("/tmp"))
         .await
@@ -220,8 +270,8 @@ async fn busy_provider_run_starts_when_idle_and_finishes_without_summary() {
             requested_policy: ProviderRequestedPolicy {
                 access: RouterAccess::WriteRestricted,
             },
-            created_by: target.clone(),
-            approver: target.clone(),
+            created_by: (target.clone()).into(),
+            approver: (target.clone()).into(),
             updated_at_ms: 1,
         })
         .await
@@ -345,7 +395,7 @@ async fn busy_provider_run_starts_when_idle_and_finishes_without_summary() {
             && failure.explanation.contains("conversation create")));
     let sink = RecordedRunEvidence(tokio::sync::Mutex::new(Vec::new()));
     let prepared = router
-        .prepare_existing_target(&target, &sink)
+        .prepare_existing_target(&target, "", &sink)
         .await
         .expect("existing target prepared");
     let inputs: CapturedRunInputs<SessionRef, EndpointRef> = serde_json::from_value(json!({
@@ -359,23 +409,58 @@ async fn busy_provider_run_starts_when_idle_and_finishes_without_summary() {
         }
     }))
     .expect("captured inputs");
-    let run_id = RunId::generate();
     let run = ScheduledRunSubmission {
         run_id: run_id.clone(),
         target: target.clone(),
-        message: MessageText::try_from("scheduled input".to_owned()).expect("message"),
+        payload: ScheduledRunPayload::Existing {
+            prepared: prepared_push.clone(),
+        },
         precondition: DeliveryPrecondition::Unpinned,
         inputs: inputs.clone(),
         recorded: prepared.evidence,
     };
+    let mismatch_push_id =
+        PushId::try_from(uuid::Uuid::now_v7().to_string()).expect("mismatched linked push ID");
+    assert_ne!(mismatch_push_id, push_id);
+    let mismatch_run_id = RunId::generate();
+    let mismatched_submission = ScheduledRunSubmission {
+        run_id: mismatch_run_id.clone(),
+        target: target.clone(),
+        payload: ScheduledRunPayload::Existing {
+            prepared: PreparedPush {
+                push_id: push_id.clone(),
+                line: rendered_schedule_line(
+                    &mismatch_run_id,
+                    &target,
+                    mismatch_push_id,
+                    "Mismatched work",
+                ),
+                load_policy: LoadPolicy::MayLoad,
+            },
+        },
+        precondition: DeliveryPrecondition::Unpinned,
+        inputs: inputs.clone(),
+        recorded: run.recorded.clone(),
+    };
+    let evidence_count_before_mismatch = sink.0.lock().await.len();
+    assert!(matches!(
+        router.submit_run(mismatched_submission, &sink).await,
+        Err(DeliveryContractError::InvalidEvidence)
+    ));
+    assert_eq!(
+        sink.0.lock().await.len(),
+        evidence_count_before_mismatch,
+        "mismatched push id was recorded as dispatch evidence"
+    );
     let active_id = OperationId::generate();
     supervisor
         .prompt(ConversationPromptRequest {
+            input_id: None,
             operation_id: active_id.clone(),
             target: target.clone(),
             generation: Some(generation.clone()),
-            requested_by: target.clone(),
-            approver: target.clone(),
+            requested_by: (target.clone()).into(),
+            approver: (target.clone()).into(),
             prompt: MessageContent::HumanUser {
                 text: MessageText::try_from("active input".to_owned()).expect("active text"),
             },
@@ -420,6 +505,36 @@ async fn busy_provider_run_starts_when_idle_and_finishes_without_summary() {
     assert!(matches!(started, RunSubmission::Started(acceptance)
         if matches!(acceptance.execution, RunExecution::ProviderAcp { .. })
             && acceptance.receipt.outcome == DeliveryOutcome::Started));
+    let (scheduled_event, _) = tokio::time::timeout(Duration::from_secs(2), listener.accept())
+        .await
+        .expect("scheduled prompt observation deadline")
+        .expect("scheduled prompt observation event");
+    let mut scheduled_event = BufReader::new(scheduled_event);
+    let mut observed_params = String::new();
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        scheduled_event.read_line(&mut observed_params),
+    )
+    .await
+    .expect("scheduled prompt params deadline")
+    .expect("scheduled prompt params");
+    scheduled_event
+        .get_mut()
+        .write_all(b"x")
+        .await
+        .expect("release scheduled prompt fixture");
+    let observed_params: serde_json::Value =
+        serde_json::from_str(&observed_params).expect("captured ACP prompt params");
+    assert_eq!(
+        observed_params["sessionId"],
+        String::from(target.session_id.clone()),
+        "scheduled push targets the intended provider session"
+    );
+    assert_eq!(
+        observed_params["prompt"],
+        json!([{"type":"text","text":prepared_push.line.as_str()}]),
+        "scheduled provider receives the exact prepared push line"
+    );
     let recorded = sink
         .0
         .lock()
@@ -434,15 +549,19 @@ async fn busy_provider_run_starts_when_idle_and_finishes_without_summary() {
         recorded,
         inputs,
     };
-    assert!(matches!(
-        router
-            .observe_settlement(context.clone())
-            .await
-            .expect("settlement"),
-        RunSettlement::Completed {
-            summary_source: None
-        }
-    ));
+    let settlement = router
+        .observe_settlement(context.clone())
+        .await
+        .expect("settlement");
+    assert!(
+        matches!(
+            &settlement,
+            RunSettlement::Completed {
+                summary_source: None
+            }
+        ),
+        "scheduled provider returned unexpected settlement: {settlement:?}"
+    );
     let restarted_supervisor = Arc::new(
         ExternalProviderSupervisor::new(Vec::new(), Arc::clone(&store))
             .expect("restarted supervisor"),
@@ -499,7 +618,7 @@ async fn busy_provider_run_starts_when_idle_and_finishes_without_summary() {
 
     let stop_sink = RecordedRunEvidence(tokio::sync::Mutex::new(Vec::new()));
     let prepared_stop = router
-        .prepare_existing_target(&target, &stop_sink)
+        .prepare_existing_target(&target, "", &stop_sink)
         .await
         .expect("stop target prepared");
     let stop_run_id = RunId::generate();
@@ -508,8 +627,14 @@ async fn busy_provider_run_starts_when_idle_and_finishes_without_summary() {
             ScheduledRunSubmission {
                 run_id: stop_run_id.clone(),
                 target: target.clone(),
-                message: MessageText::try_from("cancel scheduled input".to_owned())
-                    .expect("cancel input"),
+                payload: ScheduledRunPayload::Existing {
+                    prepared: rendered_schedule_push(
+                        &stop_run_id,
+                        &target,
+                        PushId::try_from(uuid::Uuid::now_v7().to_string()).expect("push id"),
+                        "Cancel scheduled input",
+                    ),
+                },
                 precondition: DeliveryPrecondition::Unpinned,
                 inputs: next_inputs.clone(),
                 recorded: prepared_stop.evidence,
@@ -556,7 +681,7 @@ async fn busy_provider_run_starts_when_idle_and_finishes_without_summary() {
 
     let refused_sink = RecordedRunEvidence(tokio::sync::Mutex::new(Vec::new()));
     let prepared_refused = router
-        .prepare_existing_target(&target, &refused_sink)
+        .prepare_existing_target(&target, "", &refused_sink)
         .await
         .expect("refused target prepared");
     let refused_run_id = RunId::generate();
@@ -566,8 +691,14 @@ async fn busy_provider_run_starts_when_idle_and_finishes_without_summary() {
                 ScheduledRunSubmission {
                     run_id: refused_run_id.clone(),
                     target: target.clone(),
-                    message: MessageText::try_from("refuse scheduled input".to_owned())
-                        .expect("refusal input"),
+                    payload: ScheduledRunPayload::Existing {
+                        prepared: rendered_schedule_push(
+                            &refused_run_id,
+                            &target,
+                            PushId::try_from(uuid::Uuid::now_v7().to_string()).expect("push id"),
+                            "Refuse scheduled input",
+                        ),
+                    },
                     precondition: DeliveryPrecondition::Unpinned,
                     inputs: next_inputs.clone(),
                     recorded: prepared_refused.evidence,
@@ -601,11 +732,12 @@ async fn busy_provider_run_starts_when_idle_and_finishes_without_summary() {
     for _ in 0..256 {
         let operation_id = OperationId::generate();
         let prompt = collaboration_protocol::ConversationPromptRequest {
+            input_id: None,
             operation_id: operation_id.clone(),
             target: target.clone(),
             generation: Some(generation.clone()),
-            requested_by: target.clone(),
-            approver: target.clone(),
+            requested_by: (target.clone()).into(),
+            approver: (target.clone()).into(),
             prompt: MessageContent::Router {
                 text: MessageText::try_from("evict completed live result".to_owned())
                     .expect("eviction prompt"),
@@ -641,7 +773,7 @@ async fn busy_provider_run_starts_when_idle_and_finishes_without_summary() {
 
     let pending_sink = RecordedRunEvidence(tokio::sync::Mutex::new(Vec::new()));
     let prepared_pending = router
-        .prepare_existing_target(&target, &pending_sink)
+        .prepare_existing_target(&target, "", &pending_sink)
         .await
         .expect("pending target prepared");
     let pending_run_id = RunId::generate();
@@ -650,9 +782,15 @@ async fn busy_provider_run_starts_when_idle_and_finishes_without_summary() {
             .submit_run(
                 ScheduledRunSubmission {
                     run_id: pending_run_id.clone(),
-                    target,
-                    message: MessageText::try_from("never settled".to_owned())
-                        .expect("pending input"),
+                    target: target.clone(),
+                    payload: ScheduledRunPayload::Existing {
+                        prepared: rendered_schedule_push(
+                            &pending_run_id,
+                            &target,
+                            PushId::try_from(uuid::Uuid::now_v7().to_string()).expect("push id"),
+                            "Never settled",
+                        ),
+                    },
                     precondition: DeliveryPrecondition::Unpinned,
                     inputs: pending_inputs.clone(),
                     recorded: prepared_pending.evidence,

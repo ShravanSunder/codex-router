@@ -10,6 +10,7 @@ workspace = true
 
 [dependencies]
 message-board = { path = "../message-board", version = "0.1.20" }
+session-event-model = { path = "../session-event-model", version = "0.1.39" }
 agent-automation = { path = "../agent-automation", version = "0.1.16" }
 jsonschema.workspace = true
 schemars.workspace = true

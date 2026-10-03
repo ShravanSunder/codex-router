@@ -1,0 +1,105 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT window.root_id,window.opened_at,window.last_arrival_at,0 AS pending_count, window.held_since,window.retry_not_before, window.retry_attempts,window.window_id FROM subscription_windows window JOIN board_messages root ON root.message_id=window.root_id AND root.root_id IS NULL WHERE window.reader_key=? AND root.topic_id=? AND NOT EXISTS(SELECT 1 FROM thread_subscriptions thread_override WHERE thread_override.reader_key=window.reader_key AND thread_override.scope_kind='thread' AND thread_override.scope_id=window.root_id) ORDER BY window.root_id",
+  "describe": {
+    "columns": [
+      {
+        "name": "root_id",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "subscription_windows",
+            "name": "root_id"
+          }
+        }
+      },
+      {
+        "name": "opened_at",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "subscription_windows",
+            "name": "opened_at"
+          }
+        }
+      },
+      {
+        "name": "last_arrival_at",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "subscription_windows",
+            "name": "last_arrival_at"
+          }
+        }
+      },
+      {
+        "name": "pending_count",
+        "ordinal": 3,
+        "type_info": "Integer",
+        "origin": "Expression"
+      },
+      {
+        "name": "held_since",
+        "ordinal": 4,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "subscription_windows",
+            "name": "held_since"
+          }
+        }
+      },
+      {
+        "name": "retry_not_before",
+        "ordinal": 5,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "subscription_windows",
+            "name": "retry_not_before"
+          }
+        }
+      },
+      {
+        "name": "retry_attempts",
+        "ordinal": 6,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "subscription_windows",
+            "name": "retry_attempts"
+          }
+        }
+      },
+      {
+        "name": "window_id",
+        "ordinal": 7,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "subscription_windows",
+            "name": "window_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "a447b934bea8a88e78fb763828e3afc30216cf69a37b9b36b50f15a538758cc5"
+}

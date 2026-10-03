@@ -8,6 +8,12 @@ pub(super) fn test_async_runtime() -> tokio::runtime::Runtime {
     )
 }
 
+pub(super) fn migrate_test_state_database(state_database_path: &Path) {
+    let runtime = test_async_runtime();
+    let state = must_ok(runtime.block_on(AsyncSqliteStateStore::open(state_database_path)));
+    must_ok(runtime.block_on(state.close()));
+}
+
 pub(super) struct TestRoot {
     pub(super) path: PathBuf,
 }
@@ -81,6 +87,7 @@ pub(super) fn git_diff_text(workspace_root: &Path, args: &[&str]) -> String {
     String::from_utf8_lossy(&output.stdout).into_owned()
 }
 
+#[track_caller]
 pub(super) fn must_ok<T, E: std::fmt::Display>(result: Result<T, E>) -> T {
     match result {
         Ok(value) => value,

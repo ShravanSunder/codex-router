@@ -1,4 +1,15 @@
 //! Public communication contracts without process, storage or transport ownership.
+mod thread_subscription_contract;
+mod thread_subscription_wait;
+pub use thread_subscription_contract::{
+    ThreadSubscribeRequest, ThreadSubscriptionPresence, ThreadSubscriptionState,
+    ThreadSubscriptionView, ThreadSubscriptionsRequest, ThreadSubscriptionsResult,
+    ThreadUnsubscribeRequest,
+};
+pub use thread_subscription_wait::{
+    InvalidSubscriptionWait, MAX_SUBSCRIPTION_WAIT_SECONDS, SubscriptionWaitBatch,
+    ThreadSubscriptionWaitFilter, ThreadSubscriptionWaitRequest, ThreadSubscriptionWaitResult,
+};
 mod cli_output_contract;
 pub use cli_output_contract::{
     ConversationRecord, ConversationTerminalReason, EffortChange, FiniteCommandRecord,
@@ -10,38 +21,74 @@ pub use operation_failure_contract::{
 };
 mod conversation_create_outcome;
 mod provider_conversation_contract;
+mod provider_identity;
+mod provider_settings_contract;
 pub use conversation_create_outcome::ConversationCreateOutcome;
 pub use provider_conversation_contract::{
-    ConversationAdmissionState, ConversationBindingIdentity, ConversationCancelRequest,
-    ConversationCreateRequest, ConversationLoadRequest, ConversationOperationFailure,
-    ConversationOperationFailureKind, ConversationOperationFailureStage,
-    ConversationOperationQueueState, ConversationOperationReconcileRequest,
-    ConversationOperationSettlement, ConversationOperationShowRequest,
-    ConversationOperationSnapshot, ConversationOperationSubmission,
-    ConversationOperationWaitOutput, ConversationOperationWaitRequest,
-    ConversationOperationWaitResult, ConversationOutputUnavailableReason,
-    ConversationPromptRequest, EffectiveProviderSettings, ProviderAuthenticationState,
+    AppliedProviderSetting, ConversationAdmissionState, ConversationBindingIdentity,
+    ConversationCancelRequest, ConversationCloseRequest, ConversationCreateRequest,
+    ConversationLoadRequest, ConversationOperationFailure, ConversationOperationFailureKind,
+    ConversationOperationFailureStage, ConversationOperationQueueState,
+    ConversationOperationReconcileRequest, ConversationOperationSettlement,
+    ConversationOperationShowRequest, ConversationOperationSnapshot,
+    ConversationOperationSubmission, ConversationOperationWaitOutput,
+    ConversationOperationWaitRequest, ConversationOperationWaitResult,
+    ConversationOutputUnavailableReason, ConversationPromptRequest, ConversationResumeRequest,
+    EffectiveProviderSettings, FailedProviderSetting, InvalidProviderSetting,
+    InvalidSettingSessionDisposition, NotAppliedProviderSetting, ProviderAuthenticationState,
     ProviderBindingId, ProviderBindingIdentity, ProviderCapabilities, ProviderCapability,
     ProviderCapabilityEvidence, ProviderCapabilityName, ProviderCapabilityStatus, ProviderKind,
     ProviderOperationEffect, ProviderOperationKind, ProviderOperationStage,
     ProviderPermissionOutcome, ProviderPromptStopReason, ProviderReconciliationState,
-    ProviderRequestedPolicy, ProviderRuntimeIdentity, ProviderSettingsMappingStatus,
-    ProviderTransport, ProviderWorkingDirectory,
+    ProviderRequestedPolicy, ProviderRequestedSettings, ProviderRuntimeIdentity,
+    ProviderSettingName, ProviderSettingsMappingStatus, ProviderTransport,
+    ProviderWorkingDirectory,
+};
+pub use provider_identity::ProviderIdentity;
+pub use provider_settings_contract::{
+    ProviderSettingsAcceptRequest, ProviderSettingsFailure, ProviderSettingsFailureKind,
+    ProviderSettingsResult, ProviderSettingsSetRequest,
 };
 mod access_contract;
 mod approval_contract;
+mod interaction_actor;
 mod permission_diagnostic;
+mod provider_session_inspect;
+mod provider_session_list;
+mod session_observation_contract;
+pub use provider_session_inspect::{
+    ProviderConfigOptionView, ProviderConfigValueView, ProviderHistoryAvailability,
+    ProviderInspectFailure, ProviderInspectFailureKind, ProviderSessionInspectRequest,
+    ProviderSessionInspectResult, ProviderSettingChoiceView, ProviderSettingsCatalogView,
+};
+mod question_contract;
 pub use access_contract::{
     RouterAccess, SettingsObservation, SettingsObservationSource, SettingsUnavailableReason,
 };
 pub use approval_contract::{
     ApprovalArgument, ApprovalDecideParams, ApprovalDecideResult, ApprovalDecision,
-    ApprovalListParams, ApprovalListResult, ApprovalOfferedOption, ApprovalOptionScope,
-    ApprovalPresentation, ApprovalRequestRecord, ApprovalState,
+    ApprovalDetailedListResult, ApprovalDetailedRecord, ApprovalListParams, ApprovalListResponse,
+    ApprovalListResult, ApprovalOfferedOption, ApprovalOptionEffect, ApprovalOptionScope,
+    ApprovalOptionView, ApprovalOptionViewScope, ApprovalPresentation, ApprovalRequestRecord,
+    ApprovalState,
 };
 pub use permission_diagnostic::{
     PermissionDiagnostic, PermissionDiagnosticKind, PermissionDiagnosticNextAction,
     PermissionDiagnosticStage,
+};
+pub use provider_session_list::{
+    ClaudeCodeInteractiveOrigin, ClaudeCodeInteractiveStatus, HostedProviderOrigin,
+    ProviderSessionListParams, ProviderSessionListResult, ProviderSessionState,
+    ProviderSessionSummary,
+};
+pub use question_contract::{
+    QuestionAnswerParams, QuestionAnswerResult, QuestionAnswerValue, QuestionFieldView,
+    QuestionListParams, QuestionListResult, QuestionRecord, QuestionResponse, QuestionState,
+};
+pub use session_observation_contract::{
+    BoundedObservationRequest, BoundedObservationResult, ObservationEndReason,
+    ProviderObservationEventTooLarge, ProviderObservationEventTooLargeKind,
+    ProviderSessionListenReady, ProviderSessionListenRequest,
 };
 mod backend_generation;
 mod control_error_validation;
@@ -53,8 +100,16 @@ pub use control_schema_identity::{ControlSchema, ControlSchemaError};
 mod delivery_rejection;
 mod delivery_route_evidence;
 mod message_content;
+mod push_line;
+#[cfg(test)]
+#[path = "push_line_tests.rs"]
+mod push_line_tests;
+mod push_record;
+mod router_origin_ref;
 mod session_delivery_outcome;
-pub use delivery_rejection::{DeliveryNextAction, DeliveryRejection, DeliveryRejectionReason};
+pub use delivery_rejection::{
+    DeliveryNextAction, DeliveryPeerClaim, DeliveryRejection, DeliveryRejectionReason,
+};
 mod session_delivery_receipt;
 mod session_message_send;
 pub use delivery_route_evidence::DeliveryRouteEvidence;
@@ -63,11 +118,14 @@ pub use session_delivery_outcome::{
 };
 pub use session_delivery_receipt::{DeliveryClientReceipt, DeliveryReceipt};
 pub use session_message_send::SessionMessageSendParams;
+mod session_message_reply;
+pub use session_message_reply::{SessionMessageReplyParams, SessionMessageReplyResult};
 mod native_schema_references;
 mod native_session_catalog;
 pub use message_content::{
     AcceptedResumeEffect, MessageContent, MessageDelivery, MessageInputKind, MessageRepresentation,
-    MessageText, MessageTextError, RenderedMessage, render_message,
+    MessageText, MessageTextError, RenderedMessage, SessionDisplayName, SessionDisplayNameError,
+    SessionDisplayNameLookup, SessionDisplayNameLookupError, session_identity,
 };
 pub use native_control_contract::{
     NativeInputDisposition, NativeInputOperation, NativeSendAcceptance, NativeSendParams,
@@ -77,6 +135,20 @@ pub use native_session_catalog::{
     NativeSessionListParams, NativeSessionListResult, NativeSessionObservation, NativeSessionScope,
     NativeSessionSource, NativeSessionSummary, NativeSessionView,
 };
+pub use push_line::{
+    MAX_MACHINE_LABEL_SCALARS, MAX_PUSH_LINE_BYTES, MachineId, MachineLabel, MachineLabelError,
+    ParsedPushLineHeader, PushHeaderFacts, PushId, PushIdError, PushKind, PushLineError,
+    PushLineInput, PushOrigin, RouterLink, escape_push_line_field, parse_push_line_header,
+    render_push_line,
+};
+pub use push_record::{
+    MAX_DIRECT_MESSAGE_BODY_BYTES, MAX_PUSH_ACTIVITY_RANGES, PushActivityRange,
+    PushActivityRangeRead, PushActivitySnapshot, PushDeliveryState, PushMessageSendResult,
+    PushRecord, PushRecordDraft, PushRecordHistoryParams, PushRecordListParams,
+    PushRecordListResult, PushRecordNotice, PushRecordShowParams, PushRecordShowResult,
+    PushRecordValidationError,
+};
+pub use router_origin_ref::{InteractionId, InteractionPresentationId, RouterOriginRef};
 mod control_initialization;
 mod endpoint_inventory;
 pub use control_initialization::{

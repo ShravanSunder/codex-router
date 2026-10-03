@@ -5,6 +5,12 @@ edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[features]
+keychain-test-support = [
+    "codex-router-secret-store/keychain-test-guard",
+    "codex-router-secret-store/test-support",
+]
+
 [lints]
 workspace = true
 
@@ -22,8 +28,10 @@ collaboration-protocol = { path = "../collaboration-protocol", version = "0.1.14
 claude-code-peer-messaging = { path = "../claude-code-peer-messaging", version = "0.1.37" }
 collaboration-service = { path = "../collaboration-service", version = "0.1.14" }
 collaboration-mcp = { path = "../collaboration-mcp", version = "0.1.30" }
+collaboration-client = { path = "../collaboration-client", version = "0.1.14" }
 codex-native-integration.workspace = true
 codex-router-core.workspace = true
+codex-router-secret-store = { path = "../codex-router-secret-store", version = "0.1.4" }
 httparse.workspace = true
 opentelemetry.workspace = true
 rustix.workspace = true
@@ -36,13 +44,15 @@ tracing.workspace = true
 
 [dev-dependencies]
 acp-client-runtime = { path = "../acp-client-runtime", version = "0.1.40", features = ["test-observation"] }
+codex-router-secret-store = { path = "../codex-router-secret-store", version = "0.1.4", features = ["keychain-test-guard", "test-support"] }
 agent-client-protocol.workspace = true
 sha2.workspace = true
 tempfile = "3.27.0"
 toml = "1.1.2"
 sqlx.workspace = true
+uuid.workspace = true
 tokio = { workspace = true, features = ["io-std", "test-util"] }
 futures-util.workspace = true
 tokio-tungstenite.workspace = true
-collaboration-client = { path = "../collaboration-client", version = "0.1.14" }
+tracing-subscriber.workspace = true
 codex-router-test-support = { path = "../codex-router-test-support", version = "0.1.4" }

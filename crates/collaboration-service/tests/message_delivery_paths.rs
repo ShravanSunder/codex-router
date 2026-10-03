@@ -16,7 +16,7 @@ async fn explicit_queue_rejects_unloaded_without_resume_or_enqueue() {
     .unwrap();
     let outcome = outcome_data(result).unwrap();
     assert_eq!(outcome["kind"], "notSubmitted");
-    assert_eq!(outcome["reason"], "threadNotLoaded");
+    assert_eq!(outcome["reason"], "notLoaded");
     assert_eq!(requests.len(), 1);
 }
 #[tokio::test]
@@ -59,15 +59,11 @@ async fn unload_after_loaded_admission_preserves_queue_acceptance_without_compen
     // The fixture additionally rejects any extra resume, start, queue deletion or replay.
 }
 #[tokio::test]
-async fn auto_resume_preserves_effect_when_submission_rejected() {
+async fn auto_loaded_start_rejection_preserves_effect() {
     let (result, requests) = exercise(MessageScenario {
         delivery: MessageDelivery::Auto,
         steps: vec![
-            read("notLoaded"),
-            NativeStep {
-                method: "thread/resume",
-                reply: NativeReply::Result(json!({"thread":{"id":"target"}})),
-            },
+            read("idle"),
             NativeStep {
                 method: "turn/start",
                 reply: NativeReply::Reject,
@@ -81,22 +77,50 @@ async fn auto_resume_preserves_effect_when_submission_rejected() {
     assert_eq!(outcome["reason"], "unknown");
     assert_eq!(outcome["nextAction"], "retryLater");
     assert_eq!(outcome["clientCode"], -32602);
-    assert_eq!(requests.len(), 3);
+    assert_eq!(requests.len(), 2);
     assert!(
-        requests[2]["params"]["clientUserMessageId"]
+        requests[1]["params"]["clientUserMessageId"]
             .as_str()
             .is_some_and(|id| !id.is_empty())
     );
-    assert_eq!(requests[1]["params"]["excludeTurns"], true);
 }
+
 #[tokio::test]
-async fn lost_resume_receipt_never_submits_input() {
+async fn foreign_writer_start_returns_actionable_typed_rejection_without_retry() {
     let (result, requests) = exercise(MessageScenario {
         delivery: MessageDelivery::Auto,
         steps: vec![
-            read("notLoaded"),
+            read("idle"),
             NativeStep {
-                method: "thread/resume",
+                method: "turn/start",
+                reply: NativeReply::RejectWith {
+                    code: -32600,
+                    message: "thread target already has an active writer",
+                },
+            },
+        ],
+    })
+    .await
+    .unwrap();
+    let outcome = outcome_data(result).unwrap();
+    assert_eq!(outcome["kind"], "rejected");
+    assert_eq!(outcome["reason"], "heldByAnotherClient");
+    assert_eq!(outcome["nextAction"], "messageFromHoldingCodexClient");
+    assert_eq!(
+        outcome["detail"],
+        "Message it from the Codex client that holds it."
+    );
+    assert_eq!(outcome["clientCode"], -32600);
+    assert_eq!(requests.len(), 2, "no retry after writer refusal");
+}
+#[tokio::test]
+async fn lost_start_receipt_is_unknown_and_never_replayed() {
+    let (result, requests) = exercise(MessageScenario {
+        delivery: MessageDelivery::Auto,
+        steps: vec![
+            read("idle"),
+            NativeStep {
+                method: "turn/start",
                 reply: NativeReply::Disconnect,
             },
         ],
@@ -106,7 +130,7 @@ async fn lost_resume_receipt_never_submits_input() {
     let outcome = outcome_data(result).unwrap();
     assert_eq!(outcome["kind"], "unknown");
     assert_eq!(requests.len(), 2);
-    assert_eq!(requests[1]["params"]["excludeTurns"], true);
+    assert!(requests[1]["params"]["clientUserMessageId"].is_string());
 }
 #[tokio::test]
 async fn auto_active_steers_exact_turn_without_loading_history() {

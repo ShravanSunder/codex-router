@@ -1,11 +1,72 @@
 # Release Notes
 
-## Unreleased - 2026-09-24
+## 0.1.62
 
+- Add a Credits tab beside Resets in account options, with provider-reported balance and freshness, explicit refresh, and a saved Allow/Disallow preference.
+- Use credits only as a true last resort, after all eligible included-quota candidates, when the account’s saved switch is Allow and fresh provider-authoritative credits are available. HTTP session affinity and existing WebSockets yield when included quota becomes available; previous-response ownership keeps the existing reconnect/error contract. Account eligibility, floors, spend controls and generation still govern admission; the provider controls the debit. Unlimited and withheld available balances are supported; zero, depleted or unknown credits cannot admit a turn.
+- Responses, Responses compact, and image generation/edit share this credit permission. Image generation and editing can spend credits on Allow accounts.
+- Every Responses WebSocket performs a bounded local quota/credit reassessment before later turns, outside the turn/selection locks; it never makes a provider request per turn. Finish the active turn and deliver its terminal event before reconnecting. Ordinary OAuth renewal preserves ordinary included-quota sockets.
+- Add state migration `202610020001_credit_usage_state` for saved credit policy and provider observations. Older binaries reject this newer schema, so downgrade is blocked; back up state before upgrading. Quota JSON includes `credit_usage`, and credit admissions report `credit_backed`. Eligible credit accounts held behind included quota report `held_for_included_quota`.
+- Show pool availability and observation freshness across all accounts in the quota header.
+
+## 0.1.61
+
+- Sign `codex-router`, `agent-collaboration` and `agent-sessions` with the Developer ID identity of team `974QD84WVC` under fixed identifiers (`dev.shravansunder.<executable>`), with the hardened runtime and a secure timestamp. Keychain approvals now belong to that identity and survive upgrades instead of prompting after every release. After the first signed install, the next Host restart asks once per Router Keychain item; choose **Always Allow**.
+- Local Apple Silicon `cargo run`/`cargo test` sign the same executables as `dev.shravansunder.<executable>.debug`, a separate identity, so debug rebuilds stop prompting and debug builds never share production Keychain approvals. A debug Router started directly by a debug-host example can be signed with `scripts/cargo_debug_signing_runner.sh --sign-only target/debug/codex-router`.
+- Releases require the `APPLE_CERTIFICATE_BASE64` and `APPLE_CERTIFICATE_PASSWORD` secrets and fail before publishing without them; the tap job and the local tap publisher reject a binary without the release identity.
+
+## 0.1.60
+
+- Record the Role each board message was posted under (Participant history); messages carry an optional `postedAsRole` when attribution is provable. Unprovable history stays unset and existing messages aren't backfilled.
+- Board migration backfills history fields only where stored rows prove their values.
+- UPGRADE: `Message` uses deny_unknown_fields, so long-running clients from older binaries (e.g. agent-router MCP servers) reject messages with `postedAsRole` and may report a committed post as an unknown outcome. Upgrade, restart the Host, then restart agent sessions whose MCP servers predate the upgrade.
+
+## 0.1.59
+
+- **Breaking:** remove CLI `board thread listen` and MCP `board_thread_listen` and its control tools; use per-thread subscriptions and poll-mode `board thread wait` instead.
+- Persist thread and topic subscription policies, lifecycle, per-root batching windows, and backfill eligible existing participants. Migration `202609170001` was rewritten in place: local or debug board databases that applied the earlier branch version fail with `InvalidSchema` and may need to be deleted; production databases are unaffected.
+- Subscribe participants when they join a watched thread, batch thread activity, and hold thread notices or DMs for targets that are not running. Store Router pushes as 30-day `router://` records and fetch them with `agent-collaboration show`.
+- Print message-send failures as one `error: <explanation> — <next step>` line without `--json` and held DMs as `held: <link> — delivered when <target> is next running`. Delivered or held outcomes exit 0, rejected deliveries exit 4, and unknown outcomes exit 5. Unknown DM outcomes point to `show <link>` before retrying. Ambiguous Claude terminal errors list live claimant PIDs and short names; structured details retain full names and cwd where available, and the line says to close one terminal or run `/branch`.
+- Remove `message reply --expect-sender` and implicit reply-to-latest-sender behavior; a DM reply now requires its push id or `router://` link.
+- Reject `steer` and generation-guarded DMs when the target is not running; these sends are not held for later delivery.
+- If a wait response is lost after activity may have been handed off, report an unknown outcome and inspect `board thread subscriptions` and `board inbox fetch` before waiting again.
+- Publish the generic `overloaded` admission error for message send/reply/inbox/history and `router/show`, matching rejection before route dispatch.
+- Watching or subscribing to a topic with no board activity yet now works and covers the first later thread; existing watch rows are preserved.
+- Retry known-rejected Provider ACP scheduled-run submissions with the same stored push id, leaving the run available for another attempt.
+
+## 0.1.58
+
+- Provider setting rejection errors now name the setting, requested value, and advertised choices; display truncation is marked with an ellipsis.
+- Hide empty sessions from the picker by default.
+- Encrypt pooled account credentials with a Router-owned Keychain key. After upgrading, authorize Router once at the first Host restart; refreshes in that running Host do not prompt. The Host migrates existing pooled credential files to encrypted envelopes, reads each credential back for verification, then removes the plaintext file. If migration stops early, the Host still starts, Claude requests report the incomplete migration, Codex requests keep the existing credential-unavailable response, and `account list` and `quota` identify accounts still to convert; the next Host restart resumes migration without marking accounts as needing login.
+- Add `serve --claude-five-hour-reserve-percent` to configure when Claude's five-hour window enters the reserve tier; defaults to 95 percent and accepts values from 1 to 99.
+- Route Claude accounts by their five-hour and weekly quota windows. Claude accounts are not yet shown by `quota`; that view is added in PR4.
+- Add provider identity to accounts and session pins, and migrate existing rows to OpenAI. The state migration blocks downgrade because older binaries reject its unknown migration version. Restart `serve` after upgrading; an older running process still writes pins with the previous schema and those upserts fail.
+- Let `account login` create a new credential generation for the same account and provider; refuse a label owned by a different account or provider.
+- Set Codex session-pin idle expiry to 75 minutes by default, configurable with `serve --session-pin-idle-ttl-seconds`; show each account's provider in `account list`.
+- Restore CLI and MCP prompts to existing Codex conversations when Claude or Cursor ACP routes share the Host. The client now sends the exact SessionRef on `session/load`, so a new ACP connection selects the Codex route without weakening rejection of unknown bare Session IDs.
+- Invalid `conversation create --from` identity JSON now exits 2 with `invalidField`; provider creates accept Human creators and Approvers, including an owner-selected `--approver-owner` shortcut.
+- `wake send --wait-until-first-fire --json` now emits one result with `result.record.firstFire`, or one error retaining the created wake under `created`.
+- Scheduled runs can deliver their first input to a Codex conversation created without an initial prompt.
+- Scheduled runs to materialized existing Codex conversations now compare the native workspace with the schedule's declared workspace and deliver the input.
+- Name a Codex thread held by another client's active writer as a typed message rejection, with guidance to send from the holding Codex client instead of retrying the same Router path.
+- Isolated Hosts now work in release builds and accept `--require-debug-isolation` with home-default mode; a forged `HOME` cannot reach launchctl and must satisfy isolated debug-profile and socket checks.
+- Advertise an additive MCP tool output union that validates both unchanged successful structured receipts and typed structured errors. Reconnect existing MCP clients after a Host upgrade to refresh cached tool schemas.
 - Enable configured Claude and Cursor ACP providers by default from owner-editable `providers.json`. A failed provider reports endpoint-specific reason and fix without taking down the other endpoints.
 - Use one CLI and MCP conversation surface for Codex, Claude, and Cursor, including create, prompt, load, and operation inspection. Claude and Cursor can cancel one exact operation; Codex directs callers to turn interrupt. Provider operations retain caller IDs and report completed or pending work.
 - Route messages, wakes, listen pushes, approvals, and scheduled runs through the selected Codex, provider ACP, or live Claude Code peer route. Delivery receipts expose the observed outcome and reachability; `peerMessageWritten` confirms a socket write, not a peer reply.
 - Preserve Codex create-then-message across frontend closure while the Host remains running. Provider schedules run on existing sessions and finish from provider settlement without a summary.
+
+## 0.1.57 - 2026-10-01
+
+- Add Claude account login with `codex-router account login --provider claude` and show five-hour and weekly usage in `codex-router quota status`.
+- Route new and resumed Claude Code sessions through Router's pooled accounts with `agent-sessions --provider claude`. Claude no-account responses explain unavailable credentials, accounts that need login, usage limits with reset hints, and accounts held by quota floors or stale weekly observations.
+- Bound OpenAI device login with a 5-second minimum poll interval, a 15-minute overall limit, and 30-second HTTP request timeouts.
+- Assess every account against one clock instant per selection to prevent account-order drift at second boundaries.
+
+## 0.1.54 - 2026-09-30
+
+- Add target presence reporting and loaded-only delivery policy as internal groundwork for thread subscriptions.
 
 ## 0.1.29 - 2026-09-17
 

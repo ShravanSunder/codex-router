@@ -80,7 +80,7 @@ mod tests {
         let listener = LocalControlService::bind(&root.join("control.sock"), identity)
             .unwrap_or_else(|error| panic!("fixture listener: {error}"));
         let manifest = serde_json::from_value(json!({"version":2,"serviceId":service_id,
-        "serviceEpoch":service_id,"control":{"transport":"unixJsonLines","path":"control.sock"},
+        "serviceEpoch":service_id,"machineLabel":"fixture-host","control":{"transport":"unixJsonLines","path":"control.sock"},
         "controlSchemaDigest":digest,"mcp":{"transport":"streamableHttp","url":"http://127.0.0.1:0/mcp"}}))
         .unwrap_or_else(|error| panic!("fixture manifest: {error}"));
         let publication = ManifestPublication::publish(&root, &manifest)

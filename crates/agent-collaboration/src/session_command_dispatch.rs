@@ -20,6 +20,11 @@ use session_launch_selection::SessionsLaunchTarget;
 #[cfg(test)]
 use session_launch_selection::session_profile_for_environment;
 use session_launch_selection::sessions_launch_target;
+#[path = "session_commands/claude_launch_target.rs"]
+mod claude_launch_target;
+#[path = "session_commands/claude_session_commands.rs"]
+mod claude_session_commands;
+use claude_session_commands::run_claude_sessions_command;
 
 pub(crate) use collaboration_client::session_catalog::SessionSearchExpression;
 
@@ -52,7 +57,8 @@ use session_display_text::{
 mod session_catalog_records;
 use session_catalog_records::SessionRecord;
 pub(crate) use session_catalog_records::{
-    SessionConversationPreview, SessionConversationSource, SessionPickerRecord,
+    SessionConversationPreview, SessionConversationSource, SessionPickerIdentity,
+    SessionPickerRecord,
 };
 #[path = "session_commands/session_catalog_query.rs"]
 mod session_catalog_query;
@@ -79,6 +85,9 @@ pub fn run_sessions_command<W: Write>(
     command: SessionsCommand,
     context: &CliContext,
 ) -> Result<(), SessionsCommandError> {
+    if command.provider.is_claude_code() {
+        return run_claude_sessions_command(stdout, command, context);
+    }
     if command.list {
         return run_session_listing(stdout, command, context);
     }
@@ -96,6 +105,9 @@ pub(crate) fn run_sessions_command_with_dependencies<W: Write>(
     runner: &mut impl SessionsCommandRunner,
     picker: &mut impl SessionsPicker,
 ) -> Result<(), SessionsCommandError> {
+    if command.provider.is_claude_code() {
+        return run_claude_sessions_command(stdout, command, context);
+    }
     if command.list {
         return run_session_listing(stdout, command, context);
     }
@@ -258,6 +270,7 @@ fn run_interactive_session(
         repository_identity: repository_identity.clone(),
         current_provider: current_provider_for_picker(context),
         new_session_args_display: codex_args_display(&command.codex_args),
+        include_empty_sessions: command.include_empty_sessions,
         records: records
             .iter()
             .map(SessionPickerRecord::from_record)
@@ -316,6 +329,7 @@ fn session_picker_record_loader(
     let runtime_inventory =
         std::sync::Mutex::new(picker_runtime_inventory::PickerRuntimeInventory::default());
     std::sync::Arc::new(move |query| {
+        let include_empty_sessions = query.include_empty_sessions;
         let record_query = SessionRecordQuery::from_picker_query(query);
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -337,7 +351,7 @@ fn session_picker_record_loader(
                 .map(SessionPickerRecord::from_record)
                 .collect();
             Ok(inventory
-                .refresh(service_directory.as_deref(), stored)
+                .refresh(service_directory.as_deref(), stored, include_empty_sessions)
                 .await)
         })
     })
@@ -537,6 +551,7 @@ impl SessionsCommandRunner for ProcessSessionsCommandRunner {
         session_id: &str,
         model_choice: &ResumeModelChoice,
     ) -> Result<(), SessionsCommandError> {
+        self.launch_target.ensure_profile_allows_remote_resume()?;
         self.launch_target.resolve_for_launch()?;
         let launch = self
             .launch_target
@@ -560,6 +575,7 @@ impl SessionsCommandRunner for ProcessSessionsCommandRunner {
         session_id: &str,
         model_choice: &ResumeModelChoice,
     ) -> Result<(), SessionsCommandError> {
+        self.launch_target.ensure_profile_allows_remote_resume()?;
         self.launch_target.resolve_for_launch()?;
         let launch = self
             .launch_target

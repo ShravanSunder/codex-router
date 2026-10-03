@@ -11,8 +11,14 @@ pub use collaboration_protocol::{
     AdapterOperationFailure as OperationFailure, OperationEffect, OperationFailureKind,
 };
 pub use collaboration_protocol::{ControlInitializationResult, EndpointInventory, ProtocolVersion};
+pub use collaboration_protocol::{
+    PushRecordHistoryParams, PushRecordListParams, PushRecordShowParams,
+};
 pub use control_connection::{ClientError, ControlClient};
-pub use message_operation::{MessageSendError, MessageSendRequest, PublicMessageContent};
+pub use message_operation::{
+    MessageReplyError, MessageReplyRequest, MessageSendError, MessageSendRequest,
+    PublicMessageContent,
+};
 pub use operation_error::{OperationError, operation_failure_from_client_error};
 static OBSERVED_SERVICE_VERSION: std::sync::OnceLock<std::sync::Mutex<String>> =
     std::sync::OnceLock::new();
@@ -114,24 +120,31 @@ mod native_endpoint_selector;
 pub use native_endpoint_selector::resolve_public_native;
 
 mod observation_session;
-pub use observation_session::{
-    BoundedObservationRequest, BoundedObservationResult, NativeObservation, ObservationEndReason,
+mod provider_session_observation;
+pub use collaboration_protocol::{
+    BoundedObservationRequest, BoundedObservationResult, ObservationEndReason,
 };
+pub use observation_session::NativeObservation;
+pub use provider_session_observation::SessionObservation;
 
 mod acp_conversation;
 pub use acp_conversation::AcpConversation;
 mod conversation_client;
 mod conversation_contract;
+mod conversation_create_actor;
 mod conversation_operation_result;
 mod conversation_session_operations;
+mod owner_identity_resolution;
 pub use conversation_client::{
     ConversationCancelInput, ConversationClient, ConversationClientError, ConversationCreateInput,
     ConversationCreatePromptInput, ConversationLoadInput, ConversationPromptInput,
 };
+pub use conversation_create_actor::ConversationCreateActor;
 pub use conversation_operation_result::{
     ConversationCreatePromptOutcome, ConversationOperationResult, ConversationSettlement,
     ConversationSettlementDetail, ConversationStopReason, ProviderLoadOutput, ProviderPromptOutput,
 };
+pub use owner_identity_resolution::{OwnerIdentityError, resolve_owner_human_id};
 mod provider_conversation_operations;
 pub use conversation_contract::{
     ConversationCreatePromptError, ConversationCreatePromptRequest, ConversationCreatePromptResult,

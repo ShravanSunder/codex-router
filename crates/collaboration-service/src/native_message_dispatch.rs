@@ -1,24 +1,139 @@
 //! Native message composition with explicit delivery and retained partial effects.
-use crate::{NativeControlBackend, message_effect_state::MessageEffects};
+use crate::{
+    LoadPolicy, NOT_LOADED_REASON, NativeControlBackend, message_effect_state::MessageEffects,
+};
 use codex_native_integration::{
     NativeConnectionError, NativeOperation, NativePayloadSchemas, NativeProtocolConnection,
 };
 use collaboration_protocol::{
-    AcceptedResumeEffect, ChannelDescription, EndpointDescription, MessageDelivery,
-    NativeInputDisposition, NativeInputOperation, NativeSendAcceptance, NativeSendParams,
-    NativeSendReceipt, NonEmptyText, UuidIdentity,
+    AcceptedResumeEffect, ChannelDescription, CodexGeneration, EndpointDescription,
+    MessageDelivery, MessageInputKind, MessageRepresentation, MessageText, NativeInputDisposition,
+    NativeInputOperation, NativeSendAcceptance, NativeSendReceipt, NonEmptyText, RenderedMessage,
+    SessionRef, UuidIdentity,
 };
 use serde_json::{Value, json};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum NativeThreadStatus {
+    NotLoaded,
+    Idle,
+    Active,
+    Other,
+}
+
+pub(crate) struct NativeThreadSnapshot {
+    pub status: NativeThreadStatus,
+}
+
+pub(crate) enum NativeThreadStatusReadError {
+    Missing,
+    Rejected { code: i64, native: Option<Value> },
+    Unsupported,
+    Unavailable,
+    InvalidResponse,
+}
+
+pub(crate) async fn read_native_thread_status(
+    connection: &mut NativeProtocolConnection,
+    schemas: &NativePayloadSchemas,
+    thread_id: &str,
+    deadline: tokio::time::Instant,
+    retired: &CancellationToken,
+) -> Result<NativeThreadSnapshot, NativeThreadStatusReadError> {
+    if retired.is_cancelled() || tokio::time::Instant::now() >= deadline {
+        return Err(NativeThreadStatusReadError::Unavailable);
+    }
+    let response = tokio::select! {
+        biased;
+        () = retired.cancelled() => {
+            return Err(NativeThreadStatusReadError::Unavailable);
+        }
+        response = tokio::time::timeout_at(
+            deadline,
+            connection.request_validated(
+                schemas,
+                NativeOperation::ReadThread,
+                json!({"threadId":thread_id,"includeTurns":false}),
+            ),
+        ) => match response {
+            Ok(response) => response,
+            Err(_) => return Err(NativeThreadStatusReadError::Unavailable),
+        }
+    };
+
+    let response = match response {
+        Ok(response) => response,
+        Err(NativeConnectionError::Rejected { code }) => {
+            let native = connection.take_last_rejection();
+            if code == -32600
+                && native
+                    .as_ref()
+                    .and_then(|error| error.get("message"))
+                    .and_then(Value::as_str)
+                    == Some(format!("thread not loaded: {thread_id}").as_str())
+            {
+                return Err(NativeThreadStatusReadError::Missing);
+            }
+            return Err(NativeThreadStatusReadError::Rejected { code, native });
+        }
+        Err(
+            NativeConnectionError::InvalidInput
+            | NativeConnectionError::Unavailable
+            | NativeConnectionError::UnavailableWithCause(_),
+        ) => {
+            return Err(NativeThreadStatusReadError::Unsupported);
+        }
+        Err(_) => return Err(NativeThreadStatusReadError::Unavailable),
+    };
+
+    if response.pointer("/thread/id").and_then(Value::as_str) != Some(thread_id) {
+        return Err(NativeThreadStatusReadError::InvalidResponse);
+    }
+    let Some(thread) = response.get("thread").cloned() else {
+        return Err(NativeThreadStatusReadError::InvalidResponse);
+    };
+    let status = match thread.pointer("/status/type").and_then(Value::as_str) {
+        Some("notLoaded") => NativeThreadStatus::NotLoaded,
+        Some("idle") => NativeThreadStatus::Idle,
+        Some("active") => NativeThreadStatus::Active,
+        Some(_) => NativeThreadStatus::Other,
+        None => return Err(NativeThreadStatusReadError::InvalidResponse),
+    };
+    Ok(NativeThreadSnapshot { status })
+}
+
 pub(crate) struct NativeMessageRequest<'a> {
-    pub params: NativeSendParams,
+    pub params: NativeMessageParams,
     pub id: Value,
     pub service_id: &'a UuidIdentity,
     pub backend: &'a NativeControlBackend,
     pub endpoints: &'a [EndpointDescription],
     pub held_connection: Option<&'a mut NativeProtocolConnection>,
+    pub load_policy: LoadPolicy,
+}
+
+pub(crate) struct NativeMessageParams {
+    pub target: SessionRef,
+    pub generation: CodexGeneration,
+    pub body: NativeMessageBody,
+    pub delivery: MessageDelivery,
+    pub client_user_message_id: Option<NonEmptyText>,
+}
+
+pub(crate) enum NativeMessageBody {
+    PreparedPush(MessageText),
+}
+
+fn render_native_message(body: &NativeMessageBody) -> RenderedMessage {
+    match body {
+        NativeMessageBody::PreparedPush(line) => RenderedMessage {
+            text: line.as_str().to_owned(),
+            kind: MessageInputKind::Agent,
+            representation: MessageRepresentation::DeclaredAgentText,
+        },
+    }
 }
 
 pub(crate) enum NativeMessageOutcome {
@@ -31,6 +146,7 @@ pub(crate) async fn dispatch_message(
 ) -> NativeMessageOutcome {
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
     let mut effects = MessageEffects::new(request.id);
+    let load_policy = request.load_policy;
     let params = request.params;
     if &params.target.endpoint.service_id != request.service_id {
         return NativeMessageOutcome::Failed(effects.failure("wrongService", "inspect"));
@@ -64,10 +180,7 @@ pub(crate) async fn dispatch_message(
     {
         return NativeMessageOutcome::Failed(effects.failure("unsupportedCapability", "queue"));
     }
-    let Ok(rendered) = collaboration_protocol::render_message(&params.target, &params.message)
-    else {
-        return NativeMessageOutcome::Failed(effects.failure("overloaded", "inspect"));
-    };
+    let rendered = render_native_message(&params.body);
     let correlation = match &params.client_user_message_id {
         Some(id) => String::from(id.clone()),
         None => match crate::new_service_uuid() {
@@ -111,15 +224,14 @@ pub(crate) async fn dispatch_message(
         effects,
     };
     let target_id = String::from(params.target.session_id.clone());
-    let result = session
-        .deliver(
-            &target_id,
-            params.delivery,
-            &rendered.text,
-            &correlation,
-            held,
-        )
-        .await;
+    let delivery_context = NativeMessageDeliveryContext {
+        thread_id: &target_id,
+        params: &params,
+        correlation: &correlation,
+        held_unmaterialized: held,
+        load_policy,
+    };
+    let result = session.deliver(&delivery_context).await;
     let acceptance = match result {
         Ok(value) => value,
         Err(value) => return NativeMessageOutcome::Failed(value),
@@ -150,6 +262,15 @@ struct MessageSession<'a> {
     retired: CancellationToken,
     effects: MessageEffects,
 }
+
+struct NativeMessageDeliveryContext<'a> {
+    thread_id: &'a str,
+    params: &'a NativeMessageParams,
+    correlation: &'a str,
+    held_unmaterialized: bool,
+    load_policy: LoadPolicy,
+}
+
 impl MessageSession<'_> {
     async fn call(
         &mut self,
@@ -161,10 +282,6 @@ impl MessageSession<'_> {
             return Err(self.effects.failure("unavailable", stage));
         }
         let mutation = matches!(stage, "resume" | "start" | "steer" | "queue");
-        let missing_thread_message = (operation == NativeOperation::ReadThread)
-            .then(|| params.get("threadId").and_then(Value::as_str))
-            .flatten()
-            .map(|id| format!("thread not loaded: {id}"));
         if stage == "resume" {
             self.effects.resume = "unknown";
         } else if mutation {
@@ -186,18 +303,6 @@ impl MessageSession<'_> {
                             self.effects.submission = "rejected";
                         }
                         let native = self.connection.take_last_rejection();
-                        if let Some(expected) = missing_thread_message.as_deref()
-                            && code == -32600
-                            && native
-                                .as_ref()
-                                .and_then(|error| error.get("message"))
-                                .and_then(Value::as_str)
-                                == Some(expected)
-                        {
-                            return Err(self
-                                .effects
-                                .failure("threadMissingOrUnmaterialized", stage));
-                        }
                         return Err(self.effects.native_rejection(stage, code, native.as_ref()));
                     }
                     NativeConnectionError::InvalidInput
@@ -217,21 +322,33 @@ impl MessageSession<'_> {
             }
         }
     }
-    async fn read_thread_metadata(&mut self, id: &str) -> Result<Value, Value> {
-        let result = self
-            .call(
-                NativeOperation::ReadThread,
-                json!({"threadId":id,"includeTurns":false}),
-                "inspect",
-            )
-            .await?;
-        if result.pointer("/thread/id").and_then(Value::as_str) != Some(id) {
-            return Err(self.effects.failure("nativeRejected", "inspect"));
+    async fn read_thread_status(&mut self, id: &str) -> Result<NativeThreadSnapshot, Value> {
+        match read_native_thread_status(
+            self.connection,
+            self.schemas.as_ref(),
+            id,
+            self.deadline,
+            &self.retired,
+        )
+        .await
+        {
+            Ok(snapshot) => Ok(snapshot),
+            Err(NativeThreadStatusReadError::Missing) => Err(self
+                .effects
+                .failure("threadMissingOrUnmaterialized", "inspect")),
+            Err(NativeThreadStatusReadError::Rejected { code, native }) => Err(self
+                .effects
+                .native_rejection("inspect", code, native.as_ref())),
+            Err(NativeThreadStatusReadError::Unsupported) => {
+                Err(self.effects.failure("unsupportedCapability", "inspect"))
+            }
+            Err(NativeThreadStatusReadError::Unavailable) => {
+                Err(self.effects.failure("unavailable", "inspect"))
+            }
+            Err(NativeThreadStatusReadError::InvalidResponse) => {
+                Err(self.effects.failure("nativeRejected", "inspect"))
+            }
         }
-        result
-            .get("thread")
-            .cloned()
-            .ok_or_else(|| self.effects.failure("nativeRejected", "inspect"))
     }
     async fn read_active_turn_id(&mut self, id: &str) -> Result<String, Value> {
         let result = self
@@ -258,42 +375,39 @@ impl MessageSession<'_> {
     }
     async fn deliver(
         &mut self,
-        id: &str,
-        delivery: MessageDelivery,
-        text: &str,
-        correlation: &str,
-        held_unmaterialized: bool,
+        request: &NativeMessageDeliveryContext<'_>,
     ) -> Result<NativeSendAcceptance, Value> {
-        let thread = if held_unmaterialized {
+        let thread_snapshot = if request.held_unmaterialized {
             None
         } else {
-            Some(self.read_thread_metadata(id).await?)
+            Some(self.read_thread_status(request.thread_id).await?)
         };
-        let status = match thread.as_ref() {
-            None => "idle",
-            Some(thread) => thread
-                .pointer("/status/type")
-                .and_then(Value::as_str)
-                .ok_or_else(|| self.effects.failure("unsupportedCapability", "inspect"))?,
-        };
-        let input = json!([{"type":"text","text":text}]);
-        if delivery == MessageDelivery::Queue {
-            if status == "notLoaded" {
+        let rendered = render_native_message(&request.params.body);
+        let input = json!([{"type":"text","text":rendered.text}]);
+        let status = thread_snapshot
+            .as_ref()
+            .map_or(NativeThreadStatus::Idle, |snapshot| snapshot.status);
+        if status == NativeThreadStatus::NotLoaded && request.load_policy == LoadPolicy::LoadedOnly
+        {
+            return Err(self.effects.failure(NOT_LOADED_REASON, "start"));
+        }
+        if request.params.delivery == MessageDelivery::Queue {
+            if status == NativeThreadStatus::NotLoaded {
                 return Err(self.effects.failure("threadNotLoaded", "queue"));
             }
             let result = self
                 .call(
                     NativeOperation::QueueAdd,
-                    json!({"threadId":id,"input":input,"clientUserMessageId":correlation}),
+                    json!({"threadId":request.thread_id,"input":input,"clientUserMessageId":request.correlation}),
                     "queue",
                 )
                 .await?;
             let submission_id = self.receipt_id(&result, "/queuedSubmission/id", "queue")?;
             return Ok(NativeSendAcceptance::QueueAccepted { submission_id });
         }
-        if status == "active" {
-            let turn = self.read_active_turn_id(id).await?;
-            let result = self.call(NativeOperation::SteerTurn, json!({"threadId":id,"expectedTurnId":turn,"input":input,"clientUserMessageId":correlation}), "steer").await?;
+        if status == NativeThreadStatus::Active {
+            let turn = self.read_active_turn_id(request.thread_id).await?;
+            let result = self.call(NativeOperation::SteerTurn, json!({"threadId":request.thread_id,"expectedTurnId":turn,"input":input,"clientUserMessageId":request.correlation}), "steer").await?;
             let turn_id = self.receipt_id(&result, "/turnId", "steer")?;
             if String::from(turn_id.clone()) != turn {
                 return Err(self.effects.failure("outcomeUnknown", "steer"));
@@ -303,18 +417,18 @@ impl MessageSession<'_> {
                 submission_id: None,
             });
         }
-        if delivery == MessageDelivery::Steer {
+        if request.params.delivery == MessageDelivery::Steer {
             return Err(self.effects.failure("noActiveTurn", "steer"));
         }
-        if status == "notLoaded" {
+        if status == NativeThreadStatus::NotLoaded {
             let resumed = self
                 .call(
                     NativeOperation::ResumeThread,
-                    json!({"threadId":id,"excludeTurns":true}),
+                    json!({"threadId":request.thread_id,"excludeTurns":true}),
                     "resume",
                 )
                 .await?;
-            if resumed.pointer("/thread/id").and_then(Value::as_str) != Some(id) {
+            if resumed.pointer("/thread/id").and_then(Value::as_str) != Some(request.thread_id) {
                 return Err(self.effects.failure("outcomeUnknown", "resume"));
             }
             self.effects.resume = "accepted";
@@ -322,7 +436,7 @@ impl MessageSession<'_> {
         let result = self
             .call(
                 NativeOperation::StartTurn,
-                json!({"threadId":id,"input":input,"clientUserMessageId":correlation}),
+                json!({"threadId":request.thread_id,"input":input,"clientUserMessageId":request.correlation}),
                 "start",
             )
             .await?;

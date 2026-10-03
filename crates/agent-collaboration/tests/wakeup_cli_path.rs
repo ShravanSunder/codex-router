@@ -3,12 +3,15 @@ use collaboration_client::protocol::OperationId;
 use std::os::unix::fs::DirBuilderExt;
 
 #[tokio::test]
-async fn cli_creates_and_reads_wakeup_through_host() -> Result<(), Box<dyn std::error::Error>> {
+async fn cli_creates_wakeup_with_harness_sender_and_reads_through_host()
+-> Result<(), Box<dyn std::error::Error>> {
     // Arrange: a real owned Control service and CLI subprocess; no native process/model.
-    let root = std::path::PathBuf::from(format!(
-        "/tmp/wake-cli-{}",
-        OperationId::generate().as_str()
-    ));
+    let operation_id = OperationId::generate();
+    let suffix = operation_id
+        .as_str()
+        .get(24..)
+        .expect("generated operation id has an ASCII UUID suffix");
+    let root = std::env::temp_dir().join(format!("wake-cli-{suffix}"));
     std::fs::DirBuilder::new().mode(0o700).create(&root)?;
     let runtime = CollaborationRuntime::start(CollaborationRuntimeInputs {
         directory: root.clone(),
@@ -17,17 +20,22 @@ async fn cli_creates_and_reads_wakeup_through_host() -> Result<(), Box<dyn std::
         mcp_bind: std::net::SocketAddr::from(([127, 0, 0, 1], 0)),
         native_schema: None,
         peer_registry_directory: None,
+        remote_control_server_name: None,
+        owner_human_id: None,
     })
     .await?;
     // Act: the documented CLI operation must reach Host-created persistent state.
     let target=serde_json::json!({"endpoint":{"serviceId":runtime.service_id(),"endpointId":"codex-local"},"sessionId":"fixture-only-new-thread"}).to_string();
     let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_agent-collaboration"))
+        .env("CODEX_THREAD_ID", "wake-cli-sender")
+        .env_remove("CODEX_SESSION_ID")
+        .env_remove("CLAUDE_CODE_SESSION_ID")
+        .env_remove("CURSOR_CONVERSATION_ID")
         .args([
             "wake",
             "send",
             "--to",
             &target,
-            "--human-user",
             "--every",
             "10m",
             "--for",
@@ -76,6 +84,17 @@ async fn cli_creates_and_reads_wakeup_through_host() -> Result<(), Box<dyn std::
     {
         return Err("CLI wake text was not persisted".into());
     }
+    if record
+        .pointer("/result/record/definition/message/content/kind")
+        .and_then(serde_json::Value::as_str)
+        != Some("agent")
+        || record
+            .pointer("/result/record/definition/message/content/sender/sessionId")
+            .and_then(serde_json::Value::as_str)
+            != Some("wake-cli-sender")
+    {
+        return Err("CLI wake did not persist the harness agent identity".into());
+    }
     if record.pointer("/result/record/firstFire") != Some(&serde_json::Value::Null) {
         return Err("CLI creation invented a firing".into());
     }
@@ -113,12 +132,15 @@ async fn cli_creates_and_reads_wakeup_through_host() -> Result<(), Box<dyn std::
         }
     }
     let fire = tokio::process::Command::new(env!("CARGO_BIN_EXE_agent-collaboration"))
+        .env("CODEX_THREAD_ID", "wake-cli-sender")
+        .env_remove("CODEX_SESSION_ID")
+        .env_remove("CLAUDE_CODE_SESSION_ID")
+        .env_remove("CURSOR_CONVERSATION_ID")
         .args([
             "wake",
             "send",
             "--to",
             &target,
-            "--human-user",
             "--text",
             "Check after timer",
             "--after",
@@ -137,18 +159,13 @@ async fn cli_creates_and_reads_wakeup_through_host() -> Result<(), Box<dyn std::
         )
         .into());
     }
-    let last = String::from_utf8(fire.stdout)?
-        .lines()
-        .last()
-        .ok_or("missing firing output")?
-        .to_owned();
-    let fired: serde_json::Value = serde_json::from_str(&last)?;
+    let fired: serde_json::Value = serde_json::from_slice(&fire.stdout)?;
     if fired
-        .pointer("/result/record/kind")
+        .pointer("/result/record/firstFire/kind")
         .and_then(serde_json::Value::as_str)
         != Some("wakeFired")
     {
-        return Err("wait returned before firing receipt".into());
+        return Err("one-result wait returned before firing receipt".into());
     }
     let listing = tokio::process::Command::new(env!("CARGO_BIN_EXE_agent-collaboration"))
         .args([
@@ -182,7 +199,7 @@ async fn cli_creates_and_reads_wakeup_through_host() -> Result<(), Box<dyn std::
         return Err("CLI bounded listing missing page or cursor".into());
     }
     let fired_id = fired
-        .pointer("/result/record/wakeupId")
+        .pointer("/result/record/firstFire/wakeupId")
         .and_then(serde_json::Value::as_str)
         .ok_or("missing fired wake identity")?;
     let deliveries = tokio::process::Command::new(env!("CARGO_BIN_EXE_agent-collaboration"))

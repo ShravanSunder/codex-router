@@ -4,6 +4,10 @@ use super::{
     SESSION_CONVERSATION_SNIPPET_MAX_CHARS, display_title_from_session_fields,
     format_recency_at_ms, normalize_path, session_context_from_cwd, truncate_end,
 };
+use collaboration_client::protocol::{
+    ClaudeCodeInteractiveStatus, EndpointRef, ProviderSessionState, ProviderSessionSummary,
+    SessionRef,
+};
 use collaboration_client::session_catalog::{
     SessionHistorySource, StoredSessionRecord, read_session_conversation_history,
 };
@@ -14,8 +18,24 @@ use crate::picker_runtime_status::PickerRuntimeStatus;
 pub(super) type SessionRecord = StoredSessionRecord;
 pub(crate) type SessionConversationSource = SessionHistorySource;
 
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
+pub(crate) enum SessionPickerIdentity {
+    LocalCodex(String),
+    HostedCodex(SessionRef),
+    HostedProvider(SessionRef),
+}
+
+impl SessionPickerIdentity {
+    pub(crate) fn is_provider(&self) -> bool {
+        matches!(self, Self::HostedProvider(_))
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct SessionPickerRecord {
+    pub(crate) identity: SessionPickerIdentity,
+    pub(crate) endpoint_label: Option<String>,
+    pub(crate) provider_state: Option<ProviderSessionState>,
     pub(crate) session_id: String,
     pub(crate) title: String,
     pub(crate) full_title: String,
@@ -81,6 +101,9 @@ impl SessionPickerRecord {
         )
         .unwrap_or_else(|| "Untitled session".to_owned());
         Self {
+            identity: SessionPickerIdentity::LocalCodex(record.session_id.clone()),
+            endpoint_label: None,
+            provider_state: None,
             session_id: record.session_id.clone(),
             title: display_title,
             explicit_name: record.name.clone(),
@@ -113,6 +136,113 @@ impl SessionPickerRecord {
             source: record.source.clone(),
             thread_source: record.thread_source.clone(),
             runtime_status: PickerRuntimeStatus::Unknown,
+        }
+    }
+
+    pub(crate) fn with_hosted_codex(mut self, endpoint: &EndpointRef) -> Self {
+        if let Ok(session_id) = self.session_id.clone().try_into() {
+            self.identity = SessionPickerIdentity::HostedCodex(SessionRef {
+                endpoint: endpoint.clone(),
+                session_id,
+            });
+        }
+        self
+    }
+
+    pub(crate) fn from_provider_summary(
+        summary: &ProviderSessionSummary,
+        endpoint_label: &str,
+    ) -> Self {
+        let (
+            target,
+            working_directory,
+            updated_at_seconds,
+            provider_state,
+            name,
+            created_at_seconds,
+            runtime_status,
+        ) = match summary {
+            ProviderSessionSummary::HostedProvider {
+                target,
+                working_directory,
+                updated_at,
+                state,
+                ..
+            } => (
+                target,
+                working_directory,
+                *updated_at,
+                Some(*state),
+                None,
+                None,
+                PickerRuntimeStatus::from_provider(state),
+            ),
+            ProviderSessionSummary::ClaudeCodeInteractive {
+                target,
+                working_directory,
+                updated_at,
+                started_at,
+                name,
+                status,
+                ..
+            } => (
+                target,
+                working_directory,
+                *updated_at,
+                None,
+                name.clone(),
+                Some(*started_at),
+                match status {
+                    ClaudeCodeInteractiveStatus::Busy => PickerRuntimeStatus::Active,
+                    ClaudeCodeInteractiveStatus::Idle | ClaudeCodeInteractiveStatus::Shell => {
+                        PickerRuntimeStatus::Idle
+                    }
+                    ClaudeCodeInteractiveStatus::Waiting => PickerRuntimeStatus::Blocked,
+                    ClaudeCodeInteractiveStatus::Unreported
+                    | ClaudeCodeInteractiveStatus::Other => PickerRuntimeStatus::Unknown,
+                },
+            ),
+        };
+        let session_id = String::from(target.session_id.clone());
+        let cwd = String::from(working_directory.clone());
+        let updated_at_ms = updated_at_seconds.saturating_mul(1_000);
+        let title = name
+            .clone()
+            .unwrap_or_else(|| format!("{endpoint_label} · {session_id}"));
+        let context = session_context_from_cwd(&cwd);
+        Self {
+            identity: SessionPickerIdentity::HostedProvider(target.clone()),
+            endpoint_label: Some(endpoint_label.to_owned()),
+            provider_state,
+            session_id,
+            title: title.clone(),
+            full_title: title,
+            explicit_name: name,
+            recency: format_recency_at_ms(Some(updated_at_ms)),
+            created: created_at_seconds.map_or_else(
+                || "-".to_owned(),
+                |value| format_recency_at_ms(Some(value.saturating_mul(1_000))),
+            ),
+            recency_at_ms: Some(updated_at_ms),
+            created_at_ms: created_at_seconds.map(|value| value.saturating_mul(1_000)),
+            branch: "-".to_owned(),
+            persisted_branch: String::new(),
+            context,
+            cwd: Some(cwd.clone()),
+            normalized_cwd: Some(normalize_path(Path::new(&cwd)).display().to_string()),
+            git_origin_url: None,
+            provider: None,
+            model: None,
+            reasoning_effort: None,
+            preview: None,
+            first_user_message: String::new(),
+            conversation: SessionConversationPreview::unavailable(
+                "Provider history opens through its session face",
+            ),
+            conversation_source: None,
+            source: None,
+            thread_source: None,
+            runtime_status,
         }
     }
 }

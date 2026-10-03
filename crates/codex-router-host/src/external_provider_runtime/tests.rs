@@ -39,6 +39,7 @@ fn python_fixture(
         "import json,sys; {record_process_id}request=json.loads(sys.stdin.readline()); print(json.dumps({{'jsonrpc':'2.0','id':request['id'],'result':{{'protocolVersion':{response_version},'agentCapabilities':{{'loadSession':True}},'agentInfo':{{'name':'fixture-agent','version':'1.2.3'}}}}}})); sys.stdout.flush(); sys.stdin.read()"
     );
     ExternalProviderLaunch {
+        persistence_target: acp_client_runtime::ProviderPersistenceTarget::Unspecified,
         executable: PathBuf::from("/usr/bin/python3"),
         arguments: vec!["-c".to_owned(), fixture],
         environment: vec![],
@@ -81,6 +82,7 @@ print(json.dumps({'jsonrpc':'2.0','id':request['id'],'result':{'stopReason':'end
 sys.stdin.read()
 "#;
     ExternalProviderLaunch {
+        persistence_target: acp_client_runtime::ProviderPersistenceTarget::Unspecified,
         executable: PathBuf::from("/usr/bin/python3"),
         arguments: vec!["-c".to_owned(), fixture.to_owned()],
         environment: vec![],
@@ -118,6 +120,7 @@ sys.stdin.read()
         observed_socket = observed_prompt_socket.display().to_string(),
     );
     ExternalProviderLaunch {
+        persistence_target: acp_client_runtime::ProviderPersistenceTarget::Unspecified,
         executable: PathBuf::from("/usr/bin/python3"),
         arguments: vec!["-c".to_owned(), fixture],
         environment: vec![],
@@ -234,6 +237,7 @@ print(json.dumps({'jsonrpc':'2.0','id':prompt['id'],'result':{'stopReason':'canc
 sys.stdin.read()
 "#;
     ExternalProviderLaunch {
+        persistence_target: acp_client_runtime::ProviderPersistenceTarget::Unspecified,
         executable: PathBuf::from("/usr/bin/python3"),
         arguments: vec!["-c".to_owned(), fixture.to_owned()],
         environment: vec![],
@@ -256,6 +260,7 @@ print(json.dumps({'jsonrpc':'2.0','id':second['id'],'result':{'stopReason':'end_
 sys.stdin.read()
 "#;
     ExternalProviderLaunch {
+        persistence_target: acp_client_runtime::ProviderPersistenceTarget::Unspecified,
         executable: PathBuf::from("/usr/bin/python3"),
         arguments: vec!["-c".to_owned(), fixture.to_owned()],
         environment: vec![],
@@ -288,6 +293,7 @@ sys.stdin.read()
 "#
     );
     ExternalProviderLaunch {
+        persistence_target: acp_client_runtime::ProviderPersistenceTarget::Unspecified,
         executable: PathBuf::from("/usr/bin/python3"),
         arguments: vec!["-c".to_owned(), fixture],
         environment: vec![],
@@ -315,6 +321,7 @@ for line in sys.stdin:
         admission_log = admission_log.display().to_string(),
     );
     ExternalProviderLaunch {
+        persistence_target: acp_client_runtime::ProviderPersistenceTarget::Unspecified,
         executable: PathBuf::from("/usr/bin/python3"),
         arguments: vec!["-c".to_owned(), fixture],
         environment: vec![],
@@ -339,6 +346,7 @@ print(json.dumps({'jsonrpc':'2.0','id':prompt['id'],'result':{'stopReason':'end_
 sys.stdin.read()
 "#;
     ExternalProviderLaunch {
+        persistence_target: acp_client_runtime::ProviderPersistenceTarget::Unspecified,
         executable: PathBuf::from("/usr/bin/python3"),
         arguments: vec!["-c".to_owned(), fixture.to_owned()],
         environment: vec![],
@@ -386,6 +394,7 @@ sys.stdin.read()
 "#
     );
     ExternalProviderLaunch {
+        persistence_target: acp_client_runtime::ProviderPersistenceTarget::Unspecified,
         executable: PathBuf::from("/usr/bin/python3"),
         arguments: vec!["-c".to_owned(), fixture],
         environment: vec![],
@@ -410,7 +419,7 @@ fn acp_error_codes_classify_authentication_without_message_matching() {
     authentication.message = "provider conversation is busy".to_owned();
     assert!(matches!(
         acp_operation_error(authentication),
-        ExternalProviderRuntimeError::AuthenticationRequired { code: -32000 }
+        ExternalProviderRuntimeError::AuthenticationRequired { code: -32000, .. }
     ));
     for message in [
         "provider conversation is busy",
@@ -424,7 +433,7 @@ fn acp_error_codes_classify_authentication_without_message_matching() {
         let reason = acp_operation_error(provider);
         assert!(matches!(
             &reason,
-            ExternalProviderRuntimeError::ProviderRejected { code } if *code == -32603
+            ExternalProviderRuntimeError::ProviderRejected { code, .. } if *code == -32603
         ));
         assert!(!reason.to_string().contains("must not escape"));
         assert!(!reason.to_string().contains(message));
@@ -435,7 +444,7 @@ fn acp_error_codes_classify_authentication_without_message_matching() {
     let reason = acp_operation_error(missing);
     assert!(matches!(
         &reason,
-        ExternalProviderRuntimeError::ResourceNotFound { code } if *code == -32002
+        ExternalProviderRuntimeError::ResourceNotFound { code, .. } if *code == -32002
     ));
     assert!(!reason.to_string().contains("private"));
 }
@@ -496,7 +505,7 @@ async fn resource_not_found_from_session_load_is_session_not_found() {
         .expect_err("missing session");
     assert!(matches!(
         error,
-        ExternalProviderRuntimeError::ProviderSessionNotFound { code: -32002 }
+        ExternalProviderRuntimeError::ProviderSessionNotFound { code: -32002, .. }
     ));
     runtime.shutdown().await;
 }
@@ -519,6 +528,7 @@ print(json.dumps({'jsonrpc':'2.0','id':prompt['id'],'result':{'stopReason':'canc
 sys.stdin.read()
 "#;
     ExternalProviderLaunch {
+        persistence_target: acp_client_runtime::ProviderPersistenceTarget::Unspecified,
         executable: PathBuf::from("/usr/bin/python3"),
         arguments: vec!["-c".to_owned(), fixture.to_owned()],
         environment: vec![],
@@ -542,6 +552,7 @@ print(json.dumps(new)); print(json.dumps({'jsonrpc':'2.0','id':request['id'],'re
 sys.stdin.read()
 "#;
     ExternalProviderLaunch {
+        persistence_target: acp_client_runtime::ProviderPersistenceTarget::Unspecified,
         executable: PathBuf::from("/usr/bin/python3"),
         arguments: vec!["-c".to_owned(), fixture.to_owned()],
         environment: vec![],
@@ -564,6 +575,7 @@ sys.stdin.read()
 "#
     );
     ExternalProviderLaunch {
+        persistence_target: acp_client_runtime::ProviderPersistenceTarget::Unspecified,
         executable: PathBuf::from("/usr/bin/python3"),
         arguments: vec!["-c".to_owned(), fixture],
         environment: vec![],
@@ -573,6 +585,7 @@ sys.stdin.read()
 #[tokio::test]
 async fn missing_executable_fails_before_runtime_admission() {
     let error = ExternalProviderRuntime::initialize(ExternalProviderLaunch {
+        persistence_target: acp_client_runtime::ProviderPersistenceTarget::Unspecified,
         executable: PathBuf::from("/definitely/missing/codex-router-acp-provider"),
         arguments: vec![],
         environment: vec![],
@@ -609,7 +622,7 @@ async fn stable_v1_initialize_admits_runtime_and_capabilities() {
 async fn initialize_advertises_exact_supported_client_capabilities() {
     // ACP v1 initialization.mdx:28-54 requires protocolVersion and the
     // supported capabilities; omitted capabilities are unsupported (lines
-    // 100-115). R6 requires name/version and no fs, terminal or elicitation.
+    // 100-115). The Router supports form elicitation through its Question broker.
     let root = tempfile::tempdir().expect("fixture root");
     let fixture = acp_scripted_fixture::AcpFixtureScript::new()
         .expect_exact_request(
@@ -617,7 +630,7 @@ async fn initialize_advertises_exact_supported_client_capabilities() {
             "initialize",
             serde_json::json!({
                 "protocolVersion": 1,
-                "clientCapabilities": {"auth": {"terminal": false}},
+                "clientCapabilities": {"auth": {"terminal": false}, "elicitation": {"form": {}}},
                 "clientInfo": {"name": "codex-router", "version": env!("CARGO_PKG_VERSION")}
             }),
         )
@@ -686,7 +699,7 @@ async fn capability_report_uses_initialize_and_session_advertisements() {
     assert!(!before.supports_steering);
     assert!(!before.supports_modes);
     assert!(!before.supports_config_options);
-    assert!(!before.supports_elicitation);
+    assert!(before.supports_elicitation);
     runtime
         .create_session(PathBuf::from("/tmp"))
         .await
@@ -867,6 +880,7 @@ async fn unsupported_protocol_version_is_rejected() {
 #[tokio::test]
 async fn clean_eof_before_initialize_is_a_typed_failure() {
     let error = ExternalProviderRuntime::initialize(ExternalProviderLaunch {
+        persistence_target: acp_client_runtime::ProviderPersistenceTarget::Unspecified,
         executable: PathBuf::from("/bin/sh"),
         arguments: vec!["-c".to_owned(), "exit 0".to_owned()],
         environment: vec![],
@@ -890,6 +904,7 @@ os.close(1); sys.stdin.read()",
         process_id_path.display().to_string(), close_marker.display().to_string()
     );
     let runtime = ExternalProviderRuntime::initialize(ExternalProviderLaunch {
+        persistence_target: acp_client_runtime::ProviderPersistenceTarget::Unspecified,
         executable: PathBuf::from("/usr/bin/python3"),
         arguments: vec!["-c".to_owned(), fixture],
         environment: vec![],
@@ -958,6 +973,7 @@ async fn held_initialize_times_out_and_reaps_owned_process() {
     });
     let error = ExternalProviderRuntime::initialize_with_timeout(
         ExternalProviderLaunch {
+            persistence_target: acp_client_runtime::ProviderPersistenceTarget::Unspecified,
             executable: PathBuf::from("/usr/bin/python3"),
             arguments: vec!["-c".to_owned(), fixture],
             environment: vec![],
@@ -992,6 +1008,7 @@ async fn oversized_initialize_frame_is_rejected_and_reaps_owned_process() {
     );
     let error = ExternalProviderRuntime::initialize_with_timeout(
         ExternalProviderLaunch {
+            persistence_target: acp_client_runtime::ProviderPersistenceTarget::Unspecified,
             executable: PathBuf::from("/usr/bin/python3"),
             arguments: vec!["-c".to_owned(), fixture],
             environment: vec![],
@@ -1090,7 +1107,7 @@ async fn explicit_cancel_remains_responsive_while_prompt_is_active() {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn permission_request_is_counted_once_and_cancelled_without_payload_retention() {
+async fn unavailable_broker_refuses_permission_once_without_payload_retention() {
     let runtime = ExternalProviderRuntime::initialize(permission_request_fixture())
         .await
         .expect("fixture initializes");
@@ -1108,14 +1125,17 @@ async fn permission_request_is_counted_once_and_cancelled_without_payload_retent
         .await
         .expect("prompt settles after permission cancellation");
     assert_eq!(outcome.stop_reason, ProviderPromptStopReason::EndTurn);
-    assert_eq!(outcome.permission_refusal_reason, None);
+    assert_eq!(
+        outcome.permission_refusal_reason,
+        Some(ExternalProviderApprovalRefusalReason::ApprovalBrokerUnavailable)
+    );
     assert_eq!(
         runtime.approval_refusal_warnings(),
         vec![ExternalProviderApprovalRefusalWarning {
             endpoint: "cursor-local".to_owned(),
             provider_session_id: "fixture-session".to_owned(),
             method: "session/request_permission",
-            reason_code: ExternalProviderApprovalRefusalReason::MissingPromptContext,
+            reason_code: ExternalProviderApprovalRefusalReason::ApprovalBrokerUnavailable,
         }]
     );
     assert_eq!(
@@ -1587,6 +1607,7 @@ async fn live_external_provider_create_and_prompt() {
         .map(PathBuf::from)
         .unwrap_or_else(|| std::env::current_dir().expect("current directory"));
     let launch = ExternalProviderLaunch {
+        persistence_target: acp_client_runtime::ProviderPersistenceTarget::Unspecified,
         executable,
         arguments,
         environment: Vec::new(),
@@ -1654,6 +1675,7 @@ async fn live_external_provider_explicit_cancel() {
         .map(PathBuf::from)
         .unwrap_or_else(|| std::env::current_dir().expect("current directory"));
     let runtime = ExternalProviderRuntime::initialize(ExternalProviderLaunch {
+        persistence_target: acp_client_runtime::ProviderPersistenceTarget::Unspecified,
         executable,
         arguments,
         environment: Vec::new(),

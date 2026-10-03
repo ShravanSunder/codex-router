@@ -4,8 +4,14 @@
 use crate::StorageError;
 use sqlx::{Row, Sqlite, Transaction};
 
-const CURRENT_TARGET_DEFINITION_SOURCE: &str =
-    include_str!("../migrations/20260910000000_automation_v1.sql");
+const CURRENT_TARGET_DEFINITION_SOURCE: &str = concat!(
+    include_str!("../migrations/20260910000000_automation_v1.sql"),
+    "\n",
+    include_str!("../migrations/20260928000000_latest_agent_sender.sql"),
+    "\n",
+    include_str!("../migrations/20260930000000_router_pushes.sql"),
+);
+const ROUTER_PUSH_TABLE: &str = "router_pushes";
 
 struct TableSpec {
     name: &'static str,
@@ -13,7 +19,7 @@ struct TableSpec {
     foreign_keys: &'static str,
 }
 
-const TABLE_SPECS: [TableSpec; 10] = [
+const TABLE_SPECS: [TableSpec; 11] = [
     TableSpec {
         name: "automation_events",
         columns: "event_sequence,INTEGER,0,<NULL>,1;event_id,TEXT,1,<NULL>,0;subject_kind,TEXT,1,<NULL>,0;subject_id,TEXT,1,<NULL>,0;event_kind,TEXT,1,<NULL>,0;event_body_json,TEXT,1,<NULL>,0;recorded_at_ms,INTEGER,1,<NULL>,0",
@@ -38,6 +44,11 @@ const TABLE_SPECS: [TableSpec; 10] = [
         name: "operation_receipts",
         columns: "operation_id,TEXT,0,<NULL>,1;method_name,TEXT,1,<NULL>,0;canonical_request,BLOB,1,<NULL>,0;resource_id,TEXT,1,<NULL>,0;operation_status,TEXT,1,<NULL>,0;effect_evidence_json,TEXT,1,<NULL>,0;final_result_json,TEXT,0,<NULL>,0;final_error_json,TEXT,0,<NULL>,0;committed_at_ms,INTEGER,1,<NULL>,0",
         foreign_keys: "",
+    },
+    TableSpec {
+        name: "router_pushes",
+        columns: "push_id,TEXT,1,<NULL>,1;kind,TEXT,1,<NULL>,0;origin_kind,TEXT,1,<NULL>,0;origin_service_id,TEXT,0,<NULL>,0;origin_endpoint_id,TEXT,0,<NULL>,0;origin_session_id,TEXT,0,<NULL>,0;origin_router_ref,TEXT,0,<NULL>,0;target_service_id,TEXT,1,<NULL>,0;target_endpoint_id,TEXT,1,<NULL>,0;target_session_id,TEXT,1,<NULL>,0;dm_delivery_mode,TEXT,0,<NULL>,0;dm_generation_guard_json,TEXT,0,<NULL>,0;reply_to_push_id,TEXT,0,<NULL>,0;header_facts_json,TEXT,1,<NULL>,0;body,TEXT,0,<NULL>,0;ranges_json,TEXT,0,<NULL>,0;delivery_state,TEXT,1,<NULL>,0;last_outcome_json,TEXT,0,<NULL>,0;created_at,TEXT,1,<NULL>,0;settled_at,TEXT,0,<NULL>,0;read_at,TEXT,0,<NULL>,0",
+        foreign_keys: "0,0,router_pushes,reply_to_push_id,push_id,NO ACTION,SET NULL,NONE",
     },
     TableSpec {
         name: "schedule_definitions",
@@ -66,7 +77,7 @@ const TABLE_SPECS: [TableSpec; 10] = [
     },
 ];
 
-const INDEX_SPECS: [&str; 22] = [
+const INDEX_SPECS: [&str; 26] = [
     "automation_events,event_cleanup,0,c,0,recorded_at_ms:0:BINARY:1,event_sequence:0:BINARY:1",
     "automation_events,event_history,0,c,0,subject_kind:0:BINARY:1,subject_id:0:BINARY:1,event_sequence:0:BINARY:1",
     "automation_events,_,1,u,0,event_id:0:BINARY:1",
@@ -78,6 +89,10 @@ const INDEX_SPECS: [&str; 22] = [
     "mailbox_deliveries,_,1,u,0,occurrence_id:0:BINARY:1",
     "mailbox_deliveries,_,1,pk,0,delivery_id:0:BINARY:1",
     "operation_receipts,_,1,pk,0,operation_id:0:BINARY:1",
+    "router_pushes,router_pushes_created,0,c,0,created_at:0:BINARY:1",
+    "router_pushes,router_pushes_origin_ref,1,c,0,origin_kind:0:BINARY:1,origin_router_ref:0:BINARY:1",
+    "router_pushes,router_pushes_target_state,0,c,0,target_service_id:0:BINARY:1,target_endpoint_id:0:BINARY:1,target_session_id:0:BINARY:1,delivery_state:0:BINARY:1,created_at:0:BINARY:1",
+    "router_pushes,_,1,pk,0,push_id:0:BINARY:1",
     "schedule_definitions,_,1,pk,0,schedule_id:0:BINARY:1",
     "schedule_timing_state,_,1,pk,0,schedule_id:0:BINARY:1",
     "thread_bindings,_,1,u,0,schedule_id:0:BINARY:1,thread_binding_id:0:BINARY:1",
@@ -118,18 +133,22 @@ async fn validate_schema(
     transaction: &mut Transaction<'_, Sqlite>,
     legacy: bool,
 ) -> Result<(), StorageError> {
-    validate_object_inventory(transaction).await?;
-    for table in &TABLE_SPECS {
+    validate_object_inventory(transaction, legacy).await?;
+    for table in TABLE_SPECS
+        .iter()
+        .filter(|table| !legacy || table.name != ROUTER_PUSH_TABLE)
+    {
         validate_columns(transaction, table, legacy).await?;
         validate_foreign_keys(transaction, table).await?;
     }
-    validate_indexes(transaction).await?;
+    validate_indexes(transaction, legacy).await?;
     validate_known_definitions(transaction, legacy).await?;
     Ok(())
 }
 
 async fn validate_object_inventory(
     transaction: &mut Transaction<'_, Sqlite>,
+    legacy: bool,
 ) -> Result<(), StorageError> {
     let rows = sqlx::query(
         "SELECT type,name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' AND name != '_sqlx_migrations' ORDER BY type,name",
@@ -147,14 +166,31 @@ async fn validate_object_inventory(
             _ => return Err(StorageError::InvalidSchema),
         }
     }
-    let expected_tables: Vec<&str> = TABLE_SPECS.iter().map(|table| table.name).collect();
-    let expected_indexes = [
-        "delivery_eligibility",
-        "event_cleanup",
-        "event_history",
-        "run_admission_lookup",
-        "run_history",
-    ];
+    let expected_tables: Vec<&str> = TABLE_SPECS
+        .iter()
+        .filter(|table| !legacy || table.name != ROUTER_PUSH_TABLE)
+        .map(|table| table.name)
+        .collect();
+    let expected_indexes = if legacy {
+        vec![
+            "delivery_eligibility",
+            "event_cleanup",
+            "event_history",
+            "run_admission_lookup",
+            "run_history",
+        ]
+    } else {
+        vec![
+            "delivery_eligibility",
+            "event_cleanup",
+            "event_history",
+            "router_pushes_created",
+            "router_pushes_origin_ref",
+            "router_pushes_target_state",
+            "run_admission_lookup",
+            "run_history",
+        ]
+    };
     if actual_tables != expected_tables || actual_named_indexes != expected_indexes {
         return Err(StorageError::InvalidSchema);
     }
@@ -232,9 +268,15 @@ async fn validate_foreign_keys(
     Ok(())
 }
 
-async fn validate_indexes(transaction: &mut Transaction<'_, Sqlite>) -> Result<(), StorageError> {
+async fn validate_indexes(
+    transaction: &mut Transaction<'_, Sqlite>,
+    legacy: bool,
+) -> Result<(), StorageError> {
     let mut actual = Vec::new();
-    for table in &TABLE_SPECS {
+    for table in TABLE_SPECS
+        .iter()
+        .filter(|table| !legacy || table.name != ROUTER_PUSH_TABLE)
+    {
         let indexes = sqlx::query(
             "SELECT name,\"unique\",origin,partial FROM pragma_index_list(?1) ORDER BY seq",
         )
@@ -273,7 +315,11 @@ async fn validate_indexes(transaction: &mut Transaction<'_, Sqlite>) -> Result<(
         }
     }
     actual.sort();
-    let mut expected = INDEX_SPECS.to_vec();
+    let mut expected = INDEX_SPECS
+        .iter()
+        .filter(|index| !legacy || !index.starts_with("router_pushes,"))
+        .copied()
+        .collect::<Vec<_>>();
     expected.sort();
     if actual != expected {
         return Err(StorageError::InvalidSchema);
@@ -285,7 +331,10 @@ async fn validate_known_definitions(
     transaction: &mut Transaction<'_, Sqlite>,
     legacy: bool,
 ) -> Result<(), StorageError> {
-    for table in &TABLE_SPECS {
+    for table in TABLE_SPECS
+        .iter()
+        .filter(|table| !legacy || table.name != ROUTER_PUSH_TABLE)
+    {
         let sql: String =
             sqlx::query_scalar("SELECT sql FROM sqlite_master WHERE type='table' AND name=?1")
                 .bind(table.name)
@@ -297,12 +346,16 @@ async fn validate_known_definitions(
             return Err(StorageError::InvalidSchema);
         }
     }
-    for index in INDEX_SPECS.iter().filter_map(|index| {
-        let mut fields = index.split(',');
-        fields.next();
-        let name = fields.next()?;
-        (name != "_").then_some(name)
-    }) {
+    for index in INDEX_SPECS
+        .iter()
+        .filter(|index| !legacy || !index.starts_with("router_pushes,"))
+        .filter_map(|index| {
+            let mut fields = index.split(',');
+            fields.next();
+            let name = fields.next()?;
+            (name != "_").then_some(name)
+        })
+    {
         let sql: String =
             sqlx::query_scalar("SELECT sql FROM sqlite_master WHERE type='index' AND name=?1")
                 .bind(index)
@@ -327,18 +380,50 @@ fn expected_definition_tokens(
         CURRENT_TARGET_DEFINITION_SOURCE.replace("accepted_receipt_json", "outcome_receipt_json")
     };
     let tokens = tokenize_schema_definition(&source)?;
+    let index_is_unique = if object_type == "index" {
+        index_is_declared_unique(object_name)?
+    } else {
+        false
+    };
     tokens
         .split(|token| token == ";")
         .find(|statement| {
-            statement.get(..3).is_some_and(|prefix| {
-                prefix
-                    .iter()
-                    .map(String::as_str)
-                    .eq(["create", object_type, object_name])
-            })
+            definition_prefix_matches(statement, object_type, object_name, index_is_unique)
         })
         .map(<[String]>::to_vec)
         .ok_or(StorageError::InvalidSchema)
+}
+
+fn index_is_declared_unique(index_name: &str) -> Result<bool, StorageError> {
+    INDEX_SPECS
+        .iter()
+        .find_map(|index| {
+            let mut fields = index.split(',');
+            fields.next()?;
+            let name = fields.next()?;
+            let unique = fields.next()?;
+            (name == index_name).then_some(unique == "1")
+        })
+        .ok_or(StorageError::InvalidSchema)
+}
+
+fn definition_prefix_matches(
+    statement: &[String],
+    object_type: &str,
+    object_name: &str,
+    index_is_unique: bool,
+) -> bool {
+    let matches_prefix = |prefix: &[&str]| {
+        statement
+            .get(..prefix.len())
+            .is_some_and(|tokens| tokens.iter().map(String::as_str).eq(prefix.iter().copied()))
+    };
+    match (object_type, index_is_unique) {
+        ("index", true) => matches_prefix(&["create", "unique", "index", object_name]),
+        ("index", false) => matches_prefix(&["create", "index", object_name]),
+        ("table", _) => matches_prefix(&["create", "table", object_name]),
+        _ => false,
+    }
 }
 
 #[cfg(test)]
@@ -460,5 +545,32 @@ mod tests {
             tokenize_schema_definition("CHECK(value='casesensitive')").unwrap()
         );
         assert!(tokens.contains(&"value name".to_owned()));
+    }
+
+    #[test]
+    fn non_unique_same_name_index_does_not_match_unique_index_spec() {
+        let is_unique =
+            index_is_declared_unique("router_pushes_origin_ref").expect("declared index");
+        assert!(is_unique);
+        let non_unique_definition = tokenize_schema_definition(
+            "CREATE INDEX router_pushes_origin_ref ON router_pushes(origin_kind, origin_router_ref)",
+        )
+        .expect("non-unique index definition should tokenize");
+        assert!(!definition_prefix_matches(
+            &non_unique_definition,
+            "index",
+            "router_pushes_origin_ref",
+            is_unique,
+        ));
+        let unique_definition = tokenize_schema_definition(
+            "CREATE UNIQUE INDEX router_pushes_origin_ref ON router_pushes(origin_kind, origin_router_ref)",
+        )
+        .expect("unique index definition should tokenize");
+        assert!(definition_prefix_matches(
+            &unique_definition,
+            "index",
+            "router_pushes_origin_ref",
+            is_unique,
+        ));
     }
 }

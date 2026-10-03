@@ -245,7 +245,6 @@ async fn send_task(
                 text: task.to_owned().try_into()?,
             },
             mode: MessageDelivery::Auto,
-            correlation: None,
         })
         .await?;
     proof.record(event, json!(receipt))?;

@@ -29,12 +29,15 @@ tower-service = "0.3.3"
 
 [dev-dependencies]
 agent-collaboration = { path = "../agent-collaboration", version = "0.1.30" }
+automation-storage = { path = "../automation-storage", version = "0.1.16" }
 codex-acp-adapter = { path = "../codex-acp-adapter", version = "0.1.30" }
 codex-router-host = { path = "../codex-router-host", version = "0.1.31" }
 codex-native-integration.workspace = true
 collaboration-service = { path = "../collaboration-service", version = "0.1.30" }
 futures-util.workspace = true
 jsonschema.workspace = true
+message-board = { path = "../message-board", version = "0.1.20" }
+message-board-storage = { path = "../message-board-storage", version = "0.1.20" }
 reqwest = { workspace = true, features = ["json"] }
 rmcp = { workspace = true, features = ["client"] }
 tempfile = "3.27.0"

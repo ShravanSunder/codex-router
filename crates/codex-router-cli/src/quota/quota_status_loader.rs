@@ -1,4 +1,50 @@
 use super::*;
+use codex_router_core::credit_usage::CreditProviderObservation;
+use codex_router_core::provider::Provider;
+use codex_router_core::route_profile::CLAUDE_MESSAGES;
+use codex_router_core::route_profile::RESPONSES_HTTP;
+
+#[derive(Clone)]
+pub(super) struct QuotaCredentialResources {
+    credential_store:
+        Option<codex_router_secret_store::encrypted_credential_store::EncryptedCredentialStore>,
+    availability: CredentialStoreAvailability,
+}
+
+impl QuotaCredentialResources {
+    pub(super) async fn open(router_root: &Path) -> Self {
+        match crate::secret_store_factory::open_cli_secret_store_async(router_root.join("secrets"))
+            .await
+        {
+            Ok(credential_store) => Self::from_opened_store(credential_store),
+            Err(_error) => Self {
+                credential_store: None,
+                availability: CredentialStoreAvailability::Unavailable,
+            },
+        }
+    }
+
+    fn from_opened_store(
+        credential_store: codex_router_secret_store::encrypted_credential_store::EncryptedCredentialStore,
+    ) -> Self {
+        let availability = credential_store_availability(&credential_store);
+        Self {
+            credential_store: Some(credential_store),
+            availability,
+        }
+    }
+
+    pub(super) fn credential_store(
+        &self,
+    ) -> Option<codex_router_secret_store::encrypted_credential_store::EncryptedCredentialStore>
+    {
+        self.credential_store.clone()
+    }
+
+    pub(super) fn availability(&self) -> CredentialStoreAvailability {
+        self.availability.clone()
+    }
+}
 
 pub(super) async fn load_quota_status_report_async(
     router_root: &Path,
@@ -6,19 +52,67 @@ pub(super) async fn load_quota_status_report_async(
     now_unix_seconds: u64,
     unicode_bars: bool,
 ) -> Result<QuotaStatusReport, QuotaCommandError> {
+    let credential_resources = QuotaCredentialResources::open(router_root).await;
+    load_quota_status_report_with_availability_async(
+        router_root,
+        all_limits,
+        now_unix_seconds,
+        unicode_bars,
+        credential_resources.availability(),
+    )
+    .await
+}
+
+pub(super) async fn load_quota_status_report_with_availability_async(
+    router_root: &Path,
+    all_limits: bool,
+    now_unix_seconds: u64,
+    unicode_bars: bool,
+    credential_store_availability: CredentialStoreAvailability,
+) -> Result<QuotaStatusReport, QuotaCommandError> {
+    let state_database_path = router_root.join("state.sqlite");
     let quota_history_state =
-        AsyncSqliteStateStore::open_read_only(&router_root.join("state.sqlite")).await?;
-    let accounts = quota_history_state.list_accounts().await?;
-    let report = quota_status_report(
+        match AsyncSqliteStateStore::open_read_only(&state_database_path).await {
+            Ok(state) => state,
+            Err(error) => return Err(error.into()),
+        };
+    let accounts = match quota_history_state.list_accounts().await {
+        Ok(accounts) => accounts,
+        Err(error) => return Err(error.into()),
+    };
+    let mut report = match quota_status_report(
         &quota_history_state,
         &accounts,
         all_limits,
         now_unix_seconds,
         unicode_bars,
     )
-    .await?;
-    quota_history_state.close().await?;
+    .await
+    {
+        Ok(report) => report,
+        Err(error) => return Err(error),
+    };
+    if let Err(error) = quota_history_state.close().await {
+        return Err(error.into());
+    }
+    report.credential_store_availability = credential_store_availability;
     Ok(report)
+}
+
+fn credential_store_availability(
+    credential_store: &codex_router_secret_store::encrypted_credential_store::EncryptedCredentialStore,
+) -> CredentialStoreAvailability {
+    match credential_store.status() {
+        codex_router_secret_store::encrypted_credential_store::EncryptedCredentialStoreStatus::Ready => {
+            CredentialStoreAvailability::Ready
+        }
+        codex_router_secret_store::encrypted_credential_store::EncryptedCredentialStoreStatus::KeyUnavailable => {
+            CredentialStoreAvailability::KeychainLocked
+        }
+        codex_router_secret_store::encrypted_credential_store::EncryptedCredentialStoreStatus::MigrationIncomplete { accounts, failure } => {
+            CredentialStoreAvailability::MigrationIncomplete { accounts, failure }
+        }
+    }
 }
 
 pub(super) async fn quota_status_report(
@@ -101,7 +195,17 @@ pub(super) async fn quota_status_report(
             .as_ref()
             .and_then(PersistedQuotaSnapshot::reset_credits_available);
         let mut display_windows = if let Some(selector_input) = selector_input {
-            display_windows_from_selector_input(selector_input)
+            if account.provider() == Provider::Claude {
+                selector_input
+                    .window_observations()
+                    .iter()
+                    .map(|observation| {
+                        DisplayQuotaWindow::from_claude_observation(observation, now_unix_seconds)
+                    })
+                    .collect()
+            } else {
+                display_windows_from_selector_input(selector_input)
+            }
         } else {
             snapshot.as_ref().map_or_else(Vec::new, |snapshot| {
                 vec![DisplayQuotaWindow::from_snapshot(snapshot)]
@@ -153,6 +257,7 @@ pub(super) async fn quota_status_report(
                     }
                 });
         status_inputs.push(QuotaStatusAccountInput {
+            provider: account.provider(),
             account_label: account.label().to_owned(),
             account_status: account.status().as_str().to_owned(),
             account_id: account.account_id().clone(),
@@ -164,6 +269,12 @@ pub(super) async fn quota_status_report(
             ),
             active_clients,
             windows: display_windows,
+            credit_usage: credit_usage_status(
+                selector_input,
+                refresh_statuses.get(account.account_id()),
+                account.active_credential_generation(),
+                now_unix_seconds,
+            ),
             weekly_pace,
             weekly_quota_floor_basis_points,
             oauth_maintenance: quota_history_state
@@ -176,15 +287,32 @@ pub(super) async fn quota_status_report(
         assessment_inputs.push(assessment_input);
     }
 
-    let assessment = assess_route_band(BurnDownRouteBandAssessmentInput::new(
+    let openai_inputs = assessment_inputs
+        .iter()
+        .filter(|input| input.provider() == Provider::Openai)
+        .cloned()
+        .collect();
+    let claude_inputs = assessment_inputs
+        .iter()
+        .filter(|input| input.provider() == Provider::Claude)
+        .cloned()
+        .collect();
+    let openai_assessment = assess_route_band(BurnDownRouteBandAssessmentInput::new(
         RouteBand::Responses,
         now_unix_seconds,
-        assessment_inputs,
+        RESPONSES_HTTP.clone(),
+        openai_inputs,
     ));
-    let selected_pool = assessment.selected_pool();
+    let claude_assessment = assess_route_band(BurnDownRouteBandAssessmentInput::new(
+        RouteBand::Responses,
+        now_unix_seconds,
+        CLAUDE_MESSAGES.clone(),
+        claude_inputs,
+    ));
+    let selected_pool = openai_assessment.selected_pool();
     let authoritative_projection = selection_projection_source.is_authoritative();
     let preferred_next_account_id = authoritative_projection
-        .then(|| assessment.preferred_next().cloned())
+        .then(|| openai_assessment.preferred_next().cloned())
         .flatten();
     let preferred_next_hash = preferred_next_account_id
         .as_ref()
@@ -193,7 +321,7 @@ pub(super) async fn quota_status_report(
     let preferred_selection_reason = preferred_next_account_id
         .as_ref()
         .and_then(|preferred_account_id| {
-            assessment
+            openai_assessment
                 .accounts()
                 .iter()
                 .find(|account| account.account_id() == preferred_account_id)
@@ -212,6 +340,10 @@ pub(super) async fn quota_status_report(
     let mut rows = status_inputs
         .iter()
         .filter_map(|input| {
+            let assessment = match input.provider {
+                Provider::Openai => &openai_assessment,
+                Provider::Claude => &claude_assessment,
+            };
             assessment
                 .accounts()
                 .iter()
@@ -240,6 +372,55 @@ pub(super) async fn quota_status_report(
         preferred_next_account_id,
         selection_projection_source,
         now_unix_seconds,
+        credential_store_availability: CredentialStoreAvailability::Ready,
         rows,
     })
 }
+
+fn credit_usage_status(
+    selector_input: Option<&SelectorQuotaInput>,
+    refresh_status: Option<&QuotaRefreshStatusView>,
+    active_credential_generation: Option<u64>,
+    now_unix_seconds: u64,
+) -> CreditUsageStatus {
+    let policy = selector_input.map_or_default(SelectorQuotaInput::credit_usage_policy);
+    let observation = selector_input.and_then(SelectorQuotaInput::credit_observation);
+    let provider_observation = observation
+        .map_or_else(CreditProviderObservation::missing, |value| {
+            value.provider_observation().clone()
+        });
+    let age_label = observation
+        .and_then(|value| value.observed_unix_seconds())
+        .map(|observed_unix_seconds| {
+            sample_metadata_from_observed_windows(&[observed_unix_seconds], now_unix_seconds)
+                .age_label
+        })
+        .unwrap_or_else(|| "unknown".to_owned());
+    let freshness = observation.map_or(CreditUsageFreshness::Unknown, |value| {
+        let observation_is_current = active_credential_generation
+            == Some(value.credential_generation())
+            && value.committed_attempt() == Some(value.latest_started_attempt())
+            && value
+                .observed_unix_seconds()
+                .is_some_and(|observed| observed <= now_unix_seconds);
+        if !observation_is_current {
+            return CreditUsageFreshness::Unknown;
+        }
+        match refresh_status.and_then(QuotaRefreshStatusView::stale_after_unix_seconds) {
+            Some(stale_after) if now_unix_seconds < stale_after => CreditUsageFreshness::Fresh,
+            Some(_) => CreditUsageFreshness::Stale,
+            None => CreditUsageFreshness::Unknown,
+        }
+    });
+
+    CreditUsageStatus {
+        policy,
+        provider_observation,
+        freshness,
+        age_label,
+    }
+}
+
+#[cfg(test)]
+#[path = "quota_status_loader_tests.rs"]
+mod tests;

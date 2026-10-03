@@ -33,6 +33,7 @@ pub(crate) fn picker_request() -> SessionsPickerRequest {
         },
         current_provider: Some("codex-router".to_owned()),
         new_session_args_display: String::new(),
+        include_empty_sessions: false,
         records: vec![
             picker_record(
                 "thread-a",
@@ -67,6 +68,9 @@ pub(crate) fn picker_record(
     source: &str,
 ) -> SessionPickerRecord {
     SessionPickerRecord {
+        identity: crate::sessions::SessionPickerIdentity::LocalCodex(session_id.to_owned()),
+        endpoint_label: None,
+        provider_state: None,
         session_id: session_id.to_owned(),
         title: title.to_owned(),
         full_title: title.to_owned(),

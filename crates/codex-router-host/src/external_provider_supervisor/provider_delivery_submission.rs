@@ -14,22 +14,13 @@ pub(crate) enum ProviderPromptDispatch {
 }
 
 impl ExternalProviderSupervisor {
-    pub(crate) async fn submit_delivery_prompt(
+    /// Submits caller-projected content blocks without passing through message rendering.
+    pub(crate) async fn submit_delivery_prompt_contents(
         &self,
-        request: ConversationPromptRequest,
+        request: ProviderPromptContentsRequest,
     ) -> Result<ProviderPromptDispatch, Box<ConversationOperationFailure>> {
         let operation_id = request.operation_id.clone();
         let target = request.target.clone();
-        let rendered = render_message(&target, &request.prompt).map_err(|_| {
-            Box::new(failure(
-                ConversationOperationFailureKind::InvalidRequest,
-                ConversationOperationFailureStage::Validation,
-                ProviderOperationEffect::None,
-                "provider delivery prompt could not be rendered",
-                operation_id.clone(),
-                Some(target.clone()),
-            ))
-        })?;
         let (binding, runtime) = self
             .runtime_binding(&target.endpoint, &operation_id, Some(target.clone()))
             .map_err(Box::new)?;
@@ -54,14 +45,16 @@ impl ExternalProviderSupervisor {
             return Ok(ProviderPromptDispatch::Existing);
         };
         let (dispatched, dispatch_observation) = tokio::sync::oneshot::channel();
+        let input_id = request.input_id;
         let provider_session_id = String::from(target.session_id.clone());
         let completion_target = target.clone();
         let completion_operation_id = operation_id.clone();
         self.spawn_operation(operation_id, live, async move {
             match runtime
-                .prompt_with_approval_dispatch(
+                .prompt_contents_with_approval_dispatch_for_input(
                     provider_session_id,
-                    rendered.text,
+                    input_id,
+                    request.contents,
                     approval_context,
                     Some(dispatched),
                 )

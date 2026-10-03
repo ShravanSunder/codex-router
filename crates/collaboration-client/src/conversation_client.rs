@@ -1,4 +1,5 @@
 //! One conversation connection selected from the endpoint's advertised channel.
+use crate::conversation_create_actor::{ConversationCreateActor, codex_create_actors};
 use crate::{
     AcpConversation, ClientError, ControlClient, ConversationCreatePromptOutcome,
     PublicPromptContent,
@@ -9,7 +10,8 @@ use collaboration_protocol::{
     ConversationOperationSettlement, ConversationOperationWaitOutput,
     ConversationOperationWaitRequest, EndpointDescription, EndpointRef, NonEmptyText, OperationId,
     PositiveSeconds, ProviderOperationEffect, ProviderOperationStage, ProviderRequestedPolicy,
-    ProviderWorkingDirectory, RouterAccess, SessionId, SessionRef, UuidIdentity,
+    ProviderRequestedSettings, ProviderWorkingDirectory, RouterAccess, SessionId, SessionRef,
+    UuidIdentity,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -26,13 +28,15 @@ pub struct ConversationCreateInput {
     pub endpoint: EndpointRef,
     pub working_directory: PathBuf,
     pub access: RouterAccess,
-    pub created_by: SessionRef,
+    pub created_by: ConversationCreateActor,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub approver: Option<SessionRef>,
+    pub approver: Option<ConversationCreateActor>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generation: Option<CodexGeneration>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -200,8 +204,27 @@ impl ConversationClient {
         Self::validate_create_input(&input.create, timeout)?;
         let create_operation_id = input.create.operation_id.clone();
         let endpoint = input.create.endpoint.clone();
-        let requested_by = input.create.created_by.clone();
-        let approver = input.create.approver.clone();
+        let requested_by = input.create.created_by.session()?.ok_or_else(|| {
+            unsupported(
+                &endpoint,
+                "createdBy",
+                "use conversation_create, then message_send for a Human creator",
+            )
+        })?;
+        let approver = input
+            .create
+            .approver
+            .as_ref()
+            .map(|actor| {
+                actor.session()?.ok_or_else(|| {
+                    unsupported(
+                        &endpoint,
+                        "approver",
+                        "use conversation_create, then message_send for a Human Approver",
+                    )
+                })
+            })
+            .transpose()?;
         let working_directory = input.create.working_directory.clone();
         let create_client = Self::connect(directory, &endpoint).await?;
         create_client.validate_operation_id(
@@ -215,6 +238,21 @@ impl ConversationClient {
         };
         let target = match created {
             ConversationCreateOutcome::Created { target, .. } => target,
+            ConversationCreateOutcome::CreatedWithoutSettings {
+                operation_id,
+                target,
+                applied,
+                failed,
+                not_applied,
+            } => {
+                return Ok(ConversationCreatePromptOutcome::CreatedWithoutSettings {
+                    operation_id,
+                    target,
+                    applied,
+                    failed,
+                    not_applied,
+                });
+            }
             ConversationCreateOutcome::Pending { operation_id } => {
                 return Ok(ConversationCreatePromptOutcome::CreatePending { operation_id });
             }
@@ -269,10 +307,16 @@ impl ConversationClient {
                 "create requires a positive timeout and absolute working directory",
             ));
         }
-        if input.created_by.endpoint.service_id != input.endpoint.service_id
+        if input
+            .created_by
+            .session()?
+            .is_some_and(|creator| creator.endpoint.service_id != input.endpoint.service_id)
             || input
                 .approver
                 .as_ref()
+                .map(ConversationCreateActor::session)
+                .transpose()?
+                .flatten()
                 .is_some_and(|approver| approver.endpoint.service_id != input.endpoint.service_id)
         {
             return Err(ConversationClientError::InvalidInput(
@@ -349,6 +393,14 @@ impl ConversationClient {
         let operation_id = input.operation_id.clone();
         match &mut self {
             Self::CodexAcp(acp) => {
+                let (created_by, approver) = codex_create_actors(&input)?;
+                if input.mode.is_some() {
+                    return Err(unsupported(
+                        &input.endpoint,
+                        "mode",
+                        "omit mode for this Codex ACP create",
+                    ));
+                }
                 if acp.endpoint() != &input.endpoint {
                     return Err(ConversationClientError::InvalidInput(
                         "Codex ACP endpoint changed",
@@ -373,8 +425,8 @@ impl ConversationClient {
                         RouterAccess::WriteRestricted => "write-restricted".to_owned(),
                         RouterAccess::WorkspaceWrite => "workspace-write".to_owned(),
                     }),
-                    created_by: Some(input.created_by),
-                    approver: input.approver,
+                    created_by: Some(created_by),
+                    approver,
                     root_message_id: input.root_message_id,
                 };
                 let mut emit = |_event| Ok(());
@@ -387,6 +439,7 @@ impl ConversationClient {
                     Ok(Ok(target)) => Ok(ConversationCreateOutcome::Created {
                         operation_id,
                         target,
+                        effective_settings: None,
                     }),
                     Ok(Err(error)) => Err(error.into()),
                     Err(_) => Ok(ConversationCreateOutcome::Pending { operation_id }),
@@ -399,8 +452,6 @@ impl ConversationClient {
                     ));
                 }
                 for (field, present) in [
-                    ("model", input.model.is_some()),
-                    ("effort", input.effort.is_some()),
                     ("fork", input.fork.is_some()),
                     ("rootMessageId", input.root_message_id.is_some()),
                 ] {
@@ -427,10 +478,26 @@ impl ConversationClient {
                     endpoint: input.endpoint,
                     generation: input.generation,
                     working_directory,
-                    created_by: input.created_by.clone(),
-                    approver: input.approver.unwrap_or(input.created_by),
+                    created_by: input.created_by.provider_identity()?,
+                    approver: input
+                        .approver
+                        .as_ref()
+                        .unwrap_or(&input.created_by)
+                        .provider_identity()?,
                     requested_policy: ProviderRequestedPolicy {
                         access: input.access,
+                    },
+                    settings: if input.mode.is_some()
+                        || input.model.is_some()
+                        || input.effort.is_some()
+                    {
+                        Some(ProviderRequestedSettings {
+                            mode: input.mode,
+                            model: input.model,
+                            effort: input.effort,
+                        })
+                    } else {
+                        None
                     },
                 };
                 let wait_seconds = u32::try_from(timeout.as_secs())
@@ -440,13 +507,7 @@ impl ConversationClient {
                         "create timeout must be whole seconds within the supported range",
                     ))?;
                 let submitted = tokio::time::timeout(timeout, async {
-                    let admitted = control.create_provider_conversation(request).await?;
-                    if let Some(target) = created_target(&admitted.operation) {
-                        return Ok(ConversationCreateOutcome::Created {
-                            operation_id: operation_id.clone(),
-                            target,
-                        });
-                    }
+                    control.create_provider_conversation(request).await?;
                     let settled = control
                         .wait_for_provider_conversation_operation(
                             ConversationOperationWaitRequest {
@@ -455,20 +516,38 @@ impl ConversationClient {
                             },
                         )
                         .await?;
-                    if let ConversationOperationWaitOutput::Available {
-                        settlement: ConversationOperationSettlement::Created { target, .. },
-                    } = settled.output
-                    {
-                        return Ok(ConversationCreateOutcome::Created {
-                            operation_id: operation_id.clone(),
-                            target,
-                        });
-                    }
-                    if let Some(target) = created_target(&settled.operation) {
-                        return Ok(ConversationCreateOutcome::Created {
-                            operation_id: operation_id.clone(),
-                            target,
-                        });
+                    match settled.output {
+                        ConversationOperationWaitOutput::Available {
+                            settlement:
+                                ConversationOperationSettlement::Created {
+                                    target,
+                                    effective_settings,
+                                },
+                        } => {
+                            return Ok(ConversationCreateOutcome::Created {
+                                operation_id: operation_id.clone(),
+                                target,
+                                effective_settings: Some(effective_settings),
+                            });
+                        }
+                        ConversationOperationWaitOutput::Available {
+                            settlement:
+                                ConversationOperationSettlement::CreatedWithoutSettings {
+                                    target,
+                                    applied,
+                                    failed,
+                                    not_applied,
+                                },
+                        } => {
+                            return Ok(ConversationCreateOutcome::CreatedWithoutSettings {
+                                operation_id: operation_id.clone(),
+                                target,
+                                applied,
+                                failed,
+                                not_applied,
+                            });
+                        }
+                        _ => {}
                     }
                     if settled.operation.stage == ProviderOperationStage::Terminal {
                         let effect = settled.operation.effect;
@@ -490,7 +569,8 @@ impl ConversationClient {
                                 stage: ConversationOperationFailureStage::Settlement,
                                 effect,
                                 message,
-                                operation_id: operation_id.clone(),
+                                operation_id: Some(operation_id.clone()),
+                                invalid_setting: None,
                                 provider_code: None,
                                 target: None,
                                 endpoint: None,
@@ -512,18 +592,6 @@ impl ConversationClient {
                 }
             }
         }
-    }
-}
-
-fn created_target(
-    snapshot: &collaboration_protocol::ConversationOperationSnapshot,
-) -> Option<SessionRef> {
-    if snapshot.stage == ProviderOperationStage::Terminal
-        && snapshot.effect == ProviderOperationEffect::Applied
-    {
-        snapshot.target.clone()
-    } else {
-        None
     }
 }
 

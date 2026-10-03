@@ -1,7 +1,10 @@
+use super::claude_quota_fetcher::ClaudeQuotaFetcher;
 use super::*;
+use codex_router_core::provider::Provider;
 
 /// Quota provider request after provider credentials have been resolved.
 pub(crate) struct QuotaRefreshProviderRequest {
+    provider: Provider,
     account_id: AccountId,
     account_label: String,
     route_band: String,
@@ -20,6 +23,7 @@ impl QuotaRefreshProviderRequest {
         chatgpt_account_id: Option<&str>,
     ) -> Self {
         Self {
+            provider: Provider::Openai,
             account_id,
             account_label: account_label.into(),
             route_band: route_band.into(),
@@ -27,6 +31,32 @@ impl QuotaRefreshProviderRequest {
             access_token,
             chatgpt_account_id: chatgpt_account_id.map(str::to_owned),
         }
+    }
+
+    pub(crate) fn new_for_provider(
+        provider: Provider,
+        account_id: AccountId,
+        account_label: impl Into<String>,
+        route_band: impl Into<String>,
+        base_url: impl Into<String>,
+        access_token: SecretString,
+        chatgpt_account_id: Option<&str>,
+    ) -> Self {
+        let mut request = Self::new(
+            account_id,
+            account_label,
+            route_band,
+            base_url,
+            access_token,
+            chatgpt_account_id,
+        );
+        request.provider = provider;
+        request
+    }
+
+    #[must_use]
+    pub(crate) const fn provider(&self) -> Provider {
+        self.provider
     }
 
     /// Returns the account id.
@@ -71,9 +101,23 @@ impl QuotaRefreshProviderRequest {
 pub(crate) struct QuotaRefreshProviderResponse {
     pub(crate) windows: Vec<QuotaRefreshProviderWindow>,
     pub(crate) reset_credits_available: Option<u32>,
+    pub(crate) credit_provider_observation: CreditProviderObservation,
 }
 
 impl QuotaRefreshProviderResponse {
+    fn without_credit_facts() -> Self {
+        Self {
+            windows: Vec::new(),
+            reset_credits_available: None,
+            credit_provider_observation: CreditProviderObservation::missing(),
+        }
+    }
+
+    fn with_credit_facts_from_usage(mut self, usage: &UsageResponse) -> Self {
+        self.credit_provider_observation = usage.credit_provider_observation();
+        self
+    }
+
     pub(super) fn effective_window(&self) -> Option<&QuotaRefreshProviderWindow> {
         self.windows
             .iter()
@@ -82,13 +126,42 @@ impl QuotaRefreshProviderResponse {
     }
 }
 
+impl Default for QuotaRefreshProviderResponse {
+    fn default() -> Self {
+        Self::without_credit_facts()
+    }
+}
+
 /// Quota provider response for one limit window.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct QuotaRefreshProviderWindow {
     pub(crate) limit_window_seconds: u64,
-    pub(crate) remaining_headroom: u32,
+    pub(crate) headroom: QuotaWindowHeadroom,
     pub(crate) reset_unix_seconds: Option<u64>,
     pub(crate) effective: bool,
+}
+
+/// Explicit units for the remaining usage reported by different providers.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum QuotaWindowHeadroom {
+    Percent(u32),
+    BasisPoints(u32),
+}
+
+impl QuotaWindowHeadroom {
+    pub(crate) const fn percent(self) -> Option<u32> {
+        match self {
+            Self::Percent(value) => Some(value),
+            Self::BasisPoints(_) => None,
+        }
+    }
+
+    pub(crate) const fn basis_points(self) -> Option<u32> {
+        match self {
+            Self::Percent(_) => None,
+            Self::BasisPoints(value) => Some(value),
+        }
+    }
 }
 
 /// Provider egress dependency for quota refresh.
@@ -104,6 +177,7 @@ pub(crate) trait QuotaRefreshProvider {
 #[derive(Debug)]
 pub(crate) struct HttpQuotaRefreshProvider {
     client: reqwest::Client,
+    claude_quota_fetcher: ClaudeQuotaFetcher,
 }
 
 impl HttpQuotaRefreshProvider {
@@ -121,7 +195,31 @@ impl HttpQuotaRefreshProvider {
             .map_err(|error| QuotaCommandError::ProviderRequest {
                 message: error.to_string(),
             })?;
-        Ok(Self { client })
+        Ok(Self {
+            claude_quota_fetcher: ClaudeQuotaFetcher::new(client.clone()),
+            client,
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_with_claude_usage_endpoint_for_test(
+        timeout: Duration,
+        usage_endpoint: impl Into<String>,
+    ) -> Result<Self, QuotaCommandError> {
+        let client = reqwest::Client::builder()
+            .user_agent("codex-router-quota-refresh")
+            .timeout(timeout)
+            .build()
+            .map_err(|error| QuotaCommandError::ProviderRequest {
+                message: error.to_string(),
+            })?;
+        Ok(Self {
+            claude_quota_fetcher: ClaudeQuotaFetcher::new_with_endpoint_for_test(
+                timeout,
+                usage_endpoint,
+            ),
+            client,
+        })
     }
 }
 
@@ -130,6 +228,9 @@ impl QuotaRefreshProvider for HttpQuotaRefreshProvider {
         &self,
         request: QuotaRefreshProviderRequest,
     ) -> Result<QuotaRefreshProviderResponse, QuotaCommandError> {
+        if request.provider() == Provider::Claude {
+            return self.claude_quota_fetcher.fetch_quota(request).await;
+        }
         let _account_context = (request.account_id(), request.account_label());
         let mut usage_request = self
             .client
@@ -219,23 +320,28 @@ pub(super) fn quota_response_for_route_band(
     usage: &UsageResponse,
     route_band: &str,
 ) -> Result<QuotaRefreshProviderResponse, QuotaCommandError> {
-    if route_band == "code_review" {
+    let mut response = if route_band == "code_review" {
         let window_pair = usage.code_review_rate_limit.as_ref().ok_or_else(|| {
             QuotaCommandError::ProviderResponse {
                 message: format!("missing quota window for route band {route_band}"),
             }
         })?;
-        return quota_response_from_window_pair(window_pair, route_band);
-    }
+        quota_response_from_window_pair(window_pair, route_band)?
+    } else {
+        let window_pair =
+            usage
+                .rate_limit
+                .as_ref()
+                .ok_or_else(|| QuotaCommandError::ProviderResponse {
+                    message: format!("missing quota window for route band {route_band}"),
+                })?;
+        quota_response_from_window_pair(window_pair, route_band)?
+    };
 
-    let window_pair =
-        usage
-            .rate_limit
-            .as_ref()
-            .ok_or_else(|| QuotaCommandError::ProviderResponse {
-                message: format!("missing quota window for route band {route_band}"),
-            })?;
-    quota_response_from_window_pair(window_pair, route_band)
+    if route_band == "responses" {
+        response = response.with_credit_facts_from_usage(usage);
+    }
+    Ok(response)
 }
 
 pub(super) const fn stale_after_unix_seconds(observed_unix_seconds: u64) -> u64 {
@@ -270,6 +376,7 @@ fn quota_response_from_window_pair(
     Ok(QuotaRefreshProviderResponse {
         windows,
         reset_credits_available: None,
+        ..QuotaRefreshProviderResponse::default()
     })
 }
 
@@ -360,7 +467,7 @@ fn quota_provider_window_from_usage_window(
 
     Ok(QuotaRefreshProviderWindow {
         limit_window_seconds,
-        remaining_headroom,
+        headroom: QuotaWindowHeadroom::Percent(remaining_headroom),
         reset_unix_seconds,
         effective,
     })

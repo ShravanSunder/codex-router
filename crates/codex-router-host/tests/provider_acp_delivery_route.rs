@@ -11,20 +11,24 @@ use codex_router_host::{
     ProviderAcpDeliveryRoute,
 };
 use collaboration_protocol::{
-    AttemptId, ChannelDescription, CodexGeneration, DeliveryCorrelationId, DeliveryOutcome,
-    DeliveryRejectionReason, EndpointAvailability, EndpointDescription, EndpointId, EndpointRef,
-    GenerationNumber, MessageContent, MessageDelivery, MessageText, NonEmptyText,
-    ObservationTimestamp, ProviderBindingId, ProviderBindingIdentity, ProviderCapabilities,
-    ProviderCapability, ProviderCapabilityEvidence, ProviderCapabilityName,
+    AttemptId, ChannelDescription, CodexGeneration, DeliveryClientReceipt, DeliveryCorrelationId,
+    DeliveryOutcome, DeliveryRejectionReason, EndpointAvailability, EndpointDescription,
+    EndpointId, EndpointRef, GenerationNumber, MessageDelivery, MessageText, NonEmptyText,
+    ObservationTimestamp, OperationId, ProviderBindingId, ProviderBindingIdentity,
+    ProviderCapabilities, ProviderCapability, ProviderCapabilityEvidence, ProviderCapabilityName,
     ProviderCapabilityStatus, ProviderKind, ProviderOperationEffect, ProviderOperationKind,
     ProviderReconciliationState, ProviderRequestedPolicy, ProviderRuntimeIdentity,
-    ProviderTransport, ProviderWorkingDirectory, RouterAccess, SessionId, SessionRef, UuidIdentity,
+    ProviderTransport, ProviderWorkingDirectory, PushId, RouterAccess, SessionId, SessionRef,
+    UuidIdentity,
 };
 use collaboration_service::{
     AttemptEvidenceSink, AttemptReconciliation, AttemptReconciliationContext, DeliveryFuture,
-    DeliveryPrecondition, DeliveryRequest, EndpointDirectory, ProviderOperationAdmission,
-    ProviderOperationStore, ProviderSessionRecord, SessionDeliveryRoute,
+    DeliveryPrecondition, EndpointDirectory, LoadPolicy, NOT_LOADED_REASON,
+    ProviderOperationAdmission, ProviderOperationStore, ProviderSessionRecord, RouteClaim,
+    RoutePresence, SessionDeliveryRoute, SessionDeliveryRouter, SessionMessageDelivery,
+    layer_zero::{DeliveryRequest as PreparedDeliveryRequest, PreparedPush},
 };
+use serde_json::Value;
 use std::{
     path::{Path, PathBuf},
     sync::Arc,
@@ -59,6 +63,37 @@ impl AttemptEvidenceSink for RecordedEvidence {
             self.0.lock().await.push(evidence);
             Ok(())
         })
+    }
+}
+
+struct StaleRunningClaimRoute(Arc<ProviderAcpDeliveryRoute>);
+
+impl SessionDeliveryRoute for StaleRunningClaimRoute {
+    fn reachability(&self) -> collaboration_protocol::SessionReachability {
+        collaboration_protocol::SessionReachability::ProviderAcp
+    }
+
+    fn claim(&self, _: &SessionRef) -> DeliveryFuture<'_, RouteClaim> {
+        Box::pin(async { Ok(RouteClaim::Holds) })
+    }
+
+    fn presence(&self, target: &SessionRef) -> DeliveryFuture<'_, RoutePresence> {
+        self.0.presence(target)
+    }
+
+    fn deliver<'a>(
+        &'a self,
+        request: PreparedDeliveryRequest,
+        evidence: &'a dyn AttemptEvidenceSink,
+    ) -> DeliveryFuture<'a, collaboration_protocol::DeliveryReceipt> {
+        self.0.deliver(request, evidence)
+    }
+
+    fn reconcile_attempt(
+        &self,
+        context: AttemptReconciliationContext,
+    ) -> DeliveryFuture<'_, AttemptReconciliation> {
+        self.0.reconcile_attempt(context)
     }
 }
 
@@ -125,7 +160,10 @@ fn available_directory(
     directory
 }
 
-fn cursor_prompt_fixture(event_socket: &Path) -> ExternalProviderLaunch {
+fn cursor_prompt_fixture(
+    event_socket: &Path,
+    captured_prepared_prompt: &Path,
+) -> ExternalProviderLaunch {
     let script = format!(
         r#"
 import json,socket,sys
@@ -143,6 +181,8 @@ with socket.socket(socket.AF_UNIX,socket.SOCK_STREAM) as event:
 print(json.dumps({{'jsonrpc':'2.0','id':request['id'],'result':{{'stopReason':'end_turn'}}}})); sys.stdout.flush()
 request=json.loads(sys.stdin.readline())
 assert request['method']=='session/prompt'
+with open({:?},'w') as capture:
+ json.dump(request,capture)
 with socket.socket(socket.AF_UNIX,socket.SOCK_STREAM) as event:
  event.connect({:?})
  event.sendall(b'second')
@@ -150,9 +190,11 @@ print(json.dumps({{'jsonrpc':'2.0','id':request['id'],'result':{{'stopReason':'e
 sys.stdin.read()
 "#,
         event_socket.display().to_string(),
+        captured_prepared_prompt.display().to_string(),
         event_socket.display().to_string()
     );
     ExternalProviderLaunch {
+        persistence_target: acp_client_runtime::ProviderPersistenceTarget::Unspecified,
         executable: PathBuf::from("/usr/bin/python3"),
         arguments: vec!["-c".to_owned(), script],
         environment: Vec::new(),
@@ -176,6 +218,7 @@ for line in sys.stdin:
         error_code = error_code,
     );
     ExternalProviderLaunch {
+        persistence_target: acp_client_runtime::ProviderPersistenceTarget::Unspecified,
         executable: PathBuf::from("/usr/bin/python3"),
         arguments: vec!["-c".to_owned(), script],
         environment: Vec::new(),
@@ -193,6 +236,7 @@ for line in sys.stdin:
  print(json.dumps({'jsonrpc':'2.0','id':request['id'],'result':{'sessionId':'fixture-session'}})); sys.stdout.flush()
 "#;
     ExternalProviderLaunch {
+        persistence_target: acp_client_runtime::ProviderPersistenceTarget::Unspecified,
         executable: PathBuf::from("/usr/bin/python3"),
         arguments: vec!["-c".to_owned(), script.to_owned()],
         environment: Vec::new(),
@@ -211,21 +255,34 @@ sys.exit(0)
         exit_marker.display().to_string()
     );
     ExternalProviderLaunch {
+        persistence_target: acp_client_runtime::ProviderPersistenceTarget::Unspecified,
         executable: PathBuf::from("/usr/bin/python3"),
         arguments: vec!["-c".to_owned(), script],
         environment: Vec::new(),
     }
 }
 
-fn request(target: SessionRef, text: &str) -> DeliveryRequest {
-    DeliveryRequest {
-        target,
-        message: MessageContent::HumanUser {
-            text: MessageText::try_from(text.to_owned()).expect("message"),
+fn request(target: SessionRef, text: &str) -> PreparedDeliveryRequest {
+    let push_id =
+        PushId::try_from(AttemptId::generate().as_str().to_owned()).expect("UUIDv7 push id");
+    let correlation =
+        DeliveryCorrelationId::try_from(push_id.as_str().to_owned()).expect("push id correlation");
+    let line = MessageText::try_from(format!(
+        "✉️ sender · \"{text}\" · router://{}/push/{}",
+        String::from(target.endpoint.service_id.clone()),
+        push_id.as_str()
+    ))
+    .expect("prepared push line");
+    PreparedDeliveryRequest {
+        payload: PreparedPush {
+            push_id,
+            line,
+            load_policy: LoadPolicy::MayLoad,
         },
+        target,
         mode: MessageDelivery::Auto,
         precondition: DeliveryPrecondition::Unpinned,
-        correlation: DeliveryCorrelationId::generate(),
+        correlation,
         attempt: AttemptId::generate(),
     }
 }
@@ -256,8 +313,8 @@ async fn cursor_steer_rejects_before_evidence_or_client_io() {
             requested_policy: ProviderRequestedPolicy {
                 access: RouterAccess::WriteRestricted,
             },
-            created_by: target.clone(),
-            approver: target.clone(),
+            created_by: (target.clone()).into(),
+            approver: (target.clone()).into(),
             updated_at_ms: 1,
         })
         .await
@@ -280,22 +337,13 @@ async fn cursor_steer_rejects_before_evidence_or_client_io() {
         store,
         Arc::new(NoLivePeer),
     );
+
     let evidence = RecordedEvidence(tokio::sync::Mutex::new(Vec::new()));
 
+    let mut request = request(target, "hello");
+    request.mode = MessageDelivery::Steer;
     let receipt = route
-        .deliver(
-            DeliveryRequest {
-                target,
-                message: MessageContent::HumanUser {
-                    text: MessageText::try_from("hello".to_owned()).expect("message"),
-                },
-                mode: MessageDelivery::Steer,
-                precondition: DeliveryPrecondition::Unpinned,
-                correlation: DeliveryCorrelationId::generate(),
-                attempt: AttemptId::generate(),
-            },
-            &evidence,
-        )
+        .deliver(request, &evidence)
         .await
         .expect("delivery refusal");
 
@@ -309,15 +357,19 @@ async fn cursor_steer_rejects_before_evidence_or_client_io() {
 }
 
 #[tokio::test]
-async fn cursor_auto_queues_behind_a_running_prompt() {
+async fn cursor_auto_queues_a_prepared_push_with_exact_line_and_push_id() {
     let root = tempfile::tempdir().expect("provider root");
     let event_socket = root.path().join("prompt-events.sock");
+    let captured_prepared_prompt = root.path().join("prepared-prompt.json");
     let listener = tokio::net::UnixListener::bind(&event_socket).expect("fixture events");
     let target = target();
     let binding = provider_binding(&target);
-    let runtime = ExternalProviderRuntime::initialize(cursor_prompt_fixture(&event_socket))
-        .await
-        .expect("fixture provider");
+    let runtime = ExternalProviderRuntime::initialize(cursor_prompt_fixture(
+        &event_socket,
+        &captured_prepared_prompt,
+    ))
+    .await
+    .expect("fixture provider");
     runtime
         .create_session(PathBuf::from("/tmp"))
         .await
@@ -336,8 +388,8 @@ async fn cursor_auto_queues_behind_a_running_prompt() {
             requested_policy: ProviderRequestedPolicy {
                 access: RouterAccess::WriteRestricted,
             },
-            created_by: target.clone(),
-            approver: target.clone(),
+            created_by: (target.clone()).into(),
+            approver: (target.clone()).into(),
             updated_at_ms: 1,
         })
         .await
@@ -353,14 +405,15 @@ async fn cursor_auto_queues_behind_a_running_prompt() {
         .expect("supervisor"),
     );
     let directory = available_directory(&target, &binding);
-    let route = ProviderAcpDeliveryRoute::new(
+    let route = Arc::new(ProviderAcpDeliveryRoute::new(
         target.endpoint.service_id.clone(),
         std::iter::once(target.endpoint.clone()).collect(),
         directory,
         Arc::clone(&supervisor),
         store,
         Arc::new(NoLivePeer),
-    );
+    ));
+    let router = SessionDeliveryRouter::new(vec![route.clone()]);
     let first_evidence = RecordedEvidence(tokio::sync::Mutex::new(Vec::new()));
     let second_evidence = RecordedEvidence(tokio::sync::Mutex::new(Vec::new()));
     let stale_evidence = RecordedEvidence(tokio::sync::Mutex::new(Vec::new()));
@@ -372,7 +425,7 @@ async fn cursor_auto_queues_behind_a_running_prompt() {
         },
     };
 
-    let stale = route
+    let stale = router
         .deliver(stale_request, &stale_evidence)
         .await
         .expect("stale guard");
@@ -380,7 +433,7 @@ async fn cursor_auto_queues_behind_a_running_prompt() {
         if rejection.reason == DeliveryRejectionReason::StaleGeneration));
     assert!(stale_evidence.0.lock().await.is_empty());
 
-    let first = route
+    let first = router
         .deliver(request(target.clone(), "first"), &first_evidence)
         .await
         .expect("first delivery");
@@ -393,17 +446,54 @@ async fn cursor_auto_queues_behind_a_running_prompt() {
         .read_exact(&mut first_bytes)
         .await
         .expect("first bytes");
-    let second = route
-        .deliver(request(target, "second"), &second_evidence)
+    let push_id = PushId::try_from("018f47d2-24d5-7a68-b9ec-6f759c394599".to_owned())
+        .expect("UUIDv7 push id");
+    let line = MessageText::try_from(format!(
+        "✉️ Main · \"prepared while busy\" · router://00000000-0000-4000-8000-000000000001/push/{}",
+        push_id.as_str()
+    ))
+    .expect("push line");
+    let correlation =
+        DeliveryCorrelationId::try_from(push_id.as_str().to_owned()).expect("push correlation");
+    assert_eq!(correlation.as_str(), push_id.as_str());
+    let attempt = AttemptId::generate();
+    let second = router
+        .deliver(
+            PreparedDeliveryRequest {
+                payload: PreparedPush {
+                    push_id: push_id.clone(),
+                    line: line.clone(),
+                    load_policy: LoadPolicy::LoadedOnly,
+                },
+                target: target.clone(),
+                mode: MessageDelivery::Auto,
+                precondition: DeliveryPrecondition::Unpinned,
+                correlation,
+                attempt: attempt.clone(),
+            },
+            &second_evidence,
+        )
         .await
         .expect("second delivery");
 
     assert!(matches!(first.outcome, DeliveryOutcome::Started));
     assert!(matches!(second.outcome, DeliveryOutcome::Queued));
+    assert_eq!(
+        second.reachability,
+        Some(collaboration_protocol::SessionReachability::ProviderAcp)
+    );
+    assert!(matches!(
+        second.client,
+        Some(DeliveryClientReceipt::ProviderAcp { operation_id })
+            if operation_id == OperationId::try_from(attempt.as_str().to_owned()).expect("attempt operation id")
+    ));
     assert!(
         matches!(second_evidence.0.lock().await.as_slice(), [RouteEffectEvidence::ProviderAcp(effect)]
         if effect.submission == SubmissionEffect::RouterQueued)
     );
+    let queued = route.queue_list(&target);
+    assert_eq!(queued.len(), 1);
+    assert_eq!(queued[0].input_id.as_str(), push_id.as_str());
     first_event
         .write_all(b"x")
         .await
@@ -419,6 +509,19 @@ async fn cursor_auto_queues_behind_a_running_prompt() {
         .expect("second bytes");
     assert_eq!(first_bytes, *b"first");
     assert_eq!(second_bytes, b"second");
+    let captured_prompt: Value = serde_json::from_slice(
+        &std::fs::read(&captured_prepared_prompt).expect("captured prepared prompt"),
+    )
+    .expect("prepared prompt JSON");
+    assert_eq!(
+        captured_prompt["params"]["sessionId"].as_str(),
+        Some("fixture-session")
+    );
+    let prompt_blocks = captured_prompt["params"]["prompt"]
+        .as_array()
+        .expect("ACP prompt content blocks");
+    assert_eq!(prompt_blocks.len(), 1);
+    assert_eq!(prompt_blocks[0]["text"].as_str(), Some(line.as_str()));
     route.shutdown_queue().await;
     supervisor.shutdown().await.expect("supervisor shutdown");
 }
@@ -458,9 +561,8 @@ async fn router_queued_reconciliation_uses_only_the_operation_store() {
     });
     let context = || AttemptReconciliationContext {
         target: target.clone(),
-        message: MessageContent::HumanUser {
-            text: MessageText::try_from("queued".to_owned()).expect("message"),
-        },
+        prepared_push_id: PushId::try_from("018f47d2-24d5-7a68-b9ec-6f759c394599".to_owned())
+            .expect("UUIDv7 push id"),
         mode: MessageDelivery::Queue,
         recorded: evidence.clone(),
     };
@@ -539,8 +641,8 @@ async fn provider_load_auth_rejection_is_typed_without_session_new() {
             requested_policy: ProviderRequestedPolicy {
                 access: RouterAccess::WriteRestricted,
             },
-            created_by: target.clone(),
-            approver: target.clone(),
+            created_by: (target.clone()).into(),
+            approver: (target.clone()).into(),
             updated_at_ms: 1,
         })
         .await
@@ -555,18 +657,71 @@ async fn provider_load_auth_rejection_is_typed_without_session_new() {
         )
         .expect("supervisor"),
     );
-    let route = ProviderAcpDeliveryRoute::new(
+    let route = Arc::new(ProviderAcpDeliveryRoute::new(
         target.endpoint.service_id.clone(),
         std::iter::once(target.endpoint.clone()).collect(),
         available_directory(&target, &binding),
         Arc::clone(&supervisor),
         store,
         Arc::new(NoLivePeer),
+    ));
+    assert_eq!(
+        route.presence(&target).await.expect("provider presence"),
+        RoutePresence::Wakeable
     );
+
+    let stale_router =
+        SessionDeliveryRouter::new(vec![Arc::new(StaleRunningClaimRoute(Arc::clone(&route)))]);
+    let loaded_only_push_id = PushId::try_from("018f47d2-24d5-7a68-b9ec-6f759c394588".to_owned())
+        .expect("UUIDv7 loaded-only push id");
+    let loaded_only_line = MessageText::try_from(format!(
+        "🧵 Main · \"held batch\" · router://00000000-0000-4000-8000-000000000001/push/{}",
+        loaded_only_push_id.as_str()
+    ))
+    .expect("loaded-only push line");
+    let loaded_only_correlation =
+        DeliveryCorrelationId::try_from(loaded_only_push_id.as_str().to_owned())
+            .expect("loaded-only push correlation");
+    assert_eq!(
+        loaded_only_correlation.as_str(),
+        loaded_only_push_id.as_str()
+    );
+    let loaded_only_request = PreparedDeliveryRequest {
+        payload: PreparedPush {
+            push_id: loaded_only_push_id.clone(),
+            line: loaded_only_line,
+            load_policy: LoadPolicy::LoadedOnly,
+        },
+        target: target.clone(),
+        mode: MessageDelivery::Auto,
+        precondition: DeliveryPrecondition::Unpinned,
+        correlation: loaded_only_correlation,
+        attempt: AttemptId::generate(),
+    };
+    let loaded_only_evidence = RecordedEvidence(tokio::sync::Mutex::new(Vec::new()));
+    let loaded_only_receipt = stale_router
+        .deliver(loaded_only_request, &loaded_only_evidence)
+        .await
+        .expect("loaded-only stale-claim refusal");
+    assert!(matches!(
+        loaded_only_receipt.outcome,
+        DeliveryOutcome::NotSubmitted {
+            retryable: true,
+            ref reason,
+        } if reason == NOT_LOADED_REASON
+    ));
+    assert!(!load_marker.exists());
+    assert!(matches!(
+        loaded_only_evidence.0.lock().await.as_slice(),
+        [RouteEffectEvidence::ProviderAcp(before), RouteEffectEvidence::ProviderAcp(after)]
+            if before.submission == SubmissionEffect::Dispatching
+                && after.submission == SubmissionEffect::NotDispatched
+    ));
+
     let evidence = RecordedEvidence(tokio::sync::Mutex::new(Vec::new()));
 
     let receipt = route
-        .deliver(request(target, "hello"), &evidence)
+        .deliver(request(target.clone(), "hello"), &evidence)
         .await
         .expect("load refusal");
 
@@ -610,8 +765,8 @@ async fn unadvertised_load_settles_not_submitted_without_sending_load() {
             requested_policy: ProviderRequestedPolicy {
                 access: RouterAccess::WriteRestricted,
             },
-            created_by: target.clone(),
-            approver: target.clone(),
+            created_by: (target.clone()).into(),
+            approver: (target.clone()).into(),
             updated_at_ms: 1,
         })
         .await
@@ -634,6 +789,10 @@ async fn unadvertised_load_settles_not_submitted_without_sending_load() {
         store,
         Arc::new(NoLivePeer),
     );
+    assert!(matches!(
+        route.presence(&target).await.expect("provider presence"),
+        RoutePresence::Unreachable { .. }
+    ));
     let evidence = RecordedEvidence(tokio::sync::Mutex::new(Vec::new()));
     let receipt = tokio::time::timeout(
         Duration::from_secs(2),
@@ -655,10 +814,50 @@ async fn unadvertised_load_settles_not_submitted_without_sending_load() {
 }
 
 #[tokio::test]
-async fn permanent_provider_load_rejections_are_typed_and_do_not_expose_acp_text() {
-    for (error_code, expected_reason) in [
-        (-32002, "providerSessionNotFound"),
-        (-32600, "providerRejected"),
+async fn coded_provider_load_errors_keep_correlations_and_do_not_expose_acp_text() {
+    for (error_code, expected_kind, expected_reason, expected_explanation, code_label) in [
+        (
+            -32002,
+            "rejected",
+            Some("providerSessionNotFound"),
+            "this session never started a turn and did not survive the provider restart; create a new conversation",
+            "provider code",
+        ),
+        (
+            -32600,
+            "rejected",
+            Some("providerRejected"),
+            "provider rejected the ACP operation",
+            "provider code",
+        ),
+        (
+            -32000,
+            "rejected",
+            Some("providerRejected"),
+            "provider rejected the ACP operation",
+            "provider code",
+        ),
+        (
+            -32601,
+            "notSubmitted",
+            None,
+            "provider ACP method is unsupported",
+            "ACP code",
+        ),
+        (
+            -32602,
+            "notSubmitted",
+            None,
+            "provider ACP parameters are invalid",
+            "ACP code",
+        ),
+        (
+            -32800,
+            "notSubmitted",
+            None,
+            "provider ACP request was cancelled",
+            "ACP code",
+        ),
     ] {
         let root = tempfile::tempdir().expect("provider root");
         let load_marker = root.path().join("load-method.txt");
@@ -683,8 +882,8 @@ async fn permanent_provider_load_rejections_are_typed_and_do_not_expose_acp_text
                 requested_policy: ProviderRequestedPolicy {
                     access: RouterAccess::WriteRestricted,
                 },
-                created_by: target.clone(),
-                approver: target.clone(),
+                created_by: (target.clone()).into(),
+                approver: (target.clone()).into(),
                 updated_at_ms: 1,
             })
             .await
@@ -715,20 +914,26 @@ async fn permanent_provider_load_rejections_are_typed_and_do_not_expose_acp_text
             .expect("load refusal");
         let outcome = serde_json::to_value(&receipt.outcome).expect("receipt encoding");
 
-        assert_eq!(outcome["kind"], "rejected");
-        assert_eq!(outcome["reason"], expected_reason);
-        assert_eq!(outcome["clientCode"], error_code);
-        assert!(
-            outcome["detail"]
-                .as_str()
-                .is_some_and(|detail| !detail.contains("must not escape")),
-            "ACP error data escaped: {outcome}"
-        );
-        if error_code == -32002 {
-            assert_eq!(
-                outcome["detail"],
-                "this session never started a turn and did not survive the provider restart; create a new conversation"
+        assert_eq!(outcome["kind"], expected_kind);
+        if let Some(expected_reason) = expected_reason {
+            assert_eq!(outcome["reason"], expected_reason);
+            assert_eq!(outcome["clientCode"], error_code);
+            let detail = outcome["detail"].as_str().expect("rejection detail");
+            assert!(detail.starts_with(expected_explanation), "{detail}");
+            assert!(
+                !detail.contains("provider fixture refusal") && !detail.contains("must not escape"),
+                "ACP error data escaped: {outcome}"
             );
+            assert_uuid_v7_provider_reference(detail, code_label, error_code);
+        } else {
+            assert_eq!(outcome["retryable"], true);
+            let reason = outcome["reason"].as_str().expect("not-submitted reason");
+            assert!(reason.starts_with(expected_explanation), "{reason}");
+            assert!(
+                !reason.contains("provider fixture refusal") && !reason.contains("must not escape"),
+                "ACP error data escaped: {outcome}"
+            );
+            assert_uuid_v7_provider_reference(reason, code_label, error_code);
         }
         assert_eq!(
             std::fs::read_to_string(&load_marker)
@@ -742,6 +947,20 @@ async fn permanent_provider_load_rejections_are_typed_and_do_not_expose_acp_text
         route.shutdown_queue().await;
         supervisor.shutdown().await.expect("shutdown");
     }
+}
+
+fn assert_uuid_v7_provider_reference(detail: &str, code_label: &str, provider_code: i32) {
+    assert!(
+        detail.contains(&format!("{code_label} {provider_code}; reference ")),
+        "provider code/reference missing: {detail}"
+    );
+    let correlation_reference = detail
+        .split_once("reference ")
+        .map(|(_, reference)| reference.trim_end_matches(')'))
+        .expect("provider correlation reference");
+    let correlation_uuid =
+        uuid::Uuid::parse_str(correlation_reference).expect("UUIDv7 correlation reference");
+    assert_eq!(correlation_uuid.get_version_num(), 7, "{detail}");
 }
 
 #[tokio::test]
@@ -767,8 +986,8 @@ async fn provider_process_transport_failure_remains_retryable() {
             requested_policy: ProviderRequestedPolicy {
                 access: RouterAccess::WriteRestricted,
             },
-            created_by: target.clone(),
-            approver: target.clone(),
+            created_by: (target.clone()).into(),
+            approver: (target.clone()).into(),
             updated_at_ms: 1,
         })
         .await
@@ -851,8 +1070,8 @@ async fn live_peer_recheck_prevents_provider_load() {
             requested_policy: ProviderRequestedPolicy {
                 access: RouterAccess::WriteRestricted,
             },
-            created_by: target.clone(),
-            approver: target.clone(),
+            created_by: (target.clone()).into(),
+            approver: (target.clone()).into(),
             updated_at_ms: 1,
         })
         .await
@@ -875,6 +1094,10 @@ async fn live_peer_recheck_prevents_provider_load() {
         store,
         Arc::new(LivePeer),
     );
+    assert!(matches!(
+        route.presence(&target).await.expect("provider presence"),
+        RoutePresence::LiveElsewhere { .. }
+    ));
     let evidence = RecordedEvidence(tokio::sync::Mutex::new(Vec::new()));
 
     let receipt = route

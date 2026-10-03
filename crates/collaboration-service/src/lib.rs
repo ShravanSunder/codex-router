@@ -2,10 +2,17 @@
 mod control_connection;
 mod control_overload_response;
 pub use control_connection::serve_control_connection;
+mod machine_identity;
+pub use machine_identity::MachineIdentity;
 mod automation_retention_worker;
 mod control_service_context;
 pub use automation_retention_worker::AutomationRetentionWorker;
 pub use control_service_context::ServiceIdentity;
+pub use control_service_context::subscription_delivery::{
+    BoardAvailability, SubscriptionClock, SubscriptionDeliveryService,
+    SubscriptionDeliveryServiceProps, SubscriptionWaitFilter, SubscriptionWaitResult,
+    SystemSubscriptionClock,
+};
 mod endpoint_directory;
 pub use endpoint_directory::{
     EndpointDirectory, EndpointSnapshot, EndpointSubscription, EndpointUpdate,
@@ -19,6 +26,7 @@ pub use native_channel_relay::{
 mod native_generation_gate;
 pub use native_generation_gate::{NativeAdmission, NativeGenerationGate};
 mod native_relay_listener;
+mod pending_snapshot_interactions;
 mod private_socket_listener;
 pub use native_relay_listener::NativeRelayListener;
 mod conversation_operation_projection;
@@ -29,39 +37,88 @@ pub use codex_acp_adapter::ConversationOperationRecorder;
 pub use codex_conversation_operation_recorder::{
     CodexConversationOperationRecorder, UnavailableConversationOperationRecorder,
 };
+mod provider_session_event_hub;
+mod provider_session_observation_dispatch;
 mod provider_session_record;
+mod session_event_hub;
 pub use provider_operation_store::{
     ProviderOperationAdmission, ProviderOperationAdmissionResult, ProviderOperationRecord,
     ProviderOperationStore, ProviderOperationStoreError,
 };
 mod delivery_acceptance_effect;
 mod delivery_route_projection;
+pub use provider_session_event_hub::{HubReceiveError, ProviderSessionEventHub, receive_hub_event};
 pub use provider_session_record::ProviderSessionRecord;
+mod app_server_event_forwarding;
+mod app_server_item_translation;
+mod app_server_model_catalog;
+pub use app_server_item_translation::{
+    ApprovalPresentation, ApprovalReply, HistoricalTurn, InteractionDisplayContext,
+    InteractionReplyError, QuestionPresentation, QuestionReply, TranslatedSessionItem,
+    group_historical_turns, map_approval_reply, map_question_form_reply,
+    map_request_user_input_reply, render_historical_turn, translate_approval_request,
+    translate_question_request, translate_session_item,
+};
+#[cfg(test)]
+#[path = "app_server_interaction_translation_tests.rs"]
+mod app_server_interaction_translation_tests;
+#[cfg(test)]
+#[path = "app_server_item_translation_tests.rs"]
+mod app_server_item_translation_tests;
+mod provider_acp_content_translation;
+mod provider_acp_event_projection;
+mod provider_acp_interaction;
+mod provider_acp_session_route;
 mod provider_conversation_backend;
+mod router_session_app_server;
 mod schedule_preparation_evidence_sink;
 mod scheduled_run_contract;
 mod scheduled_run_evidence_sink;
 mod scheduled_run_router;
+mod session_command_port;
+pub use app_server_model_catalog::{
+    InvalidProviderModelEntry, ProviderModelEntry, render_model_list,
+};
+pub use router_session_app_server::{
+    AppServerConnectionError, RouterSessionAppServerContext, RouterSessionAppServerListener,
+    serve_router_session_app_server_connection,
+};
 mod session_delivery_contract;
 mod session_delivery_router;
 mod stored_delivery_receipt;
 mod stored_run_receipt;
 pub use collaboration_protocol::{DeliveryClientReceipt, DeliveryReceipt};
-pub use provider_conversation_backend::{ProviderConversationBackend, ProviderConversationFuture};
+pub use provider_acp_session_route::ProviderAcpSessionRoute;
+pub use provider_conversation_backend::{
+    ProviderConversationBackend, ProviderConversationFuture, ProviderSessionInspectFuture,
+    ProviderSettingsFuture,
+};
 pub use scheduled_run_contract::{
     FreshSessionRequest, NativeTurnRef, PreparationEvidenceSink, PreparedTarget, RunAcceptance,
     RunEvidenceDisposition, RunEvidenceSink, RunObservationContext, RunReconciliation,
     RunSettlement, RunSubmission, RunSummarySource, ScheduleCapability, ScheduleDestination,
     SchedulePreparationFailure, SchedulePreparationOutcome, SchedulePreparationRequest,
-    ScheduleSupport, ScheduledRunExecution, ScheduledRunRoute, ScheduledRunSubmission,
-    SettlementEvidence, StopRequestOutcome,
+    ScheduleSupport, ScheduledRunExecution, ScheduledRunPayload, ScheduledRunRoute,
+    ScheduledRunSubmission, SettlementEvidence, StopRequestOutcome,
 };
+pub use session_command_port::{
+    CommandContent, CommandFailure, CommandFuture, CreateSessionCommand, PromptSessionCommand,
+    QueueInputCommand, QueuedSessionInput, SessionCommandPort, SessionSettingsCommand,
+    SessionSteerOutcome, SessionTargetCommand, SessionTurnHandle, SetSessionSettingCommand,
+    SteerSessionCommand,
+};
+pub use session_delivery_contract::layer_zero;
 pub use session_delivery_contract::{
     AttemptEvidenceSink, AttemptReconciliation, AttemptReconciliationContext,
-    DeliveryContractError, DeliveryFuture, DeliveryPrecondition, DeliveryRequest, RouteClaim,
-    RouteUnavailableReason, SessionDeliveryRoute, SessionMessageDelivery,
+    DeliveryContractError, DeliveryFuture, DeliveryPrecondition, LoadPolicy, NOT_LOADED_REASON,
+    RouteClaim, RoutePresence, RouteUnavailableReason, SessionDeliveryRoute,
+    SessionMessageDelivery, TargetPresence, TargetPresenceProbe,
 };
 pub use session_delivery_router::SessionDeliveryRouter;
+pub use session_event_hub::{
+    HubEvent, HubFuture, HubSessionSummary, SessionEventAttachment, SessionEventHub,
+    SessionEventHubError,
+};
 mod provider_conversation_dispatch;
 mod service_identity_storage;
 pub use service_identity_storage::{load_service_identity, new_service_uuid};
@@ -72,23 +129,30 @@ mod journal_dispatch;
 pub use control_schema_publication::publish_control_schema;
 mod native_control_dispatch;
 mod native_control_request;
+mod session_display_name_cache;
+pub use session_display_name_cache::SessionDisplayNameCache;
+mod push_record_delivery;
+mod push_record_resolver;
 mod session_message_dispatch;
+mod session_message_reply_dispatch;
 pub use native_control_dispatch::NativeControlBackend;
 
-mod approval_broker;
 mod codex_app_server_delivery_route;
 mod codex_app_server_scheduled_runs;
 mod codex_queue_reconciliation;
+mod interaction_broker;
 mod message_effect_state;
 mod native_message_dispatch;
+pub use codex_acp_adapter::BrokeredApprovalOutcome;
 pub use codex_app_server_delivery_route::CodexAppServerDeliveryRoute;
 pub use codex_app_server_scheduled_runs::CodexAppServerScheduledRuns;
-mod session_delivery_sink;
-pub use approval_broker::{
-    ExternalApprovalOperationMetadata, ExternalApprovalOption, ExternalApprovalOptionScope,
-    ExternalApprovalRefusal, ExternalApprovalRequest, ServiceApprovalBroker,
+pub use interaction_broker::{
+    ApprovalDecisionError, InteractionHistoryError, InteractionHistoryRecord,
+    InteractionHistoryState, QuestionHistoryState, QuestionResponse, RefusedApprovalOption,
+    RefusedTypedApproval, ServiceInteractionBroker, TypedApprovalLegacyContext,
+    TypedApprovalResolution, TypedApprovalSelection, TypedInteractionDecision,
+    TypedInteractionDecisionOutcome,
 };
-pub use codex_acp_adapter::BrokeredApprovalOutcome;
 
 mod acp_channel_listener;
 pub use acp_channel_listener::AcpChannelListener;
@@ -97,6 +161,7 @@ pub use codex_acp_adapter::{ACP_SCHEMA_DIGEST, NativeStoredSessions};
 pub use unmaterialized_thread_holder::UnmaterializedThreadHolder;
 
 mod instruction_dispatch;
+mod provider_session_inventory_dispatch;
 mod session_inventory_dispatch;
 mod stored_inventory_observation;
 
@@ -155,5 +220,4 @@ mod run_reconciliation;
 
 mod board_request_dispatch;
 mod board_request_validation;
-mod thread_listen_dispatch;
-mod thread_listen_registry;
+mod thread_subscription_dispatch;

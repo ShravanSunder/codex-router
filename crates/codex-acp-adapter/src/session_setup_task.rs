@@ -39,6 +39,7 @@ pub(crate) async fn run_session_setup(inputs: SetupTaskInputs) -> SetupTaskOutpu
         if inputs.adopt_unmaterialized {
             let outcome = session
                 .adopt_unmaterialized(&mut catalog, &inputs.generation, &inputs.params)
+                .await
                 .map(|()| (Vec::new(), json!({})));
             return SetupTaskOutput {
                 binding: Some(session),
@@ -49,6 +50,18 @@ pub(crate) async fn run_session_setup(inputs: SetupTaskInputs) -> SetupTaskOutpu
             .resume_with_receipt(&mut catalog, &inputs.generation, &inputs.params)
             .await
         {
+            Ok(response)
+                if crate::session_creation::native_thread_activity(&response)
+                    == crate::session_creation::NativeThreadActivity::Active =>
+            {
+                Err(SessionSetupError::Busy)
+            }
+            Ok(response)
+                if crate::session_creation::native_thread_activity(&response)
+                    == crate::session_creation::NativeThreadActivity::Invalid =>
+            {
+                Err(SessionSetupError::NativeThreadStatusUnavailable)
+            }
             Ok(response)
                 if inputs
                     .cancellation_barrier
@@ -64,7 +77,10 @@ pub(crate) async fn run_session_setup(inputs: SetupTaskInputs) -> SetupTaskOutpu
         };
         let detached = matches!(
             &outcome,
-            Err(SessionSetupError::OutcomeUnknown | SessionSetupError::Unavailable)
+            Err(SessionSetupError::Busy
+                | SessionSetupError::NativeThreadStatusUnavailable
+                | SessionSetupError::OutcomeUnknown
+                | SessionSetupError::Unavailable)
         );
         return SetupTaskOutput {
             binding: if detached { None } else { Some(session) },
@@ -142,6 +158,7 @@ pub(crate) async fn run_session_setup(inputs: SetupTaskInputs) -> SetupTaskOutpu
                     | SessionSetupError::AccessMismatch { .. }
                     | SessionSetupError::NativeRejected
                     | SessionSetupError::SchemaUnavailable
+                    | SessionSetupError::HostLocationsUnavailable { .. }
             );
             let error = if let Some(operation_id) = operation_id.as_ref() {
                 if inputs

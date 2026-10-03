@@ -1,6 +1,9 @@
 #![allow(clippy::expect_used, clippy::panic)]
 //! A peer scheduled run is a write-only acceptance through the real socket client.
-use agent_automation::{CapturedRunInputs, RouteEffectEvidence, RunId, RunPhase};
+use agent_automation::{
+    CapturedRunInputs, ClaudeCodePeerEffectEvidence, PeerWriteEffect, RouteEffectEvidence, RunId,
+    RunPhase,
+};
 use claude_code_peer_messaging::{ClaudeCodePeerSocket, ClaudeCodeSessionRegistry};
 use codex_router_host::{
     ClaudeCodePeerDeliveryRoute, CollaborationRuntime, CollaborationRuntimeInputs,
@@ -8,15 +11,17 @@ use codex_router_host::{
 use collaboration_client::ControlClient;
 use collaboration_protocol::{
     AutomationConfigureRequest, CodexGeneration, DeliveryOutcome, EndpointId, EndpointRef,
-    InstructionCreateParams, InstructionText, MessageText, OperationId, RunExecution,
+    InstructionCreateParams, InstructionText, MachineId, MachineLabel, MessageText, OperationId,
+    PushHeaderFacts, PushId, PushKind, PushLineInput, PushOrigin, RouterLink, RunExecution,
     RunShowRequest, RunState, ScheduleCreateRequest, ScheduleEnableRequest, SchedulePrepareRequest,
-    SessionId, SessionRef, UuidIdentity, WorkerOutcome,
+    SessionId, SessionRef, UuidIdentity, WorkerOutcome, render_push_line,
 };
 use collaboration_service::{
-    DeliveryFuture, DeliveryPrecondition, RunEvidenceDisposition, RunEvidenceSink,
-    RunObservationContext, RunReconciliation, RunSettlement, RunSubmission, ScheduleCapability,
-    ScheduleDestination, ScheduleSupport, ScheduledRunExecution, ScheduledRunSubmission,
-    SessionDeliveryRoute, SessionDeliveryRouter, SettlementEvidence, StopRequestOutcome,
+    DeliveryContractError, DeliveryFuture, DeliveryPrecondition, LoadPolicy,
+    RunEvidenceDisposition, RunEvidenceSink, RunObservationContext, RunReconciliation,
+    RunSettlement, RunSubmission, ScheduleCapability, ScheduleDestination, ScheduleSupport,
+    ScheduledRunExecution, ScheduledRunPayload, ScheduledRunSubmission, SessionDeliveryRoute,
+    SessionDeliveryRouter, SettlementEvidence, StopRequestOutcome, layer_zero::PreparedPush,
 };
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
@@ -130,10 +135,35 @@ async fn existing_live_peer_run_finishes_as_written_without_summary() {
         .expect("initial peer evidence");
     let sink = Arc::new(RecordedRunEvidence(tokio::sync::Mutex::new(Vec::new())));
     let prepared = router
-        .prepare_existing_target(&target, sink.as_ref())
+        .prepare_existing_target(&target, "", sink.as_ref())
         .await
         .expect("existing peer prepared");
     assert_eq!(prepared.target, target);
+    let run_id = RunId::generate();
+    let schedule_id = agent_automation::ScheduleId::generate();
+    let push_id = PushId::try_from(uuid::Uuid::now_v7().to_string()).expect("push id");
+    let prepared_line = render_push_line(&PushLineInput {
+        link: RouterLink::new(
+            MachineId::from(target.endpoint.service_id.clone()),
+            push_id.clone(),
+        ),
+        machine_label: MachineLabel::try_from("schedule-fixture".to_owned())
+            .expect("machine label"),
+        origin: PushOrigin::Router(PushKind::ScheduleRun),
+        header_facts: PushHeaderFacts::ScheduleRun {
+            schedule_id,
+            run_id: run_id.clone(),
+        },
+        body: Some("Check work".to_owned()),
+    })
+    .expect("prepared schedule line");
+    let prepared_link = prepared_line
+        .split_whitespace()
+        .last()
+        .and_then(|link| RouterLink::parse(link).ok())
+        .expect("schedule link");
+    assert_eq!(prepared_link.push_id(), &push_id);
+    let expected_peer_line = prepared_line.clone();
     let server_sink = Arc::clone(&sink);
     let receiver = tokio::spawn(async move {
         let (stream, _) = listener.accept().await.expect("peer accepted");
@@ -148,6 +178,10 @@ async fn existing_live_peer_run_finishes_as_written_without_summary() {
         let user: Value =
             serde_json::from_str(&lines.next_line().await.expect("user frame").expect("user"))
                 .expect("user JSON");
+        assert_eq!(
+            user.pointer("/message/content").and_then(Value::as_str),
+            Some(expected_peer_line.as_str())
+        );
         user
     });
     let inputs: CapturedRunInputs<SessionRef, EndpointRef> = serde_json::from_value(json!({
@@ -155,19 +189,24 @@ async fn existing_live_peer_run_finishes_as_written_without_summary() {
         "instructionRevisionId":agent_automation::RevisionId::generate(),
         "instructionText":"Check work",
         "continuity":{"kind":"none"},
-        "executionConfiguration":{
-            "destination":{"kind":"ownedThread","target":target,"cwd":"/tmp"},
+            "executionConfiguration":{
+            "destination":{"kind":"ownedThread","target":target.clone(),"cwd":"/tmp"},
             "executionTimeoutSeconds":120,"model":"fixture-model","effort":"medium"
         }
     }))
     .expect("captured inputs");
-    let run_id = RunId::generate();
     let submitted = router
         .submit_run(
             ScheduledRunSubmission {
                 run_id: run_id.clone(),
                 target: target.clone(),
-                message: MessageText::try_from("scheduled peer input".to_owned()).expect("input"),
+                payload: ScheduledRunPayload::Existing {
+                    prepared: PreparedPush {
+                        push_id: push_id.clone(),
+                        line: MessageText::try_from(prepared_line.clone()).expect("input"),
+                        load_policy: LoadPolicy::MayLoad,
+                    },
+                },
                 precondition: DeliveryPrecondition::Unpinned,
                 inputs: inputs.clone(),
                 recorded: initial,
@@ -177,14 +216,13 @@ async fn existing_live_peer_run_finishes_as_written_without_summary() {
         .await
         .expect("peer run submission");
     assert!(matches!(submitted, RunSubmission::Started(acceptance)
-        if matches!(acceptance.execution, RunExecution::ClaudeCodePeer { .. })
+        if matches!(acceptance.execution, RunExecution::ClaudeCodePeer { target: ref actual_target, .. }
+            if actual_target == &target)
             && acceptance.receipt.outcome == DeliveryOutcome::PeerMessageWritten));
     let user = receiver.await.expect("peer receiver");
-    assert!(
-        user["message"]["content"]
-            .as_str()
-            .expect("content")
-            .contains("scheduled peer input")
+    assert_eq!(
+        user.pointer("/message/content").and_then(Value::as_str),
+        Some(prepared_line.as_str())
     );
     let recorded = sink
         .0
@@ -226,6 +264,91 @@ async fn existing_live_peer_run_finishes_as_written_without_summary() {
 }
 
 #[tokio::test]
+async fn scheduled_peer_rejects_a_prepared_push_link_that_disagrees_with_its_id() {
+    let root = tempfile::tempdir().expect("registry root");
+    let target = SessionRef {
+        endpoint: EndpointRef {
+            service_id: UuidIdentity::try_from("0ff962c5-7fa3-4c18-a5ca-1bbe8db09e89".to_owned())
+                .expect("service ID"),
+            endpoint_id: EndpointId::try_from("claude-local".to_owned()).expect("endpoint ID"),
+        },
+        session_id: SessionId::try_from("peer-mismatch".to_owned()).expect("session ID"),
+    };
+    let route = ClaudeCodePeerDeliveryRoute::new(
+        target.endpoint.clone(),
+        Arc::new(ClaudeCodeSessionRegistry::new(root.path().to_owned())),
+        Arc::new(ClaudeCodePeerSocket::new(root.path().to_owned())),
+    );
+    let run_id = RunId::generate();
+    let schedule_id = agent_automation::ScheduleId::generate();
+    let push_id = PushId::try_from(uuid::Uuid::now_v7().to_string()).expect("push id");
+    let linked_push_id =
+        PushId::try_from(uuid::Uuid::now_v7().to_string()).expect("linked push id");
+    assert_ne!(push_id, linked_push_id);
+    let line = render_push_line(&PushLineInput {
+        link: RouterLink::new(
+            MachineId::from(target.endpoint.service_id.clone()),
+            linked_push_id,
+        ),
+        machine_label: MachineLabel::try_from("schedule-fixture".to_owned())
+            .expect("machine label"),
+        origin: PushOrigin::Router(PushKind::ScheduleRun),
+        header_facts: PushHeaderFacts::ScheduleRun {
+            schedule_id,
+            run_id: run_id.clone(),
+        },
+        body: Some("Inspect work".to_owned()),
+    })
+    .expect("prepared schedule line");
+    let inputs: CapturedRunInputs<SessionRef, EndpointRef> = serde_json::from_value(json!({
+        "scheduleChangeId":agent_automation::ChangeId::generate(),
+        "instructionRevisionId":agent_automation::RevisionId::generate(),
+        "instructionText":"Inspect work",
+        "continuity":{"kind":"none"},
+        "executionConfiguration":{
+            "destination":{"kind":"ownedThread","target":target.clone(),"cwd":"/tmp"},
+            "executionTimeoutSeconds":120,"model":"fixture-model","effort":"medium"
+        }
+    }))
+    .expect("captured inputs");
+    let recorded = RouteEffectEvidence::ClaudeCodePeer(ClaudeCodePeerEffectEvidence {
+        session_id: String::from(target.session_id.clone())
+            .try_into()
+            .expect("peer session ID"),
+        process_id: 42_u32.try_into().expect("peer process ID"),
+        write: PeerWriteEffect::NotDispatched,
+    });
+    let sink = RecordedRunEvidence(tokio::sync::Mutex::new(Vec::new()));
+    let result = route
+        .submit_run(
+            ScheduledRunSubmission {
+                run_id,
+                target,
+                payload: ScheduledRunPayload::Existing {
+                    prepared: PreparedPush {
+                        push_id,
+                        line: line.try_into().expect("prepared message text"),
+                        load_policy: LoadPolicy::MayLoad,
+                    },
+                },
+                precondition: DeliveryPrecondition::Unpinned,
+                inputs,
+                recorded,
+            },
+            &sink,
+        )
+        .await;
+    assert!(matches!(
+        result,
+        Err(DeliveryContractError::InvalidEvidence)
+    ));
+    assert!(
+        sink.0.lock().await.is_empty(),
+        "mismatched link crossed the route"
+    );
+}
+
+#[tokio::test]
 async fn host_worker_finalizes_peer_run_as_written() {
     let root = tempfile::tempdir().expect("Host root");
     std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700))
@@ -252,6 +375,8 @@ async fn host_worker_finalizes_peer_run_as_written() {
         mcp_bind: std::net::SocketAddr::from(([127, 0, 0, 1], 0)),
         native_schema: None,
         peer_registry_directory: Some(registry),
+        remote_control_server_name: None,
+        owner_human_id: None,
     })
     .await
     .expect("Host runtime");

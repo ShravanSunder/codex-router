@@ -1,6 +1,7 @@
 use serde_json::Value;
 
 use codex_router_core::ids::AccountId;
+use codex_router_core::route_profile::RouteProfile;
 use codex_router_core::routes::RouteBand;
 use codex_router_state::sqlite::AsyncQuotaExhaustionRepository;
 use codex_router_state::sqlite::StateStoreError;
@@ -60,6 +61,7 @@ pub trait AsyncProviderErrorObserver: Send + Sync {
         &'a self,
         _exhausted_account_id: AccountId,
         _route_band: RouteBand,
+        _route_profile: RouteProfile,
         _observed_unix_seconds: u64,
     ) -> BoxFuture<'a, Result<PostExhaustionRouteBandOutcome, ProviderErrorObservationError>> {
         Box::pin(async { Err(ProviderErrorObservationError::SelectionStateUnavailable) })

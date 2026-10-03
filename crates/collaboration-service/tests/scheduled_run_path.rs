@@ -10,8 +10,12 @@ use collaboration_service::{
 };
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
+use sqlx::Connection;
 use std::{collections::BTreeMap, os::unix::fs::DirBuilderExt, sync::Arc, time::Duration};
 use tokio_tungstenite::tungstenite::Message;
+
+const FRESH_SCHEDULE_TASK_TEXT: &str = "Inspect the task completely and preserve every detail. This deliberately long instruction must arrive intact rather than as a shortened push preview. Final verification marker: FRESH_SCHEDULE_TASK_TEXT_FULLY_DELIVERED_7D2A9B";
+
 #[tokio::test]
 async fn scheduled_fresh_thread_finishes_after_separate_luna_summary()
 -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -140,7 +144,10 @@ async fn exercise_scheduled_run(
     .with_endpoints(vec![description])?
     .with_automation_store(store.clone())
     .with_scheduled_run_execution(Arc::new(
-        collaboration_service::CodexAppServerScheduledRuns::new(native_backend.clone()),
+        collaboration_service::CodexAppServerScheduledRuns::new(
+            native_backend.clone(),
+            Arc::new(collaboration_service::UnmaterializedThreadHolder::new()),
+        ),
     ))
     .with_native_backend(native_backend)?;
     let shutdown = tokio_util::sync::CancellationToken::new();
@@ -153,7 +160,7 @@ async fn exercise_scheduled_run(
     let instruction = client
         .create_instruction(InstructionCreateParams {
             operation_id: OperationId::generate(),
-            text: InstructionText::try_from("Inspect the task".to_owned())?,
+            text: InstructionText::try_from(FRESH_SCHEDULE_TASK_TEXT.to_owned())?,
         })
         .await?;
     let backend_store = Arc::clone(&store);
@@ -358,7 +365,7 @@ async fn exercise_scheduled_run(
                 )?;
                 if frozen_inputs {
                     let encoded = start.to_string();
-                    if !encoded.contains("Inspect the task")
+                    if !encoded.contains(FRESH_SCHEDULE_TASK_TEXT)
                         || encoded.contains("FUTURE_INSTRUCTION")
                     {
                         return Err(
@@ -368,6 +375,15 @@ async fn exercise_scheduled_run(
                 }
                 if start.get("method").and_then(Value::as_str) != Some("turn/start") {
                     return Err("scheduled worker steered instead of starting".into());
+                }
+                let task_input = start
+                    .pointer("/params/input/0/text")
+                    .and_then(Value::as_str)
+                    .ok_or("fresh schedule turn input missing")?;
+                if !task_input.ends_with(FRESH_SCHEDULE_TASK_TEXT) {
+                    return Err(
+                        "fresh schedule run truncated or changed its full task instruction".into(),
+                    );
                 }
                 if start.pointer("/params/effort").and_then(Value::as_str) != Some("medium") {
                     return Err("scheduled worker turn omitted the requested effort".into());
@@ -616,6 +632,17 @@ async fn exercise_scheduled_run(
     client.close().await?;
     service.await??;
     backend.await??;
+    let mut push_connection = sqlx::SqliteConnection::connect_with(
+        &sqlx::sqlite::SqliteConnectOptions::new().filename(&database),
+    )
+    .await?;
+    let push_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM router_pushes")
+        .fetch_one(&mut push_connection)
+        .await?;
+    push_connection.close().await?;
+    if push_count != 0 {
+        return Err(format!("fresh scheduled run created {push_count} push record(s)").into());
+    }
     drop(store);
     for entry in std::fs::read_dir(&root)? {
         let entry = entry?;

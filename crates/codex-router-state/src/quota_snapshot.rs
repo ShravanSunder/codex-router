@@ -1,8 +1,44 @@
 //! SQLite quota snapshot DTOs.
 
+use codex_router_core::credit_usage::CreditUsagePolicy;
 use codex_router_core::ids::AccountId;
+use codex_router_core::provider::Provider;
 
 use crate::account::AccountStatus;
+use crate::credential_maintenance::CredentialMaintenanceState;
+use crate::credit_store::CreditUsageObservation;
+use crate::window_observation::WindowObservation;
+use crate::window_observation::WindowRejection;
+
+/// Non-secret credential-maintenance state associated with one generation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct SelectorCredentialMaintenance {
+    credential_generation: u64,
+    state: CredentialMaintenanceState,
+}
+
+impl SelectorCredentialMaintenance {
+    /// Creates selector maintenance state for one credential generation.
+    #[must_use]
+    pub(crate) const fn new(credential_generation: u64, state: CredentialMaintenanceState) -> Self {
+        Self {
+            credential_generation,
+            state,
+        }
+    }
+
+    /// Returns the credential generation represented by this state.
+    #[must_use]
+    pub(crate) const fn credential_generation(self) -> u64 {
+        self.credential_generation
+    }
+
+    /// Returns the non-secret maintenance state.
+    #[must_use]
+    pub(crate) const fn state(self) -> CredentialMaintenanceState {
+        self.state
+    }
+}
 
 /// Source that produced a persisted quota snapshot.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -524,10 +560,18 @@ impl PersistedSelectorQuotaWindow {
 pub struct SelectorQuotaInput {
     account_id: AccountId,
     account_label: String,
+    provider: Provider,
     account_status: AccountStatus,
     active_credential_generation: Option<u64>,
+    credential_maintenance: Option<SelectorCredentialMaintenance>,
     route_band: String,
     windows: Vec<PersistedSelectorQuotaWindow>,
+    canonical_responses_windows: Option<Vec<PersistedSelectorQuotaWindow>>,
+    window_observations: Vec<WindowObservation>,
+    window_rejections: Vec<WindowRejection>,
+    credit_usage_policy: CreditUsagePolicy,
+    credit_observation: Option<CreditUsageObservation>,
+    suspect_exhausted_credit_suppression: bool,
 }
 
 impl SelectorQuotaInput {
@@ -536,6 +580,7 @@ impl SelectorQuotaInput {
     pub fn new(
         account_id: AccountId,
         account_label: impl Into<String>,
+        provider: Provider,
         account_status: AccountStatus,
         active_credential_generation: Option<u64>,
         route_band: impl Into<String>,
@@ -544,11 +589,65 @@ impl SelectorQuotaInput {
         Self {
             account_id,
             account_label: account_label.into(),
+            provider,
             account_status,
             active_credential_generation,
+            credential_maintenance: None,
             route_band: route_band.into(),
             windows,
+            canonical_responses_windows: None,
+            window_observations: Vec::new(),
+            window_rejections: Vec::new(),
+            credit_usage_policy: CreditUsagePolicy::Disallow,
+            credit_observation: None,
+            suspect_exhausted_credit_suppression: false,
         }
+    }
+
+    /// Attaches durable maintenance state for a credential generation.
+    #[must_use]
+    pub(crate) fn with_credential_maintenance(
+        mut self,
+        credential_maintenance: Option<SelectorCredentialMaintenance>,
+    ) -> Self {
+        self.credential_maintenance = credential_maintenance;
+        self
+    }
+
+    /// Attaches the account's durable Claude per-window state.
+    #[must_use]
+    pub fn with_window_state(
+        mut self,
+        window_observations: Vec<WindowObservation>,
+        window_rejections: Vec<WindowRejection>,
+    ) -> Self {
+        self.window_observations = window_observations;
+        self.window_rejections = window_rejections;
+        self
+    }
+
+    /// Attaches canonical Responses windows for compact credit assessment.
+    #[must_use]
+    pub fn with_canonical_responses_windows(
+        mut self,
+        windows: Option<Vec<PersistedSelectorQuotaWindow>>,
+    ) -> Self {
+        self.canonical_responses_windows = windows;
+        self
+    }
+
+    /// Attaches one coherent credit-policy and provider-observation snapshot.
+    #[must_use]
+    pub fn with_credit_usage(
+        mut self,
+        policy: CreditUsagePolicy,
+        observation: Option<CreditUsageObservation>,
+        suspect_exhausted_credit_suppression: bool,
+    ) -> Self {
+        self.credit_usage_policy = policy;
+        self.credit_observation = observation;
+        self.suspect_exhausted_credit_suppression = suspect_exhausted_credit_suppression;
+        self
     }
 
     /// Returns account id.
@@ -563,6 +662,12 @@ impl SelectorQuotaInput {
         &self.account_label
     }
 
+    /// Returns the immutable provider for this account.
+    #[must_use]
+    pub const fn provider(&self) -> Provider {
+        self.provider
+    }
+
     /// Returns account status.
     #[must_use]
     pub const fn account_status(&self) -> AccountStatus {
@@ -575,6 +680,15 @@ impl SelectorQuotaInput {
         self.active_credential_generation
     }
 
+    /// Returns maintenance state only when it belongs to the active generation.
+    #[must_use]
+    pub(crate) fn active_credential_maintenance_state(&self) -> Option<CredentialMaintenanceState> {
+        let active_generation = self.active_credential_generation?;
+        self.credential_maintenance
+            .filter(|maintenance| maintenance.credential_generation() == active_generation)
+            .map(SelectorCredentialMaintenance::state)
+    }
+
     /// Returns route band.
     #[must_use]
     pub fn route_band(&self) -> &str {
@@ -585,6 +699,47 @@ impl SelectorQuotaInput {
     #[must_use]
     pub fn windows(&self) -> &[PersistedSelectorQuotaWindow] {
         &self.windows
+    }
+
+    /// Returns the optional canonical Responses quota evidence for compact.
+    #[must_use]
+    pub fn canonical_responses_windows(&self) -> Option<&[PersistedSelectorQuotaWindow]> {
+        self.canonical_responses_windows.as_deref()
+    }
+
+    /// Returns durable Claude quota observations ordered by window kind.
+    #[must_use]
+    pub fn window_observations(&self) -> &[WindowObservation] {
+        &self.window_observations
+    }
+
+    /// Returns durable Claude rejection barriers ordered by window kind.
+    #[must_use]
+    pub fn window_rejections(&self) -> &[WindowRejection] {
+        &self.window_rejections
+    }
+
+    /// Returns the saved per-account choice, defaulting absent storage to Disallow.
+    #[must_use]
+    pub const fn credit_usage_policy(&self) -> CreditUsagePolicy {
+        self.credit_usage_policy
+    }
+
+    /// Returns the paired provider facts and refresh-attempt metadata, if observed.
+    #[must_use]
+    pub const fn credit_observation(&self) -> Option<&CreditUsageObservation> {
+        self.credit_observation.as_ref()
+    }
+
+    /// Returns whether credit authority is fresh and current for the persisted account generation.
+    #[must_use]
+    pub fn has_current_credit_authority(&self, now_unix_seconds: u64) -> bool {
+        self.credit_usage_policy.allows_credit_usage()
+            && !self.suspect_exhausted_credit_suppression
+            && self.credit_observation.as_ref().is_some_and(|observation| {
+                observation
+                    .authorizes_credit_usage(self.active_credential_generation, now_unix_seconds)
+            })
     }
 }
 

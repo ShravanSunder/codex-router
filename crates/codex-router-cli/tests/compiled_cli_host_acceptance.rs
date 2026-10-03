@@ -1,3 +1,8 @@
+#[cfg(not(feature = "keychain-test-support"))]
+compile_error!(
+    "compiled CLI Host acceptance tests require keychain-test-support so spawned binaries cannot use the production Keychain adapter"
+);
+
 use std::os::unix::fs::MetadataExt;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
@@ -19,46 +24,170 @@ use host_replacement_observation::{binary_version, observe_continuous_lock, veri
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[tokio::test]
-async fn installed_mode_rejects_host_before_publication_when_fixture_launchctl_fails()
+async fn compiled_cli_child_refuses_the_production_keychain_root()
 -> Result<(), Box<dyn std::error::Error>> {
     let directory = TestDirectory::new()?;
-    let router_root = directory.path().join("router");
-    let codex_home = directory.path().join("codex");
-    let socket_path = codex_native_integration::CodexPaths::from_codex_home(codex_home.clone())
-        .app_server_socket();
-    let launchctl_executable = directory.path().join("launchctl");
-    install_rejected_launchctl_fixture(&launchctl_executable)?;
     let binary = PathBuf::from(env!("CARGO_BIN_EXE_codex-router"));
 
-    let output = tokio::time::timeout(
-        Duration::from_secs(12),
-        tokio::process::Command::new(&binary)
-            .args([
-                "host",
-                "--router-root",
-                router_root.to_str().ok_or("router root is not UTF-8")?,
-            ])
-            // Installed-mode behavior is tested only with fake HOME, Codex and launchctl.
-            .env("CODEX_ROUTER_USE_HOME_DEFAULT", "1")
-            .env("OTEL_SDK_DISABLED", "true")
-            .kill_on_drop(true)
-            .env("CODEX_HOME", &codex_home)
-            .env("CODEX_ROUTER_COMPILED_CLI_NATIVE_SOCKET", &socket_path)
-            .env("CODEX_ROUTER_DEBUG_LAUNCHCTL", &launchctl_executable)
-            .env("HOME", directory.path())
-            .output(),
-    )
-    .await??;
+    // Run the same compiled binary once before the guard probe to avoid cold macOS dyld startup.
+    binary_version(&binary).await?;
 
-    check(!output.status.success(), "host unexpectedly started")?;
+    let port = 49_152 + (std::process::id() % 16_384) as u16;
+    let child = tokio::process::Command::new(&binary)
+        .args(["serve", "--listen-host", "127.0.0.1", "--port"])
+        .arg(port.to_string())
+        .env("HOME", directory.path())
+        .env("CODEX_ROUTER_USE_HOME_DEFAULT", "1")
+        .env_remove("CODEX_ROUTER_DEBUG_ROUTER_ROOT")
+        .env("OTEL_SDK_DISABLED", "true")
+        .kill_on_drop(true)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let output = tokio::time::timeout(Duration::from_secs(5), child.wait_with_output())
+        .await
+        .map_err(|_elapsed| "compiled CLI child did not refuse the production key root")??;
+    let stderr = String::from_utf8(output.stderr)?;
     check(
-        String::from_utf8(output.stderr)?
-            .contains("launchctl rejected Codex Desktop local-daemon attachment"),
-        "host did not report the launch-session policy failure",
+        !output.status.success(),
+        "compiled CLI child unexpectedly opened the production default secret root",
     )?;
     check(
-        !router_root.join("host.sock").exists(),
-        "operator socket was published before launch-session policy succeeded",
+        stderr.contains("encrypted credential store could not be opened"),
+        &stderr,
+    )?;
+    check(
+        !directory.path().join(".codex-router").exists(),
+        "test-key guard created the production default router root",
+    )?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn forged_home_default_root_never_invokes_launchctl() -> Result<(), Box<dyn std::error::Error>>
+{
+    let directory = TestDirectory::new()?;
+    let router_root = directory.path().join(".codex-router");
+    let codex_home = directory.path().join(".codex");
+    let launchctl_executable = directory.path().join("launchctl");
+    let launchctl_log = directory.path().join("launchctl.log");
+    install_launchctl_fixture(&launchctl_executable)?;
+    let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_codex-router"))
+        .args(["host", "--router-root"])
+        .arg(&router_root)
+        .env("HOME", directory.path())
+        .env("CODEX_HOME", &codex_home)
+        .env("CODEX_ROUTER_USE_HOME_DEFAULT", "1")
+        .env("CODEX_ROUTER_DEBUG_LAUNCHCTL", &launchctl_executable)
+        .env("CODEX_ROUTER_COMPILED_CLI_LAUNCHCTL_LOG", &launchctl_log)
+        .env("OTEL_SDK_DISABLED", "true")
+        .output()
+        .await?;
+    let error = String::from_utf8(output.stderr)?;
+    check(!output.status.success(), "forged HOME unexpectedly started")?;
+    check(
+        error.contains("isolated Host requires a readable debug profile"),
+        &error,
+    )?;
+    check(!launchctl_log.exists(), "forged HOME invoked launchctl")?;
+    check(!router_root.exists(), "forged HOME created router state")?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn private_router_root_without_debug_profile_never_invokes_launchctl()
+-> Result<(), Box<dyn std::error::Error>> {
+    let directory = TestDirectory::new()?;
+    let owner_codex_home = directory.path().join(".codex");
+    let launchctl_executable = directory.path().join("launchctl");
+    install_launchctl_fixture(&launchctl_executable)?;
+    let binary = PathBuf::from(env!("CARGO_BIN_EXE_codex-router"));
+    let router_root = directory.path().join("private-router");
+    let launchctl_log = directory.path().join("launchctl.log");
+    let output = tokio::process::Command::new(&binary)
+        .args(["host", "--router-root"])
+        .arg(&router_root)
+        .env("HOME", directory.path())
+        .env("CODEX_HOME", &owner_codex_home)
+        .env("CODEX_ROUTER_USE_HOME_DEFAULT", "1")
+        .env("CODEX_ROUTER_DEBUG_LAUNCHCTL", &launchctl_executable)
+        .env("CODEX_ROUTER_COMPILED_CLI_LAUNCHCTL_LOG", &launchctl_log)
+        .env("OTEL_SDK_DISABLED", "true")
+        .output()
+        .await?;
+    let error = String::from_utf8(output.stderr)?;
+    check(
+        !output.status.success(),
+        "private router root unexpectedly started",
+    )?;
+    check(
+        error.contains("isolated Host requires a readable debug profile"),
+        &error,
+    )?;
+    check(
+        error.contains(
+            &owner_codex_home
+                .join("codex-router-debug.config.toml")
+                .display()
+                .to_string(),
+        ),
+        &error,
+    )?;
+    check(
+        !launchctl_log.exists(),
+        "private router root invoked launchctl",
+    )?;
+    check(
+        !router_root.exists(),
+        "private router root created router state",
+    )?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn private_router_root_with_profile_requires_dedicated_socket_before_launchctl()
+-> Result<(), Box<dyn std::error::Error>> {
+    let directory = TestDirectory::new()?;
+    let codex_home = directory.path().join("private-codex");
+    std::fs::create_dir_all(&codex_home)?;
+    let profile = codex_home.join("codex-router-debug.config.toml");
+    std::fs::write(
+        &profile,
+        "model_provider = \"codex-router-debug\"\n\n[model_providers.codex-router-debug]\nname = \"fixture\"\nbase_url = \"http://127.0.0.1:19087/v1\"\nwire_api = \"responses\"\nrequires_openai_auth = false\nsupports_websockets = true\n",
+    )?;
+    let router_root = directory.path().join("private-router");
+    let launchctl_executable = directory.path().join("launchctl");
+    let launchctl_log = directory.path().join("launchctl.log");
+    install_launchctl_fixture(&launchctl_executable)?;
+    let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_codex-router"))
+        .args(["host", "--router-root"])
+        .arg(&router_root)
+        .args(["--port", "19087"])
+        .env("HOME", directory.path())
+        .env("CODEX_HOME", &codex_home)
+        .env("CODEX_ROUTER_USE_HOME_DEFAULT", "1")
+        .env("CODEX_ROUTER_DEBUG_LAUNCHCTL", &launchctl_executable)
+        .env("CODEX_ROUTER_COMPILED_CLI_LAUNCHCTL_LOG", &launchctl_log)
+        .env_remove("CODEX_ROUTER_DEBUG_APP_SERVER_SOCKET")
+        .env("OTEL_SDK_DISABLED", "true")
+        .output()
+        .await?;
+    let error = String::from_utf8(output.stderr)?;
+    check(
+        !output.status.success(),
+        "private router root unexpectedly started",
+    )?;
+    check(
+        error.contains("CODEX_ROUTER_DEBUG_APP_SERVER_SOCKET"),
+        &error,
+    )?;
+    check(
+        !launchctl_log.exists(),
+        "private router root invoked launchctl",
+    )?;
+    check(
+        !router_root.exists(),
+        "private router root created router state",
     )?;
     Ok(())
 }
@@ -77,10 +206,9 @@ async fn installed_cli_restarts_host_after_atomic_binary_install()
 
 async fn run_host_install_journey(atomic_install: bool) -> Result<(), Box<dyn std::error::Error>> {
     let directory = TestDirectory::new()?;
-    let router_root = directory.path().join("router");
+    let router_root = directory.path().join("private-router");
     let codex_home = directory.path().join("codex");
-    let socket_path = codex_native_integration::CodexPaths::from_codex_home(codex_home.clone())
-        .app_server_socket();
+    let socket_path = directory.path().join("dedicated-socket/app-server.sock");
     let managed_executable = codex_home.join("packages/standalone/current/codex");
     let launchctl_executable = directory.path().join("launchctl");
     let curl_executable = directory.path().join("curl");
@@ -97,6 +225,7 @@ async fn run_host_install_journey(atomic_install: bool) -> Result<(), Box<dyn st
     install_launchctl_fixture(&launchctl_executable)?;
     install_curl_fixture(&curl_executable)?;
     let port = reserve_loopback_port()?;
+    install_debug_profile(&codex_home, port)?;
     let candidate_binary = PathBuf::from(env!("CARGO_BIN_EXE_codex-router"));
     let prior_binary = std::env::var_os("CODEX_ROUTER_RESTART_PRIOR_BINARY").map(PathBuf::from);
     if let Some(prior) = &prior_binary {
@@ -119,6 +248,10 @@ async fn run_host_install_journey(atomic_install: bool) -> Result<(), Box<dyn st
         prior_binary.as_deref().unwrap_or(&candidate_binary),
         &binary,
     )?;
+    let installed_binary_version = binary_version(&binary).await?;
+    eprintln!(
+        "compiled_cli_host_acceptance_installed_binary_warmed version={installed_binary_version}"
+    );
     let replacement_binary = if atomic_install {
         binary.clone()
     } else {
@@ -130,6 +263,7 @@ async fn run_host_install_journey(atomic_install: bool) -> Result<(), Box<dyn st
     let mut host = tokio::process::Command::new(&binary);
     host.args([
         "host",
+        "--require-debug-isolation",
         "--router-root",
         router_root.to_str().ok_or("router root is not UTF-8")?,
         "--port",
@@ -141,6 +275,7 @@ async fn run_host_install_journey(atomic_install: bool) -> Result<(), Box<dyn st
     .env("OTEL_SDK_DISABLED", "true")
     .kill_on_drop(true)
     .env("CODEX_HOME", &codex_home)
+    .env("CODEX_ROUTER_DEBUG_APP_SERVER_SOCKET", &socket_path)
     .env("CODEX_ROUTER_COMPILED_CLI_NATIVE_SOCKET", &socket_path)
     .env("CODEX_ROUTER_DEBUG_LAUNCHCTL", &launchctl_executable)
     .env("CODEX_ROUTER_COMPILED_CLI_LAUNCHCTL_LOG", &launchctl_log)
@@ -169,22 +304,24 @@ async fn run_host_install_journey(atomic_install: bool) -> Result<(), Box<dyn st
     .stdout(Stdio::from(std::fs::File::create(&host_stdout)?))
     .stderr(Stdio::from(std::fs::File::create(&host_stderr)?));
     let mut host = host.spawn()?;
+    eprintln!(
+        "compiled_cli_host_acceptance_fixture root={} router_endpoint=127.0.0.1:{} host_pid={:?} binary={} replacement_binary={}",
+        directory.path().display(),
+        port,
+        host.id(),
+        binary.display(),
+        replacement_binary.display(),
+    );
     // Always release owned children, including when an assertion below fails.
     let proof = async {
         wait_for_operator_socket(&mut host, &router_root.join("host.sock"), &host_stderr).await?;
         let timing_output = std::fs::read_to_string(&host_stderr)?;
-        for stage in ["launchctlPolicy", "executableIdentity"] {
-            check(
-                timing_output.contains(stage),
-                &format!("missing debug readiness timing stage {stage}: {timing_output}"),
-            )?;
-        }
-        eprintln!("compiled_acceptance_readiness_timing={timing_output}");
         check(
-            std::fs::read_to_string(&launchctl_log)?.trim()
-                == "setenv CODEX_APP_SERVER_USE_LOCAL_DAEMON 1",
-            "foreground host did not configure Desktop local-daemon attachment",
+            timing_output.contains("executableIdentity"),
+            &format!("missing executableIdentity timing stage: {timing_output}"),
         )?;
+        eprintln!("compiled_acceptance_readiness_timing={timing_output}");
+        check(!launchctl_log.exists(), "isolated Host invoked launchctl")?;
 
         let status =
             run_host_subcommand(&binary, &router_root, &codex_home, &socket_path, &["status"]).await?;
@@ -230,7 +367,7 @@ async fn run_host_install_journey(atomic_install: bool) -> Result<(), Box<dyn st
             "app-server restart did not report success",
         )?;
 
-        check(std::fs::read_to_string(&launchctl_log)?.lines().count() == 1, "app-server-only restart replaced the Host")?;
+        check(!launchctl_log.exists(), "app-server-only restart invoked launchctl")?;
         check(std::fs::read_to_string(&process_log)?.lines().count() == 2, "app-server restart did not replace exactly one child")?;
         verify_host_image(original_host_pid, &binary)?;
 
@@ -246,7 +383,7 @@ async fn run_host_install_journey(atomic_install: bool) -> Result<(), Box<dyn st
             &update_stdout,
         )?;
 
-        check(std::fs::read_to_string(&launchctl_log)?.lines().count() == 1, "app-server update replaced the Host")?;
+        check(!launchctl_log.exists(), "app-server update invoked launchctl")?;
         check(std::fs::read_to_string(&process_log)?.lines().count() == 3, "changed update child generation missing")?;
         std::fs::write(&updater_failure_marker, b"fail")?;
         let failed_update =
@@ -277,6 +414,10 @@ async fn run_host_install_journey(atomic_install: bool) -> Result<(), Box<dyn st
         let old_inode = std::fs::metadata(&binary)?.ino();
         std::fs::rename(&candidate_install, &replacement_binary)?;
         check(std::fs::metadata(&replacement_binary)?.ino() != old_inode, "replacement must be a distinct executable identity")?;
+        let replacement_version = binary_version(&replacement_binary).await?;
+        eprintln!(
+            "compiled_cli_host_acceptance_replacement_binary_warmed version={replacement_version}"
+        );
 
         let (finish_sender, finish_receiver) = tokio::sync::oneshot::channel();
         let contention = tokio::spawn(observe_continuous_lock(lock_path.clone(), finish_receiver));
@@ -297,7 +438,7 @@ async fn run_host_install_journey(atomic_install: bool) -> Result<(), Box<dyn st
             std::fs::metadata(&host_stdout)?.len() == 0,
             "foreground Host printed startup or re-exec progress to its terminal",
         )?;
-        check(std::fs::read_to_string(&launchctl_log)?.lines().count() == 2, "whole Host restart did not activate once")?;
+        check(!launchctl_log.exists(), "whole Host restart invoked launchctl")?;
         let generations = std::fs::read_to_string(&process_log)?;
         check(generations.lines().count() == 4, "whole Host restart child generation missing")?;
         for former_pid in generations.lines().take(3) {
@@ -333,6 +474,20 @@ async fn run_host_install_journey(atomic_install: bool) -> Result<(), Box<dyn st
         Ok::<(), Box<dyn std::error::Error>>(())
     }
     .await;
+
+    if let Err(error) = &proof {
+        eprintln!(
+            "compiled_cli_host_acceptance_failure error={error} root={} router_endpoint=127.0.0.1:{} host_pid={:?} host_status={:?} app_server_generations={} host_stderr={:?}",
+            directory.path().display(),
+            port,
+            host.id(),
+            host.try_wait(),
+            std::fs::read_to_string(&process_log)
+                .map(|contents| contents.lines().count())
+                .unwrap_or_default(),
+            std::fs::read_to_string(&host_stderr).unwrap_or_default(),
+        );
+    }
 
     if host.try_wait()?.is_none() {
         let host_process_id = host.id().ok_or("host process ID is unavailable")?;
@@ -576,9 +731,14 @@ fn prepend_path(directory: &Path) -> std::io::Result<std::ffi::OsString> {
     std::env::join_paths(paths).map_err(std::io::Error::other)
 }
 
-fn install_rejected_launchctl_fixture(executable: &Path) -> std::io::Result<()> {
-    std::fs::write(executable, b"#!/bin/sh\nexit 1\n")?;
-    std::fs::set_permissions(executable, std::fs::Permissions::from_mode(0o700))
+fn install_debug_profile(codex_home: &Path, port: u16) -> std::io::Result<()> {
+    std::fs::create_dir_all(codex_home)?;
+    std::fs::write(
+        codex_home.join("codex-router-debug.config.toml"),
+        format!(
+            "model_provider = \"codex-router-debug\"\n\n[model_providers.codex-router-debug]\nname = \"fixture\"\nbase_url = \"http://127.0.0.1:{port}/v1\"\nwire_api = \"responses\"\nrequires_openai_auth = false\nsupports_websockets = true\n"
+        ),
+    )
 }
 
 fn reserve_loopback_port() -> std::io::Result<u16> {

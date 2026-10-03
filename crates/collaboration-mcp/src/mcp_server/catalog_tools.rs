@@ -1,4 +1,8 @@
 use super::*;
+use collaboration_protocol::{
+    ThreadSubscribeRequest, ThreadSubscriptionView, ThreadSubscriptionsRequest,
+    ThreadSubscriptionsResult, ThreadUnsubscribeRequest,
+};
 
 macro_rules! typed_domain_tool {
     ($router:expr, $name:literal, $request:ty, $result:ty, $method:ident, $mutation:literal, $convert:ident) => {
@@ -8,7 +12,9 @@ macro_rules! typed_domain_tool {
                 operation_description($name),
                 rmcp::handler::server::tool::schema_for_type::<$request>(),
             )
-            .with_raw_output_schema(rmcp::handler::server::tool::schema_for_type::<$result>()),
+            .with_raw_output_schema(rmcp::handler::server::tool::schema_for_type::<
+                McpToolOutput<$result>,
+            >()),
             |context: ToolCallContext<'_, CollaborationMcpServer>| {
                 Box::pin(async move {
                     let request = match serde_json::from_value::<$request>(
@@ -249,7 +255,9 @@ macro_rules! automation_inspection_tool {
                 operation_description($name),
                 rmcp::handler::server::tool::schema_for_type::<$request>(),
             )
-            .with_raw_output_schema(rmcp::handler::server::tool::schema_for_type::<$result>()),
+            .with_raw_output_schema(rmcp::handler::server::tool::schema_for_type::<
+                McpToolOutput<$result>,
+            >()),
             |context: ToolCallContext<'_, CollaborationMcpServer>| {
                 Box::pin(async move {
                     let request = match serde_json::from_value::<$request>(
@@ -380,7 +388,9 @@ macro_rules! board_tool {
                 operation_description($name),
                 rmcp::handler::server::tool::schema_for_type::<$request>(),
             )
-            .with_raw_output_schema(rmcp::handler::server::tool::schema_for_type::<$result>()),
+            .with_raw_output_schema(rmcp::handler::server::tool::schema_for_type::<
+                McpToolOutput<$result>,
+            >()),
             |context: ToolCallContext<'_, CollaborationMcpServer>| {
                 Box::pin(async move {
                     let request = match serde_json::from_value::<$request>(
@@ -671,27 +681,27 @@ pub(super) fn register_board_tools(router: &mut ToolRouter<CollaborationMcpServe
     );
     board_tool!(
         router,
-        "board_thread_listen",
-        ThreadListenRequest,
-        ThreadListenResult,
-        board_thread_listen,
-        false
-    );
-    board_tool!(
-        router,
-        "board_thread_listen_show",
-        ThreadListenShowRequest,
-        ThreadListenShowResult,
-        board_thread_listen_show,
-        false
-    );
-    board_tool!(
-        router,
-        "board_thread_listen_cancel",
-        ThreadListenCancelRequest,
-        ThreadListenCancelResult,
-        board_thread_listen_cancel,
+        "board_thread_subscribe",
+        ThreadSubscribeRequest,
+        ThreadSubscriptionView,
+        board_thread_subscribe,
         true
+    );
+    board_tool!(
+        router,
+        "board_thread_unsubscribe",
+        ThreadUnsubscribeRequest,
+        ThreadSubscriptionView,
+        board_thread_unsubscribe,
+        true
+    );
+    board_tool!(
+        router,
+        "board_thread_subscriptions",
+        ThreadSubscriptionsRequest,
+        ThreadSubscriptionsResult,
+        board_thread_subscriptions,
+        false
     );
     board_tool!(
         router,
@@ -722,11 +732,3 @@ pub(super) fn register_board_tools(router: &mut ToolRouter<CollaborationMcpServe
 #[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(super) struct EmptyToolInput {}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub(super) struct ThreadWaitToolInput {
-    pub(super) request: collaboration_client::board::ThreadWaitRequest,
-    #[schemars(range(min = 1, max = 1500))]
-    pub(super) timeout_seconds: u64,
-}

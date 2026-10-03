@@ -1,7 +1,7 @@
 //! Provider ACP scheduled-run policy over recorded provider operations.
 use crate::{ExternalProviderSupervisor, LiveSessionOwnershipCheck};
 use collaboration_protocol::UuidIdentity;
-use collaboration_service::ProviderOperationStore;
+use collaboration_service::{LoadPolicy, ProviderOperationStore};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -213,11 +213,21 @@ impl ScheduledRunExecution for ProviderAcpScheduledRuns {
                     &self.store,
                     self.ownership.as_ref(),
                     &target,
+                    LoadPolicy::MayLoad,
                 )
                 .await
                 {
-                    ProviderSessionLoadOutcome::Ready => {
+                    ProviderSessionLoadOutcome::Ready
+                    | ProviderSessionLoadOutcome::AlreadyLoaded => {
                         SchedulePreparationOutcome::Prepared(PreparedTarget { target, evidence })
+                    }
+                    ProviderSessionLoadOutcome::NotLoaded => {
+                        SchedulePreparationOutcome::Failed(SchedulePreparationFailure {
+                            kind: ScheduleFailureKind::OutcomeUnknown,
+                            explanation: "Provider session is not loaded".into(),
+                            evidence,
+                            uncertain: true,
+                        })
                     }
                     ProviderSessionLoadOutcome::UnsupportedLoad => {
                         SchedulePreparationOutcome::Failed(SchedulePreparationFailure {
@@ -253,7 +263,7 @@ impl ScheduledRunExecution for ProviderAcpScheduledRuns {
                     }
                     ProviderSessionLoadOutcome::Rejected { reason } => {
                         SchedulePreparationOutcome::Failed(SchedulePreparationFailure {
-                            kind: if matches!(reason, crate::provider_acp_session_loading::ProviderSessionLoadRejection::SessionNotFound { .. }) {
+                            kind: if matches!(&reason, crate::provider_acp_session_loading::ProviderSessionLoadRejection::SessionNotFound { .. }) {
                                 ScheduleFailureKind::ResourceNotFound
                             } else {
                                 ScheduleFailureKind::OutcomeUnknown
@@ -271,6 +281,7 @@ impl ScheduledRunExecution for ProviderAcpScheduledRuns {
     fn prepare_existing_target<'a>(
         &'a self,
         target: &SessionRef,
+        _declared_cwd: &str,
         sink: &'a dyn RunEvidenceSink,
     ) -> DeliveryFuture<'a, PreparedTarget> {
         let target = target.clone();
@@ -288,9 +299,10 @@ impl ScheduledRunExecution for ProviderAcpScheduledRuns {
                     &self.store,
                     self.ownership.as_ref(),
                     &target,
+                    LoadPolicy::MayLoad,
                 )
                 .await,
-                ProviderSessionLoadOutcome::Ready
+                ProviderSessionLoadOutcome::Ready | ProviderSessionLoadOutcome::AlreadyLoaded
             ) {
                 return Err(DeliveryContractError::ClientOperation);
             }

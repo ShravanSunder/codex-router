@@ -8,13 +8,42 @@
 - After the versioned change reaches `main`, publish the matching `v<version>`
   tag and require `.github/workflows/release.yml` to publish the GitHub release
   artifact, update `ShravanSunder/homebrew-taps`, and verify the Homebrew
-  installation. A local `cargo install` is not a release and does not satisfy
-  this requirement.
-- On development machines, install local builds with Cargo; do not install or
-  upgrade `codex-router` via Homebrew. Install both workspace binaries so their
-  shared protocol and CLI surfaces stay aligned:
-  `cargo install --path crates/codex-router-cli --locked --force` and
-  `cargo install --path crates/agent-collaboration --locked --force`.
+  installation.
+- The release workflow's tap job waits for a second macOS runner. Once its
+  build job has published the release asset, run
+  `python3 -m scripts.publish_homebrew_tap_local` from the repository root on
+  an Apple Silicon Mac instead of waiting: it verifies the tag is on `main` and
+  the asset matches the release digest, updates the formula, runs the tap
+  job's Homebrew checks against a real install, and pushes the tap. The CI tap
+  job still runs its own validation when it gets a runner and commits nothing
+  if it checks out the tap after the local push; whichever push lands second
+  finds identical content. It never restarts the running production Router.
+- On development machines, the installed `codex-router`, `agent-collaboration`
+  and `agent-sessions` come from the Homebrew tap, the same release artifact
+  users get: `brew update && brew upgrade codex-router`. Do not `cargo install`
+  these binaries; a copy in `~/.cargo/bin` comes earlier on `PATH` and silently
+  shadows the Homebrew one. Exercise unreleased code through `cargo run`,
+  tests, or an isolated debug Host, not by installing it.
+- Released executables are signed with the Developer ID Application identity
+  of team `974QD84WVC`, the hardened runtime and a secure timestamp, under the
+  fixed identifiers `dev.shravansunder.<executable>`. Keychain approvals belong
+  to that identity, so they survive upgrades; a linker-signed build is
+  identified by its hash and prompts again after every build. The release job
+  imports the certificate from the `APPLE_CERTIFICATE_BASE64` and
+  `APPLE_CERTIFICATE_PASSWORD` secrets and fails without them; it does not
+  notarize, because Homebrew installs the tarball without quarantine.
+- Local Apple Silicon `cargo run` and `cargo test`, in any profile, go
+  through `scripts/cargo_debug_signing_runner.sh`, which signs `codex-router`,
+  `agent-collaboration` and `agent-sessions` with the same certificate under
+  `dev.shravansunder.<executable>.debug`, without a secure timestamp so it
+  works offline. Debug and released builds are different code identities on
+  purpose: the debug Router keeps its own Keychain item, and approvals given
+  to one never apply to the other. A debug build another process starts
+  directly, such as the `--router-binary` a debug-host example launches,
+  bypasses the runner; sign it first with
+  `scripts/cargo_debug_signing_runner.sh --sign-only target/debug/codex-router`.
+  When signing cannot happen (no certificate in the login keychain, a locked
+  keychain) the runner runs the build linker-signed and says so.
 - Keep release publication separate from production process replacement.
   Publishing or installing a new binary never authorizes restarting the
   running production router.
@@ -51,8 +80,9 @@
 - This removes rebuildable workspace debug artifacts, not account data or
   credentials. Subsequent builds may take longer. Do not clean after every
   build or stop production processes to make cleanup possible.
-- Prefer focused `cargo check -p <package>` and tests during development;
-  preserve all required full-workspace validation gates.
+- During development, default to `cargo check -p <package>` and the narrowest
+  relevant `cargo test -p <package> <test>`. Reserve workspace-wide builds and
+  tests for the required completion gate; preserve every required gate.
 
 ## Terminal UI Layout
 

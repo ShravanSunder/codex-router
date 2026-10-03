@@ -14,6 +14,9 @@ use serde_json::Value;
     rename_all_fields = "camelCase",
     deny_unknown_fields
 )]
+// Keep the public completed-result shape stable; future stop values add one
+// string payload but do not justify boxing every existing settlement caller.
+#[allow(clippy::large_enum_variant)]
 pub enum ConversationOperationResult {
     Completed {
         target: SessionRef,
@@ -25,6 +28,28 @@ pub enum ConversationOperationResult {
         operation_id: OperationId,
         target: SessionRef,
     },
+    /// The caller detached from a Codex turn that remains active.
+    Running {
+        target: SessionRef,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        turn_id: Option<String>,
+        follow_up: String,
+    },
+}
+
+impl ConversationOperationResult {
+    #[must_use]
+    pub fn running_codex_turn(target: SessionRef) -> Self {
+        let endpoint = String::from(target.endpoint.endpoint_id.clone());
+        let session = String::from(target.session_id.clone());
+        Self::Running {
+            target,
+            turn_id: None,
+            follow_up: format!(
+                "Turn continues. Follow with: agent-collaboration events listen --endpoint {endpoint} --session {session} --attach; or agent-collaboration session inspect --endpoint {endpoint} --session {session} --json"
+            ),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
@@ -37,6 +62,14 @@ pub enum ConversationOperationResult {
 pub enum ConversationCreatePromptOutcome {
     CreatePending {
         operation_id: OperationId,
+    },
+    CreatedWithoutSettings {
+        operation_id: OperationId,
+        target: SessionRef,
+        applied: Vec<collaboration_protocol::AppliedProviderSetting>,
+        failed: Vec<collaboration_protocol::FailedProviderSetting>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        not_applied: Vec<collaboration_protocol::NotAppliedProviderSetting>,
     },
     Prompt {
         create_operation_id: OperationId,
@@ -53,7 +86,7 @@ pub struct ConversationSettlement {
     pub detail: ConversationSettlementDetail,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ConversationStopReason {
     Completed,
@@ -63,6 +96,7 @@ pub enum ConversationStopReason {
     MaxTokens,
     MaxTurnRequests,
     Refusal,
+    Unknown(String),
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
