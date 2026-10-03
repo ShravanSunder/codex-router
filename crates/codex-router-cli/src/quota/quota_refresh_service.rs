@@ -758,6 +758,28 @@ where
             } else {
                 snapshot
             };
+            let weekly_remaining_basis_points =
+                if *route_band == USER_QUOTA_ROUTE_BAND && weekly_floor_observer.is_some() {
+                    match response
+                        .windows
+                        .iter()
+                        .find(|window| window.limit_window_seconds == V1_WEEKLY_WINDOW_SECONDS)
+                    {
+                        Some(window) => Some(
+                            window
+                                .headroom
+                                .percent()
+                                .ok_or_else(|| QuotaCommandError::ProviderResponse {
+                                    message: "OpenAI quota window was not expressed as a percent"
+                                        .to_owned(),
+                                })?
+                                .saturating_mul(100),
+                        ),
+                        None => None,
+                    }
+                } else {
+                    None
+                };
             let refresh_was_committed = if *route_band == USER_QUOTA_ROUTE_BAND {
                 let Some(attempt) = credit_refresh_attempt.as_ref() else {
                     return Err(QuotaCommandError::ProviderResponse {
@@ -820,6 +842,10 @@ where
                             attempt.credential_generation(),
                             weekly_quota_floors.get(account.account_id()).copied(),
                             observed_unix_seconds,
+                            SupersededResponsesFloorRead {
+                                attempt_sequence: attempt.sequence(),
+                                weekly_remaining_basis_points,
+                            },
                             observer,
                         )
                         .await?;
@@ -847,23 +873,6 @@ where
                 && let Some(observer) = weekly_floor_observer
             {
                 let floor = weekly_quota_floors.get(account.account_id()).copied();
-                let weekly_remaining_basis_points = match response
-                    .windows
-                    .iter()
-                    .find(|window| window.limit_window_seconds == V1_WEEKLY_WINDOW_SECONDS)
-                {
-                    Some(window) => Some(
-                        window
-                            .headroom
-                            .percent()
-                            .ok_or_else(|| QuotaCommandError::ProviderResponse {
-                                message: "OpenAI quota window was not expressed as a percent"
-                                    .to_owned(),
-                            })?
-                            .saturating_mul(100),
-                    ),
-                    None => None,
-                };
                 let intent = weekly_quota_floor_intent(floor, weekly_remaining_basis_points);
                 if let Some(intent) = intent {
                     observer.weekly_quota_floor_intent(account.account_id(), intent);
@@ -900,12 +909,18 @@ where
     })
 }
 
+struct SupersededResponsesFloorRead {
+    attempt_sequence: u64,
+    weekly_remaining_basis_points: Option<u32>,
+}
+
 async fn notify_weekly_floor_from_latest_committed_responses(
     state: &AsyncSqliteStateStore,
     account_id: &AccountId,
     expected_credential_generation: u64,
     floor: Option<u32>,
     now_unix_seconds: u64,
+    current_read: SupersededResponsesFloorRead,
     observer: &dyn WeeklyQuotaFloorIntentObserver,
 ) -> Result<(), QuotaCommandError> {
     let selector_inputs = state
@@ -927,6 +942,23 @@ async fn notify_weekly_floor_from_latest_committed_responses(
     let Some(observation) = selector_input.credit_observation() else {
         return Ok(());
     };
+    if observation.credential_generation() != expected_credential_generation {
+        return Ok(());
+    }
+    if observation.committed_attempt() != Some(observation.latest_started_attempt()) {
+        if observation.latest_started_attempt() <= current_read.attempt_sequence {
+            return Ok(());
+        }
+        // The newer attempt has no committed selector snapshot yet. Preserve this read's
+        // fresh floor signal without writing its quota or credit observations.
+        if let Some(intent) =
+            weekly_quota_floor_intent(floor, current_read.weekly_remaining_basis_points)
+        {
+            observer.weekly_quota_floor_intent(account_id, intent);
+        }
+        return Ok(());
+    }
+
     let Some(observed_unix_seconds) = observation.observed_unix_seconds() else {
         return Ok(());
     };
@@ -935,10 +967,7 @@ async fn notify_weekly_floor_from_latest_committed_responses(
     };
     // A newer manual commit can land while this older refresh cycle waits on provider IO.
     let evaluation_now_unix_seconds = now_unix_seconds.max(observed_unix_seconds);
-    if observation.credential_generation() != expected_credential_generation
-        || observation.committed_attempt() != Some(observation.latest_started_attempt())
-        || evaluation_now_unix_seconds >= stale_after_unix_seconds
-    {
+    if evaluation_now_unix_seconds >= stale_after_unix_seconds {
         return Ok(());
     }
 

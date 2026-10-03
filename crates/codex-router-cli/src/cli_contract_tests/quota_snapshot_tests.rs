@@ -196,16 +196,20 @@ fn quota_refresh_writes_selector_windows_for_runtime_selection() {
         },
     ]);
     let mut stdout = Vec::new();
-    let mutation = must_ok(test_async_runtime().block_on(
-        AsyncWeeklyQuotaFloorMutationStore::open(&router_root.join("state.sqlite")),
-    ));
-    must_ok(
-        test_async_runtime().block_on(mutation.set_weekly_quota_floor_by_account_id(
-            &account_id,
-            Some(must_ok(WeeklyQuotaFloorBasisPoints::new(1_500))),
-        )),
-    );
-    test_async_runtime().block_on(mutation.close());
+    test_async_runtime().block_on(async {
+        let mutation = must_ok(
+            AsyncWeeklyQuotaFloorMutationStore::open(&router_root.join("state.sqlite")).await,
+        );
+        must_ok(
+            mutation
+                .set_weekly_quota_floor_by_account_id(
+                    &account_id,
+                    Some(must_ok(WeeklyQuotaFloorBasisPoints::new(1_500))),
+                )
+                .await,
+        );
+        mutation.close().await;
+    });
 
     let floor_observer = RecordingWeeklyFloorObserver::default();
 
@@ -330,16 +334,20 @@ fn quota_refresh_signals_floor_after_saved_history_before_next_account() {
     }
     let resolver =
         RouterCredentialResolver::new(&state, &secrets, NoopCredentialRefreshClient, 1_000);
-    let mutation = must_ok(test_async_runtime().block_on(
-        AsyncWeeklyQuotaFloorMutationStore::open(&router_root.join("state.sqlite")),
-    ));
-    must_ok(
-        test_async_runtime().block_on(mutation.set_weekly_quota_floor_by_account_id(
-            &floor_account_id,
-            Some(must_ok(WeeklyQuotaFloorBasisPoints::new(500))),
-        )),
-    );
-    test_async_runtime().block_on(mutation.close());
+    test_async_runtime().block_on(async {
+        let mutation = must_ok(
+            AsyncWeeklyQuotaFloorMutationStore::open(&router_root.join("state.sqlite")).await,
+        );
+        must_ok(
+            mutation
+                .set_weekly_quota_floor_by_account_id(
+                    &floor_account_id,
+                    Some(must_ok(WeeklyQuotaFloorBasisPoints::new(500))),
+                )
+                .await,
+        );
+        mutation.close().await;
+    });
     let floor_observer = Arc::new(RecordingWeeklyFloorObserver::default());
     let provider = FloorNotificationOrderingQuotaProvider::new(
         floor_account_id.clone(),

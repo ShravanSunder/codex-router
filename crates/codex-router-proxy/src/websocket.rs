@@ -6907,6 +6907,7 @@ fn is_response_terminal_error_text(text: &str) -> bool {
 
     let has_non_success_status = error_envelope
         .get("status")
+        .or_else(|| error_envelope.get("status_code"))
         .and_then(serde_json::Value::as_u64)
         .and_then(|status| u16::try_from(status).ok())
         .and_then(|status| http::StatusCode::from_u16(status).ok())

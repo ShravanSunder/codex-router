@@ -311,6 +311,7 @@ async fn expired_committed_zero_weekly_window_does_not_signal_floor_after_supers
         observed_unix_seconds: 1_000,
         stale_after_unix_seconds: 1_001,
         weekly_remaining_percent: 0,
+        newer_attempt_is_pending: false,
         expected_intent: None,
     })
     .await;
@@ -327,6 +328,22 @@ async fn future_committed_below_floor_window_signals_after_superseded_cycle() {
         observed_unix_seconds,
         stale_after_unix_seconds: 1_560,
         weekly_remaining_percent: 4,
+        newer_attempt_is_pending: false,
+        expected_intent: Some(WeeklyQuotaFloorIntent::HardStop),
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn superseded_zero_window_notifies_while_newer_attempt_is_pending() {
+    run_superseded_floor_commit_case(SupersededFloorCommitCase {
+        test_root_name: "quota-refresh-pending-attempt-floor-intent",
+        account_name: "acct_pending_attempt_floor_intent",
+        account_label: "pending-attempt-floor-intent",
+        observed_unix_seconds: SUPERSEDED_REFRESH_CYCLE_NOW_UNIX_SECONDS,
+        stale_after_unix_seconds: 1_460,
+        weekly_remaining_percent: 0,
+        newer_attempt_is_pending: true,
         expected_intent: Some(WeeklyQuotaFloorIntent::HardStop),
     })
     .await;
@@ -340,6 +357,7 @@ struct SupersededFloorCommitCase {
     observed_unix_seconds: u64,
     stale_after_unix_seconds: u64,
     weekly_remaining_percent: u32,
+    newer_attempt_is_pending: bool,
     expected_intent: Option<WeeklyQuotaFloorIntent>,
 }
 
@@ -458,34 +476,36 @@ async fn run_superseded_floor_commit_case(test_case: SupersededFloorCommitCase) 
         .begin_credit_refresh_attempt(&account_id, 1)
         .await
         .expect("newer same-generation refresh should allocate");
-    let latest_window = [persisted_responses_window(
-        &account_id,
-        604_800,
-        test_case.weekly_remaining_percent,
-        test_case.observed_unix_seconds,
-    )];
-    let latest_history = [successful_responses_history_observation(
-        &account_id,
-        604_800,
-        test_case.weekly_remaining_percent,
-        test_case.observed_unix_seconds,
-    )];
-    state
-        .record_responses_refresh_success(ResponsesRefreshSuccessCommit {
-            attempt: &latest_attempt,
-            selector_windows: &latest_window,
-            observed_unix_seconds: test_case.observed_unix_seconds,
-            stale_after_unix_seconds: test_case.stale_after_unix_seconds,
-            provider_observation: &CreditProviderObservation::missing(),
-            history_observations: &latest_history,
-            snapshot: &successful_responses_snapshot(
-                &account_id,
-                test_case.weekly_remaining_percent,
-                test_case.observed_unix_seconds,
-            ),
-        })
-        .await
-        .expect("newer committed observation should precede the older read completion");
+    if !test_case.newer_attempt_is_pending {
+        let latest_window = [persisted_responses_window(
+            &account_id,
+            604_800,
+            test_case.weekly_remaining_percent,
+            test_case.observed_unix_seconds,
+        )];
+        let latest_history = [successful_responses_history_observation(
+            &account_id,
+            604_800,
+            test_case.weekly_remaining_percent,
+            test_case.observed_unix_seconds,
+        )];
+        state
+            .record_responses_refresh_success(ResponsesRefreshSuccessCommit {
+                attempt: &latest_attempt,
+                selector_windows: &latest_window,
+                observed_unix_seconds: test_case.observed_unix_seconds,
+                stale_after_unix_seconds: test_case.stale_after_unix_seconds,
+                provider_observation: &CreditProviderObservation::missing(),
+                history_observations: &latest_history,
+                snapshot: &successful_responses_snapshot(
+                    &account_id,
+                    test_case.weekly_remaining_percent,
+                    test_case.observed_unix_seconds,
+                ),
+            })
+            .await
+            .expect("newer committed observation should precede the older read completion");
+    }
     assert_eq!(latest_attempt.sequence(), 2);
     release_usage_response.notify_one();
 
@@ -507,13 +527,13 @@ async fn run_superseded_floor_commit_case(test_case: SupersededFloorCommitCase) 
     assert_eq!(
         *lock_test_mutex(&observer.account_ids, "weekly floor accounts"),
         expected_account_ids,
-        "only a fresh latest committed window should notify the floor observer"
+        "floor notification should reflect this run's fresh windows or a newer committed window"
     );
     let expected_intents = test_case.expected_intent.into_iter().collect::<Vec<_>>();
     assert_eq!(
         *lock_test_mutex(&observer.intents, "weekly floor intents"),
         expected_intents,
-        "the floor intent should reflect the latest committed weekly window"
+        "the floor intent should match the evidence selected by this scenario"
     );
 
     let observation = state
@@ -525,21 +545,45 @@ async fn run_superseded_floor_commit_case(test_case: SupersededFloorCommitCase) 
         observation.latest_started_attempt(),
         latest_attempt.sequence()
     );
-    assert_eq!(
-        observation.committed_attempt(),
+    let expected_committed_attempt = if test_case.newer_attempt_is_pending {
+        None
+    } else {
         Some(latest_attempt.sequence())
-    );
+    };
+    assert_eq!(observation.committed_attempt(), expected_committed_attempt);
     assert_eq!(
         observation.observed_unix_seconds(),
-        Some(test_case.observed_unix_seconds)
+        if test_case.newer_attempt_is_pending {
+            None
+        } else {
+            Some(test_case.observed_unix_seconds)
+        }
     );
     assert_eq!(
         observation.stale_after_unix_seconds(),
-        Some(test_case.stale_after_unix_seconds)
+        if test_case.newer_attempt_is_pending {
+            None
+        } else {
+            Some(test_case.stale_after_unix_seconds)
+        }
     );
     assert_eq!(
         observation.provider_observation().availability(),
         &codex_router_core::credit_usage::CreditAvailability::Unknown,
         "the floor check must rely on fresh quota evidence, not credit entitlement"
     );
+    if test_case.newer_attempt_is_pending {
+        let selector_inputs = state
+            .selector_inputs_for_route_band("responses", SUPERSEDED_REFRESH_CYCLE_NOW_UNIX_SECONDS)
+            .await
+            .expect("uncommitted attempt should leave selector rows readable");
+        let selector_input = selector_inputs
+            .iter()
+            .find(|input| input.account_id() == &account_id)
+            .expect("current account selector input should remain present");
+        assert!(
+            selector_input.windows().is_empty(),
+            "rejected Responses data must not overwrite persisted selector windows"
+        );
+    }
 }

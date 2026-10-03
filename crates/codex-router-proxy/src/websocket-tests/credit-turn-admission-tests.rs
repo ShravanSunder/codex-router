@@ -142,6 +142,14 @@ fn response_terminal_error_matching_tracks_codex_status_and_codes() {
         ),
         (
             true,
+            r#"{"type":"error","status_code":400,"error":{"code":"invalid_request_error"}}"#,
+        ),
+        (
+            false,
+            r#"{"type":"error","status_code":200,"error":{"code":"invalid_request_error"}}"#,
+        ),
+        (
+            true,
             r#"{"type":"error","error":{"code":"websocket_connection_limit_reached"}}"#,
         ),
         (
