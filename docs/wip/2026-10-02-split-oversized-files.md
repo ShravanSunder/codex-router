@@ -1,4 +1,4 @@
-# Split oversized files — Phase 1 module map
+# Split oversized files — module map and preservation receipt
 
 Status: Phase 2 GO; #115/main fast-forwarded to `609a0b02780d8cff8aa6f0be367d37370ef9aa92`. Lead approved the credit-owner delta before source moves.
 
@@ -22,7 +22,7 @@ Tracker: Linear LUNA-407. Commissioner: Claude session `8d47f947-6858-41d1-a720-
 
 Structure only: preserve public paths, behavior, SQL, assertions, test attributes, fixture lifetime and synchronization. Each resulting source/test file must fit approximately 900 lines, preferably below 600 where responsibility permits. No new domain abstraction or compatibility implementation.
 
-The Lead approved this module map as the Phase 2 basis. Phase 2 starts only after PR #115 merges to main; the Lead will send the merge commit by DM. Then merge main into this branch, refresh the map/inventories against that head, and make mechanical moves in coherent commits. Implementation and runtime proof have not started.
+The Lead approved this module map as the Phase 2 basis. Phase 2 starts only after PR #115 merges to main; the Lead will send the merge commit by DM. Then merge main into this branch, refresh the map/inventories against that head, and make mechanical moves in coherent commits. Implementation and proof started after the explicit Phase 2 GO and baseline refresh below.
 
 ## Phase 2 baseline refresh — approved credit-owner delta
 
@@ -39,7 +39,15 @@ Lead approved this delta by DM before moves:
 
 Lead explicitly reserved version/release authority: no version bump, tag or release in this refactor. Gate sequence remains format, workspace clippy, SQLx check, full CI nextest, equal before/after named-test inventories, then one PR. Host permission grant is needed for shared linked-worktree Git metadata and test sockets/process proof; those grants do not authorize production or user-state interaction.
 
+Logging preservation: Lead approved pinning the old implicit target uniformly for every moved event/span/instrument/log invocation from all six sources. Parent source scan found tracing invocations only in account_selection and websocket; no log macros, instrument attributes or logging invocation occurs in the other four at `609a0b02`. For the moved invocations, write their old implicit target explicitly (`codex_router_proxy::account_selection` or `codex_router_proxy::websocket`). Their default target otherwise follows `module_path!()` into the new child. This preserves existing event classification; fields/messages/order remain unchanged. Function-body comparison normalizes only that explicit old target to its equivalent baseline default. Compiler-generated file/line locations naturally move with the source. Removing those pins is a separately deferred behavior-visible follow-up owned by the Lead.
+
 The six refreshed source files total 45,012 lines (proxy/lib 13,511; websocket 7,294; account_selection 5,735; selection/burn_down 6,258; state/lib 6,150; sqlite 6,064). Existing separately extracted credit suites remain additional preserved tests, not folded into these line totals. The baseline source named-test manifest records 3,351 explicitly attributed cases across tracked workspace Rust files; the compiled nextest manifest also captures generated/parameterized cases and cfg selection.
+
+Refreshed direct case counts are 397: proxy/lib 154; websocket 44; account_selection 41; burn_down 75; state/lib 81; sqlite 2. Proxy/lib's four existing credit/generation child suites contain 15 tests; WebSocket's existing child suites contain 31 (21 credit plus ten floor/handshake); selection's existing credit routing suite and state credit-store suites remain untouched logical owners. New direct credit cases go to the existing relevant responsibility: credit-backed affinity with selector affinity; assembled credit HTTP with credit transport/runtime; source-provenance with account assessment selection; healthy-peer exclusion with floor-switch policy; native credit-table upgrades with floor migrations; missing credit schema with read-only store. All inherited cases and added #115 cases participate in the before/after inventory.
+
+2026-10-02 proof setup: compiled baseline nextest listing completed, exit 0, 3,352 cases. Baseline build used 23 GB. Confirmed no running build/test/debug consumers of this worktree's target, previewed and ran `cargo clean --workspace --profile dev`: removed 6,408 files, 21.7 GiB, target/debug now 1.0 GB. The approved-map commit `6bf8c7b1` used allowed unsigned fallback after two 1Password signing failures. The optional tree-sitter verification helper crashed while traversing macro ASTs, so verification uses a standalone Rust-token scanner that preserves whole string/char/numeric tokens; no project tooling/dependency changed. Its unchanged-source self-check matched all 1,333 existing function bodies across the six owners and their children, excluding only the two approved guard-body adaptations.
+
+Reversible extraction drift: initial state-test dedent also shifted whitespace inside multiline SQL strings. Parent body-token check identified affected functions before acceptance/proof; returned them to the owning Worker to preserve literal bytes exactly. All other Workers received the same literal-preserving extraction constraint. No gate is weakened to accommodate dedent, and assertions remain unchanged. This is an implementation correction, not a structural-design change.
 
 Implementation admission: the explicit Phase 2 commission and reviewed map govern this mechanical refactor; requested terminal is one PR, unmerged. The commissioning Lead owns any structural delta and has approved the refresh above. This user-directed artifact home/delivery basis takes precedence over generic canonical-plan skill metadata requirements; no new planning authority, public contract or workflow cycle is inferred.
 
@@ -332,12 +340,13 @@ On 2026-10-02 the Lead approved these limited adaptations: collect each existing
 
 | Existing guard | Current source input | Adapted source input |
 | --- | --- | --- |
-| state/lib.rs:2171 `production_state_storage_does_not_use_rusqlite` | `src/sqlite.rs` via manifest-root read | `src/sqlite.rs` plus production children recursively under `src/sqlite/`; exclude test coordinator/suites/fixtures; exact per-file prefix/filter and forbidden-line assertion retained |
+| state/lib.rs:2171 `production_state_storage_does_not_use_rusqlite` | `src/sqlite.rs` via manifest-root read | `src/sqlite.rs` plus production children recursively under `src/sqlite/`; exclude test coordinator/suites/fixtures and compiler-gated fixture modules/subtrees by parent declaration fence; exact per-file prefix/filter and forbidden-line assertion retained |
 | selection/burn_down.rs:4522 `preferred_next_matches_first_strict_candidate_without_smooth_selector` | Relative `include_str!("burn_down.rs")` | Manifest-root `src/burn_down.rs` plus production children recursively under `src/burn_down/`; exclude test coordinator/suites/fixtures; exact per-file prefix and forbidden WeightedDeficitSelector assertion retained |
+| CLI `sessions_sql_boundary_uses_sqlx_without_rusqlite` | Added Git-diff lines across `crates/` against `origin/main` | Same input/base/filter and sessions assertions; exact trimmed removed/add line multiset cancellation, allowing only duplicated identical removed import lines; pure predicate and five table scenarios |
 
 Search of all six commissioned files for `include_str!`, `read_to_string`, `source_path` and `src/` found these two source-scanning tests. Other matching proxy reads consume HTTP/audit artifacts, not Rust source, and move unchanged. Selection's separate oracle test uses a JSON fixture include, outside this source-tree adaptation.
 
-Test fixtures reside below the `_tests` coordinator directory; skip that entire test subtree, not just names ending `_tests.rs`, so fixtures do not enter the production guard. Collection includes cfg-gated sync implementation children; feature fencing remains essential. Changes to source collection and new collection-completeness checks are the only approved departures from otherwise unchanged test bodies; imports/relative paths/visibility naturally change with moves.
+Test fixtures reside below the `_tests` coordinator directory; skip that entire test subtree, not just names ending `_tests.rs`, so fixtures do not enter the production guard. Collection excludes fixture-only leaves/subtrees whose parent `mod` declaration has the unchanged preceding-line sync-rusqlite-fixtures fence; all production children remain scanned. Changes to source collection and new collection-completeness checks are the only approved departures from otherwise unchanged test bodies; imports/relative paths/visibility naturally change with moves.
 
 ## Phase 2 preservation and proof contract
 
@@ -368,3 +377,231 @@ Phase 1 complete. The six Worker evidence reports are `tmp/module-maps/{proxy-ro
 Verification: exact branch/HEAD checked; all six test inventory counts independently matched the full attributed-body range-coverage scan; product/config diff against `dea647b5` exited 0. Proposal check exited 0 for 164 file-budget rows (including retained/coordinator files), maximum 730 lines, two/three-word new module names and whitespace. Existing external child counts are listed with their owning sections and are preserved separately. Target line counts remain estimates until moves and formatting. Actual compilation, tests, SQLx metadata and runtime behavior are intentionally unverified during this analysis-only phase.
 
 Checkpoint: completed map approved by the Lead; schema filenames corrected. No board root/post created. Phase 2 remains gated on #115/main merge and the Lead's merge-commit DM. No source/test/config changes, builds or runtime validation have occurred. Return token: `ready-for-implementation` — this approved document is the Phase 2 basis, with execution explicitly held until its merge prerequisite is fulfilled.
+
+2026-10-03 integration checkpoint: selection slice committed as `39d31c1c`; scoped rustfmt, strict package Clippy and CI-profile nextest passed (120/120, exit 0). Body comparison still preserves all 1,333 baseline functions, allowing only the approved source-guard collection helpers and explicit old logging targets. SQLite/account-selection wiring corrections remain with their existing Workers; parent owns Cargo and Git integration. No production process or user runtime state was touched.
+
+Communication receipt: installed CLI `message send` failed before dispatch at manifest-read (InvalidData, effect none). Its help also differs from the bundled older manual. The already-connected Router MCP direct message returned `peerMessageWritten` to the exact commissioning Lead; this proves peer-write, not processing or reply. No service restart or installation attempted.
+
+2026-10-03 preservation tooling correction: record-token extraction now tracks bracket/parenthesis depth, so semicolons inside Rust array type declarations cannot truncate constants. Both baseline and relocated complete declarations pass through the same pinned rustfmt before comparison; the only discovered difference before normalization was removal of a trailing generic comma. All 237 complete records/constants now compare equally (exit 0); function bodies remain 1,333 preserved, with only two approved collection helpers added. State all-target compilation now exits 0; warning-only import/private-interface cleanup is assigned to the original Workers.
+
+Portable exact direct-case routing is now tracked in [split test destinations](2026-10-02-split-test-destinations.md): all 397 original embedded cases appear once. Source attribute/name comparison also preserves all 448 attributed cases in the six owners and their compared descendants (169 proxy-root, 75 WebSocket, 42 account-selection, 75 burn-down, 85 state-root, 2 SQLite), including Tokio flavors and existing lint allowances. Existing separately owned credit suites remain covered by the complete compiled inventory. One Worker performed unnecessary read-only board discovery despite the explicit no-board rule; no post/thread was created, and further board operations were stopped.
+
+2026-10-03 state proof and commits: strict `cargo clippy -p codex-router-state --all-targets -- -D warnings` passed (exit 0); `cargo nextest run --profile ci -p codex-router-state` passed 164/164 (exit 0, one nextest leaky-pass classification); production `cargo check -p codex-router-state --lib --no-default-features` passed (exit 0). Automated storage/reopen/migration paths provide runtime proof without any production Host or account home. State-root split is `85d05e43`; SQLite split is `233c0c6a`. A later required full-workspace run will capture complete case status.
+
+Tracing syntax correction: pinned tracing 0.1.44 `warn!` target arm is locally ambiguous when its first field is dotted (`account.hash`). The documented grouped-field arm (`target: old_target, { account.hash = unchanged_value }, unchanged_message`) resolves the ambiguity at exactly two WebSocket warnings. Parent inspected the macro expansion: both forms emit the same fields/message; explicit target is the already-approved preservation. The body oracle normalizes only this exact field grouping plus the approved exact target, not arbitrary braces or field expressions. No API/logging payload change.
+
+Proxy compile correction packet: missing sibling imports/privacy and one dropped `#[derive(Clone, Debug)]` were found at integration, before proof/commit. The record oracle now includes original non-cfg attributes (derive/serde/lint), detecting precisely that dropped derive; no other record attribute differs. Original cfg fences are checked through production/all-target feature builds and source inspection. Existing Workers own their corrections; assertions and bodies remain preserved.
+
+2026-10-03 SQLx gate: `python3 scripts/tooling/prepare-sqlx.py --check` exits 0 across all four configured native-schema targets. It creates only isolated temporary schema databases; `.sqlx`, native migrations, workspace Cargo version/lock and tool configuration remain unchanged. Targeted preparation reports potentially unused metadata because each package checks a subset of the shared directory; no mismatch/error was reported.
+
+State fixture-feature compilation `cargo check -p codex-router-state --lib --features sync-rusqlite-fixtures` passed (exit 0). A test-only rollback-helper import needed its original effective test cfg when compiled as a fixture-feature library dependency; corrected at the existing import without body changes. This small follow-on correction will be captured with final integration proof.
+
+2026-10-03 proxy integration: parent completed the final missing/unused imports after freezing the original Worker (its multi-file patch had failed atomically). No code bodies changed. Proxy all-target strict Clippy now exits 0. Fixture `accept_local_websocket` regained its original `#[allow(clippy::result_large_err)]`; all 616 non-cfg function-attribute instances compare equal afterward. Workspace format check, all 237 declaration bodies/non-cfg attributes and all 1,333 function bodies pass after final formatting. Host-authorized 488-case proxy CI nextest is running through actual loopback/SQLite/concurrency paths.
+
+2026-10-03 proxy proof and commits: `cargo clippy -p codex-router-proxy --all-targets -- -D warnings` and host-authorized CI-profile nextest passed (488/488, exit 0). Proxy root `adad432c`, account selection `9790aa43`, WebSocket `e6688c61`. Full workspace strict Clippy passed (exit 0); required full CI-profile workspace nextest with test Keychain support is running. No additional manual runtime probe is needed because existing automated real listener, storage/migration, protocol and process tests exercise the unchanged runnable paths.
+
+## Actual module sizes after formatting
+
+The detailed responsibility and dependency map above remains the design basis. These measured destinations replace its estimates; names ending `_tests` own test trees and fixture files are test-only descendants. The [exact test destination map](2026-10-02-split-test-destinations.md) preserves every embedded test identity.
+
+| Destination | Lines |
+| --- | ---: |
+| `crates/codex-router-cli/src/cli_contract_tests/cli_entrypoint_tests.rs` | 664 |
+| `crates/codex-router-proxy/src/account_selection.rs` | 572 |
+| `crates/codex-router-proxy/src/account_selection/account_admission.rs` | 391 |
+| `crates/codex-router-proxy/src/account_selection/account_selection_tests.rs` | 83 |
+| `crates/codex-router-proxy/src/account_selection/account_selection_tests/affinity_race_fixtures.rs` | 440 |
+| `crates/codex-router-proxy/src/account_selection/account_selection_tests/affinity_reconciliation_tests.rs` | 153 |
+| `crates/codex-router-proxy/src/account_selection/account_selection_tests/affinity_write_fixtures.rs` | 40 |
+| `crates/codex-router-proxy/src/account_selection/account_selection_tests/claude_admission_tests.rs` | 371 |
+| `crates/codex-router-proxy/src/account_selection/account_selection_tests/last_resort_tests.rs` | 257 |
+| `crates/codex-router-proxy/src/account_selection/account_selection_tests/lease_report_fixtures.rs` | 61 |
+| `crates/codex-router-proxy/src/account_selection/account_selection_tests/lease_wait_fixtures.rs` | 32 |
+| `crates/codex-router-proxy/src/account_selection/account_selection_tests/post_exhaustion_tests.rs` | 211 |
+| `crates/codex-router-proxy/src/account_selection/account_selection_tests/projection_read_fixtures.rs` | 220 |
+| `crates/codex-router-proxy/src/account_selection/account_selection_tests/provider_hold_tests.rs` | 135 |
+| `crates/codex-router-proxy/src/account_selection/account_selection_tests/quota_input_fixtures.rs` | 202 |
+| `crates/codex-router-proxy/src/account_selection/account_selection_tests/reservation_lease_tests.rs` | 83 |
+| `crates/codex-router-proxy/src/account_selection/account_selection_tests/selection_authority_tests.rs` | 272 |
+| `crates/codex-router-proxy/src/account_selection/account_selection_tests/selection_concurrency_tests.rs` | 283 |
+| `crates/codex-router-proxy/src/account_selection/account_selection_tests/short_quota_tests.rs` | 96 |
+| `crates/codex-router-proxy/src/account_selection/account_selection_tests/test_identity_fixtures.rs` | 7 |
+| `crates/codex-router-proxy/src/account_selection/active_reservations.rs` | 380 |
+| `crates/codex-router-proxy/src/account_selection/affinity_admission.rs` | 148 |
+| `crates/codex-router-proxy/src/account_selection/assessment_selection.rs` | 333 |
+| `crates/codex-router-proxy/src/account_selection/fixture_selection.rs` | 251 |
+| `crates/codex-router-proxy/src/account_selection/post_exhaustion.rs` | 198 |
+| `crates/codex-router-proxy/src/account_selection/repository_selection.rs` | 552 |
+| `crates/codex-router-proxy/src/account_selection/request_metadata.rs` | 164 |
+| `crates/codex-router-proxy/src/account_selection/runtime_quarantine.rs` | 193 |
+| `crates/codex-router-proxy/src/account_selection/short_quota_wait.rs` | 137 |
+| `crates/codex-router-proxy/src/lib.rs` | 32 |
+| `crates/codex-router-proxy/src/proxy_tests.rs` | 319 |
+| `crates/codex-router-proxy/src/proxy_tests/affinity_record_fixtures.rs` | 131 |
+| `crates/codex-router-proxy/src/proxy_tests/affinity_seed_fixtures.rs` | 333 |
+| `crates/codex-router-proxy/src/proxy_tests/audit_failure_tests.rs` | 34 |
+| `crates/codex-router-proxy/src/proxy_tests/audit_runtime_tests.rs` | 386 |
+| `crates/codex-router-proxy/src/proxy_tests/concurrent_selection_tests.rs` | 451 |
+| `crates/codex-router-proxy/src/proxy_tests/credential_record_fixtures.rs` | 233 |
+| `crates/codex-router-proxy/src/proxy_tests/credential_retry_tests.rs` | 218 |
+| `crates/codex-router-proxy/src/proxy_tests/credit_runtime_tests.rs` | 111 |
+| `crates/codex-router-proxy/src/proxy_tests/credit_seed_fixtures.rs` | 195 |
+| `crates/codex-router-proxy/src/proxy_tests/floor_switch_tests.rs` | 314 |
+| `crates/codex-router-proxy/src/proxy_tests/http_auth_tests.rs` | 355 |
+| `crates/codex-router-proxy/src/proxy_tests/http_forwarding_tests.rs` | 246 |
+| `crates/codex-router-proxy/src/proxy_tests/http_runtime_tests.rs` | 393 |
+| `crates/codex-router-proxy/src/proxy_tests/listener_adapter_tests.rs` | 480 |
+| `crates/codex-router-proxy/src/proxy_tests/loopback_request_fixtures.rs` | 321 |
+| `crates/codex-router-proxy/src/proxy_tests/quota_exhaustion_tests.rs` | 448 |
+| `crates/codex-router-proxy/src/proxy_tests/quota_observation_tests.rs` | 116 |
+| `crates/codex-router-proxy/src/proxy_tests/quota_replay_tests.rs` | 479 |
+| `crates/codex-router-proxy/src/proxy_tests/quota_seed_fixtures.rs` | 526 |
+| `crates/codex-router-proxy/src/proxy_tests/request_contract_tests.rs` | 151 |
+| `crates/codex-router-proxy/src/proxy_tests/reservation_projection_tests.rs` | 333 |
+| `crates/codex-router-proxy/src/proxy_tests/runtime_shutdown_tests.rs` | 350 |
+| `crates/codex-router-proxy/src/proxy_tests/selection_record_fixtures.rs` | 175 |
+| `crates/codex-router-proxy/src/proxy_tests/selector_affinity_tests.rs` | 671 |
+| `crates/codex-router-proxy/src/proxy_tests/selector_hold_tests.rs` | 471 |
+| `crates/codex-router-proxy/src/proxy_tests/selector_metadata_tests.rs` | 198 |
+| `crates/codex-router-proxy/src/proxy_tests/selector_projection_tests.rs` | 460 |
+| `crates/codex-router-proxy/src/proxy_tests/session_affinity_tests.rs` | 345 |
+| `crates/codex-router-proxy/src/proxy_tests/session_runtime_tests.rs` | 212 |
+| `crates/codex-router-proxy/src/proxy_tests/sse_runtime_tests.rs` | 271 |
+| `crates/codex-router-proxy/src/proxy_tests/test_identity_fixtures.rs` | 79 |
+| `crates/codex-router-proxy/src/proxy_tests/tunnel_affinity_tests.rs` | 533 |
+| `crates/codex-router-proxy/src/proxy_tests/tunnel_forwarding_tests.rs` | 590 |
+| `crates/codex-router-proxy/src/proxy_tests/upstream_record_fixtures.rs` | 78 |
+| `crates/codex-router-proxy/src/proxy_tests/websocket_affinity_tests.rs` | 522 |
+| `crates/codex-router-proxy/src/proxy_tests/websocket_concurrency_tests.rs` | 279 |
+| `crates/codex-router-proxy/src/proxy_tests/websocket_dispatch_tests.rs` | 294 |
+| `crates/codex-router-proxy/src/proxy_tests/websocket_payload_tests.rs` | 76 |
+| `crates/codex-router-proxy/src/proxy_tests/websocket_rejection_tests.rs` | 393 |
+| `crates/codex-router-proxy/src/proxy_tests/websocket_routing_tests.rs` | 403 |
+| `crates/codex-router-proxy/src/proxy_tests/websocket_upgrade_tests.rs` | 452 |
+| `crates/codex-router-proxy/src/websocket.rs` | 443 |
+| `crates/codex-router-proxy/src/websocket/account_turn_admission.rs` | 246 |
+| `crates/codex-router-proxy/src/websocket/async_tunnel.rs` | 390 |
+| `crates/codex-router-proxy/src/websocket/authenticated_routing.rs` | 483 |
+| `crates/codex-router-proxy/src/websocket/blocking_tunnel.rs` | 254 |
+| `crates/codex-router-proxy/src/websocket/duplex_forwarding.rs` | 484 |
+| `crates/codex-router-proxy/src/websocket/forwarding_tests.rs` | 135 |
+| `crates/codex-router-proxy/src/websocket/forwarding_tests/affinity_activity_tests.rs` | 336 |
+| `crates/codex-router-proxy/src/websocket/forwarding_tests/alternative_selection_tests.rs` | 415 |
+| `crates/codex-router-proxy/src/websocket/forwarding_tests/capacity_retry_tests.rs` | 175 |
+| `crates/codex-router-proxy/src/websocket/forwarding_tests/credit-included-peer-transition-tests.rs` | 545 |
+| `crates/codex-router-proxy/src/websocket/forwarding_tests/credit-source-assessment-tests.rs` | 402 |
+| `crates/codex-router-proxy/src/websocket/forwarding_tests/credit-turn-admission-tests.rs` | 579 |
+| `crates/codex-router-proxy/src/websocket/forwarding_tests/credit-turn-depletion-tests.rs` | 222 |
+| `crates/codex-router-proxy/src/websocket/forwarding_tests/credit-turn-source-transition-tests.rs` | 488 |
+| `crates/codex-router-proxy/src/websocket/forwarding_tests/credit-turn-test-support.rs` | 385 |
+| `crates/codex-router-proxy/src/websocket/forwarding_tests/credit-turn-unknown-transition-tests.rs` | 261 |
+| `crates/codex-router-proxy/src/websocket/forwarding_tests/floor-switch-supervisor-tests.rs` | 146 |
+| `crates/codex-router-proxy/src/websocket/forwarding_tests/floor-switch-terminal-tests.rs` | 344 |
+| `crates/codex-router-proxy/src/websocket/forwarding_tests/floor-switch-tests.rs` | 303 |
+| `crates/codex-router-proxy/src/websocket/forwarding_tests/handshake-cancellation-tests.rs` | 123 |
+| `crates/codex-router-proxy/src/websocket/forwarding_tests/handshake_outcome_tests.rs` | 348 |
+| `crates/codex-router-proxy/src/websocket/forwarding_tests/handshake_record_fixtures.rs` | 133 |
+| `crates/codex-router-proxy/src/websocket/forwarding_tests/idle_close_tests.rs` | 249 |
+| `crates/codex-router-proxy/src/websocket/forwarding_tests/metadata_boundary_tests.rs` | 163 |
+| `crates/codex-router-proxy/src/websocket/forwarding_tests/provider_observer_fixtures.rs` | 320 |
+| `crates/codex-router-proxy/src/websocket/forwarding_tests/quota_frame_tests.rs` | 468 |
+| `crates/codex-router-proxy/src/websocket/forwarding_tests/quota_persistence_tests.rs` | 483 |
+| `crates/codex-router-proxy/src/websocket/forwarding_tests/shutdown_floor_tests.rs` | 143 |
+| `crates/codex-router-proxy/src/websocket/forwarding_tests/turn_reservation_tests.rs` | 395 |
+| `crates/codex-router-proxy/src/websocket/forwarding_tests/unavailable_authority_tests.rs` | 379 |
+| `crates/codex-router-proxy/src/websocket/provider_signals.rs` | 201 |
+| `crates/codex-router-proxy/src/websocket/response_metadata.rs` | 388 |
+| `crates/codex-router-proxy/src/websocket/session_registry.rs` | 486 |
+| `crates/codex-router-proxy/src/websocket/session_registry_tests.rs` | 41 |
+| `crates/codex-router-proxy/src/websocket/transport_cleanup.rs` | 53 |
+| `crates/codex-router-selection/src/burn_down.rs` | 85 |
+| `crates/codex-router-selection/src/burn_down/account_assessment.rs` | 475 |
+| `crates/codex-router-selection/src/burn_down/assessment_input.rs` | 251 |
+| `crates/codex-router-selection/src/burn_down/assessment_result.rs` | 384 |
+| `crates/codex-router-selection/src/burn_down/burn_down_tests.rs` | 97 |
+| `crates/codex-router-selection/src/burn_down/burn_down_tests/drain_selection_tests.rs` | 361 |
+| `crates/codex-router-selection/src/burn_down/burn_down_tests/floor_switch_tests.rs` | 222 |
+| `crates/codex-router-selection/src/burn_down/burn_down_tests/idle_admission_tests.rs` | 283 |
+| `crates/codex-router-selection/src/burn_down/burn_down_tests/minimum_runway_tests.rs` | 195 |
+| `crates/codex-router-selection/src/burn_down/burn_down_tests/quota_account_fixtures.rs` | 168 |
+| `crates/codex-router-selection/src/burn_down/burn_down_tests/quota_evidence_tests.rs` | 462 |
+| `crates/codex-router-selection/src/burn_down/burn_down_tests/runway_priority_tests.rs` | 257 |
+| `crates/codex-router-selection/src/burn_down/burn_down_tests/scenario_selection_fixtures.rs` | 174 |
+| `crates/codex-router-selection/src/burn_down/burn_down_tests/session_balance_tests.rs` | 364 |
+| `crates/codex-router-selection/src/burn_down/burn_down_tests/weekly_floor_tests.rs` | 372 |
+| `crates/codex-router-selection/src/burn_down/burn_down_tests/weekly_survival_tests.rs` | 279 |
+| `crates/codex-router-selection/src/burn_down/burn_down_tests/window_guard_tests.rs` | 206 |
+| `crates/codex-router-selection/src/burn_down/candidate_priority.rs` | 293 |
+| `crates/codex-router-selection/src/burn_down/credit_assessment.rs` | 99 |
+| `crates/codex-router-selection/src/burn_down/route_assessment.rs` | 392 |
+| `crates/codex-router-selection/src/burn_down/routing_policy.rs` | 136 |
+| `crates/codex-router-selection/src/burn_down/routing_reasons.rs` | 312 |
+| `crates/codex-router-selection/src/burn_down/window_assessment.rs` | 395 |
+| `crates/codex-router-selection/src/burn_down/window_facts.rs` | 209 |
+| `crates/codex-router-state/src/lib.rs` | 29 |
+| `crates/codex-router-state/src/sqlite.rs` | 464 |
+| `crates/codex-router-state/src/sqlite/account_store.rs` | 398 |
+| `crates/codex-router-state/src/sqlite/active_leases.rs` | 301 |
+| `crates/codex-router-state/src/sqlite/affinity_store.rs` | 319 |
+| `crates/codex-router-state/src/sqlite/affinity_store_tests.rs` | 22 |
+| `crates/codex-router-state/src/sqlite/legacy_schema_v1to5.rs` | 259 |
+| `crates/codex-router-state/src/sqlite/legacy_schema_v6to10.rs` | 341 |
+| `crates/codex-router-state/src/sqlite/policy_mutation.rs` | 354 |
+| `crates/codex-router-state/src/sqlite/quota_history.rs` | 209 |
+| `crates/codex-router-state/src/sqlite/quota_snapshots.rs` | 213 |
+| `crates/codex-router-state/src/sqlite/repository_contracts.rs` | 205 |
+| `crates/codex-router-state/src/sqlite/selector_windows.rs` | 752 |
+| `crates/codex-router-state/src/sqlite/selector_windows_tests.rs` | 39 |
+| `crates/codex-router-state/src/sqlite/session_history.rs` | 121 |
+| `crates/codex-router-state/src/sqlite/session_records.rs` | 246 |
+| `crates/codex-router-state/src/sqlite/session_rollups.rs` | 391 |
+| `crates/codex-router-state/src/sqlite/sync_accounts.rs` | 350 |
+| `crates/codex-router-state/src/sqlite/sync_affinity.rs` | 137 |
+| `crates/codex-router-state/src/sqlite/sync_migrations.rs` | 299 |
+| `crates/codex-router-state/src/sqlite/sync_selectors.rs` | 553 |
+| `crates/codex-router-state/src/sqlite/sync_snapshots.rs` | 230 |
+| `crates/codex-router-state/src/state_tests.rs` | 147 |
+| `crates/codex-router-state/src/state_tests/account_order_tests.rs` | 49 |
+| `crates/codex-router-state/src/state_tests/active_lease_tests.rs` | 176 |
+| `crates/codex-router-state/src/state_tests/burn_projection_tests.rs` | 380 |
+| `crates/codex-router-state/src/state_tests/credential_claim_tests.rs` | 557 |
+| `crates/codex-router-state/src/state_tests/credential_mutation_tests.rs` | 327 |
+| `crates/codex-router-state/src/state_tests/floor_migration_tests.rs` | 338 |
+| `crates/codex-router-state/src/state_tests/floor_mutation_tests.rs` | 298 |
+| `crates/codex-router-state/src/state_tests/floor_schema_tests.rs` | 339 |
+| `crates/codex-router-state/src/state_tests/policy_schema_fixtures.rs` | 161 |
+| `crates/codex-router-state/src/state_tests/provider_schema_tests.rs` | 85 |
+| `crates/codex-router-state/src/state_tests/quota_exhaustion_tests.rs` | 307 |
+| `crates/codex-router-state/src/state_tests/quota_history_tests.rs` | 121 |
+| `crates/codex-router-state/src/state_tests/quota_refresh_tests.rs` | 388 |
+| `crates/codex-router-state/src/state_tests/quota_schema_fixtures.rs` | 218 |
+| `crates/codex-router-state/src/state_tests/read_only_tests.rs` | 235 |
+| `crates/codex-router-state/src/state_tests/repository_contract_tests.rs` | 168 |
+| `crates/codex-router-state/src/state_tests/response_affinity_tests.rs` | 204 |
+| `crates/codex-router-state/src/state_tests/session_affinity_tests.rs` | 392 |
+| `crates/codex-router-state/src/state_tests/session_history_tests.rs` | 292 |
+| `crates/codex-router-state/src/state_tests/session_schema_fixtures.rs` | 210 |
+| `crates/codex-router-state/src/state_tests/session_terminal_tests.rs` | 354 |
+| `crates/codex-router-state/src/state_tests/storage_boundary_tests.rs` | 139 |
+| `crates/codex-router-state/src/state_tests/store_projection_tests.rs` | 219 |
+| `crates/codex-router-state/src/state_tests/test_identity_fixtures.rs` | 123 |
+
+Fresh remote check before publication: `origin/main` remains `609a0b02`; no base drift/conflicts were introduced. CI/scripts/config contain no invalidated module-qualified filters. One historical July plan references already-absent pre-refactor exact tests, so it is an unrelated preexisting documentation mismatch and remains unchanged.
+
+Complete workspace source-name comparison re-read the original Git tree and current source with identical parsing on both sides: 3,352/3,352 attributed tests, no added/missing names or multiplicities. The initial 3,351-entry scratch source manifest omitted an already-existing `pub(super)` CLI test; a first follow-on regex also missed comments between another existing test marker and function. Both mismatches were tooling-only in untouched files; the corrected symmetric scan includes both. The compiled baseline already counted 3,352 and remains the named-test gate.
+
+Final import ownership: unused private root imports were removed; test-only sibling helpers are imported by the test coordinator. The internal unused `pub(crate)` root re-export of `route_band_queue_health_key` was removed because all callers are inside its new runtime-quarantine leaf; its original body stays there, with no public API change or compatibility shim. Single test-import cfg follow-on committed as `2d3c3936`. Compiled inventory collection will run after the full suite; an early overlapping list was cancelled (exit 130) to avoid competing with process-test resource budgets. The full suite itself continues unchanged.
+
+2026-10-03 third guard approval: initial full CI run finished 3,276 passed / 1 failed / 75 skipped (exit 100); sole failure was CLI added-line guard misclassifying relocated rusqlite fixture code. Lead inspected the exact guard and approved extracting its unchanged three-pattern filter into a pure predicate. Only trimmed-identical removed lines excuse additions, as a multiset; removed identical `use` declarations may excuse repeated imports. All file-level session SQLx assertions, Git base, forbidden filter and final assertion/message remain unchanged. Restored the two original qualified `&rusqlite::Transaction` signatures and removed the non-move alias import. Added one named table test covering the five required scenarios; expected final inventory is original 3,352 cases plus this one approved addition. Required full suite will be rerun.
+
+Third-guard focused proof: host-authorized CI nextest ran the existing live guard and the new table test, 2/2 passed (exit 0), covering all five required predicate scenarios. Final prefix stripping uses safe `strip_prefix`, satisfying workspace Clippy without changing the approved predicate. Fresh workspace strict Clippy passed (exit 0). Idle cleanup previewed 25.0 GiB and removed 10,557 rebuildable workspace debug files / 24.2 GiB; process inventory showed no consumers. Full suite rerun is now underway with original CI settings.
+
+2026-10-03 parameter approach REVERTED after Lead correction: rustfmt made the guard pass through a magic-word comment, which was the wrong boundary. Both parameter cfgs and both comments were removed; qualified Transaction parameters are pure moves again. Lead inspected the compiler-gated `mod sync_selectors` declaration and approved excluding fixture modules at collection. The collector now reads each parent module and skips a file/subtree only when its `mod <name>;` line is immediately preceded by the same sync-rusqlite-fixtures fence the existing line filter recognizes. All production leaves, all forbidden patterns, line filter, per-file cfg(test) truncation, final assertion, nonempty check and root-presence check remain. The attribute oracle returns to zero baseline/zero current parameter attributes. The superseded suite was cancelled (exit 130) before further proof.
+
+Current non-move preservation edits: (1) explicit old tracing targets, plus exactly two equivalent grouped dotted fields needed by the pinned tracing macro; (2) root-plus-production-child source collection for both moved guards, with test/fixture exclusion and the state collector’s compiler-gated fixture-module exclusion; (3) CLI added-line guard’s approved exact trimmed multiset relocation filter/import exception and one new five-scenario table test. Module imports, required visibility and relative paths are mechanical tree wiring. No parameter attributes or magic comments remain.
+
+Fixture-module collector proof: all 18 non-test SQLite leaves are classified from the actual parent declarations: 11 production children scanned and seven compiler-gated fixture children excluded, plus the sqlite.rs root. No unclassified leaf exists. The corrected state guard passes 1/1 (exit 0); both production/no-fixture and fixture-feature state builds and strict workspace Clippy pass (exit 0). Final parameter-attribute comparison is 0 before / 0 after, no missing/additions. Full suite rerun now uses the corrected collector, with no parameter workaround.
+
+Final local CI suite: 3,278 executed / 3,277 passed / 1 failed / 75 existing skipped (exit 100). Every refactor guard and affected crate scenario passes. The sole failure is unchanged `codex-router-host::runtime_restart::owned_router_restart_replaces_only_router_and_preserves_app_server_state`, managed fixture executable resolution; exact isolated retry passed 1/1 in 1.517s (exit 0). Lead identified it as a preexisting local flake from PR #115 and September collab-improvements receipts and explicitly instructed one isolated run only, no assertion/deadline changes or retry loops, with exact-head hosted CI authority for this case. Host/native-integration diff is empty. The precise local cause is unverified (lookup error and timeout share a message); no production/native user runtime was used. Compiled after inventory is running; publication proceeds under this Lead-directed limitation.
+
+Final compiled named-test inventory: original 3,352 cases preserved across the same 355 binaries, identical leaf-name multiplicities and ignored status; only approved addition is `codex-router-cli::rusqlite_diff_guard_preserves_relocations_and_rejects_new_bindings`, total 3,353. Comparison exits 0. [Portable proof summary](2026-10-02-split-preservation-proof.json) records command outcomes, body/declaration equality and the Lead-approved local Host flake limitation. Code and source-guard adaptations are committed through `b6b289f0`; final remaining delivery is push and one unmerged PR, with hosted CI authority for the known Host test and independent review owned by the commissioning Lead. No open stand-in, release or production-state action.

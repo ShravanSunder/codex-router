@@ -1,0 +1,167 @@
+{
+  "execution_baseline": "609a0b02780d8cff8aa6f0be367d37370ef9aa92",
+  "original_named_test_inventory": {
+    "before_cases": 3352,
+    "after_cases": 3353,
+    "before_binaries": 355,
+    "after_binaries": 355,
+    "missing": [],
+    "added": [
+      {
+        "identity": [
+          "codex-router-cli",
+          "rusqlite_diff_guard_preserves_relocations_and_rejects_new_bindings",
+          false
+        ],
+        "count": 1
+      }
+    ],
+    "approved_added_cases": 1,
+    "original_named_inventory_equal": true
+  },
+  "function_bodies": [
+    {
+      "owner": "proxy-root",
+      "before_functions": 302,
+      "after_functions": 302,
+      "missing": [],
+      "extra": []
+    },
+    {
+      "owner": "websocket",
+      "before_functions": 286,
+      "after_functions": 286,
+      "missing": [],
+      "extra": []
+    },
+    {
+      "owner": "account-selection",
+      "before_functions": 213,
+      "after_functions": 213,
+      "missing": [],
+      "extra": []
+    },
+    {
+      "owner": "burn-down",
+      "before_functions": 245,
+      "after_functions": 246,
+      "missing": [],
+      "extra": [
+        {
+          "name": "collect_production_sources",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "owner": "state-root",
+      "before_functions": 105,
+      "after_functions": 106,
+      "missing": [],
+      "extra": [
+        {
+          "name": "append_sqlite_production_source_paths",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "owner": "sqlite",
+      "before_functions": 182,
+      "after_functions": 182,
+      "missing": [],
+      "extra": []
+    }
+  ],
+  "record_and_constant_declarations": [
+    {
+      "owner": "proxy-root",
+      "before_records": 39,
+      "after_records": 39,
+      "missing": [],
+      "extra": []
+    },
+    {
+      "owner": "websocket",
+      "before_records": 66,
+      "after_records": 66,
+      "missing": [],
+      "extra": []
+    },
+    {
+      "owner": "account-selection",
+      "before_records": 39,
+      "after_records": 39,
+      "missing": [],
+      "extra": []
+    },
+    {
+      "owner": "burn-down",
+      "before_records": 54,
+      "after_records": 54,
+      "missing": [],
+      "extra": []
+    },
+    {
+      "owner": "state-root",
+      "before_records": 2,
+      "after_records": 2,
+      "missing": [],
+      "extra": []
+    },
+    {
+      "owner": "sqlite",
+      "before_records": 37,
+      "after_records": 37,
+      "missing": [],
+      "extra": []
+    }
+  ],
+  "parameter_attributes": {
+    "before": 0,
+    "after": 0,
+    "missing": [],
+    "added": [],
+    "exact_approved_additions": true
+  },
+  "resulting_rust_files": 179,
+  "maximum_lines": 752,
+  "checks": [
+    {
+      "command": "cargo fmt --all -- --check",
+      "exit_code": 0
+    },
+    {
+      "command": "cargo clippy --workspace --all-targets -- -D warnings",
+      "exit_code": 0
+    },
+    {
+      "command": "python3 scripts/tooling/prepare-sqlx.py --check",
+      "exit_code": 0
+    },
+    {
+      "command": "cargo nextest run --profile ci --workspace --features codex-router-cli/keychain-test-support",
+      "exit_code": 100,
+      "passed": 3277,
+      "failed": 1,
+      "skipped": 75,
+      "limitation": "preexisting local Host runtime_restart managed executable resolution flake; Lead requires hosted CI authority for this case"
+    },
+    {
+      "command": "cargo nextest run --profile ci -p codex-router-host --test runtime_restart -E test(owned_router_restart_replaces_only_router_and_preserves_app_server_state)",
+      "exit_code": 0,
+      "passed": 1,
+      "skipped": 2
+    }
+  ],
+  "preserved_artifacts": [
+    "Cargo.toml",
+    "Cargo.lock",
+    "native migrations",
+    ".sqlx",
+    ".cargo",
+    ".config"
+  ],
+  "release_boundary": "one PR unmerged; no version bump, tag, install, production replacement or user runtime/account state changes",
+  "independent_review": "reserved to commissioning Lead and independent reviewer"
+}
