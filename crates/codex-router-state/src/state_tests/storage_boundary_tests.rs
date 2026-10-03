@@ -3,7 +3,30 @@ use std::path::{Path, PathBuf};
 
 use super::*;
 
-fn append_sqlite_production_source_paths(directory: &Path, source_paths: &mut Vec<PathBuf>) {
+fn append_sqlite_production_source_paths(
+    directory: &Path,
+    parent_module_file: &Path,
+    source_paths: &mut Vec<PathBuf>,
+) {
+    let parent_source = fs::read_to_string(parent_module_file).unwrap_or_else(|error| {
+        panic!(
+            "state sqlite parent module should be readable at {}: {error}",
+            parent_module_file.display()
+        )
+    });
+    let parent_lines = parent_source.lines().collect::<Vec<_>>();
+    let fixture_modules = parent_lines
+        .iter()
+        .enumerate()
+        .filter_map(|(index, line)| {
+            let module_line = line.trim();
+            let module_name = module_line
+                .strip_prefix("mod ")
+                .and_then(|line| line.strip_suffix(';'))?;
+            (index > 0 && parent_lines[index - 1].contains("sync-rusqlite-fixtures"))
+                .then_some(module_name)
+        })
+        .collect::<Vec<_>>();
     let entries = fs::read_dir(directory).unwrap_or_else(|error| {
         panic!(
             "state sqlite source directory should be readable at {}: {error}",
@@ -18,6 +41,14 @@ fn append_sqlite_production_source_paths(directory: &Path, source_paths: &mut Ve
         let file_type = entry.file_type().unwrap_or_else(|error| {
             panic!("state sqlite source entry type should be readable: {error}")
         });
+        let module_name = if file_type.is_dir() {
+            path.file_name()
+        } else {
+            path.file_stem()
+        };
+        if module_name.is_some_and(|name| fixture_modules.iter().any(|fixture| name == *fixture)) {
+            continue;
+        }
         if file_type.is_dir() {
             let directory_name = entry.file_name();
             let directory_name = directory_name.to_string_lossy();
@@ -27,7 +58,13 @@ fn append_sqlite_production_source_paths(directory: &Path, source_paths: &mut Ve
             {
                 continue;
             }
-            append_sqlite_production_source_paths(&path, source_paths);
+            let sibling_module_file = path.with_extension("rs");
+            let parent_module_file = if sibling_module_file.is_file() {
+                sibling_module_file
+            } else {
+                path.join("mod.rs")
+            };
+            append_sqlite_production_source_paths(&path, &parent_module_file, source_paths);
         } else if file_type.is_file()
             && path.extension().is_some_and(|extension| extension == "rs")
             && !path
@@ -46,7 +83,11 @@ fn production_state_storage_does_not_use_rusqlite() {
     let sqlite_child_source_directory = manifest_dir.join("src/sqlite");
     let mut source_paths = vec![sqlite_source_path.clone()];
     if sqlite_child_source_directory.is_dir() {
-        append_sqlite_production_source_paths(&sqlite_child_source_directory, &mut source_paths);
+        append_sqlite_production_source_paths(
+            &sqlite_child_source_directory,
+            &sqlite_source_path,
+            &mut source_paths,
+        );
     }
     source_paths.sort();
     assert!(

@@ -6,7 +6,6 @@ use super::selector_windows::{
 use super::*;
 
 #[cfg(any(test, feature = "sync-rusqlite-fixtures"))]
-use rusqlite::Transaction;
 impl SqliteStateStore {
     /// Inserts or updates a selector quota window.
     pub fn upsert_selector_quota_window(
@@ -470,7 +469,7 @@ impl SelectorQuotaRepository for SqliteStateStore {
 
 #[cfg(any(test, feature = "sync-rusqlite-fixtures"))]
 fn insert_selector_window_in_transaction(
-    transaction: &Transaction<'_>,
+    transaction: &rusqlite::Transaction<'_>,
     window: &PersistedSelectorQuotaWindow,
 ) -> Result<(), StateStoreError> {
     transaction
@@ -499,7 +498,7 @@ fn insert_selector_window_in_transaction(
 
 #[cfg(any(test, feature = "sync-rusqlite-fixtures"))]
 pub(super) fn invalidate_credential_mutation_quota_sync(
-    transaction: &Transaction<'_>,
+    transaction: &rusqlite::Transaction<'_>,
     account_id: &AccountId,
 ) -> Result<(), StateStoreError> {
     for route_band in CREDENTIAL_MUTATION_INVALIDATED_ROUTE_BANDS {
