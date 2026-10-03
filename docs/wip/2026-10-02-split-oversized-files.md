@@ -478,10 +478,10 @@ The detailed responsibility and dependency map above remains the design basis. T
 | `crates/codex-router-proxy/src/proxy_tests/websocket_rejection_tests.rs` | 393 |
 | `crates/codex-router-proxy/src/proxy_tests/websocket_routing_tests.rs` | 403 |
 | `crates/codex-router-proxy/src/proxy_tests/websocket_upgrade_tests.rs` | 452 |
-| `crates/codex-router-proxy/src/websocket.rs` | 443 |
+| `crates/codex-router-proxy/src/websocket.rs` | 444 |
 | `crates/codex-router-proxy/src/websocket/account_turn_admission.rs` | 246 |
 | `crates/codex-router-proxy/src/websocket/async_tunnel.rs` | 390 |
-| `crates/codex-router-proxy/src/websocket/authenticated_routing.rs` | 483 |
+| `crates/codex-router-proxy/src/websocket/authenticated_routing.rs` | 482 |
 | `crates/codex-router-proxy/src/websocket/blocking_tunnel.rs` | 254 |
 | `crates/codex-router-proxy/src/websocket/duplex_forwarding.rs` | 484 |
 | `crates/codex-router-proxy/src/websocket/forwarding_tests.rs` | 135 |
@@ -511,7 +511,7 @@ The detailed responsibility and dependency map above remains the design basis. T
 | `crates/codex-router-proxy/src/websocket/forwarding_tests/unavailable_authority_tests.rs` | 379 |
 | `crates/codex-router-proxy/src/websocket/provider_signals.rs` | 201 |
 | `crates/codex-router-proxy/src/websocket/response_metadata.rs` | 388 |
-| `crates/codex-router-proxy/src/websocket/session_registry.rs` | 486 |
+| `crates/codex-router-proxy/src/websocket/session_registry.rs` | 487 |
 | `crates/codex-router-proxy/src/websocket/session_registry_tests.rs` | 41 |
 | `crates/codex-router-proxy/src/websocket/transport_cleanup.rs` | 53 |
 | `crates/codex-router-selection/src/burn_down.rs` | 85 |
@@ -605,3 +605,37 @@ Fixture-module collector proof: all 18 non-test SQLite leaves are classified fro
 Final local CI suite: 3,278 executed / 3,277 passed / 1 failed / 75 existing skipped (exit 100). Every refactor guard and affected crate scenario passes. The sole failure is unchanged `codex-router-host::runtime_restart::owned_router_restart_replaces_only_router_and_preserves_app_server_state`, managed fixture executable resolution; exact isolated retry passed 1/1 in 1.517s (exit 0). Lead identified it as a preexisting local flake from PR #115 and September collab-improvements receipts and explicitly instructed one isolated run only, no assertion/deadline changes or retry loops, with exact-head hosted CI authority for this case. Host/native-integration diff is empty. The precise local cause is unverified (lookup error and timeout share a message); no production/native user runtime was used. Compiled after inventory is running; publication proceeds under this Lead-directed limitation.
 
 Final compiled named-test inventory: original 3,352 cases preserved across the same 355 binaries, identical leaf-name multiplicities and ignored status; only approved addition is `codex-router-cli::rusqlite_diff_guard_preserves_relocations_and_rejects_new_bindings`, total 3,353. Comparison exits 0. [Portable proof summary](2026-10-02-split-preservation-proof.json) records command outcomes, body/declaration equality and the Lead-approved local Host flake limitation. Code and source-guard adaptations are committed through `b6b289f0`; final remaining delivery is push and one unmerged PR, with hosted CI authority for the known Host test and independent review owned by the commissioning Lead. No open stand-in, release or production-state action.
+
+
+## 2026-10-03 independent review remediation pass 1
+
+Review found stale proof filters, root-only Python guard reads, and two misplaced/deleted doc attributes. Remediation source commit `34ecceed37596cb0bec1c4f9eafce6ee6a7b0d39` restores the original enum and constant docs (including the duplicate registry doc). The attribute oracle now compares docs and their attached item identities: 524 before / 524 after, no differences. Its red check against `2017622c` identified the two original defects. Parameter attributes remain 0 / 0.
+
+Nine stale filter occurrences (seven distinct filters) in `scripts/proof-matrix.sh` now use the new full test paths. Each exact updated Cargo invocation ran one test and exited 0. One leaf ending `_is_reported` was already stale on main: the existing test ends `_is_clean_transport_close`; fixing this also repairs a preexisting dead proof row. No test body or test name changed. This corrects the earlier trace claim that no script filters were invalidated.
+
+Both Python proof scripts follow top-level production out-of-line `mod` declarations recursively, including `#[path]`, and skip `#[cfg(test)]`-gated subtrees. The release checker keeps its original stripper, every needle and required/forbidden sense, global scanner, dirty-source check and receipt behavior. Required needles must occur in any one production file; forbidden needles are checked across every production file. Blind test-directory globbing would introduce test-only false positives and lose the original compiler boundary; the Lead approved declaration traversal.
+
+Clean-head actual script execution compared `34ecceed` with the clean credits worktree whose tree equals baseline `609a0b02`; `CODEX_ROUTER_PROOF_VERIFY_ONLY=1` kept receipts in system temporary storage. Both worktrees stayed clean. All 16 actual outcomes match: release G-02/G-04/G-05/G-07/G-23/AR-WS-GUARD pass on both; G-01/G-03/G-26/G-27/G-28 fail on both. The four isolation prohibition checks pass on both; maintenance ownership (the G-25 proof row) fails on both because its existing `compact_active_session_history(` needle is absent. No baseline failure is claimed as green or repaired here.
+
+| Scan | Baseline files | Head files |
+| --- | ---: | ---: |
+| Release account_selection root/subtree | 1 | 10 |
+| Release proxy lib root/subtree | 1 | 1 |
+| Release websocket root/subtree | 1 | 9 |
+| Release burn_down root/subtree | 1 | 11 |
+| Release state lib root/subtree | 1 | 1 |
+| Release sqlite root/subtree | 1 | 19 |
+| Release-wide inventory (unchanged scanner) | 302 | 460 |
+| Isolation no-admission-maintenance | 3 | 20 |
+| Isolation no-hot-path-sqlite-open | 3 | 20 |
+| Isolation no-raw-provider-body-actor-command | 1 | 1 |
+| Isolation no-raw-provider-body-observer-boundary | 1 | 1 |
+| Isolation runtime-owns-maintenance-actor | 2 | 2 |
+
+The release sqlite collection includes feature-gated fixture leaves under its unchanged stripping semantics; the separate state production-storage guard excludes those seven leaves at their compiler cfg fence and scans root plus eleven production children. These guards retain their different original scopes.
+
+Complete approved non-move list: (1) old tracing target pins plus exactly two equivalent grouped warn fields; (2) CLI diff guard exact trimmed relocation multiset/import exception and its one named table test; (3) state guard production-child collection with compiler-gated fixture-module exclusion; (4) burn-down guard production-child widening; (5) Python proof guard production-subtree widening and exact proof filter updates. Imports, visibility and relative module paths remain mechanical wiring. No parameter cfg/comment workaround remains.
+
+Hosted run `37099896046` initially failed only `saved_floor_refresh_reconnects_established_websocket_before_later_response_create` with `ResetWithoutClosingHandshake`. The four forwarding/pump/supervisor bodies are token-equal to main; `supervise_websocket_pumps` unconditionally aborts local-to-upstream when upstream-to-local completes, as on main, allowing Close delivery to race. The Lead verified this as a preexisting pump-abort race exposed by timing and deferred the product fix. Head macOS stress passed 30/30; the independent reviewer additionally reported 26/26. No assertions, deadlines or product behavior changed. The earlier local Host runtime_restart limitation remains separate. One failed-job rerun had already been dispatched before the remediation instruction; no further explicit rerun will be issued. Pushing this correction is the required new hosted run; another floor-case failure requires stopping and sending the Lead evidence.
+
+Remediation checks: all nine nonzero Cargo filter runs exit 0; proxy strict all-target Clippy, workspace fmt check, shell/Python syntax and diff whitespace pass. The compiled preservation gate remains 3,352 original cases plus one approved addition across the same 355 binaries. Tracked portable JSON records exact counts and outcomes. Remaining delivery: commit this receipt, push the same branch/PR, update the HEAD-tied body, watch the new hosted run, and return exact-head proof for the Lead's independent rereview. No release/merge authority or open stand-in.
