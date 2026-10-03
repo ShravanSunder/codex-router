@@ -287,7 +287,10 @@ and no PID discovery or signalling. Basis: U5 (then), U6 (then).
   They are applied when its child activates, after the outgoing child of the
   same role has stopped writing. There are two exceptions:
   - the proxy's shared state DB, whose migrations stay compatible with a
-    still-running older writer, as they must already be today;
+    still-running older writer under the explicit proxy exception in the
+    owner's selected A1 recommendation. Compatibility with that writer is a
+    required outcome and proof obligation, not inferred from the fact that
+    today's CLI opens the DB while the proxy is running;
   - the proxy's one-time pooled-credential migration, which runs only on a
     fresh start.
 
@@ -368,4 +371,3 @@ root and Codex home. Production processes are never touched.
   generation and fingerprint changes.
 
 ## Open decisions
-

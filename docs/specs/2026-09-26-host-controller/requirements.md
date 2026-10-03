@@ -143,8 +143,14 @@ Further owner confirmations on 2026-09-26, after design review:
   active, that one replacement follows the crash path and may exceed 1 s.
 - **Migrations in hot updates (A1, 2026-10-03).** A hot update may apply the
   incoming version's own schema migrations when its child activates, after the
-  outgoing child of the same role has stopped writing. There is no reset and no
-  new store, and the older version is never reactivated on migrated data. V8
+  outgoing child of the same role has stopped writing. The selected option A's
+  recommendation explicitly retained the proxy state-DB exception: "The proxy's
+  state DB keeps today's rule that migrations must stay compatible with an older
+  writer still running, because the CLI already migrates it under a running
+  `serve`." That exception is part of the owner's selection, not permission to
+  infer compatibility from the current CLI opener. V8 must prove the incoming
+  migration preserves the older proxy's claimed renewal. There is no reset and
+  no new store, and the older version is never reactivated on migrated data. V8
   measures activation with a real unapplied migration. An overrun of the 1 s
   target comes back to the owner rather than raising the deadline. Option B,
   where migration-bearing releases need a full restart, was rejected.
