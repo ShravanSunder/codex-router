@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM route_band_account_states\n              WHERE account_id = ?1 AND route_band = 'responses'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "eebe6cd4cb10676f620a96c4645c98d5dfe37c38208f2c007a94863b547db286"
+}

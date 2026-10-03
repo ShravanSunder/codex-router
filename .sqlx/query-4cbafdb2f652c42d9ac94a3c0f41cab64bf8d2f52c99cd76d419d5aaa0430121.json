@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE account_credit_observations\n                SET committed_attempt = ?1,\n                    observed_unix_seconds = ?2,\n                    stale_after_unix_seconds = ?3,\n                    availability = ?4,\n                    balance = ?5,\n                    spend_control_state = ?6,\n                    provider_limit_reason = ?7\n              WHERE account_id = ?8\n                AND credential_generation = ?9\n                AND latest_started_attempt = ?10\n                AND EXISTS (\n                  SELECT 1 FROM accounts\n                   WHERE accounts.account_id = account_credit_observations.account_id\n                     AND accounts.active_credential_generation = ?11\n                )",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 11
+    },
+    "nullable": []
+  },
+  "hash": "4cbafdb2f652c42d9ac94a3c0f41cab64bf8d2f52c99cd76d419d5aaa0430121"
+}

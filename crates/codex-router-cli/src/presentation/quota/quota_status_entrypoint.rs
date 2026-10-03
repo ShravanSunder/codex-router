@@ -5,6 +5,8 @@ use iocraft::prelude::*;
 
 use crate::quota_reset::reset_session_supervisor::ResetSessionPorts;
 
+use super::CreditUsagePolicySaver;
+use super::CreditUsageRefresher;
 use super::quota_browse_rendering::colorize_reset_pace_ansi;
 use super::quota_floor_editor::WeeklyQuotaFloorSaver;
 use super::quota_status_component::LIVE_QUOTA_STATUS_RELOAD_INTERVAL;
@@ -65,6 +67,8 @@ pub(crate) async fn run_quota_status_view(
     reload_view_model: Option<QuotaStatusViewModelLoader>,
     reset_session_ports: Option<ResetSessionPorts>,
     weekly_floor_saver: Option<WeeklyQuotaFloorSaver>,
+    credit_policy_saver: Option<CreditUsagePolicySaver>,
+    credit_usage_refresher: Option<CreditUsageRefresher>,
 ) -> io::Result<()> {
     let (reset_intent_sender, reset_snapshot_receiver) = reset_session_ports
         .map(|ports| (Some(ports.intent_sender), Some(ports.snapshot_receiver)))
@@ -78,6 +82,8 @@ pub(crate) async fn run_quota_status_view(
             reset_intent_sender,
             reset_snapshot_receiver,
             weekly_floor_saver,
+            credit_policy_saver,
+            credit_usage_refresher,
             reload_interval: LIVE_QUOTA_STATUS_RELOAD_INTERVAL,
             spinner_interval: LIVE_QUOTA_STATUS_SPINNER_INTERVAL,
         )

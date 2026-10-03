@@ -48,6 +48,7 @@ pub(in crate::quota_reset) use reset_effect_execution::ProductionResetClock;
 use reset_effect_execution::RedeemRequestIdFactory;
 use reset_effect_execution::ResetClock;
 use reset_effect_execution::SessionTaskOutput;
+pub(crate) use reset_presentation_protocol::InspectionTabRequestId;
 #[cfg(test)]
 pub(crate) use reset_presentation_protocol::LiveWeeklyDisplayFacts;
 use reset_presentation_protocol::PinnedResetTarget;
@@ -114,6 +115,7 @@ pub(in crate::quota_reset) struct QuotaInteractiveSession<
     invalidation_reason: Option<PinnedTargetInvalidationReason>,
     terminal_outcome: Option<WorkflowResult>,
     presentation_connected: bool,
+    last_processed_inspection_tab_request: Option<InspectionTabRequestId>,
 }
 
 impl<TAuthorityReader, TProvider, TRedeemRequestIdFactory>
@@ -130,7 +132,7 @@ where
     ) -> (Self, ResetSessionPorts) {
         let (intent_sender, intent_receiver) = tokio::sync::mpsc::unbounded_channel();
         let initial_snapshot =
-            ResetWorkflowSnapshot::from_workflow(&ResetWorkflow::default(), None, None);
+            ResetWorkflowSnapshot::from_workflow(&ResetWorkflow::default(), None, None, None, None);
         let (snapshot_sender, snapshot_receiver) = watch::channel(initial_snapshot);
         (
             Self {
@@ -155,6 +157,7 @@ where
                 invalidation_reason: None,
                 terminal_outcome: None,
                 presentation_connected: true,
+                last_processed_inspection_tab_request: None,
             },
             ResetSessionPorts {
                 intent_sender: ResetIntentSender::new(intent_sender),
@@ -260,6 +263,28 @@ where
                             prepared,
                         }
                     });
+                }
+            }
+            ResetSessionIntent::CancelInspectionForTab {
+                request_id,
+                expected_inspection_attempt,
+            } => {
+                let phase = self.workflow.phase();
+                let current_attempt = self
+                    .current_attempt_generation()
+                    .map(crate::quota_reset::reset_credit_policy::AttemptGeneration::get);
+                let expected_attempt_matches = expected_inspection_attempt.is_some()
+                    && expected_inspection_attempt == current_attempt;
+                if matches!(phase, WorkflowPhase::Inspecting | WorkflowPhase::Inspected)
+                    && expected_attempt_matches
+                {
+                    self.clear_precommit_state().await;
+                }
+                if self
+                    .last_processed_inspection_tab_request
+                    .is_none_or(|last_processed| request_id >= last_processed)
+                {
+                    self.last_processed_inspection_tab_request = Some(request_id);
                 }
             }
             ResetSessionIntent::OpenConfirmation => self.open_confirmation(),
@@ -448,6 +473,11 @@ where
     }
 
     async fn cancel_precommit(&mut self) {
+        self.clear_precommit_state().await;
+        self.publish_snapshot();
+    }
+
+    async fn clear_precommit_state(&mut self) {
         self.workflow.reduce(WorkflowIntent::Cancel);
         self.generations.allocate_attempt();
         self.tasks.abort_all();
@@ -461,7 +491,6 @@ where
         self.revalidation_inventory = None;
         self.invalidation_reason = None;
         self.terminal_outcome = None;
-        self.publish_snapshot();
     }
 
     async fn invalidate_pinned_target(&mut self, reason: PinnedTargetInvalidationReason) {

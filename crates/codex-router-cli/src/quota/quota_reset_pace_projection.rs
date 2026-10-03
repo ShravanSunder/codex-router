@@ -103,15 +103,6 @@ pub(super) fn quota_total_rate_summary(snapshot: Option<QuotaPaceSnapshot>) -> S
     )
 }
 
-pub(super) fn quota_compact_total_burn_rate(snapshot: Option<QuotaPaceSnapshot>) -> Option<String> {
-    let snapshot = snapshot?;
-    snapshot
-        .projected_candidate_burn_basis_points_per_hour
-        .or(snapshot.aggregate_burn_basis_points_per_hour)
-        .map(format_burn_rate_basis_points_per_hour)
-        .map(|rate| format!("burn {rate}"))
-}
-
 pub(super) fn quota_connection_rate_summary(snapshot: Option<QuotaPaceSnapshot>) -> String {
     let Some(snapshot) = snapshot else {
         return "connection rate unknown".to_owned();

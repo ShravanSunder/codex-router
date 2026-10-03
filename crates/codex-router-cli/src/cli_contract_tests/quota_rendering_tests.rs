@@ -529,7 +529,7 @@ fn quota_status_table_format_renders_account_rows_without_legacy_tables() {
     assert!(visible_stdout.contains("Quota status"));
     assert!(visible_stdout.contains("─"));
     assert!(visible_stdout.contains("╰"));
-    assert!(visible_stdout.contains("responses -> primary"));
+    assert!(visible_stdout.contains("responses · 1 account · usable 1"));
     assert!(visible_stdout.contains("idle far-reset allowance"));
     assert!(visible_stdout.contains("burn "));
     assert!(!visible_stdout.contains("why: preferred by quota"));
@@ -595,7 +595,11 @@ fn quota_status_default_keeps_single_human_status_block_without_refresh() {
     ]);
 
     assert_eq!(output.stdout.matches("Quota status").count(), 1);
-    assert!(output.stdout.contains("responses -> primary"));
+    assert!(
+        output.stdout.contains("responses · 1 account · unknown 1"),
+        "default pool status header: {}",
+        output.stdout.lines().take(4).collect::<Vec<_>>().join("\n")
+    );
     assert!(!output.stdout.contains("refresh failed:"));
     assert!(!output.stdout.contains("refreshing quota..."));
     assert!(!output.stdout.contains("updated quota:"));

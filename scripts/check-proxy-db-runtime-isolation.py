@@ -2,15 +2,87 @@
 """Structural checks for proxy DB runtime isolation boundaries."""
 
 import argparse
+import re
 import sys
 from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+NON_CODE_RUST = re.compile(
+    r'//[^\n]*|/\*.*?\*/|(?:br|r)(?P<hashes>\#{0,255})".*?"(?P=hashes)|'
+    r'(?:b)?"(?:\\.|[^"\\])*"|'
+    r"(?:b)?'(?:\\(?:[nrt0\\'\"]|x[0-9a-fA-F]{2}|u\{[0-9a-fA-F_]+\})|[^\\'\n])'",
+    re.DOTALL,
+)
 
 
 def source_text(relative_path: str) -> str:
     return (REPO_ROOT / relative_path).read_text(encoding="utf-8")
+
+
+def declared_production_modules(relative_path: str, text: str) -> list[str]:
+    module_directory = Path(relative_path).parent / Path(relative_path).stem
+    modules: list[str] = []
+    attributes: list[str] = []
+    code = NON_CODE_RUST.sub(
+        lambda match: "".join("\n" if char == "\n" else " " for char in match.group()),
+        text,
+    )
+    brace_depth = 0
+    for line, code_line in zip(text.splitlines(), code.splitlines(), strict=True):
+        stripped = line.strip()
+        if brace_depth == 0:
+            if stripped.startswith("#["):
+                attributes.append(stripped)
+            else:
+                module = re.fullmatch(
+                    r"(?:(?:pub(?:\([^)]*\))?)\s+)?mod\s+([A-Za-z_][A-Za-z_0-9]*)\s*;",
+                    stripped,
+                )
+                if module is not None:
+                    test_only = any(
+                        re.fullmatch(r"#\[cfg\(\s*test\s*\)\]", attribute)
+                        for attribute in attributes
+                    )
+                    if not test_only:
+                        path_attribute = next(
+                            (
+                                match.group(1)
+                                for attribute in attributes
+                                if (
+                                    match := re.fullmatch(
+                                        r'#\[path\s*=\s*"([^"]+)"\]', attribute
+                                    )
+                                )
+                            ),
+                            None,
+                        )
+                        module_path = (
+                            Path(relative_path).parent / path_attribute
+                            if path_attribute is not None
+                            else module_directory / f"{module.group(1)}.rs"
+                        )
+                        modules.append(module_path.as_posix())
+                attributes.clear()
+        else:
+            attributes.clear()
+        brace_depth += code_line.count("{") - code_line.count("}")
+    return modules
+
+
+def production_module_paths(relative_path: str) -> list[str]:
+    pending = [relative_path]
+    visited: set[str] = set()
+    paths: list[str] = []
+    while pending:
+        current = pending.pop()
+        if current in visited:
+            continue
+        visited.add(current)
+        text = production_text(current)
+        paths.append(current)
+        pending.extend(declared_production_modules(current, text))
+    return paths
 
 
 def production_text(relative_path: str) -> str:
@@ -19,6 +91,13 @@ def production_text(relative_path: str) -> str:
     if marker in text:
         return text.split(marker, maxsplit=1)[0]
     return text
+
+
+def production_module_texts(relative_path: str) -> list[tuple[str, str]]:
+    return [
+        (path, production_text(path))
+        for path in production_module_paths(relative_path)
+    ]
 
 
 def fail(message: str) -> None:
@@ -50,10 +129,12 @@ def check_no_admission_maintenance() -> None:
         "crates/codex-router-proxy/src/websocket.rs",
         "crates/codex-router-proxy/src/server.rs",
     ):
-        text = production_text(relative_path)
-        for token in forbidden:
-            if token in text:
-                fail(f"{relative_path} contains admission/socket maintenance call {token}")
+        for source_path, text in production_module_texts(relative_path):
+            for token in forbidden:
+                if token in text:
+                    fail(
+                        f"{source_path} contains admission/socket maintenance call {token}"
+                    )
     print("PASS no-admission-maintenance")
 
 
@@ -62,10 +143,12 @@ def check_no_hot_path_sqlite_open() -> None:
         "crates/codex-router-proxy/src/account_selection.rs",
         "crates/codex-router-proxy/src/websocket.rs",
     ):
-        text = production_text(relative_path)
-        for token in ("AsyncSqliteStateStore::open", "open_read_only", "PRAGMA user_version"):
-            if token in text:
-                fail(f"{relative_path} contains hot-path SQLite open/schema token {token}")
+        for source_path, text in production_module_texts(relative_path):
+            for token in ("AsyncSqliteStateStore::open", "open_read_only", "PRAGMA user_version"):
+                if token in text:
+                    fail(
+                        f"{source_path} contains hot-path SQLite open/schema token {token}"
+                    )
     server_text = production_text("crates/codex-router-proxy/src/server.rs")
     for marker in (
         "async fn handle_hyper_connection(",

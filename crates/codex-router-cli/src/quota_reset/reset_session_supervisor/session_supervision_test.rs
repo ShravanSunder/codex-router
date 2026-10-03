@@ -9,6 +9,7 @@ use codex_router_core::ids::AccountId;
 use codex_router_core::redaction::SecretString;
 use tokio::sync::Notify;
 
+use super::reset_presentation_protocol::InspectionTabRequestId;
 use super::reset_presentation_protocol::PinnedTargetInvalidationReason;
 use super::reset_presentation_protocol::ResetEligibilityDisabledReason;
 use super::reset_presentation_protocol::ResetValueProvenance;
@@ -313,6 +314,231 @@ async fn cancel_reaps_partial_get_and_allows_second_inspection() {
 }
 
 #[tokio::test]
+async fn inspection_tab_request_acknowledges_only_after_get_tasks_are_reaped() {
+    let fixture = session_fixture();
+    let mut snapshots = fixture.ports.snapshot_receiver;
+    let intents = fixture.ports.intent_sender;
+    let session_task = tokio::spawn(fixture.session.run());
+
+    begin_inspection(&intents).await;
+    fixture.control.inspection_usage_started.notified().await;
+    fixture
+        .control
+        .inspection_inventory_started
+        .notified()
+        .await;
+    let inspecting = wait_for_phase(&mut snapshots, WorkflowPhase::Inspecting).await;
+    let expected_attempt = inspecting
+        .inspection_attempt_generation()
+        .expect("inspection snapshot should carry its private attempt identity");
+    let request_id = InspectionTabRequestId::new(4, 9);
+
+    intents
+        .send(ResetSessionIntent::CancelInspectionForTab {
+            request_id,
+            expected_inspection_attempt: Some(expected_attempt),
+        })
+        .await
+        .expect("tab cancellation request should queue");
+    let acknowledged = wait_for_inspection_tab_ack(&mut snapshots, request_id).await;
+
+    assert_eq!(acknowledged.phase(), WorkflowPhase::Browse);
+    assert_eq!(
+        acknowledged.last_processed_inspection_tab_request(),
+        Some(request_id)
+    );
+    assert_ne!(
+        acknowledged.inspection_attempt_generation(),
+        Some(expected_attempt),
+        "cancel should invalidate the inspection attempt after reaping its tasks"
+    );
+    assert!(
+        fixture
+            .control
+            .inspection_inventory_dropped
+            .load(Ordering::SeqCst),
+        "the provider inventory task must be reaped before the ack snapshot"
+    );
+    assert_eq!(fixture.control.post_calls.load(Ordering::SeqCst), 0);
+
+    intents
+        .send(ResetSessionIntent::Shutdown)
+        .await
+        .expect("shutdown");
+    assert_eq!(
+        session_task.await.expect("session task"),
+        ResetSessionOutcome::Cancelled
+    );
+}
+
+#[tokio::test]
+async fn stale_tab_attempt_mismatch_does_not_cancel_a_newer_inspection() {
+    let fixture = session_fixture();
+    let mut snapshots = fixture.ports.snapshot_receiver;
+    let intents = fixture.ports.intent_sender;
+    let session_task = tokio::spawn(fixture.session.run());
+    begin_inspection(&intents).await;
+    fixture.control.inspection_usage_started.notified().await;
+    fixture
+        .control
+        .inspection_inventory_started
+        .notified()
+        .await;
+    let earlier_inspection = wait_for_phase(&mut snapshots, WorkflowPhase::Inspecting).await;
+    let earlier_attempt = earlier_inspection
+        .inspection_attempt_generation()
+        .expect("earlier inspection should have an attempt identity");
+    let delayed_request_id = InspectionTabRequestId::new(3, 1);
+
+    intents
+        .send(ResetSessionIntent::Cancel)
+        .await
+        .expect("cancel earlier inspection");
+    let browse_after_cancel = wait_for_phase(&mut snapshots, WorkflowPhase::Browse).await;
+    assert_ne!(
+        browse_after_cancel.inspection_attempt_generation(),
+        Some(earlier_attempt),
+        "cancellation advances the inspection attempt before a new inspection begins"
+    );
+
+    begin_inspection(&intents).await;
+    // The fake provider labels every call after the first as revalidation.
+    fixture.control.revalidation_usage_started.notified().await;
+    fixture
+        .control
+        .revalidation_inventory_started
+        .notified()
+        .await;
+    let newer_inspection = wait_for_phase(&mut snapshots, WorkflowPhase::Inspecting).await;
+    let newer_attempt = newer_inspection
+        .inspection_attempt_generation()
+        .expect("new inspection should have an attempt identity");
+    assert_ne!(newer_attempt, earlier_attempt);
+
+    intents
+        .send(ResetSessionIntent::CancelInspectionForTab {
+            request_id: delayed_request_id,
+            expected_inspection_attempt: Some(earlier_attempt),
+        })
+        .await
+        .expect("delayed request captured from the earlier attempt");
+    let delayed_ack = wait_for_inspection_tab_ack(&mut snapshots, delayed_request_id).await;
+
+    assert_eq!(delayed_ack.phase(), WorkflowPhase::Inspecting);
+    assert_eq!(
+        delayed_ack.inspection_attempt_generation(),
+        Some(newer_attempt)
+    );
+    assert_eq!(
+        delayed_ack.last_processed_inspection_tab_request(),
+        Some(delayed_request_id)
+    );
+    assert_eq!(fixture.control.post_calls.load(Ordering::SeqCst), 0);
+
+    intents
+        .send(ResetSessionIntent::Cancel)
+        .await
+        .expect("explicit cancel should retain its ordinary behavior");
+    let canceled = wait_for_phase(&mut snapshots, WorkflowPhase::Browse).await;
+    assert!(
+        fixture
+            .control
+            .inspection_inventory_dropped
+            .load(Ordering::SeqCst)
+    );
+    assert_eq!(
+        canceled.last_processed_inspection_tab_request(),
+        Some(delayed_request_id)
+    );
+    intents
+        .send(ResetSessionIntent::Shutdown)
+        .await
+        .expect("shutdown");
+    assert_eq!(
+        session_task.await.expect("session task"),
+        ResetSessionOutcome::Cancelled
+    );
+}
+
+#[tokio::test]
+async fn inspection_tab_request_acknowledges_without_canceling_confirmation_revalidation() {
+    let fixture = session_fixture();
+    let mut snapshots = fixture.ports.snapshot_receiver;
+    let intents = fixture.ports.intent_sender;
+    let session_task = tokio::spawn(fixture.session.run());
+    begin_inspection(&intents).await;
+    fixture.control.inspection_usage_started.notified().await;
+    fixture
+        .control
+        .inspection_inventory_started
+        .notified()
+        .await;
+    fixture.control.inspection_usage_release.notify_one();
+    fixture.control.inspection_inventory_release.notify_one();
+    let inspected = wait_for_phase(&mut snapshots, WorkflowPhase::Inspected).await;
+    let inspection_attempt = inspected
+        .inspection_attempt_generation()
+        .expect("inspected snapshot should retain its attempt identity");
+    intents
+        .send(ResetSessionIntent::OpenConfirmation)
+        .await
+        .expect("open reset confirmation");
+    intents
+        .send(ResetSessionIntent::SelectYes)
+        .await
+        .expect("select an eligible reset");
+    intents
+        .send(ResetSessionIntent::Confirm {
+            now_unix_seconds: 100,
+        })
+        .await
+        .expect("confirm reset");
+    fixture.control.revalidation_usage_started.notified().await;
+    fixture
+        .control
+        .revalidation_inventory_started
+        .notified()
+        .await;
+    let revalidating = wait_for_phase(&mut snapshots, WorkflowPhase::Revalidating).await;
+    let request_id = InspectionTabRequestId::new(7, 2);
+
+    intents
+        .send(ResetSessionIntent::CancelInspectionForTab {
+            request_id,
+            expected_inspection_attempt: Some(inspection_attempt),
+        })
+        .await
+        .expect("tab request should be processed");
+    let acknowledged = wait_for_inspection_tab_ack(&mut snapshots, request_id).await;
+
+    assert_eq!(acknowledged.phase(), WorkflowPhase::Revalidating);
+    assert_eq!(
+        acknowledged.inspection_attempt_generation(),
+        revalidating.inspection_attempt_generation()
+    );
+    assert_eq!(fixture.control.post_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        acknowledged.last_processed_inspection_tab_request(),
+        Some(request_id)
+    );
+
+    intents
+        .send(ResetSessionIntent::Cancel)
+        .await
+        .expect("ordinary reset cancellation remains available");
+    wait_for_phase(&mut snapshots, WorkflowPhase::Browse).await;
+    assert_eq!(fixture.control.post_calls.load(Ordering::SeqCst), 0);
+    intents
+        .send(ResetSessionIntent::Shutdown)
+        .await
+        .expect("shutdown");
+    assert_eq!(
+        session_task.await.expect("session task"),
+        ResetSessionOutcome::Cancelled
+    );
+}
+
+#[tokio::test]
 async fn inventory_first_completion_remains_partial_until_usage_finishes() {
     // Arrange
     let fixture = session_fixture();
@@ -522,10 +748,24 @@ async fn drive_to_committing(
 async fn wait_for_phase(
     snapshot_receiver: &mut watch::Receiver<ResetWorkflowSnapshot>,
     expected_phase: WorkflowPhase,
-) {
+) -> ResetWorkflowSnapshot {
     loop {
-        if snapshot_receiver.borrow().phase() == expected_phase {
-            return;
+        let snapshot = snapshot_receiver.borrow_and_update().clone();
+        if snapshot.phase() == expected_phase {
+            return snapshot;
+        }
+        snapshot_receiver.changed().await.expect("snapshot update");
+    }
+}
+
+async fn wait_for_inspection_tab_ack(
+    snapshot_receiver: &mut watch::Receiver<ResetWorkflowSnapshot>,
+    request_id: InspectionTabRequestId,
+) -> ResetWorkflowSnapshot {
+    loop {
+        let snapshot = snapshot_receiver.borrow_and_update().clone();
+        if snapshot.last_processed_inspection_tab_request() == Some(request_id) {
+            return snapshot;
         }
         snapshot_receiver.changed().await.expect("snapshot update");
     }

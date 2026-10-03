@@ -74,6 +74,21 @@ pub(super) fn reset_panel_content_height(
     reset_detail_document(snapshot, target, inventory_page_start, 4, "⠋").content_height()
 }
 
+pub(super) fn reset_options_content_height(
+    snapshot: &ResetWorkflowSnapshot,
+    target: &ResetPaneTarget,
+    inventory_page_start: usize,
+) -> usize {
+    let document = reset_detail_document(snapshot, target, inventory_page_start, 4, "⠋");
+    let result_title_rows = usize::from(snapshot.phase() == WorkflowPhase::Result);
+    let section_rows = document
+        .sections
+        .iter()
+        .map(|section| 2 + section.rows.len())
+        .sum::<usize>();
+    result_title_rows + section_rows
+}
+
 pub(super) fn render_reset_panel(
     snapshot: &ResetWorkflowSnapshot,
     target: &ResetPaneTarget,
@@ -114,6 +129,38 @@ pub(super) fn render_reset_panel(
         ) {
             #(title)
             #(account)
+            #(sections)
+        }
+    }
+    .into_any()
+}
+
+pub(super) fn render_reset_panel_content(
+    snapshot: &ResetWorkflowSnapshot,
+    target: &ResetPaneTarget,
+    width: usize,
+    height: usize,
+    inventory_page_start: usize,
+    inventory_page_size: usize,
+    spinner_tick: usize,
+) -> AnyElement<'static> {
+    let document = reset_detail_document(
+        snapshot,
+        target,
+        inventory_page_start,
+        inventory_page_size,
+        quota_spinner_tick(spinner_tick),
+    );
+    let title = (snapshot.phase() == WorkflowPhase::Result)
+        .then(|| render_styled_text(document.title, width.saturating_sub(2)));
+    let sections = document
+        .sections
+        .into_iter()
+        .map(|section| render_section(section, width.saturating_sub(2)))
+        .collect::<Vec<_>>();
+    element! {
+        View(width: width as u32, height: height as u32, flex_direction: FlexDirection::Column, overflow: Overflow::Hidden) {
+            #(title)
             #(sections)
         }
     }
@@ -553,7 +600,7 @@ impl From<StyledText> for ResetDetailRow {
 pub(super) fn reset_footer(snapshot: Option<&ResetWorkflowSnapshot>) -> &'static str {
     match snapshot.map(ResetWorkflowSnapshot::phase) {
         None | Some(WorkflowPhase::Browse) => {
-            "↑/↓ focus  ctrl-r inspect reset credits  esc/q exit  ctrl-c exit"
+            "↑/↓ focus  ctrl-r account options  esc/q exit  ctrl-c exit"
         }
         Some(WorkflowPhase::Inspecting) => "esc/ctrl-r back  ctrl-c exit without consume",
         Some(WorkflowPhase::Inspected) => {

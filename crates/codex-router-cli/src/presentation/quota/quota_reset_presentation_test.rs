@@ -39,11 +39,21 @@ async fn ctrl_r_inspects_the_focused_stable_account_and_generation() {
     view_model.rows[0].account = "duplicate".to_owned();
     view_model.rows[1].account = "duplicate".to_owned();
     let expected_account_id = view_model.rows[1].account_id.clone();
-    let events = vec![
-        TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Down)),
-        TerminalEvent::Key(control_key('r')),
-        TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Esc)),
-    ];
+    let (events, expected_frame, frame_acknowledgements) = acknowledged_quota_events(vec![
+        (
+            TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Down)),
+            Some("❯ duplicate"),
+        ),
+        (TerminalEvent::Key(control_key('r')), Some("Reset credits")),
+        (
+            TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Esc)),
+            Some("ctrl-r account options"),
+        ),
+        (
+            TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Char('q'))),
+            None,
+        ),
+    ]);
 
     let _frames = element! {
         QuotaStatusComponent(
@@ -54,12 +64,15 @@ async fn ctrl_r_inspects_the_focused_stable_account_and_generation() {
             reset_snapshot_receiver: Some(ports.snapshot_receiver),
         )
     }
-    .mock_terminal_render_loop(MockTerminalConfig::with_events(
-        futures_util::stream::iter(events).then(|event| async move {
-            tokio::time::sleep(Duration::from_millis(1)).await;
-            event
-        }),
-    ))
+    .mock_terminal_render_loop(MockTerminalConfig::with_events(events))
+    .map(|canvas| canvas.to_string())
+    .inspect(move |frame| {
+        if let Some(marker) = *expected_frame.borrow()
+            && frame.contains(marker)
+        {
+            let _ = frame_acknowledgements.send(marker);
+        }
+    })
     .collect::<Vec<_>>()
     .await;
 
@@ -197,7 +210,7 @@ async fn precommit_cancel_is_not_lost_behind_queued_intents() {
 }
 
 #[tokio::test]
-async fn browse_reset_resize_and_cancel_restores_the_existing_shell() {
+async fn account_options_reset_inspection_resize_and_cancel_restore_resets_tab() {
     for (width, height) in [(159usize, 24usize), (160, 24), (159, 48), (160, 48)] {
         let browse_snapshot = test_snapshot(WorkflowPhase::Browse);
         let (ports, mut intent_receiver, snapshot_sender) =
@@ -218,43 +231,64 @@ async fn browse_reset_resize_and_cancel_restores_the_existing_shell() {
                 .send(browse_snapshot)
                 .expect("presentation watch should remain connected");
         });
-        let events = vec![
-            TerminalEvent::Key(control_key('r')),
-            TerminalEvent::Resize(width.saturating_sub(1) as u16, height as u16),
-            TerminalEvent::Resize(width as u16, height as u16),
-            TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Esc)),
-            TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Char('q'))),
-        ];
+        let (events, expected_frame, frame_acknowledgements) = acknowledged_quota_events(vec![
+            (
+                TerminalEvent::Key(control_key('r')),
+                Some("Checking live eligibility"),
+            ),
+            (
+                TerminalEvent::Resize(width.saturating_sub(1) as u16, height as u16),
+                Some("Checking live eligibility"),
+            ),
+            (
+                TerminalEvent::Resize(width as u16, height as u16),
+                Some("Checking live eligibility"),
+            ),
+            (
+                TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Esc)),
+                Some("enter inspect"),
+            ),
+            (
+                TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Esc)),
+                Some("ctrl-r account options"),
+            ),
+            (
+                TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Char('q'))),
+                None,
+            ),
+        ]);
 
         let frames = element! {
             QuotaStatusComponent(
                 view_model: quota_two_account_view_model(),
-                width,
+                width: 0usize,
                 height,
                 reset_intent_sender: Some(ports.intent_sender),
                 reset_snapshot_receiver: Some(ports.snapshot_receiver),
             )
         }
-        .mock_terminal_render_loop(MockTerminalConfig::with_events(
-            futures_util::stream::iter(events).then(|event| async move {
-                tokio::time::sleep(Duration::from_millis(3)).await;
-                event
-            }),
-        ))
+        .mock_terminal_render_loop(MockTerminalConfig::with_events(events))
         .map(|canvas| canvas.to_string())
+        .inspect(move |frame| {
+            if let Some(marker) = *expected_frame.borrow()
+                && frame.contains(marker)
+            {
+                let _ = frame_acknowledgements.send(marker);
+            }
+        })
         .collect::<Vec<_>>()
         .await;
 
         session_driver.await.expect("session driver should finish");
         let reset_frames = frames
             .iter()
-            .filter(|frame| frame.contains("Reset credit"))
+            .filter(|frame| frame.contains("Checking live eligibility"))
             .collect::<Vec<_>>();
         assert!(
             reset_frames.iter().any(|frame| {
-                frame.contains("❯ alpha") && frame.contains("Checking live eligibility")
+                frame.contains("[ Resets ]") && frame.contains("Checking live eligibility")
             }),
-            "reset must replace only detail while the account list remains: {frames:?}"
+            "account-options Resets tab should render the active inspection: {frames:?}"
         );
         assert!(
             reset_frames
@@ -262,6 +296,21 @@ async fn browse_reset_resize_and_cancel_restores_the_existing_shell() {
                 .all(|frame| !frame.contains("Selected account")),
             "reset and selected-account detail panes must be mutually exclusive: {reset_frames:?}"
         );
+        if width == 160 {
+            let has_sidecar = |frame: &str| {
+                frame
+                    .lines()
+                    .any(|line| line.matches('┌').count() >= 2 && line.matches('┐').count() >= 2)
+            };
+            assert!(
+                reset_frames.iter().any(|frame| !has_sidecar(frame)),
+                "shrinking to 159 columns should stack the active inspection: {reset_frames:?}"
+            );
+            assert!(
+                reset_frames.iter().any(|frame| has_sidecar(frame)),
+                "growing back to 160 columns should restore the active inspection sidecar: {reset_frames:?}"
+            );
+        }
         if height == 48 {
             for frame in &reset_frames {
                 let lines = frame.lines().collect::<Vec<_>>();
@@ -277,9 +326,15 @@ async fn browse_reset_resize_and_cancel_restores_the_existing_shell() {
         }
         assert!(
             frames
+                .iter()
+                .any(|frame| { frame.contains("[ Resets ]") && frame.contains("enter inspect") }),
+            "the account-options Resets tab should remain after inspection cancellation: {frames:?}"
+        );
+        assert!(
+            frames
                 .last()
-                .is_some_and(|frame| frame.contains("Selected account")),
-            "browse detail should return after cancellation: {frames:?}"
+                .is_some_and(|frame| frame.contains("ctrl-r account options")),
+            "closing the Resets tab should restore the quota browse footer: {frames:?}"
         );
     }
 }
@@ -442,12 +497,13 @@ fn shared_detail_viewport_pages_every_credit_once_without_corrupting_stacked_geo
     let body_budget = super::responsive_quota_layout::quota_body_budget(48);
     let stacked_layout = super::responsive_quota_layout::quota_body_layout(
         body_budget,
-        false,
-        true,
+        super::responsive_quota_layout::QuotaBodyLayoutMode::Stacked {
+            fill_available_height: false,
+            prioritize_details: false,
+        },
         2,
         Some(0),
         super::responsive_quota_layout::selected_detail_height(true),
-        false,
     );
     let detail_height = stacked_layout.detail_viewport_height(false);
     let page_size = super::quota_reset_presentation_model::reset_inventory_page_size(detail_height);
@@ -670,6 +726,56 @@ fn test_snapshot(phase: WorkflowPhase) -> ResetWorkflowSnapshot {
         Vec::new(),
         Some(ResetEligibilityDisabledReason::LiveInspectionIncomplete),
     )
+}
+
+fn acknowledged_quota_events(
+    ordered_events: Vec<(TerminalEvent, Option<&'static str>)>,
+) -> (
+    impl futures_util::Stream<Item = TerminalEvent>,
+    tokio::sync::watch::Receiver<Option<&'static str>>,
+    tokio::sync::mpsc::UnboundedSender<&'static str>,
+) {
+    let (expected_frame_sender, expected_frame) = tokio::sync::watch::channel(None);
+    let (frame_acknowledgements, frame_acknowledgement_receiver) =
+        tokio::sync::mpsc::unbounded_channel();
+    let events = futures_util::stream::unfold(
+        (
+            ordered_events.into_iter(),
+            expected_frame_sender,
+            frame_acknowledgement_receiver,
+            None,
+        ),
+        |(
+            mut pending_events,
+            expected_frame_sender,
+            mut frame_acknowledgement_receiver,
+            expected_marker,
+        )| async move {
+            if let Some(expected_marker) = expected_marker {
+                loop {
+                    match frame_acknowledgement_receiver.recv().await {
+                        Some(actual_marker) if actual_marker == expected_marker => break,
+                        Some(_) => {}
+                        None => panic!(
+                            "rendered-frame acknowledgement channel closed before marker {expected_marker:?}"
+                        ),
+                    }
+                }
+            }
+            let (event, next_marker) = pending_events.next()?;
+            expected_frame_sender.send_replace(next_marker);
+            Some((
+                event,
+                (
+                    pending_events,
+                    expected_frame_sender,
+                    frame_acknowledgement_receiver,
+                    next_marker,
+                ),
+            ))
+        },
+    );
+    (events, expected_frame, frame_acknowledgements)
 }
 
 include!("quota_reset_scenarios_test.rs");

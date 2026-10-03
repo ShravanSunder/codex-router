@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE account_credit_observations\n            SET credential_generation = ?2,\n                committed_attempt = NULL,\n                observed_unix_seconds = NULL,\n                stale_after_unix_seconds = NULL,\n                availability = 'unknown',\n                balance = NULL,\n                spend_control_state = 'unreported',\n                provider_limit_reason = NULL\n          WHERE account_id = ?1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "8d12932f11c042b80265cd07bfbb9952c324c114adc4c9f0d966f0949e6db6ed"
+}

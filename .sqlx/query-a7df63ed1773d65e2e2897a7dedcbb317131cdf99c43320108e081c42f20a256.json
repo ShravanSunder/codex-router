@@ -1,0 +1,74 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT window_kind, remaining_basis_points,\n                reset_unix_seconds, observation_started_at,\n                fresh_until_unix_seconds\n           FROM account_window_observations\n          WHERE account_id = ?1\n          ORDER BY window_kind",
+  "describe": {
+    "columns": [
+      {
+        "name": "window_kind",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "account_window_observations",
+            "name": "window_kind"
+          }
+        }
+      },
+      {
+        "name": "remaining_basis_points",
+        "ordinal": 1,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "account_window_observations",
+            "name": "remaining_basis_points"
+          }
+        }
+      },
+      {
+        "name": "reset_unix_seconds",
+        "ordinal": 2,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "account_window_observations",
+            "name": "reset_unix_seconds"
+          }
+        }
+      },
+      {
+        "name": "observation_started_at",
+        "ordinal": 3,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "account_window_observations",
+            "name": "observation_started_at"
+          }
+        }
+      },
+      {
+        "name": "fresh_until_unix_seconds",
+        "ordinal": 4,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "account_window_observations",
+            "name": "fresh_until_unix_seconds"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      false,
+      true
+    ]
+  },
+  "hash": "a7df63ed1773d65e2e2897a7dedcbb317131cdf99c43320108e081c42f20a256"
+}

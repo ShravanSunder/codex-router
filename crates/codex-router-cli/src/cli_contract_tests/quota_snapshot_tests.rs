@@ -53,13 +53,14 @@ impl QuotaRefreshProvider for FaultingFloorRefreshProvider {
                 },
             ],
             reset_credits_available: None,
+            ..Default::default()
         })
     }
 }
 
 #[test]
-fn required_history_failure_sends_no_floor_signal_but_snapshot_failure_follows_signal() {
-    for (stage, should_signal) in [("history", false), ("snapshot", true)] {
+fn responses_observation_transaction_failure_sends_no_floor_signal_or_windows() {
+    for stage in ["history", "snapshot"] {
         let test_root = TestRoot::new(&format!("floor-refresh-{stage}-fault"));
         must_ok(fs::create_dir(test_root.path()));
         let state_path = test_root.path().join("state.sqlite");
@@ -93,16 +94,18 @@ fn required_history_failure_sends_no_floor_signal_but_snapshot_failure_follows_s
                 ),
             ),
         );
-        let mutation = must_ok(
-            test_async_runtime().block_on(AsyncWeeklyQuotaFloorMutationStore::open(&state_path)),
-        );
-        must_ok(
-            test_async_runtime().block_on(mutation.set_weekly_quota_floor_by_account_id(
-                &account_id,
-                Some(must_ok(WeeklyQuotaFloorBasisPoints::new(500))),
-            )),
-        );
-        test_async_runtime().block_on(mutation.close());
+        test_async_runtime().block_on(async {
+            let mutation = must_ok(AsyncWeeklyQuotaFloorMutationStore::open(&state_path).await);
+            must_ok(
+                mutation
+                    .set_weekly_quota_floor_by_account_id(
+                        &account_id,
+                        Some(must_ok(WeeklyQuotaFloorBasisPoints::new(500))),
+                    )
+                    .await,
+            );
+            mutation.close().await;
+        });
         let resolver =
             RouterCredentialResolver::new(&state, &secrets, NoopCredentialRefreshClient, 1_000);
         let provider = FaultingFloorRefreshProvider {
@@ -125,10 +128,7 @@ fn required_history_failure_sends_no_floor_signal_but_snapshot_failure_follows_s
             },
         ));
         assert!(error.to_string().contains("sqlite state store failed"));
-        assert_eq!(
-            lock_test_mutex(&observer.account_ids, "weekly floor observer").len() == 1,
-            should_signal,
-        );
+        assert!(lock_test_mutex(&observer.account_ids, "weekly floor observer").is_empty());
         let windows = must_ok(SelectorQuotaRepository::selector_inputs_for_route_band(
             &state,
             "responses",
@@ -140,7 +140,7 @@ fn required_history_failure_sends_no_floor_signal_but_snapshot_failure_follows_s
             .any(|window| {
                 window.limit_window_seconds() == 604_800 && window.observed_unix_seconds() == 1_100
             });
-        assert_eq!(saved_new_weekly, should_signal);
+        assert!(!saved_new_weekly);
     }
 }
 
@@ -196,16 +196,20 @@ fn quota_refresh_writes_selector_windows_for_runtime_selection() {
         },
     ]);
     let mut stdout = Vec::new();
-    let mutation = must_ok(test_async_runtime().block_on(
-        AsyncWeeklyQuotaFloorMutationStore::open(&router_root.join("state.sqlite")),
-    ));
-    must_ok(
-        test_async_runtime().block_on(mutation.set_weekly_quota_floor_by_account_id(
-            &account_id,
-            Some(must_ok(WeeklyQuotaFloorBasisPoints::new(1_500))),
-        )),
-    );
-    test_async_runtime().block_on(mutation.close());
+    test_async_runtime().block_on(async {
+        let mutation = must_ok(
+            AsyncWeeklyQuotaFloorMutationStore::open(&router_root.join("state.sqlite")).await,
+        );
+        must_ok(
+            mutation
+                .set_weekly_quota_floor_by_account_id(
+                    &account_id,
+                    Some(must_ok(WeeklyQuotaFloorBasisPoints::new(1_500))),
+                )
+                .await,
+        );
+        mutation.close().await;
+    });
 
     let floor_observer = RecordingWeeklyFloorObserver::default();
 
@@ -330,16 +334,20 @@ fn quota_refresh_signals_floor_after_saved_history_before_next_account() {
     }
     let resolver =
         RouterCredentialResolver::new(&state, &secrets, NoopCredentialRefreshClient, 1_000);
-    let mutation = must_ok(test_async_runtime().block_on(
-        AsyncWeeklyQuotaFloorMutationStore::open(&router_root.join("state.sqlite")),
-    ));
-    must_ok(
-        test_async_runtime().block_on(mutation.set_weekly_quota_floor_by_account_id(
-            &floor_account_id,
-            Some(must_ok(WeeklyQuotaFloorBasisPoints::new(500))),
-        )),
-    );
-    test_async_runtime().block_on(mutation.close());
+    test_async_runtime().block_on(async {
+        let mutation = must_ok(
+            AsyncWeeklyQuotaFloorMutationStore::open(&router_root.join("state.sqlite")).await,
+        );
+        must_ok(
+            mutation
+                .set_weekly_quota_floor_by_account_id(
+                    &floor_account_id,
+                    Some(must_ok(WeeklyQuotaFloorBasisPoints::new(500))),
+                )
+                .await,
+        );
+        mutation.close().await;
+    });
     let floor_observer = Arc::new(RecordingWeeklyFloorObserver::default());
     let provider = FloorNotificationOrderingQuotaProvider::new(
         floor_account_id.clone(),
@@ -406,22 +414,30 @@ fn saved_quota_observations_switch_clear_and_floor_disable_intents() {
     must_ok(secrets.write_secret(&key, &must_ok(bundle.to_secret_string())));
     let resolver =
         RouterCredentialResolver::new(&state, &secrets, NoopCredentialRefreshClient, 1_000);
-    let mutation = must_ok(
-        test_async_runtime().block_on(AsyncWeeklyQuotaFloorMutationStore::open(&state_path)),
-    );
-    must_ok(
-        test_async_runtime().block_on(mutation.set_weekly_quota_floor_by_account_id(
-            &account_id,
-            Some(must_ok(WeeklyQuotaFloorBasisPoints::new(500))),
-        )),
-    );
+    test_async_runtime().block_on(async {
+        let mutation = must_ok(AsyncWeeklyQuotaFloorMutationStore::open(&state_path).await);
+        must_ok(
+            mutation
+                .set_weekly_quota_floor_by_account_id(
+                    &account_id,
+                    Some(must_ok(WeeklyQuotaFloorBasisPoints::new(500))),
+                )
+                .await,
+        );
+        mutation.close().await;
+    });
     let observer = RecordingWeeklyFloorObserver::default();
     for (index, remaining) in [8, 9, 8, 8].into_iter().enumerate() {
         if index == 3 {
-            must_ok(
-                test_async_runtime()
-                    .block_on(mutation.set_weekly_quota_floor_by_account_id(&account_id, None)),
-            );
+            test_async_runtime().block_on(async {
+                let mutation = must_ok(AsyncWeeklyQuotaFloorMutationStore::open(&state_path).await);
+                must_ok(
+                    mutation
+                        .set_weekly_quota_floor_by_account_id(&account_id, None)
+                        .await,
+                );
+                mutation.close().await;
+            });
         }
         let provider = StaticQuotaRefreshProvider::new(vec![
             QuotaRefreshProviderWindow {
@@ -474,7 +490,6 @@ fn saved_quota_observations_switch_clear_and_floor_disable_intents() {
             WeeklyQuotaFloorIntent::Clear,
         ]
     );
-    test_async_runtime().block_on(mutation.close());
 }
 
 #[test]

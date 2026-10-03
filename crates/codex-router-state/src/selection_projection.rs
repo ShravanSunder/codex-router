@@ -5,8 +5,10 @@ use std::collections::HashMap;
 use codex_router_core::ids::AccountId;
 use codex_router_core::provider::Provider;
 use codex_router_core::route_profile::WindowKind;
+use codex_router_core::routes::RouteBand;
 use codex_router_selection::burn_down::ACTIVE_SESSION_ROLLUP_BUCKET_SECONDS;
 use codex_router_selection::burn_down::BurnDownAccountInput;
+use codex_router_selection::burn_down::CreditBackedEligibility;
 use codex_router_selection::burn_down::QuotaEvidenceFreshness;
 use codex_router_selection::burn_down::QuotaWindowFact;
 use codex_router_selection::burn_down::QuotaWindowRejectionFact;
@@ -461,6 +463,15 @@ where
                 )
             })
             .collect();
+        let canonical_responses_windows = input.canonical_responses_windows().map(|windows| {
+            windows
+                .iter()
+                .map(quota_window_fact_from_selector_window)
+                .collect::<Vec<_>>()
+        });
+        let has_allow_compact_canonical_responses_windows = route_band
+            == RouteBand::ResponsesCompact.as_str()
+            && canonical_responses_windows.is_some();
         let mut projected_account = BurnDownAccountInput::new(
             input.account_id().clone(),
             input.account_label(),
@@ -470,7 +481,20 @@ where
         .with_rejected_windows(rejected_windows)
         .with_account_enabled(input.account_status() == AccountStatus::Enabled)
         .with_active_credential(active_credential_is_routable(&input))
-        .with_current_active_sessions(current_active_sessions);
+        .with_current_active_sessions(current_active_sessions)
+        .with_canonical_responses_windows(canonical_responses_windows);
+        let credit_backed_eligibility = if (route_band == RouteBand::Responses.as_str()
+            || has_allow_compact_canonical_responses_windows)
+            && input.provider() == Provider::Openai
+            && weekly_floor_basis_points.is_none()
+            && input.has_current_credit_authority(now_unix_seconds)
+        {
+            CreditBackedEligibility::Eligible
+        } else {
+            CreditBackedEligibility::Ineligible
+        };
+        projected_account =
+            projected_account.with_credit_backed_eligibility(credit_backed_eligibility);
         if let Some(floor_basis_points) = weekly_floor_basis_points {
             projected_account =
                 projected_account.with_weekly_quota_floor_basis_points(floor_basis_points);

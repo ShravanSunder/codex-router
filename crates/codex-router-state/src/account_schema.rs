@@ -157,6 +157,18 @@ pub(crate) async fn validate_target_schema(
     validate_table(connection, "credential_maintenance", CREDENTIAL_MAINTENANCE).await?;
     validate_table(
         connection,
+        "account_credit_policies",
+        ACCOUNT_CREDIT_POLICIES,
+    )
+    .await?;
+    validate_table(
+        connection,
+        "account_credit_observations",
+        ACCOUNT_CREDIT_OBSERVATIONS,
+    )
+    .await?;
+    validate_table(
+        connection,
         "account_window_observations",
         ACCOUNT_WINDOW_OBSERVATIONS,
     )
@@ -256,6 +268,8 @@ pub(crate) async fn validate_required_read_only_objects(
         }
     }
     for (table_name, columns) in [
+        ("account_credit_policies", ACCOUNT_CREDIT_POLICIES),
+        ("account_credit_observations", ACCOUNT_CREDIT_OBSERVATIONS),
         ("account_window_observations", ACCOUNT_WINDOW_OBSERVATIONS),
         ("account_window_rejections", ACCOUNT_WINDOW_REJECTIONS),
     ] {

@@ -15,6 +15,63 @@ use crate::quota_reset::FixedOriginInteractiveResetSessionFactory;
 use crate::quota_reset::InteractiveResetSessionFactory;
 use codex_router_secret_store::encrypted_credential_store::EncryptedCredentialStoreStatus;
 
+#[tokio::test]
+async fn quota_status_report_reloads_saved_claude_credit_policy_from_sqlite() {
+    let test_root = TempDir::new().expect("quota status root");
+    let router_root = test_root.path().join("router");
+    std::fs::create_dir_all(&router_root).expect("router root");
+    let account_id = codex_router_core::ids::AccountId::new("saved_claude_credit_policy")
+        .expect("Claude account id should parse");
+    let state = AsyncSqliteStateStore::open(&router_root.join("state.sqlite"))
+        .await
+        .expect("state store should open");
+    state
+        .upsert_account(
+            &codex_router_state::account::AccountRecord::new(
+                codex_router_core::provider::Provider::Claude,
+                account_id.clone(),
+                "claude-credit-policy",
+                codex_router_state::account::AccountStatus::Enabled,
+            )
+            .with_active_credential_generation(1),
+        )
+        .await
+        .expect("Claude account should persist");
+    state
+        .save_account_credit_usage_policy(
+            &account_id,
+            codex_router_core::credit_usage::CreditUsagePolicy::Allow,
+        )
+        .await
+        .expect("saved Claude preference should persist");
+    state.close().await.expect("state store should close");
+
+    let report = load_quota_status_report_with_availability_async(
+        &router_root,
+        false,
+        1_000,
+        false,
+        CredentialStoreAvailability::Ready,
+    )
+    .await
+    .expect("quota report should reload saved policy");
+    let row = report
+        .rows()
+        .iter()
+        .find(|row| row.account_id == account_id)
+        .expect("Claude account should appear in report");
+
+    assert_eq!(
+        row.credit_usage.policy,
+        codex_router_core::credit_usage::CreditUsagePolicy::Allow
+    );
+    assert_eq!(
+        row.credit_usage.provider_observation,
+        codex_router_core::credit_usage::CreditProviderObservation::missing()
+    );
+    assert_eq!(row.credit_usage.freshness, CreditUsageFreshness::Unknown);
+}
+
 #[derive(Default)]
 struct CountingKeychainAccess {
     items: Mutex<HashMap<(String, String), Vec<u8>>>,

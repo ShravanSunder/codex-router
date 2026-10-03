@@ -175,7 +175,7 @@ pub(super) fn render_account_row(
             }
             View(width: inner_width as u32) {
                 Text(content: " ".repeat(account_width), wrap: TextWrap::NoWrap)
-                Text(content: " ".repeat(status_width), wrap: TextWrap::NoWrap)
+                Text(content: fit_column(&row.credit_usage_summary, status_width), color: metadata_color, wrap: TextWrap::NoWrap)
                 #(reset_sample_pace)
             }
         }

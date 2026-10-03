@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT active_credential_generation\n               FROM accounts\n              WHERE account_id = ?1",
+  "describe": {
+    "columns": [
+      {
+        "name": "active_credential_generation",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "accounts",
+            "name": "active_credential_generation"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "125ff9db2fc6335c2b1ae56bcbf8140d2727a5957827351c5e368305e3e2fed8"
+}

@@ -87,6 +87,7 @@ pub(super) fn git_diff_text(workspace_root: &Path, args: &[&str]) -> String {
     String::from_utf8_lossy(&output.stdout).into_owned()
 }
 
+#[track_caller]
 pub(super) fn must_ok<T, E: std::fmt::Display>(result: Result<T, E>) -> T {
     match result {
         Ok(value) => value,

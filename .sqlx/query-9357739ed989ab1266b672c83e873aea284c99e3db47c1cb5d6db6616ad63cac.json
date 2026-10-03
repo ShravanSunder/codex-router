@@ -1,0 +1,122 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT credential_generation, latest_started_attempt, committed_attempt,\n                observed_unix_seconds, stale_after_unix_seconds, availability, balance,\n                spend_control_state, provider_limit_reason\n           FROM account_credit_observations\n          WHERE account_id = ?1",
+  "describe": {
+    "columns": [
+      {
+        "name": "credential_generation",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "account_credit_observations",
+            "name": "credential_generation"
+          }
+        }
+      },
+      {
+        "name": "latest_started_attempt",
+        "ordinal": 1,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "account_credit_observations",
+            "name": "latest_started_attempt"
+          }
+        }
+      },
+      {
+        "name": "committed_attempt",
+        "ordinal": 2,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "account_credit_observations",
+            "name": "committed_attempt"
+          }
+        }
+      },
+      {
+        "name": "observed_unix_seconds",
+        "ordinal": 3,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "account_credit_observations",
+            "name": "observed_unix_seconds"
+          }
+        }
+      },
+      {
+        "name": "stale_after_unix_seconds",
+        "ordinal": 4,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "account_credit_observations",
+            "name": "stale_after_unix_seconds"
+          }
+        }
+      },
+      {
+        "name": "availability",
+        "ordinal": 5,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "account_credit_observations",
+            "name": "availability"
+          }
+        }
+      },
+      {
+        "name": "balance",
+        "ordinal": 6,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "account_credit_observations",
+            "name": "balance"
+          }
+        }
+      },
+      {
+        "name": "spend_control_state",
+        "ordinal": 7,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "account_credit_observations",
+            "name": "spend_control_state"
+          }
+        }
+      },
+      {
+        "name": "provider_limit_reason",
+        "ordinal": 8,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "account_credit_observations",
+            "name": "provider_limit_reason"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      true,
+      true,
+      false,
+      true,
+      false,
+      true
+    ]
+  },
+  "hash": "9357739ed989ab1266b672c83e873aea284c99e3db47c1cb5d6db6616ad63cac"
+}

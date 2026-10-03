@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO selector_quota_windows (\n                   account_id, route_band, limit_window_seconds, status,\n                   remaining_headroom, reset_unix_seconds, effective,\n                   observed_unix_seconds\n                 ) VALUES (?1, 'responses', ?2, ?3, ?4, ?5, ?6, ?7)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 7
+    },
+    "nullable": []
+  },
+  "hash": "ba74268513163c97d606b86359aad26561a6254c48b82f2a82ab3fee7362ca6f"
+}

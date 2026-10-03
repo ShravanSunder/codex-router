@@ -471,9 +471,9 @@ main() {
     AR-WS-ACTIVE-TURN)
       mark_row_pass "$row_id" "$layer" "$owner" \
         "WebSocket active-turn reservation tests prove completion releases load and later same-socket request-like frames re-reserve the pinned account." \
-        "cargo test -p codex-router-proxy websocket::async_forwarding_tests::response_completed_releases_active_reservation_before_socket_closes -- --nocapture" \
-        "cargo test -p codex-router-proxy websocket::async_forwarding_tests::completion_releases_before_blocked_affinity_recording -- --nocapture" \
-        "cargo test -p codex-router-proxy websocket::async_forwarding_tests::same_socket_request_after_completion_reserves_pinned_account_again -- --nocapture"
+        "cargo test -p codex-router-proxy websocket::forwarding_tests::turn_reservation_tests::response_completed_releases_active_reservation_before_socket_closes -- --nocapture" \
+        "cargo test -p codex-router-proxy websocket::forwarding_tests::metadata_boundary_tests::completion_releases_before_blocked_affinity_recording -- --nocapture" \
+        "cargo test -p codex-router-proxy websocket::forwarding_tests::turn_reservation_tests::same_socket_request_after_completion_reserves_pinned_account_again -- --nocapture"
       ;;
     AR-HTTP-PASSTHROUGH)
       mark_row_pass "$row_id" "$layer" "$owner" \
@@ -621,7 +621,7 @@ PY
         "WebSocket first request data validation and pre-duplex cancellation proofs passed." \
         "cargo test -p codex-router-proxy websocket_first_frame_rejects_hostile_preselection_cases -- --nocapture" \
         "cargo test -p codex-router-proxy authenticated_websocket_router_rejects_first_frame_before_selection_or_credentials -- --nocapture" \
-        "cargo test -p codex-router-proxy websocket::async_forwarding_tests::runtime_shutdown_cancels_pending_first_frame_routing -- --nocapture"
+        "cargo test -p codex-router-proxy websocket::forwarding_tests::handshake_outcome_tests::runtime_shutdown_cancels_pending_first_frame_routing -- --nocapture"
       ;;
     U-04)
       mark_row_pass "$row_id" "$layer" "$owner" \
@@ -672,13 +672,13 @@ PY
     I-06)
       mark_row_pass "$row_id" "$layer" "$owner" \
         "Upstream/local close cleanup proof passed through async pump shutdown fixtures." \
-        "cargo test -p codex-router-proxy websocket::async_forwarding_tests::runtime_shutdown_cancels_active_duplex_pumps -- --nocapture" \
-        "cargo test -p codex-router-proxy websocket::async_forwarding_tests::reset_after_idle_control_frame_remains_clean_after_completion -- --nocapture"
+        "cargo test -p codex-router-proxy websocket::forwarding_tests::shutdown_floor_tests::runtime_shutdown_cancels_active_duplex_pumps -- --nocapture" \
+        "cargo test -p codex-router-proxy websocket::forwarding_tests::idle_close_tests::reset_after_idle_control_frame_remains_clean_after_completion -- --nocapture"
       ;;
     I-07)
       mark_row_pass "$row_id" "$layer" "$owner" \
         "Blocked write/backpressure cleanup proof passed through duplex pump cancellation fixture." \
-        "cargo test -p codex-router-proxy websocket::async_forwarding_tests::runtime_shutdown_cancels_active_duplex_pumps -- --nocapture"
+        "cargo test -p codex-router-proxy websocket::forwarding_tests::shutdown_floor_tests::runtime_shutdown_cancels_active_duplex_pumps -- --nocapture"
       ;;
     I-08)
       mark_row_pass "$row_id" "$layer" "$owner" \
@@ -1371,8 +1371,8 @@ PY
         && cargo test -p codex-router-proxy runtime_shutdown_cancels_pending_first_frame_routing -- --nocapture \
         && cargo test -p codex-router-proxy runtime_shutdown_cancels_pending_upstream_connect -- --nocapture \
         && cargo test -p codex-router-proxy loopback_router_runtime_shutdown_drains_active_websocket_sessions -- --nocapture \
-        && cargo test -p codex-router-proxy websocket::async_forwarding_tests::reset_during_new_turn_after_prior_completion_is_reported -- --nocapture \
-        && cargo test -p codex-router-proxy websocket::async_forwarding_tests::reset_after_idle_control_frame_remains_clean_after_completion -- --nocapture; then
+        && cargo test -p codex-router-proxy websocket::forwarding_tests::idle_close_tests::reset_during_new_turn_after_prior_completion_is_clean_transport_close -- --nocapture \
+        && cargo test -p codex-router-proxy websocket::forwarding_tests::idle_close_tests::reset_after_idle_control_frame_remains_clean_after_completion -- --nocapture; then
         if ! ensure_guarded_source_paths_clean "$row_id"; then
           receipt=$(write_proof_receipt "$row_id" "$layer" "$owner" "fail" 1)
           printf 'proof row %s failed; guarded source paths are dirty; receipt: %s\n' "$row_id" "$receipt" >&2

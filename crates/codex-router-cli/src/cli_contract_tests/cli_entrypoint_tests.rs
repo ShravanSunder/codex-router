@@ -555,14 +555,32 @@ fn sessions_sql_boundary_uses_sqlx_without_rusqlite() {
         .parent()
         .and_then(Path::parent)
         .unwrap_or_else(|| panic!("cli crate should have workspace root parent"));
-    let committed_diff = git_diff_text(
+    let effective_diff = git_diff_text(
         workspace_root,
-        &["diff", "--unified=0", "origin/main...HEAD", "--", "crates"],
+        &["diff", "--unified=0", "origin/main", "--", "crates"],
     );
-    let worktree_diff = git_diff_text(workspace_root, &["diff", "--unified=0", "--", "crates"]);
-    let diff_text = format!("{committed_diff}\n{worktree_diff}");
-    let added_rusqlite_lines = diff_text
+    let added_rusqlite_lines = disallowed_rusqlite_additions(&effective_diff);
+    assert!(
+        added_rusqlite_lines.is_empty(),
+        "new or extended SQL must be SQLx-only; added disallowed binding lines: {added_rusqlite_lines:?}"
+    );
+}
+
+fn disallowed_rusqlite_additions(diff: &str) -> Vec<&str> {
+    let mut removed_lines = std::collections::BTreeMap::<&str, usize>::new();
+    let mut removed_imports = std::collections::BTreeSet::new();
+    for removed_line in diff
         .lines()
+        .filter(|line| !line.starts_with("---"))
+        .filter_map(|line| line.strip_prefix('-'))
+    {
+        let removed_line = removed_line.trim();
+        *removed_lines.entry(removed_line).or_default() += 1;
+        if removed_line.starts_with("use ") && removed_line.ends_with(';') {
+            removed_imports.insert(removed_line);
+        }
+    }
+    diff.lines()
         .filter(|line| {
             line.starts_with('+')
                 && !line.starts_with("+++")
@@ -570,9 +588,77 @@ fn sessions_sql_boundary_uses_sqlx_without_rusqlite() {
                     || line.contains(concat!("use rus", "qlite"))
                     || line.contains(concat!(" rus", "qlite ")))
         })
-        .collect::<Vec<_>>();
-    assert!(
-        added_rusqlite_lines.is_empty(),
-        "new or extended SQL must be SQLx-only; added disallowed binding lines: {added_rusqlite_lines:?}"
+        .filter(|line| {
+            let added_line = line.strip_prefix('+').unwrap_or(line).trim();
+            if removed_imports.contains(added_line) {
+                return false;
+            }
+            if let Some(remaining) = removed_lines.get_mut(added_line)
+                && *remaining > 0
+            {
+                *remaining -= 1;
+                return false;
+            }
+            true
+        })
+        .collect()
+}
+
+#[test]
+fn rusqlite_diff_guard_preserves_relocations_and_rejects_new_bindings() {
+    let new_statement = concat!("+let connection = rus", "qlite::Connection::open(path)?;");
+    let edited_statement = concat!(
+        "+let connection = rus",
+        "qlite::Connection::open(other_path)?;"
     );
+    let cases = [
+        (
+            "moved statement with different indentation",
+            concat!(
+                "-    let connection = rus",
+                "qlite::Connection::open(path)?;\n",
+                "+let connection = rus",
+                "qlite::Connection::open(path)?;"
+            ),
+            Vec::new(),
+        ),
+        ("brand-new binding", new_statement, vec![new_statement]),
+        (
+            "edited call through the same binding path",
+            concat!(
+                "-let connection = rus",
+                "qlite::Connection::open(path)?;\n",
+                "+let connection = rus",
+                "qlite::Connection::open(other_path)?;"
+            ),
+            vec![edited_statement],
+        ),
+        (
+            "duplicate executable statement exceeds removed count",
+            concat!(
+                "-let connection = rus",
+                "qlite::Connection::open(path)?;\n",
+                "+let connection = rus",
+                "qlite::Connection::open(path)?;\n",
+                "+let connection = rus",
+                "qlite::Connection::open(path)?;"
+            ),
+            vec![new_statement],
+        ),
+        (
+            "removed import duplicated by module split",
+            concat!(
+                "-use rus",
+                "qlite::Connection;\n",
+                "+use rus",
+                "qlite::Connection;\n",
+                "+    use rus",
+                "qlite::Connection;"
+            ),
+            Vec::new(),
+        ),
+    ];
+    for (scenario, diff, expected) in cases {
+        assert_eq!(disallowed_rusqlite_additions(diff), expected, "{scenario}");
+    }
 }
