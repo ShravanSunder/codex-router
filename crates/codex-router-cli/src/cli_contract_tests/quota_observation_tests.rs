@@ -58,15 +58,19 @@ fn quota_status_projects_held_switch_and_distinct_saved_floor_thresholds() {
     }
     drop(state);
     migrate_test_state_database(&state_path);
-    let mutation = must_ok(
-        test_async_runtime().block_on(AsyncWeeklyQuotaFloorMutationStore::open(&state_path)),
-    );
-    must_ok(
-        test_async_runtime().block_on(mutation.set_weekly_quota_floor_by_account_id(
-            &protected_id,
-            Some(must_ok(WeeklyQuotaFloorBasisPoints::new(500))),
-        )),
-    );
+    // Keep SQLx connection-return tasks alive through the whole fixture mutation.
+    test_async_runtime().block_on(async {
+        let mutation = must_ok(AsyncWeeklyQuotaFloorMutationStore::open(&state_path).await);
+        must_ok(
+            mutation
+                .set_weekly_quota_floor_by_account_id(
+                    &protected_id,
+                    Some(must_ok(WeeklyQuotaFloorBasisPoints::new(500))),
+                )
+                .await,
+        );
+        mutation.close().await;
+    });
     let status = run_cli(
         [
             "codex-router",
@@ -101,7 +105,6 @@ fn quota_status_projects_held_switch_and_distinct_saved_floor_thresholds() {
     assert_eq!(source["weekly_quota_floor_percent"], 5);
     assert_eq!(source["weekly_quota_switch_at_percent"], 8);
     assert!(source.get("weekly_quota_effective_stop_percent").is_none());
-    test_async_runtime().block_on(mutation.close());
 }
 
 #[test]
@@ -166,12 +169,86 @@ fn quota_status_json_exposes_burndown_debug_fields_without_secret_material() {
     ensure_async_state_schema(&router_root);
     drop(state);
     let runtime = test_async_runtime();
-    let maintenance_store = must_ok(runtime.block_on(AsyncSqliteStateStore::open(
+    let primary_account_id = primary_account.account_id().clone();
+    let native_state = must_ok(runtime.block_on(AsyncSqliteStateStore::open(
         &router_root.join("state.sqlite"),
     )));
+    let credit_attempt = must_ok(
+        runtime.block_on(native_state.begin_credit_refresh_attempt(&primary_account_id, 1)),
+    );
+    let credit_windows = [
+        PersistedSelectorQuotaWindow::new(
+            primary_account_id.clone(),
+            "responses",
+            18_000,
+            SelectorQuotaWindowStatus::Eligible,
+        )
+        .with_remaining_headroom(25)
+        .with_reset_unix_seconds(20_000)
+        .with_effective(true)
+        .with_observed_unix_seconds(11_000),
+        PersistedSelectorQuotaWindow::new(
+            primary_account_id.clone(),
+            "responses",
+            604_800,
+            SelectorQuotaWindowStatus::Eligible,
+        )
+        .with_remaining_headroom(80)
+        .with_reset_unix_seconds(614_800)
+        .with_observed_unix_seconds(11_000),
+    ];
+    let credit_history = [
+        PersistedQuotaHistoryObservation::new(
+            primary_account_id.clone(),
+            "primary",
+            "responses",
+            18_000,
+            11_000,
+            25,
+        )
+        .with_reset_unix_seconds(20_000)
+        .with_effective(true),
+        PersistedQuotaHistoryObservation::new(
+            primary_account_id.clone(),
+            "primary",
+            "responses",
+            604_800,
+            11_000,
+            80,
+        )
+        .with_reset_unix_seconds(614_800),
+    ];
+    let credit_snapshot = PersistedQuotaSnapshot::new(
+        primary_account_id.clone(),
+        QuotaSnapshotSource::OpenAiEndpoint,
+    )
+    .with_observed_unix_seconds(11_000)
+    .with_route_band("responses", 25)
+    .with_reset_unix_seconds(20_000)
+    .with_reset_credits_available(1)
+    .with_stale_penalty(false);
+    let provider_credit_observation =
+        codex_router_core::credit_usage::CreditProviderObservation::new(
+            codex_router_core::credit_usage::CreditAvailability::Available { balance: None },
+            codex_router_core::credit_usage::CreditSpendControl::Clear,
+            Some(codex_router_core::credit_usage::CreditProviderLimitReason::RateLimitReached),
+        );
     assert!(must_ok(runtime.block_on(
-        maintenance_store.claim_credential_refresh(
-            primary_account.account_id(),
+        native_state.record_responses_refresh_success(
+            codex_router_state::credit_store::ResponsesRefreshSuccessCommit {
+                attempt: &credit_attempt,
+                selector_windows: &credit_windows,
+                observed_unix_seconds: 11_000,
+                stale_after_unix_seconds: 20_000,
+                provider_observation: &provider_credit_observation,
+                history_observations: &credit_history,
+                snapshot: &credit_snapshot,
+            },
+        )
+    )));
+    assert!(must_ok(runtime.block_on(
+        native_state.claim_credential_refresh(
+            &primary_account_id,
             codex_router_core::provider::Provider::Openai,
             codex_router_state::credential_maintenance::ClaimPurpose::Refresh,
             1,
@@ -179,7 +256,20 @@ fn quota_status_json_exposes_burndown_debug_fields_without_secret_material() {
             1_000
         )
     )));
-    must_ok(runtime.block_on(maintenance_store.close()));
+    must_ok(runtime.block_on(native_state.close()));
+    let policy_mutation = must_ok(runtime.block_on(
+        codex_router_state::credit_store::AsyncCreditUsagePolicyMutationStore::open(
+            &router_root.join("state.sqlite"),
+        ),
+    ));
+    must_ok(
+        runtime.block_on(policy_mutation.save_account_credit_usage_policy(
+            &primary_account_id,
+            Some(1),
+            codex_router_core::credit_usage::CreditUsagePolicy::Allow,
+        )),
+    );
+    runtime.block_on(policy_mutation.close());
     let in_progress = run_cli(
         [
             "codex-router",
@@ -270,6 +360,14 @@ fn quota_status_json_exposes_burndown_debug_fields_without_secret_material() {
     );
     assert!(parsed["accounts"][0].get("routing_weight").is_none());
     assert_eq!(parsed["accounts"][0]["preferred_next"], true);
+    let credit_usage = &parsed["accounts"][0]["credit_usage"];
+    assert_eq!(credit_usage["policy"], "allow");
+    assert_eq!(credit_usage["availability"], "available");
+    assert!(credit_usage["balance"].is_null());
+    assert_eq!(credit_usage["spend_control"], "clear");
+    assert_eq!(credit_usage["provider_limit_reason"], "rate_limit_reached");
+    assert_eq!(credit_usage["freshness"], "fresh");
+    assert_ne!(credit_usage["observation_age"], "unknown");
     assert!(!output.stdout.contains("acct_primary"));
     assert_eq!(parsed["accounts"][0]["reset_credits_available"], 1);
     assert_eq!(parsed["accounts"][0]["active_clients"], 0);

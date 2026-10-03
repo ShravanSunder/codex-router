@@ -27,7 +27,9 @@ use codex_router_selection::burn_down::BurnDownAccountAssessment;
 use codex_router_selection::burn_down::BurnDownAccountInput;
 use codex_router_selection::burn_down::BurnDownRouteBandAssessmentInput;
 use codex_router_selection::burn_down::BurnDownRouteBandAssessmentResult;
+use codex_router_selection::burn_down::CreditBackedEligibility;
 use codex_router_selection::burn_down::QuotaEvidenceFreshness;
+use codex_router_selection::burn_down::QuotaEvidenceReason;
 use codex_router_selection::burn_down::QuotaWindowFact;
 use codex_router_selection::burn_down::QuotaWindowStatus;
 use codex_router_selection::burn_down::RoutingExclusion;
@@ -82,11 +84,12 @@ use crate::session_account_affinity_cache::publish_session_account_affinity;
 use crate::session_account_affinity_cache::reconcile_persisted_session_account_affinity;
 use crate::session_account_affinity_cache::release_claude_session_account_affinity;
 
-#[path = "account_selection/floor_switch_peer.rs"]
-mod floor_switch_peer;
-pub(crate) use floor_switch_peer::FloorSwitchPeerAssessment;
-pub(crate) use floor_switch_peer::LiveFloorSwitchPeerAssessor;
-pub(crate) use floor_switch_peer::RuntimeFloorSwitchPeerAssessor;
+#[path = "account_selection/account_admission.rs"]
+mod account_admission;
+pub(crate) use account_admission::AccountSourceAdmission;
+pub(crate) use account_admission::FloorSwitchPeerAssessment;
+pub(crate) use account_admission::LiveAccountAdmissionAssessor;
+pub(crate) use account_admission::RuntimeAccountAdmissionAssessor;
 
 /// Process-lifetime weighted state partitioned by route band.
 pub type RouteBandWeightedSelectors = Arc<Mutex<HashMap<String, WeightedDeficitSelector>>>;
@@ -206,6 +209,11 @@ impl AsyncAccountSelectorRuntimeState {
             selection_reservation_lock,
             session_affinity_cache,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn selection_reservation_lock_for_test(&self) -> SelectionReservationLock {
+        Arc::clone(&self.selection_reservation_lock)
     }
 }
 
@@ -570,6 +578,8 @@ pub(crate) fn route_band_queue_health_key_prefix(route_band: RouteBand) -> Strin
 pub struct SelectedAccountDecision {
     account_id: AccountId,
     selection_reason: String,
+    /// Private in-memory source context for next-turn credit eligibility checks.
+    credit_backed_at_selection: bool,
     active_reservation_guard: Option<ActiveReservationGuard>,
     session_affinity_activity_handle: Option<SessionAffinityActivityHandle>,
     pin_observation: Option<PinObservation>,
@@ -582,6 +592,7 @@ impl SelectedAccountDecision {
         Self {
             account_id,
             selection_reason: selection_reason.into(),
+            credit_backed_at_selection: false,
             active_reservation_guard: None,
             session_affinity_activity_handle: None,
             pin_observation: None,
@@ -608,6 +619,18 @@ impl SelectedAccountDecision {
     #[must_use]
     pub fn selection_reason(&self) -> &str {
         &self.selection_reason
+    }
+
+    pub(crate) const fn credit_backed_at_selection(&self) -> bool {
+        self.credit_backed_at_selection
+    }
+
+    pub(crate) const fn with_credit_backed_at_selection(
+        mut self,
+        credit_backed_at_selection: bool,
+    ) -> Self {
+        self.credit_backed_at_selection = credit_backed_at_selection;
+        self
     }
 
     /// Returns the active-load reservation handle, if one was created.
@@ -1590,10 +1613,13 @@ fn select_affinity_owner(
         selection_scope,
         AccountHold::new(owner_account_id.clone(), now_unix_seconds),
     );
-    Ok(SelectedAccountDecision::new(
-        owner_account_id.clone(),
-        selection_reason,
-    ))
+    Ok(
+        SelectedAccountDecision::new(owner_account_id.clone(), selection_reason)
+            .with_credit_backed_at_selection(assessment_account_is_credit_backed(
+                assessment,
+                owner_account_id,
+            )),
+    )
 }
 
 fn assessment_account_is_available(
@@ -1606,6 +1632,22 @@ fn assessment_account_is_available(
                 account.availability(),
                 AccountAvailability::Usable | AccountAvailability::Reserve
             )
+            && (account.quota_evidence_reason() != QuotaEvidenceReason::CreditBacked
+                || assessment
+                    .weighted_candidates()
+                    .iter()
+                    .any(|(candidate_id, _)| candidate_id == account_id))
+    })
+}
+
+fn assessment_account_is_credit_backed(
+    assessment: &BurnDownRouteBandAssessmentResult,
+    account_id: &AccountId,
+) -> bool {
+    assessment.accounts().iter().any(|account| {
+        account.account_id() == account_id
+            && account.quota_evidence_reason() == QuotaEvidenceReason::CreditBacked
+            && account.routing_reason() == RoutingReason::CreditBacked
     })
 }
 
@@ -1811,6 +1853,9 @@ fn select_from_burn_down_assessment_without_hold(
     Ok(SelectedAccountDecision::new(
         selected_account_id,
         selection_reason_for_assessment(selected_assessment),
+    )
+    .with_credit_backed_at_selection(
+        selected_assessment.quota_evidence_reason() == QuotaEvidenceReason::CreditBacked,
     ))
 }
 
@@ -1838,10 +1883,13 @@ fn select_from_burn_down_assessment(
         now_unix_seconds,
     ) && Some(&held_account_id) == assessment.preferred_next()
     {
-        return Ok(SelectedAccountDecision::new(
-            held_account_id,
-            "account_hold_cooldown",
-        ));
+        return Ok(
+            SelectedAccountDecision::new(held_account_id.clone(), "account_hold_cooldown")
+                .with_credit_backed_at_selection(assessment_account_is_credit_backed(
+                    assessment,
+                    &held_account_id,
+                )),
+        );
     }
 
     let selected_account_id = strict_preferred_account_id(assessment)?;
@@ -1865,10 +1913,12 @@ fn select_from_burn_down_assessment(
         "codex_router.account_selected"
     );
 
-    Ok(SelectedAccountDecision::new(
-        selected_account_id,
-        selected_reason,
-    ))
+    Ok(
+        SelectedAccountDecision::new(selected_account_id, selected_reason)
+            .with_credit_backed_at_selection(
+                selected_assessment.quota_evidence_reason() == QuotaEvidenceReason::CreditBacked,
+            ),
+    )
 }
 
 fn empty_assessment_selection_error(
@@ -4532,6 +4582,151 @@ mod tests {
     fn account_id(value: &str) -> AccountId {
         AccountId::new(value)
             .unwrap_or_else(|error| panic!("test account id should parse: {error}"))
+    }
+
+    #[test]
+    fn selected_source_credit_provenance_comes_from_the_typed_assessment() {
+        use codex_router_selection::burn_down::BurnDownAccountInput;
+        use codex_router_selection::burn_down::BurnDownRouteBandAssessmentInput;
+        use codex_router_selection::burn_down::CreditBackedEligibility;
+        use codex_router_selection::burn_down::QuotaWindowFact;
+        use codex_router_selection::burn_down::QuotaWindowStatus;
+        use codex_router_selection::burn_down::SelectedPool;
+        use codex_router_selection::burn_down::V1_SHORT_WINDOW_SECONDS;
+        use codex_router_selection::burn_down::V1_WEEKLY_WINDOW_SECONDS;
+        use codex_router_selection::burn_down::assess_route_band;
+
+        let now_unix_seconds = 1_000;
+        let credit_backed_account = BurnDownAccountInput::new(
+            account_id("acct_selected_credit_backed"),
+            "selected-credit-backed",
+            Provider::Openai,
+            vec![
+                QuotaWindowFact::new(V1_SHORT_WINDOW_SECONDS, QuotaWindowStatus::Eligible)
+                    .with_remaining_headroom(0)
+                    .with_reset_unix_seconds(now_unix_seconds + V1_SHORT_WINDOW_SECONDS)
+                    .with_observed_unix_seconds(now_unix_seconds)
+                    .with_effective(true),
+                QuotaWindowFact::new(V1_WEEKLY_WINDOW_SECONDS, QuotaWindowStatus::Eligible)
+                    .with_remaining_headroom(20)
+                    .with_reset_unix_seconds(now_unix_seconds + V1_WEEKLY_WINDOW_SECONDS)
+                    .with_observed_unix_seconds(now_unix_seconds),
+            ],
+        )
+        .with_credit_backed_eligibility(CreditBackedEligibility::Eligible);
+        let credit_backed_assessment = assess_route_band(BurnDownRouteBandAssessmentInput::new(
+            RouteBand::Responses,
+            now_unix_seconds,
+            RESPONSES_HTTP.clone(),
+            vec![credit_backed_account],
+        ));
+        assert_eq!(
+            credit_backed_assessment.selected_pool(),
+            SelectedPool::Reserve
+        );
+        let credit_backed_decision = super::select_from_burn_down_assessment(
+            RouteBand::Responses.as_str(),
+            Provider::Openai,
+            &credit_backed_assessment,
+            &mut super::WeightedDeficitSelector::default(),
+            &mut HashMap::new(),
+            super::DEFAULT_ACCOUNT_HOLD_COOLDOWN_SECONDS,
+            now_unix_seconds,
+        )
+        .expect("credit-backed source should select");
+        assert!(credit_backed_decision.credit_backed_at_selection());
+        assert_eq!(credit_backed_decision.selection_reason(), "credit_backed");
+
+        let mut credit_backed_affinity_holds = HashMap::new();
+        let credit_backed_affinity_decision = super::select_affinity_owner(
+            RouteBand::Responses,
+            Provider::Openai,
+            credit_backed_assessment
+                .preferred_next()
+                .expect("credit-backed candidate should be preferred"),
+            &credit_backed_assessment,
+            &mut credit_backed_affinity_holds,
+            now_unix_seconds,
+            "previous_response_affinity",
+        )
+        .expect("available credit-backed affinity owner should remain selectable");
+        assert!(credit_backed_affinity_decision.credit_backed_at_selection());
+        assert_eq!(
+            credit_backed_affinity_decision.selection_reason(),
+            "previous_response_affinity"
+        );
+
+        let last_resort_account = BurnDownAccountInput::new(
+            account_id("acct_selected_last_resort"),
+            "selected-last-resort",
+            Provider::Openai,
+            vec![
+                QuotaWindowFact::new(V1_SHORT_WINDOW_SECONDS, QuotaWindowStatus::Eligible)
+                    .with_remaining_headroom(2)
+                    .with_reset_unix_seconds(now_unix_seconds + 4 * 3_600)
+                    .with_observed_unix_seconds(now_unix_seconds)
+                    .with_per_connection_burn_basis_points_per_hour(100),
+                QuotaWindowFact::new(V1_WEEKLY_WINDOW_SECONDS, QuotaWindowStatus::Eligible)
+                    .with_remaining_headroom(80)
+                    .with_reset_unix_seconds(now_unix_seconds + 4 * 86_400)
+                    .with_observed_unix_seconds(now_unix_seconds)
+                    .with_per_connection_burn_basis_points_per_hour(20),
+            ],
+        );
+        let last_resort_assessment = assess_route_band(BurnDownRouteBandAssessmentInput::new(
+            RouteBand::Responses,
+            now_unix_seconds,
+            RESPONSES_HTTP.clone(),
+            vec![last_resort_account],
+        ));
+        assert_eq!(
+            last_resort_assessment.selected_pool(),
+            SelectedPool::LastResort
+        );
+        let last_resort_decision = super::select_from_burn_down_assessment(
+            RouteBand::Responses.as_str(),
+            Provider::Openai,
+            &last_resort_assessment,
+            &mut super::WeightedDeficitSelector::default(),
+            &mut HashMap::new(),
+            super::DEFAULT_ACCOUNT_HOLD_COOLDOWN_SECONDS,
+            now_unix_seconds,
+        )
+        .expect("LastResort source should select");
+        assert_eq!(
+            last_resort_decision.selection_reason(),
+            "preferred_last_resort_short_window_guard"
+        );
+        assert!(!last_resort_decision.credit_backed_at_selection());
+
+        let mut unknown_holds = HashMap::new();
+        let unknown_assessment = assess_route_band(BurnDownRouteBandAssessmentInput::new(
+            RouteBand::Responses,
+            now_unix_seconds,
+            RESPONSES_HTTP.clone(),
+            vec![BurnDownAccountInput::new(
+                account_id("acct_selected_unknown"),
+                "selected-unknown",
+                Provider::Openai,
+                Vec::new(),
+            )],
+        ));
+        assert_eq!(unknown_assessment.selected_pool(), SelectedPool::Unknown);
+        let unknown_decision = super::select_from_burn_down_assessment(
+            RouteBand::Responses.as_str(),
+            Provider::Openai,
+            &unknown_assessment,
+            &mut super::WeightedDeficitSelector::default(),
+            &mut unknown_holds,
+            super::DEFAULT_ACCOUNT_HOLD_COOLDOWN_SECONDS,
+            now_unix_seconds,
+        )
+        .expect("unknown fallback source should select");
+        assert_eq!(
+            unknown_decision.selection_reason(),
+            "unknown_fallback_preferred"
+        );
+        assert!(!unknown_decision.credit_backed_at_selection());
     }
 
     #[test]

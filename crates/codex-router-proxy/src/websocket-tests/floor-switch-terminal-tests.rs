@@ -130,6 +130,7 @@ async fn terminal_delivery_blocks_next_create_until_turn_state_commits() {
         affinity_secret,
         account_id,
         credential_generation: 1,
+        credit_backed_at_selection: false,
         active_reservation_guard: None,
         session_affinity_activity_handle: None,
     };
@@ -143,7 +144,7 @@ async fn terminal_delivery_blocks_next_create_until_turn_state_commits() {
             affinity_record_tasks: TaskTracker::new(),
             affinity_owner_context: Some(&affinity_owner_context),
             provider_error_observer: None,
-            floor_switch_peer_assessor: Some(Arc::new(ImmediateSelectableFloorPeer)),
+            account_admission_assessor: Some(Arc::new(ImmediateSelectableFloorPeer)),
             initial_turn_active: true,
             revocation: &revocation,
             session_shutdown: &session_shutdown,
@@ -260,6 +261,7 @@ async fn hard_floor_closes_old_upstream_while_terminal_delivery_holds_turn_gate(
         affinity_secret,
         account_id: account_id.clone(),
         credential_generation: 1,
+        credit_backed_at_selection: false,
         active_reservation_guard: None,
         session_affinity_activity_handle: None,
     };
@@ -273,7 +275,7 @@ async fn hard_floor_closes_old_upstream_while_terminal_delivery_holds_turn_gate(
             affinity_record_tasks: TaskTracker::new(),
             affinity_owner_context: Some(&affinity_owner_context),
             provider_error_observer: None,
-            floor_switch_peer_assessor: None,
+            account_admission_assessor: None,
             initial_turn_active: true,
             revocation: &revocation,
             session_shutdown: &session_shutdown,

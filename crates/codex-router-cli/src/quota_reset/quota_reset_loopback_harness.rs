@@ -292,6 +292,13 @@ mod tests {
                 message: "test factory must not be called".to_owned(),
             })
         }
+
+        fn credit_usage_refresher(
+            &self,
+            _router_root: &Path,
+        ) -> crate::presentation::quota::CreditUsageRefresher {
+            panic!("non-interactive test must not compose a credit refresher");
+        }
     }
 
     fn harness_args(

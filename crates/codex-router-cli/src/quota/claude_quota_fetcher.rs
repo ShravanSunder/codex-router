@@ -143,6 +143,8 @@ fn parse_claude_usage_response(
     Ok(QuotaRefreshProviderResponse {
         windows,
         reset_credits_available: None,
+        credit_provider_observation:
+            codex_router_core::credit_usage::CreditProviderObservation::missing(),
     })
 }
 

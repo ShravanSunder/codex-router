@@ -35,7 +35,7 @@ mod tests {
     use crate::account_selection::AsyncAccountSelectorRuntimeState;
     use crate::account_selection::AsyncRepositoryBackedAccountSelector;
     use crate::account_selection::FloorSwitchPeerAssessment;
-    use crate::account_selection::LiveFloorSwitchPeerAssessor;
+    use crate::account_selection::LiveAccountAdmissionAssessor;
     use crate::account_selection::PROMPT_CACHE_ACCOUNT_AFFINITY_IDLE_TTL_SECONDS;
     use crate::account_selection::QuotaAwareAccountSelector;
     use crate::account_selection::QuotaAwareAccountSelectorError;
@@ -47,7 +47,7 @@ mod tests {
     use crate::account_selection::RouteBandReservationBooks;
     use crate::account_selection::RouteBandRuntimeExhaustions;
     use crate::account_selection::RouteBandWeightedSelectors;
-    use crate::account_selection::RuntimeFloorSwitchPeerAssessor;
+    use crate::account_selection::RuntimeAccountAdmissionAssessor;
     use crate::account_selection::SelectedAccountDecision;
     use crate::account_selection::mark_route_band_queue_degraded;
     use crate::account_selection::mark_runtime_quota_exhausted;
@@ -1602,7 +1602,6 @@ mod tests {
             Ok(state) => state,
             Err(error) => panic!("async state store should open: {error}"),
         };
-
         let selector = AsyncRepositoryBackedAccountSelector::new(&async_state);
         let selected = match selector
             .select_upstream_account(
@@ -2379,8 +2378,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn async_repository_backed_selector_affinity_owner_bypasses_hold_and_weighted_choice() {
-        let temp_dir = ProxyTestTempDir::new("async_repository_selector_affinity_owner_hit");
+    async fn async_repository_backed_selector_preserves_healthy_previous_response_affinity() {
+        let temp_dir = ProxyTestTempDir::new("async_repository_selector_healthy_affinity_owner");
         let database_path = temp_dir.path().join("state.sqlite");
         let state = match SqliteStateStore::open(&database_path) {
             Ok(state) => state,
@@ -2425,6 +2424,108 @@ mod tests {
         };
 
         let selector = AsyncRepositoryBackedAccountSelector::new(&async_state);
+        let selected = selector
+            .select_upstream_account(
+                &HttpProxyRequest::new(Method::Post, "/v1/responses")
+                    .with_body(br#"{"previous_response_id":"resp_beta"}"#.to_vec()),
+                TokenGeneration::new(1),
+                Some(&affinity_secret),
+            )
+            .await
+            .unwrap_or_else(|error| {
+                panic!("healthy previous-response owner should select: {error}")
+            });
+
+        assert_eq!(selected.account_id(), beta.account_id());
+        assert_eq!(selected.selection_reason(), "previous_response_affinity");
+        assert!(
+            !selected.credit_backed_at_selection(),
+            "healthy included affinity should remain ordinary quota admission"
+        );
+    }
+
+    #[tokio::test]
+    async fn async_repository_backed_selector_preserves_credit_backed_previous_response_affinity() {
+        let temp_dir = ProxyTestTempDir::new("async_repository_selector_affinity_owner_hit");
+        let database_path = temp_dir.path().join("state.sqlite");
+        let state = match SqliteStateStore::open(&database_path) {
+            Ok(state) => state,
+            Err(error) => panic!("state store should open: {error}"),
+        };
+        let alpha = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
+            account_id("acct_alpha"),
+            "alpha",
+            AccountStatus::Enabled,
+        );
+        let beta = AccountRecord::new(
+            codex_router_core::provider::Provider::Openai,
+            account_id("acct_beta"),
+            "beta",
+            AccountStatus::Enabled,
+        );
+        let secrets = codex_router_secret_store::test_support::open_encrypted_credential_store(
+            temp_dir.path().join("secrets"),
+        )
+        .expect("affinity credential store should open");
+        let now_unix_seconds = test_unix_seconds();
+        persist_credit_backed_account_with_token_async(
+            &database_path,
+            &secrets,
+            &alpha,
+            "alpha-credit-token",
+            now_unix_seconds,
+            true,
+        )
+        .await;
+        persist_credit_backed_account_with_token_async(
+            &database_path,
+            &secrets,
+            &beta,
+            "beta-credit-token",
+            now_unix_seconds,
+            true,
+        )
+        .await;
+        let affinity_secret = test_affinity_secret();
+        if let Err(error) = persist_previous_response_owner(
+            &state,
+            "resp_beta",
+            &affinity_secret,
+            beta.account_id(),
+        ) {
+            panic!("affinity owner should persist: {error}");
+        }
+        let async_state = match AsyncSqliteStateStore::open(&database_path).await {
+            Ok(state) => state,
+            Err(error) => panic!("async state store should open: {error}"),
+        };
+        let projection = codex_router_state::selection_projection::project_route_band_selection_inputs_read_only(
+            &async_state,
+            "responses",
+            now_unix_seconds,
+            300,
+        )
+        .await
+        .expect("credit-backed affinity projection should load");
+        let assessment = assess_route_band(BurnDownRouteBandAssessmentInput::new(
+            RouteBand::Responses,
+            now_unix_seconds,
+            RESPONSES_HTTP.clone(),
+            projection.accounts().to_vec(),
+        ));
+        assert_eq!(
+            assessment.selected_pool(),
+            codex_router_selection::burn_down::SelectedPool::Reserve
+        );
+        for account in assessment.accounts() {
+            assert_eq!(
+                account.routing_reason(),
+                codex_router_selection::burn_down::RoutingReason::CreditBacked
+            );
+        }
+
+        let selector = AsyncRepositoryBackedAccountSelector::new(&async_state);
         let selected = match selector
             .select_upstream_account(
                 &HttpProxyRequest::new(Method::Post, "/v1/responses")
@@ -2440,6 +2541,7 @@ mod tests {
 
         assert_eq!(selected.account_id(), beta.account_id());
         assert_eq!(selected.selection_reason(), "previous_response_affinity");
+        assert!(selected.credit_backed_at_selection());
     }
 
     #[tokio::test]
@@ -3002,7 +3104,7 @@ mod tests {
             Arc::clone(&runtime_exhaustions),
             Arc::clone(&queue_health),
         );
-        let assessor = RuntimeFloorSwitchPeerAssessor::new(
+        let assessor = RuntimeAccountAdmissionAssessor::new(
             state.clone(),
             &runtime_state,
             Arc::new(test_unix_seconds),
@@ -6291,6 +6393,119 @@ mod tests {
             Ok(()) => {}
             Err(error) => panic!("mock upstream thread panicked: {error:?}"),
         }
+    }
+
+    #[test]
+    fn assembled_loopback_http_routes_known_exhaustion_to_opted_in_credit_account() {
+        let temp_dir = ProxyTestTempDir::new("assembled_runtime_http_credit_backing");
+        let database_path = temp_dir.path().join("state.sqlite");
+        let secret_path = temp_dir.path().join("secrets");
+        let state = match SqliteStateStore::open(&database_path) {
+            Ok(state) => state,
+            Err(error) => panic!("state store should open: {error}"),
+        };
+        let secrets = match codex_router_secret_store::test_support::open_encrypted_credential_store(
+            &secret_path,
+        ) {
+            Ok(secrets) => secrets,
+            Err(error) => panic!("secret store should open: {error}"),
+        };
+        let included_exhausted = AccountRecord::new(
+            Provider::Openai,
+            account_id("acct_included_exhausted"),
+            "included-exhausted",
+            AccountStatus::Enabled,
+        );
+        let credit_backed = AccountRecord::new(
+            Provider::Openai,
+            account_id("acct_credit_backed_http"),
+            "credit-backed-http",
+            AccountStatus::Enabled,
+        );
+        persist_account_with_snapshot_and_token(
+            &state,
+            &secrets,
+            &included_exhausted,
+            0,
+            "included-exhausted-token",
+        );
+        persist_credit_backed_account_with_token(
+            &database_path,
+            &secrets,
+            &credit_backed,
+            "credit-backed-token",
+            1_030,
+            true,
+        );
+
+        let upstream_listener = TcpListener::bind("127.0.0.1:0")
+            .unwrap_or_else(|error| panic!("credit mock upstream should bind: {error}"));
+        let upstream_address = upstream_listener
+            .local_addr()
+            .unwrap_or_else(|error| panic!("credit mock upstream address should read: {error}"));
+        let (authorization_sender, authorization_receiver) = mpsc::channel();
+        let upstream_thread = thread::spawn(move || {
+            let (mut stream, _peer_address) = upstream_listener.accept().unwrap_or_else(|error| {
+                panic!("credit upstream should receive one request: {error}")
+            });
+            let request = read_test_http_request(&mut stream);
+            let authorization = request
+                .lines()
+                .find(|line| line.starts_with("authorization: "))
+                .unwrap_or("<missing>")
+                .to_owned();
+            authorization_sender
+                .send(authorization)
+                .unwrap_or_else(|error| panic!("credit authorization should record: {error}"));
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+                .unwrap_or_else(|error| panic!("credit upstream response should write: {error}"));
+        });
+        let endpoint = UpstreamEndpoint::new(format!("http://{upstream_address}/v1"))
+            .unwrap_or_else(|error| panic!("credit upstream endpoint should validate: {error}"));
+        let bind_address = LoopbackBindAddress::new("127.0.0.1", 0)
+            .unwrap_or_else(|error| panic!("router bind address should validate: {error}"));
+        let config = LoopbackRouterRuntimeConfig::new(
+            bind_address,
+            endpoint,
+            database_path,
+            secret_path,
+            LocalRouterTokenRecord::new(
+                SecretString::new("current-token"),
+                TokenGeneration::new(1),
+            ),
+        )
+        .with_quota_clock(1_030, 60);
+        let runtime = LoopbackRouterRuntime::start(config, secrets)
+            .unwrap_or_else(|error| panic!("credit proxy runtime should start: {error}"));
+        let router_address = runtime.local_addr();
+        let client_thread = thread::spawn(move || {
+            send_loopback_request(
+                router_address,
+                "POST /v1/responses HTTP/1.1\r\n",
+                br#"{"model":"gpt-5","credit_backed":true}"#,
+            )
+        });
+        assert_eq!(
+            runtime
+                .serve_http_connections(1)
+                .unwrap_or_else(|error| panic!("credit runtime should serve request: {error}")),
+            1
+        );
+        let response = client_thread
+            .join()
+            .unwrap_or_else(|error| panic!("credit client should finish: {error:?}"));
+        assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response}");
+        assert!(response.ends_with("\r\n\r\nok"), "{response}");
+        assert_eq!(
+            authorization_receiver.recv().unwrap_or_else(|error| panic!(
+                "selected credit authorization should arrive: {error}"
+            )),
+            "authorization: Bearer credit-backed-token"
+        );
+        upstream_thread
+            .join()
+            .unwrap_or_else(|error| panic!("credit upstream should finish: {error:?}"));
     }
 
     #[test]
@@ -9770,6 +9985,200 @@ mod tests {
         }
     }
 
+    fn persist_credit_backed_account_with_token(
+        database_path: &Path,
+        secrets: &EncryptedCredentialStore,
+        account: &AccountRecord,
+        upstream_token: &str,
+        observed_unix_seconds: u64,
+        allow_credit_usage: bool,
+    ) {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap_or_else(|error| panic!("credit fixture runtime should build: {error}"));
+        runtime.block_on(persist_credit_backed_account_with_token_async(
+            database_path,
+            secrets,
+            account,
+            upstream_token,
+            observed_unix_seconds,
+            allow_credit_usage,
+        ));
+    }
+
+    async fn persist_credit_backed_account_with_token_async(
+        database_path: &Path,
+        secrets: &EncryptedCredentialStore,
+        account: &AccountRecord,
+        upstream_token: &str,
+        observed_unix_seconds: u64,
+        allow_credit_usage: bool,
+    ) {
+        persist_credit_account_with_availability_async(
+            database_path,
+            secrets,
+            account,
+            upstream_token,
+            observed_unix_seconds,
+            allow_credit_usage,
+            codex_router_core::credit_usage::CreditAvailability::Available {
+                balance: Some(
+                    codex_router_core::credit_usage::CreditBalance::new("2.75")
+                        .expect("fixture credit balance should be valid"),
+                ),
+            },
+        )
+        .await;
+    }
+
+    fn persist_credit_account_with_availability(
+        database_path: &Path,
+        secrets: &EncryptedCredentialStore,
+        account: &AccountRecord,
+        upstream_token: &str,
+        observed_unix_seconds: u64,
+        allow_credit_usage: bool,
+        availability: codex_router_core::credit_usage::CreditAvailability,
+    ) {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap_or_else(|error| panic!("credit fixture runtime should build: {error}"));
+        runtime.block_on(persist_credit_account_with_availability_async(
+            database_path,
+            secrets,
+            account,
+            upstream_token,
+            observed_unix_seconds,
+            allow_credit_usage,
+            availability,
+        ));
+    }
+
+    async fn persist_credit_account_with_availability_async(
+        database_path: &Path,
+        secrets: &EncryptedCredentialStore,
+        account: &AccountRecord,
+        upstream_token: &str,
+        observed_unix_seconds: u64,
+        allow_credit_usage: bool,
+        availability: codex_router_core::credit_usage::CreditAvailability,
+    ) {
+        let account_with_generation = account.clone().with_active_credential_generation(1);
+        let sync_state = SqliteStateStore::open(database_path)
+            .unwrap_or_else(|error| panic!("state should open for credit account: {error}"));
+        AccountStateRepository::upsert_account(&sync_state, &account_with_generation)
+            .unwrap_or_else(|error| panic!("credit account should persist: {error}"));
+
+        let async_state = AsyncSqliteStateStore::open(database_path)
+            .await
+            .unwrap_or_else(|error| panic!("credit state should open: {error}"));
+        async_state
+            .save_account_credit_usage_policy(
+                account.account_id(),
+                if allow_credit_usage {
+                    codex_router_core::credit_usage::CreditUsagePolicy::Allow
+                } else {
+                    codex_router_core::credit_usage::CreditUsagePolicy::Disallow
+                },
+            )
+            .await
+            .unwrap_or_else(|error| panic!("credit policy should persist: {error}"));
+        let attempt = async_state
+            .begin_credit_refresh_attempt(account.account_id(), 1)
+            .await
+            .unwrap_or_else(|error| panic!("credit attempt should allocate: {error}"));
+        let windows = [
+            PersistedSelectorQuotaWindow::new(
+                account.account_id().clone(),
+                "responses",
+                18_000,
+                SelectorQuotaWindowStatus::Ineligible,
+            )
+            .with_remaining_headroom(0)
+            .with_effective(true)
+            .with_observed_unix_seconds(observed_unix_seconds)
+            .with_reset_unix_seconds(observed_unix_seconds + 18_000),
+            PersistedSelectorQuotaWindow::new(
+                account.account_id().clone(),
+                "responses",
+                604_800,
+                SelectorQuotaWindowStatus::Ineligible,
+            )
+            .with_remaining_headroom(0)
+            .with_effective(false)
+            .with_observed_unix_seconds(observed_unix_seconds)
+            .with_reset_unix_seconds(observed_unix_seconds + 604_800),
+        ];
+        let history = windows
+            .iter()
+            .map(|window| {
+                PersistedQuotaHistoryObservation::new(
+                    account.account_id().clone(),
+                    account.label(),
+                    "responses",
+                    window.limit_window_seconds(),
+                    observed_unix_seconds,
+                    window.remaining_headroom(),
+                )
+                .with_reset_unix_seconds(
+                    window
+                        .reset_unix_seconds()
+                        .expect("credit fixture windows should have reset times"),
+                )
+                .with_window_status(SelectorQuotaWindowStatus::Ineligible)
+                .with_effective(window.effective())
+                .with_refresh_source(QuotaSnapshotSource::OpenAiEndpoint)
+                .with_refresh_outcome(QuotaHistoryRefreshOutcome::Success)
+            })
+            .collect::<Vec<_>>();
+        let snapshot = PersistedQuotaSnapshot::new(
+            account.account_id().clone(),
+            QuotaSnapshotSource::OpenAiEndpoint,
+        )
+        .with_observed_unix_seconds(observed_unix_seconds)
+        .with_route_band("responses", 0)
+        .with_reset_unix_seconds(observed_unix_seconds + 18_000)
+        .with_stale_penalty(false);
+        let observation = codex_router_core::credit_usage::CreditProviderObservation::new(
+            availability,
+            codex_router_core::credit_usage::CreditSpendControl::Clear,
+            Some(codex_router_core::credit_usage::CreditProviderLimitReason::RateLimitReached),
+        );
+        let committed = async_state
+            .record_responses_refresh_success(
+                codex_router_state::credit_store::ResponsesRefreshSuccessCommit {
+                    attempt: &attempt,
+                    selector_windows: &windows,
+                    observed_unix_seconds,
+                    stale_after_unix_seconds: observed_unix_seconds + 300,
+                    provider_observation: &observation,
+                    history_observations: &history,
+                    snapshot: &snapshot,
+                },
+            )
+            .await
+            .unwrap_or_else(|error| panic!("coherent credit fixture should commit: {error}"));
+        assert!(committed, "credit fixture should be latest attempt");
+        async_state
+            .close()
+            .await
+            .unwrap_or_else(|error| panic!("credit state should close: {error}"));
+
+        let token_key = openai_account_credential_bundle_key(account.account_id(), 1)
+            .unwrap_or_else(|error| panic!("credit token key should build: {error}"));
+        let bundle = AccountCredentialBundle::imported_codex_auth(
+            upstream_token,
+            Some(format!("{upstream_token}-refresh")),
+        )
+        .to_secret_string()
+        .unwrap_or_else(|error| panic!("credit token should serialize: {error}"));
+        secrets
+            .write_secret(&token_key, &bundle)
+            .unwrap_or_else(|error| panic!("credit token should persist: {error}"));
+    }
+
     fn set_weekly_floor_for_test(
         database_path: &Path,
         account_label: &str,
@@ -13087,4 +13496,16 @@ mod tests {
             Err(error) => panic!("mock websocket upstream thread panicked: {error:?}"),
         }
     }
+
+    #[path = "credit_transport_proof.rs"]
+    mod credit_transport_proof;
+
+    #[path = "credit_compact_transport.rs"]
+    mod credit_compact_transport;
+
+    #[path = "credential_generation_websocket.rs"]
+    mod credential_generation_websocket;
+
+    #[path = "credit_affinity_transport.rs"]
+    mod credit_affinity_transport;
 }

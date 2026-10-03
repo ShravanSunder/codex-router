@@ -1,4 +1,5 @@
 use super::*;
+use crate::presentation::quota::credit_usage_compact_summary;
 
 pub(super) fn quota_status_view_model(
     report: &QuotaStatusReport,
@@ -12,8 +13,10 @@ pub(super) fn quota_status_view_model(
     };
     QuotaStatusViewModel {
         width,
-        route_line: quota_status_route_line(report, rows),
+        route_line: quota_status_pool_summary(report),
         why_line: String::new(),
+        pool_freshness_summary: quota_status_pool_freshness_summary(report),
+        selection_projection_degraded: !report.selection_projection_source.is_authoritative(),
         serving_clients: quota_status_serving_clients(rows),
         rows: rows
             .iter()
@@ -27,6 +30,8 @@ pub(super) fn quota_status_view_model(
                 status: display_quota_row_status(report, row),
                 active_clients: active_clients_label(row),
                 reset_credits: reset_credits_account_list_label(row.reset_credits_available_value),
+                credit_usage_summary: credit_usage_compact_summary(&row.credit_usage),
+                credit_usage: row.credit_usage.clone(),
                 reason: display_quota_row_reason(report, row),
                 weekly_window: quota_account_list_window_summary(
                     &row.windows,
@@ -79,46 +84,77 @@ pub(super) fn quota_status_serving_clients(rows: &[QuotaStatusRow]) -> Option<u3
     (total > 0).then_some(total)
 }
 
-pub(super) fn quota_status_route_line(
-    report: &QuotaStatusReport,
-    rows: &[QuotaStatusRow],
-) -> String {
+pub(super) fn quota_status_pool_summary(report: &QuotaStatusReport) -> String {
+    let mut usable_count = 0_usize;
+    let mut reserve_count = 0_usize;
+    let mut blocked_count = 0_usize;
+    let mut unknown_count = 0_usize;
+    let mut excluded_count = 0_usize;
+    for row in &report.rows {
+        match row.availability {
+            AccountAvailability::Usable => usable_count = usable_count.saturating_add(1),
+            AccountAvailability::Reserve => reserve_count = reserve_count.saturating_add(1),
+            AccountAvailability::Blocked => blocked_count = blocked_count.saturating_add(1),
+            AccountAvailability::Unknown => unknown_count = unknown_count.saturating_add(1),
+            AccountAvailability::Excluded => excluded_count = excluded_count.saturating_add(1),
+        }
+    }
+
+    let mut parts = vec![report.route_band.clone()];
+    if !report.selection_projection_source.is_authoritative() {
+        parts.push("degraded".to_owned());
+    }
     if !report.credential_store_availability.is_ready() {
-        return format!(
-            "{} -> none    {}",
-            report.route_band,
-            report.credential_store_availability.status_label()
-        );
+        parts.push(report.credential_store_availability.status_label());
     }
-    let Some(selected_row) = rows.iter().find(|row| row.preferred_next) else {
-        return format!(
-            "{} -> none    {}",
-            report.route_band,
-            selector_summary(rows)
-        );
-    };
-    let mut parts = vec![
-        format!("{} -> {}", report.route_band, selected_row.account_label),
-        compact_routing_summary(selected_row),
-    ];
-    if let Some(total_rate) = quota_compact_total_burn_rate(selected_row.weekly_pace) {
-        parts.push(total_rate);
+    let total = report.rows.len();
+    if total == 0 {
+        parts.push("no accounts".to_owned());
+        return parts.join(" · ");
     }
-    if let Some(limiting_window) = selected_row.limiting_window {
-        parts.push(format!(
-            "{} {} left",
-            quota_window_label(limiting_window.window_seconds()),
-            format_percent(limiting_window.remaining_headroom())
-        ));
+    parts.push(if total == 1 {
+        "1 account".to_owned()
+    } else {
+        format!("{total} accounts")
+    });
+    for (label, count) in [
+        ("usable", usable_count),
+        ("reserve", reserve_count),
+        ("blocked", blocked_count),
+        ("unknown", unknown_count),
+        ("excluded", excluded_count),
+    ] {
+        if count > 0 {
+            parts.push(format!("{label} {count}"));
+        }
     }
-    parts.join("    ")
+    parts.join(" · ")
 }
 
-pub(super) fn compact_routing_summary(row: &QuotaStatusRow) -> String {
-    first_line(&row.routing)
-        .strip_prefix("preferred by quota: ")
-        .unwrap_or_else(|| first_line(&row.routing))
-        .to_owned()
+pub(super) fn quota_status_pool_freshness_summary(report: &QuotaStatusReport) -> String {
+    let mut fresh_count = 0_usize;
+    let mut stale_count = 0_usize;
+    let mut unknown_count = 0_usize;
+    for row in &report.rows {
+        match row.freshness {
+            QuotaEvidenceFreshness::Fresh => fresh_count = fresh_count.saturating_add(1),
+            QuotaEvidenceFreshness::Stale => stale_count = stale_count.saturating_add(1),
+            QuotaEvidenceFreshness::Unknown => unknown_count = unknown_count.saturating_add(1),
+        }
+    }
+    if report.rows.is_empty() {
+        return "unknown".to_owned();
+    }
+    [
+        ("fresh", fresh_count),
+        ("stale", stale_count),
+        ("unknown", unknown_count),
+    ]
+    .into_iter()
+    .filter(|(_label, count)| *count > 0)
+    .map(|(label, count)| format!("{label} {count}"))
+    .collect::<Vec<_>>()
+    .join(" · ")
 }
 
 pub(super) fn quota_selected_account_view_model(

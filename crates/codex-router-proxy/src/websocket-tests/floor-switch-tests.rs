@@ -7,13 +7,23 @@ pub(super) struct HeldSelectableFloorPeer {
 
 pub(super) struct ImmediateSelectableFloorPeer;
 
-impl LiveFloorSwitchPeerAssessor for ImmediateSelectableFloorPeer {
+impl LiveAccountAdmissionAssessor for ImmediateSelectableFloorPeer {
     fn assess_peer<'a>(
         &'a self,
         _source_account_id: &'a AccountId,
         _route_band: codex_router_core::routes::RouteBand,
     ) -> BoxFuture<'a, FloorSwitchPeerAssessment> {
         Box::pin(async { FloorSwitchPeerAssessment::SelectablePeer })
+    }
+
+    fn assess_source_account<'a>(
+        &'a self,
+        _source_account_id: &'a AccountId,
+        _pinned_credential_generation: u64,
+        _route_band: codex_router_core::routes::RouteBand,
+        _credit_backed_at_selection: bool,
+    ) -> BoxFuture<'a, crate::account_selection::AccountSourceAdmission> {
+        Box::pin(async { crate::account_selection::AccountSourceAdmission::Permitted })
     }
 }
 
@@ -23,6 +33,7 @@ async fn initial_session_update_can_switch_before_first_response_create() {
         AccountId::new("acct_precreate_floor").expect("fixture account id should parse");
     let selector = FixedAsyncSelector {
         account_id: account_id.clone(),
+        credit_backed_at_selection: false,
     };
     let credential_resolver = FixedAsyncCredentialResolver {
         account_id: account_id.clone(),
@@ -40,7 +51,7 @@ async fn initial_session_update_can_switch_before_first_response_create() {
     )
     .with_revocation_registry(registry.clone())
     .with_affinity_secret_provider(&affinity_secret_provider)
-    .with_floor_switch_peer_assessor(Arc::new(ImmediateSelectableFloorPeer));
+    .with_account_admission_assessor(Arc::new(ImmediateSelectableFloorPeer));
     let upstream_listener = TcpListener::bind(("127.0.0.1", 0))
         .await
         .expect("fixture upstream should bind");
@@ -107,7 +118,7 @@ async fn initial_session_update_can_switch_before_first_response_create() {
     assert_eq!(registry.snapshot().quota_reconnect_signal_count, 1);
 }
 
-impl LiveFloorSwitchPeerAssessor for HeldSelectableFloorPeer {
+impl LiveAccountAdmissionAssessor for HeldSelectableFloorPeer {
     fn assess_peer<'a>(
         &'a self,
         _source_account_id: &'a AccountId,
@@ -118,6 +129,16 @@ impl LiveFloorSwitchPeerAssessor for HeldSelectableFloorPeer {
             self.release.notified().await;
             FloorSwitchPeerAssessment::SelectablePeer
         })
+    }
+
+    fn assess_source_account<'a>(
+        &'a self,
+        _source_account_id: &'a AccountId,
+        _pinned_credential_generation: u64,
+        _route_band: codex_router_core::routes::RouteBand,
+        _credit_backed_at_selection: bool,
+    ) -> BoxFuture<'a, crate::account_selection::AccountSourceAdmission> {
+        Box::pin(async { crate::account_selection::AccountSourceAdmission::Permitted })
     }
 }
 
@@ -172,6 +193,7 @@ async fn assert_held_floor_switch_socket_outcome(outcome: HeldSwitchOutcome) {
         affinity_secret,
         account_id: selected_account.clone(),
         credential_generation: 1,
+        credit_backed_at_selection: false,
         active_reservation_guard: None,
         session_affinity_activity_handle: None,
     };
@@ -192,7 +214,7 @@ async fn assert_held_floor_switch_socket_outcome(outcome: HeldSwitchOutcome) {
             affinity_record_tasks: TaskTracker::new(),
             affinity_owner_context: Some(&affinity_owner_context),
             provider_error_observer: None,
-            floor_switch_peer_assessor: Some(peer_assessor),
+            account_admission_assessor: Some(peer_assessor),
             initial_turn_active: false,
             revocation: &revocation,
             session_shutdown: &session_shutdown,

@@ -1,4 +1,6 @@
 use super::*;
+use codex_router_core::credit_usage::CreditProviderObservation;
+use codex_router_core::credit_usage::CreditUsagePolicy;
 use codex_router_core::provider::Provider;
 use codex_router_secret_store::model::CredentialMigrationFailure;
 
@@ -93,6 +95,33 @@ impl SelectionProjectionSource {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum CreditUsageFreshness {
+    Fresh,
+    Stale,
+    #[default]
+    Unknown,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct CreditUsageStatus {
+    pub(crate) policy: CreditUsagePolicy,
+    pub(crate) provider_observation: CreditProviderObservation,
+    pub(crate) freshness: CreditUsageFreshness,
+    pub(crate) age_label: String,
+}
+
+impl Default for CreditUsageStatus {
+    fn default() -> Self {
+        Self {
+            policy: CreditUsagePolicy::Disallow,
+            provider_observation: CreditProviderObservation::missing(),
+            freshness: CreditUsageFreshness::Unknown,
+            age_label: "unknown".to_owned(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -119,6 +148,7 @@ pub(super) struct QuotaStatusAccountInput {
     pub(super) account_id: AccountId,
     pub(super) active_credential_generation: Option<u64>,
     pub(super) reset_credits_available: Option<u32>,
+    pub(super) credit_usage: CreditUsageStatus,
     pub(super) updated: String,
     pub(super) active_clients: ActiveClientMirrorStatus,
     pub(super) windows: Vec<DisplayQuotaWindow>,
@@ -144,6 +174,7 @@ pub(super) struct QuotaStatusRow {
     pub(super) active_clients_source: &'static str,
     pub(super) reset_credits_available: String,
     pub(super) reset_credits_available_value: Option<u32>,
+    pub(super) credit_usage: CreditUsageStatus,
     pub(super) routing: String,
     pub(super) next_use: String,
     pub(super) weekly_pace: Option<QuotaPaceSnapshot>,
@@ -199,6 +230,7 @@ impl QuotaStatusRow {
             active_clients_source: input.active_clients.source(),
             reset_credits_available: format_reset_credits(input.reset_credits_available),
             reset_credits_available_value: input.reset_credits_available,
+            credit_usage: input.credit_usage.clone(),
             routing: format_routing_cell(assessment),
             next_use: format_next_use(assessment).to_owned(),
             weekly_pace: input.weekly_pace,

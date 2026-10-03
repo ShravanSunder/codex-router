@@ -1,9 +1,27 @@
 use super::*;
+use codex_router_core::ids::AccountId;
 use codex_router_core::provider::Provider;
 use codex_router_core::route_profile::WindowKind;
 use codex_router_state::window_observation::WindowObservation;
 use codex_router_state::window_observation::WindowObservationProps;
 use codex_router_state::window_observation::calculate_window_observation_fresh_until_unix_seconds;
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct QuotaRefreshReport {
+    committed_responses_generations: HashMap<AccountId, u64>,
+}
+
+impl QuotaRefreshReport {
+    pub(crate) fn responses_observation_committed_for(
+        &self,
+        account_id: &AccountId,
+        credential_generation: Option<u64>,
+    ) -> bool {
+        credential_generation.is_some_and(|generation| {
+            self.committed_responses_generations.get(account_id) == Some(&generation)
+        })
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum WeeklyQuotaFloorIntent {
@@ -64,7 +82,7 @@ pub(crate) async fn refresh_quota_with_dependencies<R, P>(
     credential_resolver: &R,
     quota_provider: &P,
     observed_unix_seconds: u64,
-) -> Result<(), QuotaCommandError>
+) -> Result<QuotaRefreshReport, QuotaCommandError>
 where
     R: AsyncProviderCredentialResolver,
     P: QuotaRefreshProvider,
@@ -89,7 +107,7 @@ pub(crate) async fn refresh_quota_store_paths_with_dependencies<R, P>(
     credential_resolver: &R,
     quota_provider: &P,
     observed_unix_seconds: u64,
-) -> Result<(), QuotaCommandError>
+) -> Result<QuotaRefreshReport, QuotaCommandError>
 where
     R: AsyncProviderCredentialResolver,
     P: QuotaRefreshProvider,
@@ -118,7 +136,7 @@ pub(crate) async fn refresh_quota_store_paths_with_dependencies_and_floor_notifi
     credential_resolver: &R,
     quota_provider: &P,
     observation_context: QuotaRefreshObservationContext<'_>,
-) -> Result<(), QuotaCommandError>
+) -> Result<QuotaRefreshReport, QuotaCommandError>
 where
     R: AsyncProviderCredentialResolver,
     P: QuotaRefreshProvider,
@@ -159,7 +177,8 @@ where
         .collect::<HashMap<_, _>>();
     let mut refreshed_count = 0_u64;
     let mut failed_count = 0_u64;
-    for account in accounts
+    let mut committed_responses_generations = HashMap::new();
+    'accounts: for account in accounts
         .iter()
         .filter(|account| account.status() == AccountStatus::Enabled)
         .filter(|account| account.active_credential_generation().is_some())
@@ -198,23 +217,81 @@ where
             Ok(resolved) => resolved,
             Err(error) => {
                 failed_count = failed_count.saturating_add(route_bands.len() as u64);
-                for route_band in route_bands {
+                let current_account = if account.provider() == Provider::Openai {
                     quota_history_state
-                        .record_refresh_failure_preserving_selector_windows(
+                        .list_accounts()
+                        .await?
+                        .into_iter()
+                        .find(|current| current.account_id() == account.account_id())
+                } else {
+                    None
+                };
+                let responses_credit_attempt = match current_account
+                    .as_ref()
+                    .and_then(AccountRecord::active_credential_generation)
+                {
+                    Some(generation) => {
+                        begin_credit_refresh_attempt_for_current_generation(
+                            &quota_history_state,
                             account.account_id(),
+                            generation,
+                        )
+                        .await?
+                    }
+                    None => None,
+                };
+                for route_band in route_bands {
+                    if *route_band == USER_QUOTA_ROUTE_BAND {
+                        if let Some(attempt) = responses_credit_attempt.as_ref() {
+                            quota_history_state
+                                .record_responses_refresh_failure(
+                                    attempt,
+                                    observed_unix_seconds,
+                                    QuotaRefreshErrorClass::AuthError,
+                                    &failure_quota_history_observations(
+                                        account,
+                                        route_band,
+                                        observed_unix_seconds,
+                                        QuotaRefreshErrorClass::AuthError,
+                                    ),
+                                )
+                                .await?;
+                        } else if current_account.is_some() {
+                            quota_history_state
+                                .record_refresh_failure_preserving_selector_windows(
+                                    account.account_id(),
+                                    route_band,
+                                    observed_unix_seconds,
+                                    QuotaRefreshErrorClass::AuthError,
+                                )
+                                .await?;
+                            append_failure_quota_history_observations(
+                                &quota_history_state,
+                                account,
+                                route_band,
+                                observed_unix_seconds,
+                                QuotaRefreshErrorClass::AuthError,
+                            )
+                            .await?;
+                        }
+                    } else {
+                        quota_history_state
+                            .record_refresh_failure_preserving_selector_windows(
+                                account.account_id(),
+                                route_band,
+                                observed_unix_seconds,
+                                QuotaRefreshErrorClass::AuthError,
+                            )
+                            .await?;
+                        append_failure_quota_history_observations(
+                            &quota_history_state,
+                            account,
                             route_band,
                             observed_unix_seconds,
                             QuotaRefreshErrorClass::AuthError,
                         )
                         .await?;
-                    append_failure_quota_history_observations(
-                        &quota_history_state,
-                        account,
-                        route_band,
-                        observed_unix_seconds,
-                        QuotaRefreshErrorClass::AuthError,
-                    )
-                    .await?;
+                    }
                 }
                 tracing::warn!(
                     account.hash = telemetry_hash(account.account_id().as_str()),
@@ -381,7 +458,28 @@ where
             }
             continue;
         }
-        for route_band in DEFAULT_ROUTE_BANDS {
+        for route_band in route_bands {
+            let mut credit_refresh_attempt = if *route_band == USER_QUOTA_ROUTE_BAND {
+                match begin_credit_refresh_attempt_for_current_generation(
+                    &quota_history_state,
+                    account.account_id(),
+                    resolved.credential_generation(),
+                )
+                .await?
+                {
+                    Some(attempt) => Some(attempt),
+                    None => {
+                        record_superseded_account_refresh(
+                            &mut *stdout,
+                            account,
+                            &mut failed_count,
+                        )?;
+                        continue 'accounts;
+                    }
+                }
+            } else {
+                None
+            };
             let first_response = quota_provider
                 .fetch_quota(QuotaRefreshProviderRequest::new_for_provider(
                     account.provider(),
@@ -408,6 +506,26 @@ where
                 {
                     Ok((recovered, renewed_here)) => {
                         let retry_generation = Some(recovered.credential_generation());
+                        if *route_band == USER_QUOTA_ROUTE_BAND {
+                            credit_refresh_attempt =
+                                match begin_credit_refresh_attempt_for_current_generation(
+                                    &quota_history_state,
+                                    account.account_id(),
+                                    recovered.credential_generation(),
+                                )
+                                .await?
+                                {
+                                    Some(attempt) => Some(attempt),
+                                    None => {
+                                        record_superseded_account_refresh(
+                                            &mut *stdout,
+                                            account,
+                                            &mut failed_count,
+                                        )?;
+                                        continue 'accounts;
+                                    }
+                                };
+                        }
                         let retry_response = quota_provider
                             .fetch_quota(QuotaRefreshProviderRequest::new_for_provider(
                                 account.provider(),
@@ -436,22 +554,43 @@ where
                 Err(error) => {
                     failed_count = failed_count.saturating_add(1);
                     let error_class = quota_refresh_error_class(&error);
-                    quota_history_state
-                        .record_refresh_failure_preserving_selector_windows(
-                            account.account_id(),
+                    if *route_band == USER_QUOTA_ROUTE_BAND {
+                        let Some(attempt) = credit_refresh_attempt.as_ref() else {
+                            return Err(QuotaCommandError::ProviderResponse {
+                                message: "Responses refresh attempt was not allocated".to_owned(),
+                            });
+                        };
+                        quota_history_state
+                            .record_responses_refresh_failure(
+                                attempt,
+                                observed_unix_seconds,
+                                error_class,
+                                &failure_quota_history_observations(
+                                    account,
+                                    route_band,
+                                    observed_unix_seconds,
+                                    error_class,
+                                ),
+                            )
+                            .await?;
+                    } else {
+                        quota_history_state
+                            .record_refresh_failure_preserving_selector_windows(
+                                account.account_id(),
+                                route_band,
+                                observed_unix_seconds,
+                                error_class,
+                            )
+                            .await?;
+                        append_failure_quota_history_observations(
+                            &quota_history_state,
+                            account,
                             route_band,
                             observed_unix_seconds,
                             error_class,
                         )
                         .await?;
-                    append_failure_quota_history_observations(
-                        &quota_history_state,
-                        account,
-                        route_band,
-                        observed_unix_seconds,
-                        error_class,
-                    )
-                    .await?;
+                    }
                     let provider_rejected_credentials =
                         matches!(error, QuotaCommandError::ProviderStatus { status: 401 });
                     if provider_rejected_credentials && renewed_for_retry {
@@ -490,22 +629,43 @@ where
                 Some(effective_window) => effective_window,
                 None => {
                     failed_count = failed_count.saturating_add(1);
-                    quota_history_state
-                        .record_refresh_failure_preserving_selector_windows(
-                            account.account_id(),
+                    if *route_band == USER_QUOTA_ROUTE_BAND {
+                        let Some(attempt) = credit_refresh_attempt.as_ref() else {
+                            return Err(QuotaCommandError::ProviderResponse {
+                                message: "Responses refresh attempt was not allocated".to_owned(),
+                            });
+                        };
+                        quota_history_state
+                            .record_responses_refresh_failure(
+                                attempt,
+                                observed_unix_seconds,
+                                QuotaRefreshErrorClass::ParseError,
+                                &failure_quota_history_observations(
+                                    account,
+                                    route_band,
+                                    observed_unix_seconds,
+                                    QuotaRefreshErrorClass::ParseError,
+                                ),
+                            )
+                            .await?;
+                    } else {
+                        quota_history_state
+                            .record_refresh_failure_preserving_selector_windows(
+                                account.account_id(),
+                                route_band,
+                                observed_unix_seconds,
+                                QuotaRefreshErrorClass::ParseError,
+                            )
+                            .await?;
+                        append_failure_quota_history_observations(
+                            &quota_history_state,
+                            account,
                             route_band,
                             observed_unix_seconds,
                             QuotaRefreshErrorClass::ParseError,
                         )
                         .await?;
-                    append_failure_quota_history_observations(
-                        &quota_history_state,
-                        account,
-                        route_band,
-                        observed_unix_seconds,
-                        QuotaRefreshErrorClass::ParseError,
-                    )
-                    .await?;
+                    }
                     tracing::warn!(
                         account.hash = telemetry_hash(account.account_id().as_str()),
                         route_band,
@@ -527,6 +687,7 @@ where
                 }
             };
             let mut selector_windows = Vec::new();
+            let mut responses_history_observations = Vec::new();
             for window in &response.windows {
                 let remaining_headroom = window.headroom.percent().ok_or_else(|| {
                     QuotaCommandError::ProviderResponse {
@@ -553,63 +714,24 @@ where
                     selector_window
                 };
                 selector_windows.push(selector_window);
-                append_success_quota_history_observation(
-                    &quota_history_state,
-                    account,
-                    route_band,
-                    window,
-                    observed_unix_seconds,
-                    response.reset_credits_available,
-                )
-                .await?;
-            }
-            quota_history_state
-                .record_refresh_success_and_replace_selector_windows(
-                    account.account_id(),
-                    route_band,
-                    &selector_windows,
-                    observed_unix_seconds,
-                    stale_after_unix_seconds(observed_unix_seconds),
-                )
-                .await?;
-            if *route_band == USER_QUOTA_ROUTE_BAND
-                && let Some(observer) = weekly_floor_observer
-            {
-                let floor = weekly_quota_floors.get(account.account_id()).copied();
-                let weekly_remaining_basis_points = match response
-                    .windows
-                    .iter()
-                    .find(|window| window.limit_window_seconds == V1_WEEKLY_WINDOW_SECONDS)
-                {
-                    Some(window) => Some(
-                        window
-                            .headroom
-                            .percent()
-                            .ok_or_else(|| QuotaCommandError::ProviderResponse {
-                                message: "OpenAI quota window was not expressed as a percent"
-                                    .to_owned(),
-                            })?
-                            .saturating_mul(100),
-                    ),
-                    None => None,
-                };
-                let intent = match (floor, weekly_remaining_basis_points) {
-                    (None, _) => Some(WeeklyQuotaFloorIntent::Clear),
-                    (Some(floor), Some(remaining)) if remaining <= floor => {
-                        Some(WeeklyQuotaFloorIntent::HardStop)
-                    }
-                    (Some(floor), Some(remaining))
-                        if remaining
-                            <= weekly_quota_switch_at_basis_points(Some(floor))
-                                .unwrap_or(floor) =>
-                    {
-                        Some(WeeklyQuotaFloorIntent::GracefulSwitch)
-                    }
-                    (Some(_), Some(_)) => Some(WeeklyQuotaFloorIntent::Clear),
-                    (Some(_), None) => None,
-                };
-                if let Some(intent) = intent {
-                    observer.weekly_quota_floor_intent(account.account_id(), intent);
+                if *route_band == USER_QUOTA_ROUTE_BAND {
+                    responses_history_observations.push(success_quota_history_observation(
+                        account,
+                        route_band,
+                        window,
+                        observed_unix_seconds,
+                        response.reset_credits_available,
+                    )?);
+                } else {
+                    append_success_quota_history_observation(
+                        &quota_history_state,
+                        account,
+                        route_band,
+                        window,
+                        observed_unix_seconds,
+                        response.reset_credits_available,
+                    )
+                    .await?;
                 }
             }
             let snapshot = PersistedQuotaSnapshot::new(
@@ -636,9 +758,126 @@ where
             } else {
                 snapshot
             };
-            quota_history_state
-                .upsert_quota_snapshot_preserving_selector_windows(&snapshot)
-                .await?;
+            let weekly_remaining_basis_points =
+                if *route_band == USER_QUOTA_ROUTE_BAND && weekly_floor_observer.is_some() {
+                    match response
+                        .windows
+                        .iter()
+                        .find(|window| window.limit_window_seconds == V1_WEEKLY_WINDOW_SECONDS)
+                    {
+                        Some(window) => Some(
+                            window
+                                .headroom
+                                .percent()
+                                .ok_or_else(|| QuotaCommandError::ProviderResponse {
+                                    message: "OpenAI quota window was not expressed as a percent"
+                                        .to_owned(),
+                                })?
+                                .saturating_mul(100),
+                        ),
+                        None => None,
+                    }
+                } else {
+                    None
+                };
+            let refresh_was_committed = if *route_band == USER_QUOTA_ROUTE_BAND {
+                let Some(attempt) = credit_refresh_attempt.as_ref() else {
+                    return Err(QuotaCommandError::ProviderResponse {
+                        message: "Responses refresh attempt was not allocated".to_owned(),
+                    });
+                };
+                quota_history_state
+                    .record_responses_refresh_success(
+                        codex_router_state::credit_store::ResponsesRefreshSuccessCommit {
+                            attempt,
+                            selector_windows: &selector_windows,
+                            observed_unix_seconds,
+                            stale_after_unix_seconds: stale_after_unix_seconds(
+                                observed_unix_seconds,
+                            ),
+                            provider_observation: &response.credit_provider_observation,
+                            history_observations: &responses_history_observations,
+                            snapshot: &snapshot,
+                        },
+                    )
+                    .await?
+            } else {
+                quota_history_state
+                    .record_refresh_success_and_replace_selector_windows(
+                        account.account_id(),
+                        route_band,
+                        &selector_windows,
+                        observed_unix_seconds,
+                        stale_after_unix_seconds(observed_unix_seconds),
+                    )
+                    .await?;
+                true
+            };
+            if !refresh_was_committed {
+                if *route_band == USER_QUOTA_ROUTE_BAND {
+                    let Some(attempt) = credit_refresh_attempt.as_ref() else {
+                        return Err(QuotaCommandError::ProviderResponse {
+                            message: "Responses refresh attempt was not allocated".to_owned(),
+                        });
+                    };
+                    tracing::info!(
+                        account.hash = telemetry_hash(account.account_id().as_str()),
+                        credential_generation = attempt.credential_generation(),
+                        attempt_sequence = attempt.sequence(),
+                        "codex_router.responses_quota_refresh_superseded"
+                    );
+                    let current_generation = quota_history_state
+                        .list_accounts()
+                        .await?
+                        .into_iter()
+                        .find(|current| current.account_id() == account.account_id())
+                        .and_then(|current| current.active_credential_generation());
+                    if current_generation != Some(attempt.credential_generation()) {
+                        continue 'accounts;
+                    }
+                    if let Some(observer) = weekly_floor_observer {
+                        notify_weekly_floor_from_latest_committed_responses(
+                            &quota_history_state,
+                            account.account_id(),
+                            attempt.credential_generation(),
+                            weekly_quota_floors.get(account.account_id()).copied(),
+                            observed_unix_seconds,
+                            SupersededResponsesFloorRead {
+                                attempt_sequence: attempt.sequence(),
+                                weekly_remaining_basis_points,
+                            },
+                            observer,
+                        )
+                        .await?;
+                    }
+                }
+                continue;
+            }
+            if *route_band == USER_QUOTA_ROUTE_BAND {
+                let Some(attempt) = credit_refresh_attempt.as_ref() else {
+                    return Err(QuotaCommandError::ProviderResponse {
+                        message: "Responses refresh attempt was not allocated".to_owned(),
+                    });
+                };
+                committed_responses_generations.insert(
+                    account.account_id().clone(),
+                    attempt.credential_generation(),
+                );
+            }
+            if *route_band != USER_QUOTA_ROUTE_BAND {
+                quota_history_state
+                    .upsert_quota_snapshot_preserving_selector_windows(&snapshot)
+                    .await?;
+            }
+            if *route_band == USER_QUOTA_ROUTE_BAND
+                && let Some(observer) = weekly_floor_observer
+            {
+                let floor = weekly_quota_floors.get(account.account_id()).copied();
+                let intent = weekly_quota_floor_intent(floor, weekly_remaining_basis_points);
+                if let Some(intent) = intent {
+                    observer.weekly_quota_floor_intent(account.account_id(), intent);
+                }
+            }
             tracing::info!(
                 account.hash = telemetry_hash(account.account_id().as_str()),
                 route_band,
@@ -665,7 +904,145 @@ where
     };
     quota_history_state.close().await?;
 
-    refresh_result
+    refresh_result.map(|()| QuotaRefreshReport {
+        committed_responses_generations,
+    })
+}
+
+struct SupersededResponsesFloorRead {
+    attempt_sequence: u64,
+    weekly_remaining_basis_points: Option<u32>,
+}
+
+async fn notify_weekly_floor_from_latest_committed_responses(
+    state: &AsyncSqliteStateStore,
+    account_id: &AccountId,
+    expected_credential_generation: u64,
+    floor: Option<u32>,
+    now_unix_seconds: u64,
+    current_read: SupersededResponsesFloorRead,
+    observer: &dyn WeeklyQuotaFloorIntentObserver,
+) -> Result<(), QuotaCommandError> {
+    let selector_inputs = state
+        .selector_inputs_for_route_band(USER_QUOTA_ROUTE_BAND, now_unix_seconds)
+        .await?;
+    let Some(selector_input) = selector_inputs
+        .iter()
+        .find(|input| input.account_id() == account_id)
+    else {
+        return Ok(());
+    };
+    if selector_input.provider() != Provider::Openai
+        || selector_input.account_status() != AccountStatus::Enabled
+        || selector_input.active_credential_generation() != Some(expected_credential_generation)
+    {
+        return Ok(());
+    }
+
+    let Some(observation) = selector_input.credit_observation() else {
+        return Ok(());
+    };
+    if observation.credential_generation() != expected_credential_generation {
+        return Ok(());
+    }
+    if observation.committed_attempt() != Some(observation.latest_started_attempt()) {
+        if observation.latest_started_attempt() <= current_read.attempt_sequence {
+            return Ok(());
+        }
+        // The newer attempt has no committed selector snapshot yet. Preserve this read's
+        // fresh floor signal without writing its quota or credit observations.
+        if let Some(intent) =
+            weekly_quota_floor_intent(floor, current_read.weekly_remaining_basis_points)
+        {
+            observer.weekly_quota_floor_intent(account_id, intent);
+        }
+        return Ok(());
+    }
+
+    let Some(observed_unix_seconds) = observation.observed_unix_seconds() else {
+        return Ok(());
+    };
+    let Some(stale_after_unix_seconds) = observation.stale_after_unix_seconds() else {
+        return Ok(());
+    };
+    // A newer manual commit can land while this older refresh cycle waits on provider IO.
+    let evaluation_now_unix_seconds = now_unix_seconds.max(observed_unix_seconds);
+    if evaluation_now_unix_seconds >= stale_after_unix_seconds {
+        return Ok(());
+    }
+
+    let latest_successful_windows = selector_input
+        .windows()
+        .iter()
+        .filter(|window| {
+            window.observed_unix_seconds() == observed_unix_seconds
+                && window.observed_unix_seconds() <= evaluation_now_unix_seconds
+                && matches!(
+                    window.status(),
+                    SelectorQuotaWindowStatus::Eligible | SelectorQuotaWindowStatus::Ineligible
+                )
+        })
+        .collect::<Vec<_>>();
+    if latest_successful_windows.is_empty() {
+        return Ok(());
+    }
+
+    let weekly_remaining_basis_points = latest_successful_windows
+        .iter()
+        .find(|window| window.limit_window_seconds() == V1_WEEKLY_WINDOW_SECONDS)
+        .map(|window| window.remaining_headroom().saturating_mul(100));
+    if let Some(intent) = weekly_quota_floor_intent(floor, weekly_remaining_basis_points) {
+        observer.weekly_quota_floor_intent(account_id, intent);
+    }
+    Ok(())
+}
+
+fn weekly_quota_floor_intent(
+    floor: Option<u32>,
+    weekly_remaining_basis_points: Option<u32>,
+) -> Option<WeeklyQuotaFloorIntent> {
+    match (floor, weekly_remaining_basis_points) {
+        (None, _) => Some(WeeklyQuotaFloorIntent::Clear),
+        (Some(floor), Some(remaining)) if remaining <= floor => {
+            Some(WeeklyQuotaFloorIntent::HardStop)
+        }
+        (Some(floor), Some(remaining))
+            if remaining <= weekly_quota_switch_at_basis_points(Some(floor)).unwrap_or(floor) =>
+        {
+            Some(WeeklyQuotaFloorIntent::GracefulSwitch)
+        }
+        (Some(_), Some(_)) => Some(WeeklyQuotaFloorIntent::Clear),
+        (Some(_), None) => None,
+    }
+}
+
+async fn begin_credit_refresh_attempt_for_current_generation(
+    state: &AsyncSqliteStateStore,
+    account_id: &AccountId,
+    credential_generation: u64,
+) -> Result<Option<CreditRefreshAttempt>, QuotaCommandError> {
+    match state
+        .begin_credit_refresh_attempt(account_id, credential_generation)
+        .await
+    {
+        Ok(attempt) => Ok(Some(attempt)),
+        Err(StateStoreError::AccountConcurrentModification { .. }) => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn record_superseded_account_refresh(
+    stdout: &mut impl Write,
+    account: &AccountRecord,
+    failed_count: &mut u64,
+) -> Result<(), QuotaCommandError> {
+    *failed_count = failed_count.saturating_add(DEFAULT_ROUTE_BANDS.len() as u64);
+    let diagnostic_account = quota_refresh_diagnostic_account_label(account);
+    writeln!(
+        stdout,
+        "refresh skipped: account={diagnostic_account} error=credential generation changed during refresh",
+    )
+    .map_err(QuotaCommandError::Stdout)
 }
 
 fn quota_refresh_diagnostic_account_label(account: &AccountRecord) -> String {

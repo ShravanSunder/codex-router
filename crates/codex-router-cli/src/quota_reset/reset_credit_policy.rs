@@ -21,6 +21,10 @@ impl AttemptGeneration {
     pub(in crate::quota_reset) const fn new(value: u64) -> Self {
         Self(value)
     }
+
+    pub(crate) const fn get(self) -> u64 {
+        self.0
+    }
 }
 
 /// Unique identity for one operation within an attempt.

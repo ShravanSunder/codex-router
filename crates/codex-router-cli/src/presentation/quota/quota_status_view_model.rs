@@ -2,6 +2,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
+use crate::quota::CreditUsageStatus;
 use codex_router_core::ids::AccountId;
 
 pub(crate) type QuotaStatusViewModelLoader =
@@ -14,6 +15,8 @@ pub(crate) struct QuotaStatusViewModel {
     pub(crate) width: usize,
     pub(crate) route_line: String,
     pub(crate) why_line: String,
+    pub(crate) pool_freshness_summary: String,
+    pub(crate) selection_projection_degraded: bool,
     pub(crate) serving_clients: Option<u32>,
     pub(crate) rows: Vec<QuotaStatusAccountViewModel>,
     pub(crate) selected: Option<QuotaSelectedAccountViewModel>,
@@ -30,6 +33,8 @@ pub(crate) struct QuotaStatusAccountViewModel {
     pub(crate) status: String,
     pub(crate) active_clients: String,
     pub(crate) reset_credits: String,
+    pub(crate) credit_usage_summary: String,
+    pub(crate) credit_usage: CreditUsageStatus,
     pub(crate) reason: String,
     pub(crate) weekly_window: String,
     pub(crate) short_window: String,

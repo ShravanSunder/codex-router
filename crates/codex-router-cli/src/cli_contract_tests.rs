@@ -163,6 +163,15 @@ mod quota_snapshot_tests;
 #[path = "cli_contract_tests/quota_http_tests.rs"]
 mod quota_http_tests;
 
+#[path = "cli_contract_tests/quota_http_null_primary_tests.rs"]
+mod quota_http_null_primary_tests;
+
+#[path = "cli_contract_tests/quota_refresh_race_tests.rs"]
+mod quota_refresh_race_tests;
+
+#[path = "cli_contract_tests/quota_refresh_floor_superseded_tests.rs"]
+mod quota_refresh_floor_superseded_tests;
+
 #[path = "cli_contract_tests/live_quota_tests.rs"]
 mod live_quota_tests;
 

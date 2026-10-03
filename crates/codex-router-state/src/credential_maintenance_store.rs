@@ -77,32 +77,18 @@ impl AsyncSqliteStateStore {
         &self,
         account_id: &AccountId,
     ) -> Result<Option<CredentialMaintenanceRecord>, StateStoreError> {
-        if self.read_only {
-            let table_exists: bool = sqlx::query_scalar(
-                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'credential_maintenance')",
-            )
-            .fetch_one(&self.pool)
+        let mut connection = self.pool.acquire().await.map_err(sqlx_error)?;
+        load_credential_maintenance_from_connection(account_id, self.read_only, &mut connection)
             .await
-            .map_err(sqlx_error)?;
-            if !table_exists {
-                return Ok(None);
-            }
-        }
-        let row = sqlx::query(
-            "SELECT credential_generation, state, failure_class,
-                    last_success_unix_seconds, next_attempt_unix_seconds,
-                    claimed_successor_generation, claim_purpose,
-                    claim_started_unix_seconds, claim_prior_state, consecutive_failures
-               FROM credential_maintenance
-               JOIN accounts USING (account_id)
-              WHERE credential_maintenance.account_id = ?1",
-        )
-        .bind(account_id.as_str())
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(sqlx_error)?;
-        row.map(|row| decode_maintenance_row(account_id, &row))
-            .transpose()
+    }
+
+    /// Loads maintenance state through the caller's existing coherent snapshot.
+    pub(crate) async fn load_credential_maintenance_in_transaction(
+        &self,
+        account_id: &AccountId,
+        transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    ) -> Result<Option<CredentialMaintenanceRecord>, StateStoreError> {
+        load_credential_maintenance_from_connection(account_id, self.read_only, transaction).await
     }
 
     /// Claims a successor generation in the existing maintenance row.
@@ -625,6 +611,39 @@ impl AsyncSqliteStateStore {
         .map_err(sqlx_error)?;
         Ok(updated.rows_affected() == 1)
     }
+}
+
+async fn load_credential_maintenance_from_connection(
+    account_id: &AccountId,
+    read_only: bool,
+    connection: &mut sqlx::SqliteConnection,
+) -> Result<Option<CredentialMaintenanceRecord>, StateStoreError> {
+    if read_only {
+        let table_exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'credential_maintenance')",
+        )
+        .fetch_one(&mut *connection)
+        .await
+        .map_err(sqlx_error)?;
+        if !table_exists {
+            return Ok(None);
+        }
+    }
+    let row = sqlx::query(
+        "SELECT credential_generation, state, failure_class,
+                last_success_unix_seconds, next_attempt_unix_seconds,
+                claimed_successor_generation, claim_purpose,
+                claim_started_unix_seconds, claim_prior_state, consecutive_failures
+           FROM credential_maintenance
+           JOIN accounts USING (account_id)
+          WHERE credential_maintenance.account_id = ?1",
+    )
+    .bind(account_id.as_str())
+    .fetch_optional(&mut *connection)
+    .await
+    .map_err(sqlx_error)?;
+    row.map(|row| decode_maintenance_row(account_id, &row))
+        .transpose()
 }
 
 fn decode_maintenance_row(

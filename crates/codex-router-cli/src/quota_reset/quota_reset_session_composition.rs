@@ -6,6 +6,7 @@ use std::net::SocketAddr;
 use std::path::Path;
 use std::pin::Pin;
 
+use crate::presentation::quota::CreditUsageRefresher;
 use codex_router_secret_store::encrypted_credential_store::EncryptedCredentialStore;
 
 use super::QuotaResetError;
@@ -32,6 +33,8 @@ pub(crate) trait InteractiveResetSessionFactory: Send + Sync {
         router_root: &Path,
         credential_store: EncryptedCredentialStore,
     ) -> Result<InteractiveResetSession, QuotaResetError>;
+
+    fn credit_usage_refresher(&self, router_root: &Path) -> CreditUsageRefresher;
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -47,6 +50,13 @@ impl InteractiveResetSessionFactory for FixedOriginInteractiveResetSessionFactor
             router_root,
             credential_store,
             HttpLiveQuotaResetProvider::new()?,
+        )
+    }
+
+    fn credit_usage_refresher(&self, router_root: &Path) -> CreditUsageRefresher {
+        crate::quota::interactive_credit_usage_refresher(
+            router_root.to_path_buf(),
+            codex_router_auth::live_quota::DEFAULT_CHATGPT_BACKEND_BASE_URL.to_owned(),
         )
     }
 }
@@ -75,6 +85,13 @@ impl InteractiveResetSessionFactory for LoopbackInteractiveResetSessionFactory {
             router_root,
             credential_store,
             HttpLiveQuotaResetProvider::new_loopback(self.provider_listener)?,
+        )
+    }
+
+    fn credit_usage_refresher(&self, router_root: &Path) -> CreditUsageRefresher {
+        crate::quota::interactive_credit_usage_refresher(
+            router_root.to_path_buf(),
+            format!("http://{}", self.provider_listener),
         )
     }
 }

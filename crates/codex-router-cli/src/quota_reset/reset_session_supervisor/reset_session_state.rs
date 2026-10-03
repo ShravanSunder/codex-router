@@ -24,6 +24,9 @@ where
                 &self.workflow,
                 self.current_target.clone(),
                 self.invalidation_reason,
+                self.current_attempt_generation()
+                    .map(crate::quota_reset::reset_credit_policy::AttemptGeneration::get),
+                self.last_processed_inspection_tab_request,
             ));
     }
 

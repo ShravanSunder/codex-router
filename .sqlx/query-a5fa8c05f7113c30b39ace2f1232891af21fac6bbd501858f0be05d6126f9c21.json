@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO account_credit_observations (\n               account_id, credential_generation, latest_started_attempt,\n               committed_attempt, observed_unix_seconds, stale_after_unix_seconds,\n               availability, balance, spend_control_state, provider_limit_reason\n             )\n             SELECT ?1, ?2, 1, NULL, NULL, NULL, 'unknown', NULL, 'unreported', NULL\n              WHERE EXISTS (\n                SELECT 1 FROM accounts\n                 WHERE account_id = ?1 AND active_credential_generation = ?2\n              )\n             ON CONFLICT(account_id) DO UPDATE SET\n               credential_generation = excluded.credential_generation,\n               latest_started_attempt = account_credit_observations.latest_started_attempt + 1,\n               committed_attempt = CASE\n                 WHEN account_credit_observations.credential_generation = excluded.credential_generation\n                   THEN account_credit_observations.committed_attempt\n                 ELSE NULL\n               END,\n               observed_unix_seconds = CASE\n                 WHEN account_credit_observations.credential_generation = excluded.credential_generation\n                   THEN account_credit_observations.observed_unix_seconds\n                 ELSE NULL\n               END,\n               stale_after_unix_seconds = CASE\n                 WHEN account_credit_observations.credential_generation = excluded.credential_generation\n                   THEN account_credit_observations.stale_after_unix_seconds\n                 ELSE NULL\n               END,\n               availability = CASE\n                 WHEN account_credit_observations.credential_generation = excluded.credential_generation\n                   THEN account_credit_observations.availability\n                 ELSE 'unknown'\n               END,\n               balance = CASE\n                 WHEN account_credit_observations.credential_generation = excluded.credential_generation\n                   THEN account_credit_observations.balance\n                 ELSE NULL\n               END,\n               spend_control_state = CASE\n                 WHEN account_credit_observations.credential_generation = excluded.credential_generation\n                   THEN account_credit_observations.spend_control_state\n                 ELSE 'unreported'\n               END,\n               provider_limit_reason = CASE\n                 WHEN account_credit_observations.credential_generation = excluded.credential_generation\n                   THEN account_credit_observations.provider_limit_reason\n                 ELSE NULL\n               END\n             WHERE account_credit_observations.latest_started_attempt > 0\n               AND account_credit_observations.latest_started_attempt < 9223372036854775807\n             RETURNING latest_started_attempt",
+  "describe": {
+    "columns": [
+      {
+        "name": "latest_started_attempt",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "account_credit_observations",
+            "name": "latest_started_attempt"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "a5fa8c05f7113c30b39ace2f1232891af21fac6bbd501858f0be05d6126f9c21"
+}

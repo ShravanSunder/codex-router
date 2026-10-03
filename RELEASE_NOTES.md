@@ -1,10 +1,25 @@
 # Release Notes
 
+## 0.1.62
+
+- Add a Credits tab beside Resets in account options, with provider-reported balance and freshness, explicit refresh, and a saved Allow/Disallow preference.
+- Use credits only as a true last resort, after all eligible included-quota candidates, when the account’s saved switch is Allow and fresh provider-authoritative credits are available. HTTP session affinity and existing WebSockets yield when included quota becomes available; previous-response ownership keeps the existing reconnect/error contract. Account eligibility, floors, spend controls and generation still govern admission; the provider controls the debit. Unlimited and withheld available balances are supported; zero, depleted or unknown credits cannot admit a turn.
+- Responses, Responses compact, and image generation/edit share this credit permission. Image generation and editing can spend credits on Allow accounts.
+- Every Responses WebSocket performs a bounded local quota/credit reassessment before later turns, outside the turn/selection locks; it never makes a provider request per turn. Finish the active turn and deliver its terminal event before reconnecting. Ordinary OAuth renewal preserves ordinary included-quota sockets.
+- Add state migration `202610020001_credit_usage_state` for saved credit policy and provider observations. Older binaries reject this newer schema, so downgrade is blocked; back up state before upgrading. Quota JSON includes `credit_usage`, and credit admissions report `credit_backed`. Eligible credit accounts held behind included quota report `held_for_included_quota`.
+- Show pool availability and observation freshness across all accounts in the quota header.
+
 ## 0.1.61
 
 - Sign `codex-router`, `agent-collaboration` and `agent-sessions` with the Developer ID identity of team `974QD84WVC` under fixed identifiers (`dev.shravansunder.<executable>`), with the hardened runtime and a secure timestamp. Keychain approvals now belong to that identity and survive upgrades instead of prompting after every release. After the first signed install, the next Host restart asks once per Router Keychain item; choose **Always Allow**.
 - Local Apple Silicon `cargo run`/`cargo test` sign the same executables as `dev.shravansunder.<executable>.debug`, a separate identity, so debug rebuilds stop prompting and debug builds never share production Keychain approvals. A debug Router started directly by a debug-host example can be signed with `scripts/cargo_debug_signing_runner.sh --sign-only target/debug/codex-router`.
 - Releases require the `APPLE_CERTIFICATE_BASE64` and `APPLE_CERTIFICATE_PASSWORD` secrets and fail before publishing without them; the tap job and the local tap publisher reject a binary without the release identity.
+
+## 0.1.60
+
+- Record the Role each board message was posted under (Participant history); messages carry an optional `postedAsRole` when attribution is provable. Unprovable history stays unset and existing messages aren't backfilled.
+- Board migration backfills history fields only where stored rows prove their values.
+- UPGRADE: `Message` uses deny_unknown_fields, so long-running clients from older binaries (e.g. agent-router MCP servers) reject messages with `postedAsRole` and may report a committed post as an unknown outcome. Upgrade, restart the Host, then restart agent sessions whose MCP servers predate the upgrade.
 
 ## 0.1.59
 
