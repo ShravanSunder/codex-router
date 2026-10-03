@@ -404,10 +404,12 @@ fn output_limit_reasons_decode_strictly_and_validate_in_operation_wait() {
         );
     }
 
-    assert!(serde_json::from_value::<
-        collaboration_protocol::ConversationOutputUnavailableReason,
-    >(json!("futureReason"))
-    .is_err());
+    assert!(
+        serde_json::from_value::<collaboration_protocol::ConversationOutputUnavailableReason>(
+            json!("futureReason")
+        )
+        .is_err()
+    );
 }
 
 #[test]
