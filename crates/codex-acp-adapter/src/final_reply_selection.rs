@@ -114,7 +114,7 @@ mod tests {
     }
 
     #[test]
-    fn final_answer_wins_over_commentary_tool_activity_and_earlier_final_answers() {
+    fn final_answer_wins_over_commentary_tool_activity_and_later_unknown_phase() {
         let mut selection = FinalReplySelection::new();
         observe(
             &mut selection,
@@ -133,6 +133,11 @@ mod tests {
             &mut selection,
             &completed_message(Some("final_answer"), "last answer"),
         );
+        // A later unrecognized phase is not eligible to replace the final answer.
+        observe(
+            &mut selection,
+            &completed_message(Some("analysis"), "later unknown phase"),
+        );
         selection.observe_completed_item(
             "thread-a",
             "turn-a",
@@ -149,9 +154,6 @@ mod tests {
     fn absent_phase_falls_back_to_last_unphased_message_and_never_commentary() {
         let mut selection = FinalReplySelection::new();
         observe(&mut selection, &completed_message(None, "first unphased"));
-        let mut null_phase = completed_message(None, "null phase");
-        null_phase["params"]["item"]["phase"] = Value::Null;
-        observe(&mut selection, &null_phase);
         observe(
             &mut selection,
             &completed_message(Some("commentary"), "commentary"),
@@ -161,6 +163,20 @@ mod tests {
         assert_eq!(
             selection.metadata(),
             json!({"kind":"available","text":"last unphased"})
+        );
+    }
+
+    #[test]
+    fn null_phase_alone_is_a_reply_candidate() {
+        let mut selection = FinalReplySelection::new();
+        let mut null_phase = completed_message(None, "null phase reply");
+        null_phase["params"]["item"]["phase"] = Value::Null;
+        // No absent-phase item follows it to hide loss of null-phase handling.
+        observe(&mut selection, &null_phase);
+
+        assert_eq!(
+            selection.metadata(),
+            json!({"kind":"available","text":"null phase reply"})
         );
     }
 
@@ -263,16 +279,17 @@ mod tests {
     #[test]
     fn last_completed_plan_wins_over_surrounding_agent_prose() {
         let mut selection = FinalReplySelection::new();
+        observe(&mut selection, &completed_plan("first plan"));
         observe(
             &mut selection,
-            &completed_message(Some("final_answer"), "prose before plan"),
+            &completed_message(Some("final_answer"), "prose before last plan"),
         );
-        observe(&mut selection, &completed_plan("first plan"));
+        observe(&mut selection, &completed_plan("last plan"));
+        // This is the last completed reply-like item, but the plan still wins.
         observe(
             &mut selection,
             &completed_message(Some("final_answer"), "prose after plan"),
         );
-        observe(&mut selection, &completed_plan("last plan"));
 
         assert_eq!(
             selection.metadata(),

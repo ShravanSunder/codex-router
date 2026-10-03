@@ -46,6 +46,8 @@ enum FinalReplyFixture {
     PlanOnly,
     PlanWithProse,
 }
+#[path = "native_prompt_execution/early_cancellation.rs"]
+mod early_cancellation;
 fn expected_final_reply(fixture: FinalReplyFixture) -> Value {
     match fixture {
         FinalReplyFixture::Available => json!({"kind":"available","text":"selected answer"}),
@@ -315,11 +317,17 @@ async fn prompt_buffers_early_output_and_settles_native_completion_once() {
             ) {
                 socket.send(Message::Text(json!({"method":"item/completed","params":{"threadId":"thread-a","turnId":"turn-a","item":{"type":"plan","id":"plan-first","text":"first plan"}}}).to_string().into())).await.unwrap_or_else(|error| panic!("first plan: {error}"));
             }
-            if let Some(text) = completed_reply.as_ref() {
+            if let Some(text) = completed_reply.as_ref()
+                && reply != FinalReplyFixture::PlanWithProse
+            {
                 socket.send(Message::Text(json!({"method":"item/completed","params":{"threadId":"thread-a","turnId":"turn-a","item":{"type":"agentMessage","id":"final-a","phase":reply_phase,"text":text}}}).to_string().into())).await.unwrap_or_else(|error| panic!("completed message: {error}"));
             }
             if reply == FinalReplyFixture::PlanWithProse {
                 socket.send(Message::Text(json!({"method":"item/completed","params":{"threadId":"thread-a","turnId":"turn-a","item":{"type":"plan","id":"plan-last","text":"last completed plan"}}}).to_string().into())).await.unwrap_or_else(|error| panic!("last plan: {error}"));
+                let text = completed_reply
+                    .as_ref()
+                    .unwrap_or_else(|| panic!("plan fixture prose"));
+                socket.send(Message::Text(json!({"method":"item/completed","params":{"threadId":"thread-a","turnId":"turn-a","item":{"type":"agentMessage","id":"prose-after-plan","phase":"final_answer","text":text}}}).to_string().into())).await.unwrap_or_else(|error| panic!("prose after last plan: {error}"));
             }
             if matches!(
                 reply,
@@ -448,7 +456,7 @@ async fn prompt_buffers_early_output_and_settles_native_completion_once() {
                         if value["params"]["item"]["type"] == "plan"
                 ));
             } else if matches!(reply, FinalReplyFixture::PlanWithProse) {
-                for expected_type in ["plan", "agentMessage", "plan"] {
+                for expected_type in ["plan", "plan", "agentMessage"] {
                     assert!(matches!(
                         prompt.next_event(&mut catalog).await.unwrap(),
                         Some(PromptEvent::NativeNotification(value))

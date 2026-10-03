@@ -147,7 +147,7 @@ pub async fn run_prompt_task(mut inputs: PromptTaskInputs) -> PromptTaskCompleti
     }
 }
 fn cancelled_response(id: &Value, state: &str) -> Value {
-    json!({"jsonrpc":"2.0","id":id,"result":{"stopReason":"cancelled","_meta":{"codex-router/nativeInterruption":{"state":state}}}})
+    json!({"jsonrpc":"2.0","id":id,"result":{"stopReason":"cancelled","_meta":{"codex-router/nativeInterruption":{"state":state},"codex-router/finalReply":{"kind":"available","text":null}}}})
 }
 fn failure(id: &Value, message: &str) -> Value {
     json!({"jsonrpc":"2.0","id":id,"error":{"code":-32603,"message":"Native prompt rejected","data":{"detail":message}}})
