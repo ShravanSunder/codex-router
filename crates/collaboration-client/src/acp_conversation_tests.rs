@@ -211,13 +211,13 @@ async fn sdk_identity_preflight_fails_before_acp_discovery_or_mutation() {
 }
 
 #[test]
-fn prompt_update_buffer_has_count_and_byte_limits() {
-    let mut updates = BoundedPromptUpdates::new();
-    updates.bytes = MAX_PROMPT_RESULT_BYTES;
-    assert!(matches!(
-        updates.push(serde_json::json!({"kind":"update"})),
-        Err(crate::ClientError::Protocol("ACP prompt updates overflow"))
-    ));
+fn missing_final_reply_metadata_reports_output_as_not_retained() {
+    let output = super::codex_final_reply_output(&serde_json::json!({"stopReason":"end_turn"}))
+        .expect("older Host success remains usable");
+    assert_eq!(
+        serde_json::to_value(output).unwrap(),
+        serde_json::json!({"kind":"unavailable","reason":"notRetained"})
+    );
 }
 
 #[test]

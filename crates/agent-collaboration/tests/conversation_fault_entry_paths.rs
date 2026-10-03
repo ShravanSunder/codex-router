@@ -438,6 +438,10 @@ async fn compiled_cli_conversation_records_deserialize_for_success_errors_deadli
             )
             .expect("load JSON");
             assert_eq!(load["method"], "session/load");
+            assert_eq!(
+                load.pointer("/params/_meta/codex-router~1replayHistory"),
+                Some(&json!(false))
+            );
             writer
                 .write_all(
                     format!(
@@ -458,7 +462,7 @@ async fn compiled_cli_conversation_records_deserialize_for_success_errors_deadli
             .expect("prompt JSON");
             assert_eq!(prompt["method"], "session/prompt");
             match outcome {
-                "success" => writer.write_all(format!("{}\n", json!({"jsonrpc":"2.0","id":prompt["id"],"result":{"stopReason":"end_turn","_meta":{"codexRouter":{"effectiveModel":"gpt-5.6-sol","effectiveEffort":"low","effectiveAccess":"workspace-write","settingsObservation":{"kind":"observed","source":"threadStart","observedAt":"2026-09-19T00:00:00Z","routerAccess":"workspace-write","nativeSandbox":null,"permissionProfile":null,"approvalPolicy":null,"approvalsReviewer":null}}}}})).as_bytes()).await.expect("success response"),
+                "success" => writer.write_all(format!("{}\n", json!({"jsonrpc":"2.0","id":prompt["id"],"result":{"stopReason":"end_turn","_meta":{"codexRouter":{"effectiveModel":"gpt-5.6-sol","effectiveEffort":"low","effectiveAccess":"workspace-write","settingsObservation":{"kind":"observed","source":"threadStart","observedAt":"2026-09-19T00:00:00Z","routerAccess":"workspace-write","nativeSandbox":null,"permissionProfile":null,"approvalPolicy":null,"approvalsReviewer":null}},"codex-router/finalReply":{"kind":"available","text":"CLI final answer"}}}})).as_bytes()).await.expect("success response"),
                 "rejected" => writer.write_all(format!("{}\n", json!({"jsonrpc":"2.0","id":prompt["id"],"error":{"code":-32603,"message":"fixture rejection","data":{"kind":"nativeRejected"}}})).as_bytes()).await.expect("rejection response"),
                 "deadline" | "interrupt" => {
                     if outcome == "interrupt" {
@@ -562,6 +566,15 @@ async fn compiled_cli_conversation_records_deserialize_for_success_errors_deadli
     assert_eq!(
         success_result["prompt"]["settlement"]["detail"]["kind"],
         "codexPrompt"
+    );
+    assert_eq!(
+        success_result["prompt"]["settlement"]["detail"]["output"],
+        json!({"kind":"available","text":"CLI final answer"})
+    );
+    assert!(
+        success_result["prompt"]["settlement"]["detail"]
+            .get("updates")
+            .is_none()
     );
     assert!(success_result["prompt"].get("operationId").is_none());
 

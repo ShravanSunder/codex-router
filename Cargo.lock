@@ -1005,6 +1005,7 @@ dependencies = [
 name = "collaboration-client"
 version = "0.1.61"
 dependencies = [
+ "codex-acp-adapter",
  "codex-native-integration",
  "collaboration-protocol",
  "collaboration-service",
