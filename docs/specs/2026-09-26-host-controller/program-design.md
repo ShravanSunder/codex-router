@@ -211,19 +211,21 @@ pub enum GenerationFailure {
     SchemaExportFailed, AliasOccupied, ServicesDidNotAdopt, PublicationFailed,
 }
 pub struct GenerationEvidence {                 // reused publication boundary (collaboration_runtime.rs:719-750,834-865)
-    pub executable: ExecutableIdentity,         // existing codex-native-integration type
+    pub executable: RecordedExecutableIdentity, // new immutable record owned by codex-native-integration; not a freshly observed ExecutableIdentity
     pub schema: GenerationSchemaAvailability,
 }
 #[serde(tag = "availability", rename_all = "camelCase")]
 pub enum GenerationSchemaAvailability {
     Ready {
-        schema_digest: NativeSchemaDigest,      // existing
+        schema_digest: NativeSchemaDigest,      // new validated digest in codex-native-integration; existing NativeSchemaBundle::digest returns raw &[u8; 32]
         schema_bundle_dir: PathBuf,             // keeper-private 0700 dir, content-addressed by digest
     },
     Unavailable { reason: SchemaUnavailableReason }, // real generation/alias/executable; raw relay only
 }
 pub enum SchemaUnavailableReason { ExportFailed }
-// TryFrom validates Ready's executable/digest/bundle together. Unavailable never manufactures a digest or bundle.
+// Wire TryFrom validates record/path/digest shape. Ready's actual executable and bundle match are checked
+// by the role's existing-style preparation/publication observation below, not by deserialization alone.
+// Unavailable never manufactures a digest or bundle.
 // Every GenerationCurrentPayload and HandoffGeneration carries this same schema state.
 
 // ---------- KeeperChannel frames ----------
@@ -526,6 +528,58 @@ pub enum GenerationHealth { Healthy, Unverified, Exited }
 pub enum ChildHealth { Healthy, ChannelBroken, Exited }
 ```
 
+**Executable and schema evidence across processes.** The current
+`codex-native-integration::ExecutableIdentity` has private canonical-path and
+whole-file digest fields (`native_executable_identity.rs:16-19`), exposes only
+`canonical_path`, and is constructed by hashing the file. It is not a serde
+record and has no reconstruction constructor. The existing bundle exposes its
+digest as `&[u8; 32]` (`native_schema_bundle.rs:81-83`); no
+`NativeSchemaDigest` type exists today. The transport therefore needs the
+following completion at that same semantic owner, not a copy of its private
+domain type in the keeper:
+
+- `RecordedExecutableIdentity` lives beside `ExecutableIdentity` in native
+  integration. It contains the recorded absolute canonical path and complete
+  SHA-256 digest, with fallible structural constructors and immutable
+  accessors. `From<&ExecutableIdentity>` captures the already-observed fields;
+  comparison with an observed `ExecutableIdentity` uses that owner's existing
+  whole-file identity algorithm. A decoded record is a claim about captured
+  identity, never evidence that the current file was re-observed. Existing
+  hashing constructors and `ExecutableIdentity` callers remain intact.
+- `NativeSchemaDigest` is a new validated native-integration newtype, owned by
+  the bundle identity responsibility. Its wire form is canonical lowercase
+  `sha256:<64 hexadecimal digits>`, the same encoding currently published by
+  `collaboration_runtime.rs:858-866`. Construction from a bundle's computed
+  bytes and fallible parsing use one algorithm/encoding. Existing bundle
+  canonicalization and `digest()` behavior are unchanged.
+- The keeper-protocol wire records contain path/digest data and use `TryFrom`
+  into those recorded/domain values before effectful consumers. They do not
+  deserialize directly into an observed `ExecutableIdentity`, expose its
+  fields or introduce a keeper-to-collaboration dependency.
+- For `Ready`, the candidate generation's export remains tied to an observed
+  executable before publication. Services Prepare reads the bundle, computes
+  its existing canonical digest, and observes the executable on
+  `spawn_blocking` through the existing retained hash task; compare both with
+  the announced record. Mismatch retains the existing
+  `ExecutableMismatch`/`DigestMismatch` rejection. Wire shape validation is
+  insufficient for schema compilation/admission.
+- Self-exec phase 1 validates the record's structural shape and fd/envelope
+  authority only; it neither hashes an executable nor runs a schema exporter
+  or starts a task to establish generation health. Phase 2 retains the
+  existing alias-probe/item-health policy. A healthy adopted generation keeps
+  its captured record even if the executable path has since changed; no
+  fabricated fresh observation or changed fatal/item-local failure policy.
+  `Unavailable` carries the real captured record without inventing bundle
+  authority, preserving §6.3's raw-only behavior.
+
+Proof uses real temporary executable and bundle files: captured-record round
+trip, malformed path/digest refusal, same-path changed-content rejection during
+Prepare, bundle mismatch rejection, and phase-1 decoding with the recorded
+executable path removed while the independently owned generation remains live.
+The latter must not hash/spawn or become a fatal envelope error; phase-2 health
+still decides adoption. These observations extend the existing evidence and
+handoff proof seams, not a new state store or trust boundary.
+
 ProviderLink shapes live in the new `provider-link-protocol` crate. Every payload
 type is RSP's, consumed and never forked:
 
@@ -801,7 +855,7 @@ agent-provider-services       → acp-client-runtime, session-event-model, provi
 agent-collaboration-services  → provider-link-protocol (not acp-client-runtime once P3 lands)
 provider-link-protocol        → session-event-model, serde, uuid (never acp-client-runtime; the conversions live in agent-provider-services and agent-collaboration-services)
 codex-acp-adapter             → session-event-model (RSP codec), …
-codex-router-keeper-protocol  → codex-native-integration (ExecutableIdentity, NativeSchemaDigest), serde, uuid, chrono, semver, rustix(net)
+codex-router-keeper-protocol  → codex-native-integration (RecordedExecutableIdentity and NativeSchemaDigest, both added at their existing semantic owners), serde, uuid, chrono, semver, rustix(net)
 ```
 
 **Forbidden edges:**
