@@ -237,7 +237,7 @@ pub enum SchemaUnavailableReason { ExportFailed }
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum KeeperToChild {
     ListenerGrant { listeners: Vec<ListenerKind> }, // rights in list order
-    Prepare { generation: Option<GenerationCurrentPayload>, mode: PrepareMode }, // services: generation always Some once one exists
+    Prepare { generation: Option<GenerationPreparation>, mode: PrepareMode }, // services: Some once a candidate or current generation exists; explicit evidence use below
     Activate { handover: Option<RoleHandover> },     // services: the outgoing child's ServicesHandover, relayed unread (6.5)
     Deactivate { reason: DeactivateReason, handover_to: Option<RoleHandoverVersion> }, // services: the incoming child's accepted version
     PrepareGeneration(GenerationCurrentPayload),     // services: stage and validate; admission unchanged (H5)
@@ -255,6 +255,13 @@ pub struct GenerationCurrentPayload {
     pub evidence: GenerationEvidence,
     pub server_display_name: Option<ServerDisplayName>, // preserves the existing optional validated readiness value (managed_app_server.rs:19-76,275-301), consumed by collaboration identity (collaboration_lifecycle.rs:25-57)
 }
+#[serde(tag = "evidenceUse", rename_all = "camelCase")]
+pub enum GenerationPreparation {
+    CandidateAdmission { payload: GenerationCurrentPayload }, // first admission of newly exported generation: observe executable and bundle
+    CurrentGeneration { payload: GenerationCurrentPayload },  // reuse keeper-committed generation: captured identity, verify bundle only
+}
+// PrepareGeneration always stages a candidate and uses CandidateAdmission validation. The keeper derives
+// this classification from its candidate/current slots; the child never infers it from PrepareMode or path existence.
 // Fresh: no other child of this kind is alive (fresh keeper start, crash respawn). Prepare may run the role's
 //   bootstrap creators and one-time writes (6.1): credential key/marker/token/affinity creation, service identity
 //   creation, proxy pooled-credential migration (today Host startup, startup_convergence.rs:23-31).
@@ -557,12 +564,24 @@ domain type in the keeper:
   deserialize directly into an observed `ExecutableIdentity`, expose its
   fields or introduce a keeper-to-collaboration dependency.
 - For `Ready`, the candidate generation's export remains tied to an observed
-  executable before publication. Services Prepare reads the bundle, computes
-  its existing canonical digest, and observes the executable on
-  `spawn_blocking` through the existing retained hash task; compare both with
-  the announced record. Mismatch retains the existing
-  `ExecutableMismatch`/`DigestMismatch` rejection. Wire shape validation is
-  insufficient for schema compilation/admission.
+  executable before publication. `GenerationPreparation::CandidateAdmission`
+  (generation 1, a recovery candidate, or a schema-changed incoming services
+  child for N+1) and `PrepareGeneration{N+1}` read the bundle, compute its
+  existing canonical digest, and observe the executable on `spawn_blocking`
+  through the retained hash task; compare both with the announced record.
+  Observation failure or mismatch rejects as `ExecutableMismatch`; a bundle
+  digest mismatch remains `DigestMismatch`. Wire shape validation is
+  insufficient for a new candidate's schema admission.
+- `GenerationPreparation::CurrentGeneration` is a services replacement, crash
+  respawn or post-exec child recovery against an already keeper-committed
+  generation. Validate record/path/digest shape and recompute the bundle's
+  canonical digest, but **do not re-hash the executable path**. The record
+  identifies the already-running process image; a changed or removed installed
+  path does not change that image or make its retained schema evidence invalid.
+  Keep generation/alias/bundle/record together and retain mismatch rejection for
+  the bundle. The keeper selects this classification from its committed slot;
+  `Fresh` versus `Replacement` is not evidence-use authority. This preserves R3
+  without admitting an unobserved new candidate or adding a trust source.
 - Self-exec phase 1 validates the record's structural shape and fd/envelope
   authority only; it neither hashes an executable nor runs a schema exporter
   or starts a task to establish generation health. Phase 2 retains the
@@ -574,10 +593,13 @@ domain type in the keeper:
 
 Proof uses real temporary executable and bundle files: captured-record round
 trip, malformed path/digest refusal, same-path changed-content rejection during
-Prepare, bundle mismatch rejection, and phase-1 decoding with the recorded
+candidate admission, bundle mismatch rejection, and phase-1 decoding with the recorded
 executable path removed while the independently owned generation remains live.
 The latter must not hash/spawn or become a fatal envelope error; phase-2 health
-still decides adoption. These observations extend the existing evidence and
+still decides adoption. Against that current generation, an E4 crash respawn and
+an E7 services replacement both prepare and become active after its recorded
+executable path is removed or changed; neither re-hashes that path. A candidate
+with the same-path change still fails before publication. These observations extend the existing evidence and
 handoff proof seams, not a new state store or trust boundary.
 
 ProviderLink shapes live in the new `provider-link-protocol` crate. Every payload
@@ -905,7 +927,7 @@ that moves to Activate.
 
 | Effect | Services | Proxy | Phase |
 |---|---|---|---|
-| Read configuration; for `GenerationSchemaAvailability::Ready`, validate and compile payload schemas from `GenerationEvidence` (as today, `collaboration_runtime.rs:719-750,834-865`); for `Unavailable`, prepare raw-native admission and Codex ACP's `SchemaUnavailable` degradation without compiling schemas (6.3). Build in-memory services, including `SubscriptionDeliveryService::new` (`subscription_service.rs:73-101`, no spawn and no write); schema-dependent store construction waits for Activate when migrations are pending. | yes | build the resolver factory (`credential_runtime.rs:160-180`, which does no refresh); build runtime state without actors | **Prepare** |
+| Read configuration; for `GenerationSchemaAvailability::Ready`, validate and compile payload schemas from `GenerationEvidence`. The keeper supplies explicit `GenerationPreparation`: `CandidateAdmission` observes executable and bundle before first publication (today's `collaboration_runtime.rs:719-750,834-865` boundary); `CurrentGeneration` validates captured record and bundle, never re-hashing the current process's installed path (§4). For `Unavailable`, prepare raw-native admission and Codex ACP's `SchemaUnavailable` degradation without compiling schemas (6.3). Build in-memory services, including `SubscriptionDeliveryService::new` (`subscription_service.rs:73-101`, no spawn and no write); schema-dependent store construction waits for Activate when migrations are pending. | yes | build the resolver factory (`credential_runtime.rs:160-180`, which does no refresh); build runtime state without actors | **Prepare** |
 | Open stores **without migrating**: connect, then compare the applied migration set with this image's. A store with migrations this image doesn't know → `PrepareFailed{StoreSchemaNewerThanImage}` (never downgrade). Pending migrations are recorded and run first thing at Activate. Today every opener migrates on open: board (`board_connection.rs:24-33`, `board_schema_migrations.rs:38-90`, including the #121 participant-history backfill), automation (`automation_connection.rs:101-110`) and provider operations (`provider_operation_store.rs:105-115`). Each gains a non-migrating open, and the migrating open stays for Activate. | yes | the state DB (`codex-router-state` migrations, including #110's claim purpose and #115's credit state), the same way | **Prepare** (read) / **Activate** (migrate) |
 | Parse broker routes and histories **without rewriting them**, for validation and warm-up only. Today's `InteractionHistoryStore::load` rewrites every Pending row to `Cancelled{HostRestarted}` and upgrades undated rows, then persists (`interaction_history_store.rs:58-124`). It splits into a pure parse and a reconciliation write. The Prepare parse is **never authoritative**, because the old child keeps writing these whole-file stores until `Deactivated` (`interaction_broker.rs:595-619`, `interaction_history_store.rs:594-624`). At Activate, after the old child's write barrier and before the first mutation, the incoming child rereads routes and both histories, then reconciles them against the handover (6.5) and the `Promoted` cut (6.11) (RC3). The rule covers every whole-file JSON store; SQLite stores are read in transactions and need no reread. | yes | — | **Prepare** (parse) / **Activate** (reread, reconcile, write) |
 | Secret store and local credentials | — | **`Replacement`: validate-only (RC5).** Read the existing Keychain data key with no create path. Read the existing store id and format-v2 marker with no publish. Read the existing local Router token and affinity secret. The ordinary opener is not used here, because it creates: `load_or_create_pooled_credential_data_key` (`encrypted_credential_store.rs:75-78`, `keychain_data_key.rs:166-184`), the v2 marker for an empty store (`encrypted_credential_store.rs:163-176`), the token (`local_router_token.rs:77-85`) and the affinity secret (`affinity_secret.rs:58-74`). A missing or unreadable prerequisite gives `PrepareFailed{SecretStoreUnavailable}`, and the old proxy keeps serving. The one exception: when the active proxy reported `Degraded{PooledCredentials, CredentialStoreUnavailable}`, the candidate may come up the same way, still creating nothing. A Keychain prompt or a locked keychain therefore fails the candidate, not the service. The read runs on `spawn_blocking` under `PREPARE_DEADLINE`, because it has no deadline of its own. **`Fresh`:** today's creators (token, key, marker, affinity secret) followed by pooled-credential migration (next row). | **Prepare** |
@@ -1291,6 +1313,11 @@ would tear, or block forever.
 | child `ChannelBroken` (alive) | replace via 6.2 without a Deactivate message: the forced predicate (group SIGTERM, grace, group SIGKILL, observe bound), then Activate a prepared replacement | that kind's outcome becomes `Failed{AdoptionLost}` if it was not already `Replaced` |
 | child `Exited` | crash respawn (6.7) | same as above |
 
+Both child recovery paths use `Prepare.generation = CurrentGeneration{payload}`
+for an adopted current generation. They verify its retained bundle without
+re-hashing its recorded executable path. A fallback/recovery generation newly
+created by 6.3 is instead `CandidateAdmission` until first publication.
+
 **Operator continuity.**
 
 1. The old image sends `Progress KeeperReExecuting{update_id}`.
@@ -1673,6 +1700,13 @@ flowchart TB
 If the current generation crashes while a transition is held, a candidate
 already being prepared becomes the recovery candidate. Otherwise recovery waits
 for the settling predecessor's group stop, so the two-live invariant holds.
+
+An E4 crash while its generation remains current uses
+`GenerationPreparation::CurrentGeneration`; its installed executable path may
+have changed or vanished, but the running generation/alias and captured
+evidence remain authoritative. Verify the retained bundle, not that old path.
+Recovery of an exited generation creates a candidate with fresh observation,
+as in §4 and 6.3.
 
 **Which image a child runs: a retained slot image (RC6).** Homebrew deletes an
 upgraded formula's old keg as part of `brew upgrade`, unless
@@ -2154,6 +2188,7 @@ None stands in for another.
 | Platforms | Linux CI (#82) and macOS | none | SCM_RIGHTS, CLOEXEC after receipt, process groups and the symlink swap exercised on both; Linux-only flags (`MSG_CMSG_CLOEXEC`) are not relied on |
 | Generation publication (V2, V4, V7) | real keeper, fixture or pinned app-server, real services | none | rename failure after services staged N+1 (services stays on N); an N connection kept through promotion; retirement of N after N+1 is committed never drops N+1 admissions; commit-not-applied and commit-applied-but-ack-lost, each followed by a failed recovery Prepare (N retained, transition held, truthful `ServicesReplacementFailed`), for both `host app-server restart` and `update` |
 | Schema availability (V2, V4, V10) | real keeper/services and the schema-export failure seam | export failure only | fresh start or recovery of an exited generation publishes the real generation/alias/executable with Unavailable schema, raw native relay answers, Codex ACP reports SchemaUnavailable, and self-exec re-adopts the same raw-only state without invented digest/bundle. With any live predecessor, including live-but-unverified R11 fallback, export failure keeps that predecessor and E1 unchanged |
+| Generation evidence (V2, V4, V6, V10) | real temporary executable/bundle files, keeper and services | none | recorded-identity and canonical-digest round trip; malformed record rejected structurally without file I/O; CandidateAdmission and PrepareGeneration reject same-path changed content or missing executable before publication and reject bundle mismatch; CurrentGeneration E4 crash respawn, E7 services replacement and post-exec child recovery become active with recorded path removed/changed, verifying the retained bundle without re-hashing that path; phase-1 decoding never hashes/spawns or converts that removed path into a fatal envelope error |
 | Exec admission (V7, V10) | real keeper with controlled stop observations | an uninterruptible wait is simulated by the stop-observation seam, not manufactured | `DeferredChildRetiring{Draining}` after the drain bound and `{StuckAfterKill}` immediately: terminal `UpdateCompleted`, admission released, no exec, ownership retained |
 | Handoff (V10) | the real exec on macOS and Linux | none | child fd inventory (no leaked lock, listeners or channels), including after a later `RequestListener` grant; partial and oversized frames rejected; quiesce with held output; failed-exec resume; a manifest naming a live unrelated pid (`NotOurChild`) → never signalled, role restarted fresh ; the pre-exec header plus manifest file carrying a near-`MAX_FRAME_BYTES` manifest and 64 fds on macOS and Linux; a truncated manifest and a digest mismatch (`ManifestMismatch`, no signals); a stale `handoff-*.json` swept at the next start |
 | Prepare effects (RC5, RC3, V8) | real candidate E4 and E5 binaries against a snapshot of the shared state root (isolated debug root) | none | under `Replacement` with complete, missing and degraded prerequisites, then a forced Prepare failure: the snapshot is byte-identical. That covers the Keychain item (isolated keychain), store marker, token, affinity secret, service identity, control schema, histories and SQLite schema. Under `Fresh`, the creators run once |
