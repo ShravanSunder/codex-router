@@ -227,7 +227,7 @@ pub enum KeeperToChild {
     ListenerGrant { listeners: Vec<ListenerKind> }, // rights in list order
     Prepare { generation: Option<GenerationCurrentPayload>, mode: PrepareMode }, // services: generation always Some once one exists
     Activate { handover: Option<RoleHandover> },     // services: the outgoing child's ServicesHandover, relayed unread (6.5)
-    Deactivate { reason: DeactivateReason },
+    Deactivate { reason: DeactivateReason, handover_to: Option<RoleHandoverVersion> }, // services: the incoming child's accepted version
     PrepareGeneration(GenerationCurrentPayload),     // services: stage and validate; admission unchanged (H5)
     CommitGeneration { generation: GenerationId },   // services: new admissions → generation; earlier admissions stay live
     AbandonGeneration { generation: GenerationId },  // services: drop the staged generation
@@ -244,13 +244,17 @@ pub struct GenerationCurrentPayload {
     pub server_display_name: ServerDisplayName, // existing validated readiness value (managed_app_server.rs:19-76,275-301), consumed by collaboration identity (collaboration_lifecycle.rs:25-57)
 }
 // Fresh: no other child of this kind is alive (fresh keeper start, crash respawn). Prepare may run the role's
-//   one-time startup writes: proxy pooled-credential migration (today Host startup, startup_convergence.rs:23-31).
-// Replacement: an Active child of this kind is serving. Prepare is non-mutating (6.1).
-pub enum PrepareMode { Fresh, Replacement }
+//   bootstrap creators and one-time writes (6.1): credential key/marker/token/affinity creation, service identity
+//   creation, proxy pooled-credential migration (today Host startup, startup_convergence.rs:23-31).
+// Replacement: an Active child of this kind is serving. Prepare is non-mutating and creates nothing (6.1); it is
+//   told the active child's reported degradations so it may match, never exceed, them.
+pub enum PrepareMode { Fresh, Replacement { active_degraded: Vec<(ChildComponent, ChildDegradation)> } }
 // Opaque to the keeper: a role-owned, versioned body passed from the outgoing child to the incoming one.
 // serde_json::Value is right here because the keeper does not own this schema; agent-collaboration-services
 // parses it with TryFrom into its own ServicesHandover::V1 and treats an unknown version as unadoptable (6.5).
-pub struct RoleHandover { pub role: ComponentKind, pub body: serde_json::Value } // bounded by MAX_FRAME_BYTES
+pub struct RoleHandover { pub role: ComponentKind, pub version: RoleHandoverVersion, pub body: serde_json::Value } // bounded by MAX_FRAME_BYTES
+pub struct RoleHandoverVersion(NonZeroU32);
+pub enum DeactivateRefusal { HandoverIncompatible { produced: RoleHandoverVersion, wanted: RoleHandoverVersion }, HandoverTooLarge }
 pub enum ListenerKind { CollaborationControl, NativeRelay, AcpChannel, McpHttp, ProxyHttp, RouterSessionFace { endpoint: EndpointId }, ProviderLink }
 // RouterSessionFace = RSP app-server face socket router-sessions/<endpoint-id>.sock (e.g. claude-local.sock), bound today
 // only when the provider has a model catalog AND the owner Human identity resolved (collaboration_runtime.rs:554-603);
@@ -260,7 +264,7 @@ pub enum NoGenerationReason { StartupPending, CurrentExited, RecoveryExhausted }
 
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum ChildToKeeper {
-    Prepared { fingerprint: ComponentFingerprint },
+    Prepared { fingerprint: ComponentFingerprint, accepts_handover: Option<RoleHandoverVersion> }, // services: exactly one accepted version
     PrepareFailed { reason: PrepareFailure },
     Active,
     Deactivated { handover: Option<RoleHandover> }, // services: released turn owners (6.5); None for other roles
@@ -269,15 +273,16 @@ pub enum ChildToKeeper {
     GenerationCommitted { generation: GenerationId },
     GenerationRejected { generation: GenerationId, reason: EvidenceRejection },
     Quiesced(ChildSnapshot),                        // the child then holds output until Resume
-    Degraded { component: ServicesComponent, reason: ServicesDegradation },
-    Recovered { component: ServicesComponent },
+    Degraded { component: ChildComponent, reason: ChildDegradation },
+    Recovered { component: ChildComponent },
+    DeactivateRefused { reason: DeactivateRefusal }, // services: handover inadmissible; the child keeps serving (6.5)
     RequestListener { kind: ListenerKind },         // Prepare phase only; the keeper binds once, keeps it, and replies with ListenerGrant
 }
 pub struct ChildSnapshot {
     pub phase: ChildPhase,                          // Prepared | Active | Deactivating
     pub fingerprint: ComponentFingerprint,
     pub committed_generation: Option<GenerationId>,
-    pub degraded: Vec<(ServicesComponent, ServicesDegradation)>,
+    pub degraded: Vec<(ChildComponent, ChildDegradation)>,
 }
 pub enum ChildPhase { Prepared, Active, Deactivating }
 pub enum PrepareFailure {
@@ -288,8 +293,15 @@ pub enum PrepareFailure {
 }
 pub enum StoreKind { ProjectBoard, Automation, ProviderOperations, RouterState }
 pub enum EvidenceRejection { ExecutableMismatch, DigestMismatch, BundleUnreadable }
-pub enum ServicesComponent { Board, Delivery, Automation, Schedules, Mcp, AcpChannel, NativeRelay, Providers }
-pub enum ServicesDegradation { StoreUnavailable, SchemaMismatch, NoCurrentGeneration, ProviderUnavailable }
+pub enum ChildComponent {                       // role-neutral (was ServicesComponent)
+    Board, Delivery, Automation, Schedules, Mcp, AcpChannel, NativeRelay, Providers, CodexTurnAdoption, // E4
+    PooledCredentials,                                                                                  // E5
+}
+pub enum ChildDegradation {
+    StoreUnavailable, SchemaMismatch, NoCurrentGeneration, ProviderUnavailable,
+    AdoptionPending { turns: u32 },             // 6.5: handed-over turns not yet adopted
+    CredentialStoreUnavailable,                 // E5 serving with KeyUnavailable (encrypted_credential_store.rs:31-40)
+}
 
 // ---------- updates (role-specific outcomes) ----------
 #[serde(tag = "outcome", rename_all = "camelCase")]
@@ -311,7 +323,7 @@ pub enum ChildUpdateOutcome {
     Replaced,
     Failed { reason: ChildUpdateFailure },
 }
-pub enum ChildUpdateFailure { PrepareFailed(PrepareFailure), PrepareTimedOut, ActivationFailed, AdoptionLost }
+pub enum ChildUpdateFailure { PrepareFailed(PrepareFailure), PrepareTimedOut, ActivationFailed, AdoptionLost, HandoverRefused(DeactivateRefusal) }
 
 pub struct UpdateOutcome {
     pub update_id: UpdateId,
@@ -402,12 +414,13 @@ pub enum GroupStopResult { Graceful, Killed, TimedOutStillRunning, DrainOverrun 
 // DrainOverrun: a responsive, deactivated proxy still settling a claimed renewal past RENEWAL_DRAIN_BOUND; it is never signalled (H4)
 pub struct HandoverRecord { pub kind: ComponentKind, pub interruption: Duration, pub outcome: HandoverOutcome, pub at: DateTime<Utc> }
 pub enum HandoverOutcome { WithinBudget, ExceededBudget, IncomingDiedBeforeActive } // the last is the owner-authorized R7 exception
-pub enum ChildState { Starting, Prepared, Active, Deactivating, Stopping, Crashed { consecutive: u32, last_at: DateTime<Utc> } }
+pub enum ChildState { Starting, Prepared, Active, Deactivating, Stopping, Crashed { consecutive: u32, last_at: DateTime<Utc>, blocked: Option<RespawnBlock> } }
+pub enum RespawnBlock { ImageUnavailable } // the retained slot image is missing or changed (6.7)
 pub struct ChildStatus {
     pub state: ChildState,
     pub pid: Option<ChildPid>,
     pub fingerprint: Option<ComponentFingerprint>,
-    pub degraded: Vec<(ServicesComponent, ServicesDegradation)>,
+    pub degraded: Vec<(ChildComponent, ChildDegradation)>,
 }
 
 // ---------- self-exec handoff ----------
@@ -419,7 +432,6 @@ pub enum KeeperHandoff {
         launch_path: InstalledExecutablePath,     // default E7 target; carried, never re-derived (6.7)
         next_generation: GenerationNumber,
         recovery_budget: RecoveryBudget,
-        fds: Vec<HandoffFdRole>,                  // rights order; each role at most once, except Listener by kind
         current_generation: Option<HandoffGeneration>,
         settling_generation: Option<HandoffGeneration>,
         agent_collaboration_services: Option<HandoffChild>,
@@ -430,7 +442,15 @@ pub enum KeeperHandoff {
         settle_remaining: Option<Duration>,       // monotonic remainder, never a wall-clock deadline
     },
 }
+// Sent alone on the pre-exec socketpair with every fd as SCM_RIGHTS; ≤ HANDOFF_HEADER_MAX including ancillary data.
+pub struct KeeperHandoffHeader {
+    pub version: HandoffVersion,                  // "2"
+    pub manifest_len: u32,                        // ≤ MAX_FRAME_BYTES
+    pub manifest_sha256: [u8; 32],
+    pub fds: Vec<HandoffFdRole>,                  // rights order; exactly one Manifest
+}
 pub enum HandoffFdRole {
+    Manifest,                                     // unlinked O_RDONLY file holding the KeeperHandoff::V2 JSON
     SingletonLock,
     OperatorListener,
     Listener { kind: ListenerKind },
@@ -439,7 +459,7 @@ pub enum HandoffFdRole {
 }
 pub struct HandoffGeneration { pub id: GenerationId, pub pid: ChildPid, pub alias: GenerationAliasPath, pub evidence: GenerationEvidence }
 pub struct HandoffChild { pub pid: ChildPid, pub snapshot: ChildSnapshot, pub held_output: Vec<ChildToKeeper>, pub image: SlotImage }
-pub struct SlotImage { pub path: PathBuf, pub device: u64, pub inode: u64, pub size: u64, pub modified: SystemTime } // the file a slot's child was spawned from (6.7)
+pub struct SlotImage { pub retained_path: PathBuf, pub file_sha256: [u8; 32], pub device: u64, pub inode: u64 } // the keeper-retained file a slot's children spawn from (6.7)
 pub struct InFlightUpdate {
     pub update_id: UpdateId,
     pub target: BuildInfo,
@@ -449,12 +469,13 @@ pub struct InFlightUpdate {
 }
 
 // Phase 1 domain type: authority validated; nothing signalled yet.
-pub struct ValidatedHandoff { /* only from TryFrom<(KeeperHandoff, Vec<OwnedFd>)> */ }
+pub struct ValidatedHandoff { /* only from TryFrom<(KeeperHandoffHeader, KeeperHandoff, Vec<OwnedFd>)>: rights match header roles, manifest matches header digest */ }
 
 #[derive(thiserror::Error)]
 pub enum HandoffInvalid {                         // phase 1, FATAL envelope/authority errors: the new image signals nothing and exits
     #[error("unsupported handoff version")] UnsupportedVersion,
     #[error("fd roles do not match the received rights")] FdManifestMismatch,
+    #[error("handoff manifest length or digest does not match its header")] ManifestMismatch,
     #[error("an fd has the wrong socket type or address for its role")] FdKindMismatch,
     #[error("singleton lock inode or device changed")] LockMismatch,
     #[error("identity or relationship invalid: {0}")] IdentityInvalid(IdentityDefect),
@@ -657,9 +678,11 @@ pub enum LinkRefusalReason { /* mirror of the serde enum that replaces RefusedAp
   the ledger *before* executing it. A record is held until E4 sends
   `OperationSettled`, so its memory is bounded by un-acknowledged operations, not
   by the ring.
-- **Non-blocking dispatch (H3).** The link reader never awaits a command's
-  completion. Each command goes to its session actor, and replies correlate by
-  `LinkRequestId`.
+- **Non-blocking dispatch (H3).** The link reader never awaits a command's or
+  a query's completion. Each goes to its session actor or a query task, and
+  replies correlate by `LinkRequestId`. So a long `WaitSessionIdle` never holds
+  up an `InteractionDecision` or a `Cancel` (round-trip and concurrency proof in
+  V11).
 - **Link replacement kills old request ids.** Their truth comes from the ledger
   in the next `Attached`.
 - **Decisions apply at most once.** `InteractionDecision` is idempotent per
@@ -700,7 +723,8 @@ boundary:
 | `SERVICES_CRASH_BACKOFF` | 0, 250 ms, 1 s, 5 s cap | |
 | `MAX_FRAME_BYTES` | 1 MiB | |
 | `MAX_FRAME_FDS` | 64 | |
-| `ADOPT_DEADLINE` | 5 s per handed-over thread | incoming E4 adoption by `thread/resume`; after `Active`, off the interruption path (6.5) |
+| `HANDOFF_HEADER_MAX` | 4 KiB | the pre-exec header and its rights; below the 8 KiB macOS socketpair buffer (6.4) |
+| `ADOPT_DEADLINE` | 5 s per resume attempt | incoming E4 adoption by `thread/resume`, after `Active` and off the interruption path. A missed attempt retries on `SERVICES_CRASH_BACKOFF`; responsibility is never dropped (6.5) |
 | `STANDBY_ATTACH_DEADLINE` | 10 s | E4 Prepare waits this long for a standby `Attached`; off the interruption path (H6) |
 | `FORCED_TERM_GRACE` | 150 ms | forced handover path: group SIGTERM before SIGKILL (R8, H6) |
 | `KILL_OBSERVE_BOUND` | 100 ms | forced path: observe up to this bound after SIGKILL, then Activate whether or not the group is reaped (owner D2) |
@@ -805,15 +829,16 @@ that moves to Activate.
 |---|---|---|---|
 | Read configuration; compile payload schemas from `GenerationEvidence` (validated as today, `collaboration_runtime.rs:719-750,834-865`); build in-memory services, including `SubscriptionDeliveryService::new` (`subscription_service.rs:73-101`, no spawn and no write) | yes | build the resolver factory (`credential_runtime.rs:160-180`, which does no refresh); build runtime state without actors | **Prepare** |
 | Open stores **without migrating**: connect, then compare the applied migration set with this image's. A store with migrations this image doesn't know → `PrepareFailed{StoreSchemaNewerThanImage}` (never downgrade). Pending migrations are recorded and run first thing at Activate. Today every opener migrates on open: board (`board_connection.rs:24-33`, `board_schema_migrations.rs:38-90`, including the #121 participant-history backfill), automation (`automation_connection.rs:101-110`) and provider operations (`provider_operation_store.rs:105-115`). Each gains a non-migrating open, and the migrating open stays for Activate. | yes | the state DB (`codex-router-state` migrations, including #110's claim purpose and #115's credit state), the same way | **Prepare** (read) / **Activate** (migrate) |
-| Read broker histories **without rewriting them**. Today's `InteractionHistoryStore::load` rewrites every Pending row to `Cancelled{HostRestarted}` and upgrades undated rows, then persists (`interaction_history_store.rs:58-124`). It splits into a pure parse and a reconciliation write, and the write runs at Activate (6.11). | yes | — | **Prepare** (read) / **Activate** (write) |
-| Secret store and local credentials | — | open the encrypted store with the ordinary opener: Keychain read plus a store-wide lock held for the open only (`encrypted_credential_store.rs:62-99`; the ready handle caches the data key and keeps no lock, `:45-58,75-78`). Under `Replacement`, the store must come up `Ready`, otherwise `PrepareFailed{SecretStoreUnavailable}` and the old proxy keeps serving. A Keychain prompt or a locked keychain therefore fails the candidate, not the service. The call runs on `spawn_blocking` under `PREPARE_DEADLINE`, because it has no deadline of its own. Ensure the local Router token and the affinity secret (both write only if absent, `affinity_secret.rs:58-77`). | **Prepare** |
+| Parse broker routes and histories **without rewriting them**, for validation and warm-up only. Today's `InteractionHistoryStore::load` rewrites every Pending row to `Cancelled{HostRestarted}` and upgrades undated rows, then persists (`interaction_history_store.rs:58-124`). It splits into a pure parse and a reconciliation write. The Prepare parse is **never authoritative**, because the old child keeps writing these whole-file stores until `Deactivated` (`interaction_broker.rs:595-619`, `interaction_history_store.rs:594-624`). At Activate, after the old child's write barrier and before the first mutation, the incoming child rereads routes and both histories, then reconciles them against the handover (6.5) and the `Promoted` cut (6.11) (RC3). The rule covers every whole-file JSON store; SQLite stores are read in transactions and need no reread. | yes | — | **Prepare** (parse) / **Activate** (reread, reconcile, write) |
+| Secret store and local credentials | — | **`Replacement`: validate-only (RC5).** Read the existing Keychain data key with no create path. Read the existing store id and format-v2 marker with no publish. Read the existing local Router token and affinity secret. The ordinary opener is not used here, because it creates: `load_or_create_pooled_credential_data_key` (`encrypted_credential_store.rs:75-78`, `keychain_data_key.rs:166-184`), the v2 marker for an empty store (`encrypted_credential_store.rs:163-176`), the token (`local_router_token.rs:77-85`) and the affinity secret (`affinity_secret.rs:58-74`). A missing or unreadable prerequisite gives `PrepareFailed{SecretStoreUnavailable}`, and the old proxy keeps serving. The one exception: when the active proxy reported `Degraded{PooledCredentials, CredentialStoreUnavailable}`, the candidate may come up the same way, still creating nothing. A Keychain prompt or a locked keychain therefore fails the candidate, not the service. The read runs on `spawn_blocking` under `PREPARE_DEADLINE`, because it has no deadline of its own. **`Fresh`:** today's creators (token, key, marker, affinity secret) followed by pooled-credential migration (next row). | **Prepare** |
+| Service identity and control schema | `Replacement`: load the existing service identity only (`service_identity_storage.rs:37-81` today loads or creates); absent → `PrepareFailed{StoreOpenFailed}`. `Fresh`: load or create. Control-schema publication (`control_schema_publication.rs:10-48`, called from `collaboration_runtime.rs:228,238-258`) writes files clients read, so it runs at **Activate**. | — | **Prepare** (identity) / **Activate** (schema publication) |
 | Pooled-credential migration (legacy store → format v2; writes a marker and deletes legacy payloads, `credential_migration.rs:100-125,218-312`) | — | `Fresh` only. Today the Host runs it before spawning `serve` (`startup_convergence.rs:23-31`, `router_credential_migration.rs:15-55`) and on explicit router restart (`explicit_router_restart.rs:57-64`). Under `Replacement` it never runs: the ordinary opener reports an incomplete legacy store as unavailable (`encrypted_credential_store.rs:180-195`), which fails the candidate. | **Prepare (`Fresh`)** |
 | Credential upkeep worker (both providers, `credential_upkeep_worker.rs:111-128,141-204,300-337`); background quota refresh, including Claude quota and its 401 recovery (`quota_background_refresh_worker.rs:93-188`, `quota_refresh_service.rs:152-215,316-355`); floor notifier (`server.rs:792-795`); runtime maintenance hints (`server.rs:763-765`); `LocalTokenReloadWatcher` (50 ms poll, `token_reload_watcher.rs:15-52`) | — | yes | **Activate** only. Cross-process refresh safety comes from #83's file lock plus durable claim. Duplicate quota polls, credit observations, maintenance and floor signals must not run in a Prepared process. |
-| Apply pending migrations recorded at Prepare. The old child is already `Deactivated`, so nothing else is writing. Once a store is migrated, the outgoing image is never reactivated: any Activate failure takes the crash path (6.7) with the installed image. | yes | yes | **Activate**, first step |
+| Apply pending migrations recorded at Prepare. **E4's stores** (board, automation, provider operations) have E4 as their only writer, so after `Deactivated` the migration is exclusive. **E5's state DB** is already multi-writer today: the CLI's account commands open it with migrations while `serve` runs (`codex-router-cli/src/account.rs:478,587` → `codex-router-state/src/sqlite.rs:279-300`). So its migrations must already be compatible with a still-running previous writer. E5's Activate migration therefore doesn't wait for `Drained`, and V8 checks this existing invariant with the old proxy mid-renewal. Prepare's non-migrating check uses the existing `open_read_only` (`sqlite.rs:306`). Once Deactivate has gone to the outgoing child, the slot's image is the incoming one (6.7). So any later Activate failure, before or after a migration, recovers with the incoming, schema-capable image and never reactivates the outgoing one. | yes | yes | **Activate**, first step |
 | Lifecycle journal prepare and retention (`collaboration_runtime.rs:259-270`, `lifecycle_store.rs:174-185`); address book rebuild (`address_book_rebuild.rs:8-23`); automation configuration recovery and manifest publication (`collaboration_runtime.rs:605-627`); provider supervisor start; wake, schedule and retention workers; MCP, control, relay, ACP and façade accept loops | yes | write and maintenance actors (`server.rs:709-723`); accept loop | **Activate** (exclusive; old child already Deactivated or killed) |
 | `SubscriptionDeliveryService::start`. Subscription restore clears every window's in-flight markers under `BEGIN IMMEDIATE` (`thread_subscription_records.rs:469-503`). Direct-message restore settles interrupted pushes as `outcome_unknown`, never resending them (`direct_message_recovery.rs:65-88`). Then it spawns one owner per reader (`subscription_service.rs:103-143,270-306`), and those owners write and egress (`direct_message_push.rs:121-145`, `subscription_push.rs:178-205`). | yes | — | **Activate** only. Running it in a Prepared process would clear the Active child's in-flight state and start duplicate readers (W15 item 14). |
 | Broker history reconciliation write and session-event hub population (in memory) | yes | — | **Activate** only; single-writer across the Prepare overlap |
-| Stop accepting. Hand detached Codex turns over (6.5). Stop subscription reader owners (cancel and join, `subscription_service.rs:247-254`): a push already marked attempted whose egress hasn't returned is settled by the incoming child's restore as `outcome_unknown` and never resent, which is today's crash semantics. Cancel and join the other workers (bounded). Close ProviderLink (providers keep running in E11). Flush the journal. | yes | stop accepting; reply `Deactivated` at once; close renewal admission; cancel pre-claim renewals; join response-side tasks (Claude passive quota observation and affinity publication, compressed SSE completion; the existing `affinity_record_tasks` tracker, `claude_edge/server_pipeline.rs:196-228,408-431`, `response_completion.rs:65-79`); await post-claim renewals until they return (≤ `RENEWAL_DRAIN_BOUND`, never killed while responsive); reply `Drained` (see below) | **Deactivate** |
+| Stop accepting. `LifecycleRelease` at the broker boundary, then the handover (6.5). Stop subscription reader owners (cancel and join, `subscription_service.rs:247-254`): a push already marked attempted whose egress hasn't returned is settled by the incoming child's restore as `outcome_unknown` and never resent, which is today's crash semantics. Cancel and join the other workers (bounded). Close ProviderLink (providers keep running in E11). Flush the journal. | yes | stop accepting; reply `Deactivated` at once; close renewal admission; cancel pre-claim renewals; join response-side tasks (Claude passive quota observation and affinity publication, compressed SSE completion; the existing `affinity_record_tasks` tracker, `claude_edge/server_pipeline.rs:196-228,408-431`, `response_completion.rs:65-79`); await post-claim renewals until they return (≤ `RENEWAL_DRAIN_BOUND`, never killed while responsive); reply `Drained` (see below) | **Deactivate** |
 | ProviderLink standby attach, and warming hub history from `AttachSnapshot` (6.11) | yes | — | **Prepare**: read-only toward E11 and toward `InteractionHistoryStore` and `ProviderOperationStore`; the first write comes after `Promoted`. Old E4's `Deactivated` means both stores are flushed. (S2) |
 | ProviderLink `Promote`; broker orphan reconciliation; ledger settlement | yes | — | **Activate** (message-sized, inside the window) |
 
@@ -1031,6 +1056,18 @@ sequenceDiagram
   4. release the transition.
 - A second restart during the settle gets `Busy{GenerationTransition}` (review
   G4).
+- **Schema export failure.**
+  - With a predecessor, the candidate fails: `Failed{SchemaExportFailed}`, and
+    N stays current.
+  - Without one (fresh start, crash recovery, adoption fallback), today's
+    degrade applies. Today that means retaining raw native access
+    (`managed_app_server.rs:161`). Here it means the generation is published
+    with no evidence: services report Codex ACP
+    `Degraded{AcpChannel, SchemaMismatch}`, and the relay stays a byte
+    pass-through.
+  - The evidence directory is content-addressed by digest, so the moved code
+    needs no `collaboration_service::new_service_uuid` (`:151`). That keeps the
+    keeper → collaboration edge forbidden.
 - A services connection admitted on N before the commit keeps talking to N's
   alias with N's schemas. It ends when N stops, is retired by
   `RetireGeneration{N}`, and re-admits on N+1. No mixed snapshot is possible
@@ -1084,9 +1121,10 @@ sequenceDiagram
   alt a child fails to quiesce in time
     HO->>K: Resume · Failed{QuiesceTimedOut} · old image continues
   end
-  HO->>HO: socketpair a/b · sendmsg(a, frame KeeperHandoff::V2, SCM_RIGHTS[…]) · dup2_stdin(b) · clear CLOEXEC on stdin only · drop a
-  HO->>Img: exec(installed executable, reconstructed host args, marker env) [existing mechanism]
-  Img->>Img: recvmsg(stdin) → frame + OwnedFds · CLOEXEC on all · stdin ← /dev/null
+  HO->>HO: write the KeeperHandoff::V2 manifest to a 0700 runtime file · open it O_RDONLY · unlink the path [changed]
+  HO->>HO: socketpair a/b · sendmsg(a, KeeperHandoffHeader{version, manifest_len, manifest_sha256, fd roles} + SCM_RIGHTS[manifest fd, …]) ≤ HANDOFF_HEADER_MAX · dup2_stdin(b) · clear CLOEXEC on stdin only · drop a [changed]
+  HO->>Img: exec(update target, reconstructed host args, marker env) [existing mechanism]
+  Img->>Img: recvmsg(stdin) → header + OwnedFds · CLOEXEC on all · read the manifest fd to EOF · check length and SHA-256 · stdin ← /dev/null [changed]
   Img->>Img: phase 1 TryFrom → ValidatedHandoff (versions, fd roles and kinds, lock inode, ids, alias names, update pairing)
   alt HandoffInvalid (fatal envelope or authority error)
     Img->>Img: signal nothing · log · exit non-zero (children orphaned: accepted debt)
@@ -1099,6 +1137,31 @@ sequenceDiagram
     Img->>Img: UpdateOutcome = InFlightUpdate + keeper outcome · last_update · release admission
   end
 ```
+
+**Why a header plus a manifest file.** Nothing reads the socketpair until after
+exec, because the only reader is this same process. So everything written
+before exec must fit the kernel buffer. A fresh AF_UNIX stream pair on macOS
+buffers 8 KiB: the Sunclaw Lead's probe saw SO_SNDBUF = SO_RCVBUF = 8192, and a
+nonblocking 1 MiB `sendmsg` with no reader returned 8192. A larger frame
+would tear, or block forever.
+
+- **The header** carries every fd as SCM_RIGHTS, including the manifest's, plus
+  the fd roles, so the rights bind to one bounded frame. It is capped at
+  `HANDOFF_HEADER_MAX` = 4 KiB, ancillary data included. A unit test checks the
+  worst case: 64 fds and the longest role list.
+- **The manifest** (child snapshots, held output, generations, the in-flight
+  update) is bounded by `MAX_FRAME_BYTES` as before. It travels as an unlinked
+  file, so it is never reachable by path.
+- **The alternatives don't work.** A larger SO_SNDBUF isn't portable (Linux caps
+  unprivileged sockets at `wmem_max`, about 208 KiB), a pipe has the same
+  limit, and raw fd numbers across exec need `unsafe`.
+- **Failure.** A length or digest mismatch is `HandoffInvalid::ManifestMismatch`,
+  which is fatal and signals nothing.
+- **Cleanup.** A keeper that dies between writing and unlinking leaves a
+  `handoff-*.json` in its 0700 runtime directory. The next keeper start sweeps
+  it.
+- Ordinary KeeperChannel frames are unaffected: their peer reads concurrently
+  and handles short writes (G6).
 
 **Phase-2 recovery**, one row per item; every other item stays adopted:
 
@@ -1139,6 +1202,13 @@ closed, because only duplicates were sent.
   `TaskTracker`, which drains with no deadline
   (`session_connection_registry.rs:206-236`,
   `unmaterialized_thread_holder.rs:1-33`).
+- **Approval identity is connection-local.** Each native approval gets a Router
+  permission id built from `(thread, turn, a per-task counter)`
+  (`native_prompt_execution.rs:180-190`). The broker mints a Router approval
+  record with an armed `CancellationMarker`
+  (`interaction_broker/native_approval.rs:119-157`). Dropping the waiting
+  future spawns an **untracked** task that writes `Cancelled` history
+  (`interaction_broker.rs:631-662`).
 - **Explicit cancel** (`PromptCommand::Cancel`) still runs `pending.cancel()`,
   which becomes `InterruptTurn` (`native_prompt_execution.rs:360-395`). An
   unsupported native callback or a projection error also cancels the turn, even
@@ -1149,9 +1219,7 @@ closed, because only duplicates were sent.
 - **`session/load` of an Active thread is refused** with `-32600`,
   `data.kind = "busy"` (`session_creation.rs:513-540`,
   `session_setup_task.rs:50-63`, asserted by `tests/prompt_detach.rs:300-328`).
-  An idle load still installs Ready with no reader
-  (`acp_connection_dispatch.rs:84-119`). The Codex route emits no
-  `_session/state`.
+  The Codex route emits no `_session/state`.
 
 **Upstream facts this relies on** (W19, verified at `rust-v0.160.0`):
 
@@ -1159,12 +1227,13 @@ closed, because only duplicates were sent.
   interrupts a turn (`message_processor.rs:864-899`,
   `thread_state.rs:606-630`).
 - A loaded thread unloads only when it is inactive and has had no subscribers
-  for `thread_unload_delay`, 60 s by default (`thread_lifecycle.rs:20-81`).
+  for `thread_unload_delay` (60 s by default). A running turn keeps it loaded
+  (`thread_lifecycle.rs:20-81`).
 - Pending thread-scoped server requests stay registered after their recipient
-  closes: command and file-change approval, `request_user_input`, MCP
-  elicitation, permissions. A `thread/resume` re-sends them to the resuming
-  connection with the same request id, and that connection can answer them
-  (`outgoing_message.rs:446-465,582-596`).
+  closes. That covers command and file-change approval, `request_user_input`,
+  MCP elicitation and permissions. A `thread/resume` re-sends them to the
+  resuming connection with the **same native request id**, and that connection
+  can answer them (`outgoing_message.rs:446-465,582-596`).
 - The exception is a `UserVerification` elicitation. It is connection-owned and
   cancelled when its owner closes. Router treats it as an unsupported native
   callback today, which cancels the turn anyway.
@@ -1173,12 +1242,16 @@ closed, because only duplicates were sent.
 - Resume returns a snapshot, including the active turn's id and status, plus
   every later notification. Notifications emitted while nobody was subscribed
   are not replayed (`outgoing_message.rs:199-209`).
+- **A thread with no rollout can't be resumed**, even while it is loaded:
+  "no rollout found for thread id" (`thread_processor.rs:4290-4299`; test
+  `thread_resume_rejects_unmaterialized_thread`). Only materialized threads can
+  be handed over (RC1).
 
 **Two roles for one live Router turn:**
 
 | Role | Who | Does | Never |
 |---|---|---|---|
-| **Turn owner**, exactly one per E4 per live turn that Router started | the prompt task while its frontend is attached; the same task once detached (#89); after an E4 replacement, an **adopted owner** in the incoming E4 | drains native events; answers native requests through the broker (the single writer of broker history); settles the turn; holds an unmaterialized binding when the turn ends | runs in a Deactivated E4 |
+| **Turn owner**, exactly one per E4 per live turn that Router started | the prompt task while its frontend is attached; the same task once detached (#89); after an E4 replacement, an **adopted owner** in the incoming E4 | drains native events; answers native requests through the broker; settles the turn; holds an unmaterialized binding when the turn ends | runs in a Deactivated E4 |
 | **Observer**, any number | an `Attached{turn}` ACP slot created by `session/load` of an Active thread | projects updates and `_session/state.turn` to its front door | answers a native request, cancels, or settles |
 
 **Changed: an E4 replacement hands its turn owners to the incoming E4.**
@@ -1191,84 +1264,166 @@ sequenceDiagram
   participant App as app-server gen N
   participant New as new E4
   participant Cl as ACP client
-  Note over Old,App: turn T running · owned by Old (frontend attached, or caller-detached) · approval A pending
-  K->>Old: Deactivate{Replacement}
-  Old->>Old: stop accepting · every owner gets LifecycleRelease: stop reading, answer nothing more, no cancel [added]
-  Old->>App: close each owner's native connection · unmaterialized held bindings too [added]
-  Note over App: T keeps running · A stays registered (W19 §1-2)
-  Old-->>K: Deactivated{handover: ServicesHandover{generation N, threads [T: turn t, routing facts]}} [changed]
-  K->>New: Activate{handover} [changed]
-  New-->>K: Active (accept loops on; the window ends here)
-  New->>App: per handed-over thread: open a native connection on N's alias · thread/resume{T} [added]
-  App-->>New: snapshot: T active, turn t InProgress · replay of A, same request id
-  New->>New: adopted owner(t): answer A through this E4's broker · keep draining [added]
-  Cl->>New: reconnect · initialize (advertises State) · session/load{T}
-  New-->>Cl: history · _session/state{running, turn{t, running}} · slot Attached{t} fed by the owner's projection [added]
-  App-->>New: turn/completed
-  New-->>Cl: _session/state{idle, turn{t, completed|interrupted, stopReason?}} · slot Ready
-  New->>New: owner settles · unmaterialized binding → holder
+  Note over Old,App: turn T running · owned by Old (frontend attached, or caller-detached) · native request R pending as Router approval A
+  New-->>K: Prepared{fingerprint, accepts: ServicesHandover v1} [changed]
+  K->>Old: Deactivate{Replacement, handover_to: v1} [changed]
+  Old->>Old: stop accepting · build ServicesHandover v1 · fits MAX_FRAME_BYTES? [added]
+  alt cannot produce v1, or too large, while owners exist
+    Old-->>K: DeactivateRefused{HandoverIncompatible | HandoverTooLarge} · keeps serving [added]
+    K->>New: group stop · ChildUpdateOutcome Failed{HandoverRefused} · END
+  else admissible
+    Old->>Old: LifecycleRelease: owners stop reading · broker marks A Transferring (marker disarmed, no Cancelled write) · decided-but-unsent responses are sent upstream first [added]
+    Old->>App: close each owner's native connection (no interrupt)
+    Old->>Old: join the broker's write tracker (every history write, drop paths included) [added]
+    Old-->>K: Deactivated{handover: body} [changed]
+    K->>New: Activate{handover: body} [changed]
+    New->>New: reread routes and histories (RC3) · A stays Pending, held for adoption · register T as Adopting owner before accept loops start [added]
+    New-->>K: Active (accept loops on; the window ends here)
+    New->>App: open a native connection on N's alias · thread/resume{T} [added]
+    App-->>New: snapshot: T active, turn t InProgress · replay of R, same native request id
+    New->>New: adopted owner(t): bind R to existing Router approval A, no new identity or notice · keep draining [added]
+    Cl->>New: reconnect · initialize (advertises State) · session/load{T}
+    New-->>Cl: history · _session/state{running, turn{t, running}} · slot Attached{t} fed by the owner's projection [added]
+    App-->>New: turn/completed
+    New-->>Cl: _session/state{idle, turn{t, completed|interrupted, stopReason?}} · slot Ready
+    New->>New: owner settles turn t
+  end
 ```
 
-**Rules:**
+**Admissibility before release (RC4).**
 
-- **Release is message-sized.** `LifecycleRelease` stops every owner without
-  awaiting a turn. That keeps `Deactivated` inside `DEACTIVATE_DEADLINE`.
-  Today's unbounded holder drain is never part of an E4 replacement; it
-  remains only in the full-stop shutdown path. Once released, an owner answers
-  nothing, so broker history keeps a single writer across the overlap (6.1).
-- **Break before make.** The old connection closes before the new one resumes.
-  A request raised in the gap waits upstream and is replayed to the adopted
-  owner, so no request reaches two Router answerers. The gap is the handover
-  window plus one resume round trip, far inside the 60 s unload delay. That
-  delay only applies to inactive threads anyway, so a held unmaterialized
-  thread survives too.
-- **Adoption runs after `Active`,** off the interruption path. It is bounded
-  per thread by `ADOPT_DEADLINE`, and every outcome is recorded in services
-  telemetry:
-  - `adopted`;
-  - `endedInGap`: the snapshot shows the turn finished, so it is settled from
-    the snapshot;
-  - `generationGone`: N stopped meanwhile, so T is `lost`, the owner-accepted
-    app-server-restart loss;
-  - `unadoptable{reason}`: the schema, a resume error, or `heldByAnotherClient`.
-  An unadoptable turn keeps running upstream, and its pending requests wait for
-  whichever client resumes that thread next. Nothing is cancelled because
-  adoption failed.
-- **The handover carries routing facts, not sockets.** `ServicesHandover` is
-  versioned and owned by `agent-collaboration-services`. For each thread it
-  carries the session id, the live turn id (none for an idle held binding),
-  whether it is materialized, and the binding's routing facts:
-  - working directory;
-  - MCP configuration;
-  - requested access;
-  - approval route;
-  - persisted effort.
+- The incoming E4 states in `Prepared` the one `ServicesHandover` version it
+  accepts. The keeper passes that version to the outgoing E4 in `Deactivate`.
+- Before releasing anything, the outgoing E4 builds its handover and checks two
+  things: it can produce exactly that version, and the body fits
+  `MAX_FRAME_BYTES`.
+- If either check fails while it has owners, it replies `DeactivateRefused` and
+  keeps serving. The keeper stops the candidate, and the outcome is
+  `Failed{HandoverRefused{reason}}`.
+- With no owners the handover is empty, and any version is admissible.
+- Versions must match exactly, with no compatibility shims. A release that
+  changes the handover shape bumps the version. Its update then succeeds once
+  no Router turn is live, or through `host keeper restart`, which carries the
+  owner-accepted turn loss.
 
-  The incoming E4 rebuilds the binding with its own broker and a fresh native
-  connection. The keeper relays the body unread, capped by `MAX_FRAME_BYTES`.
-  An unknown version makes every thread `unadoptable{schema}`, following the
-  rule above.
-- **A handover across a generation change** (a schema-changing restart replaces
-  services with the N+1 payload, 6.3): threads on N can't be resumed on N+1
-  while N lives (writer lock), and N stops after the settle. They end `lost`,
-  inside the owner-accepted turn loss for app-server restarts.
-- **Crash is not handover.** An E4 that crashes hands nothing over. Its turns
-  keep running upstream unowned, and their pending requests wait for the next
-  resume, as today after a Host crash.
-- **Observers.** `session/load` of an Active thread installs `Attached{turn}`
-  instead of refusing Busy. If this E4 owns the turn, the observer subscribes to
-  the owner's projection in process, without a second native subscription.
-  Otherwise, for example when a direct TUI started the turn, it opens its own
-  native connection and `thread/resume`. Requests replayed to it are left
-  unanswered, because the originating client answers them. When the turn ends,
-  it emits the terminal `_session/state.turn` and returns to Ready.
-- **Explicit cancel stays intact.** `session/cancel` from the owner's own
-  frontend, or from an observer of a turn this E4 owns, goes through the owner:
-  the broker's cancelling mark, then `InterruptTurn`. `LifecycleRelease` is
-  never set by a client action.
+**Release at the broker boundary (RC2).** `LifecycleRelease` runs in this
+order, inside `DEACTIVATE_DEADLINE`, and never awaits a turn:
+
+1. Stop accepting.
+2. Each owner stops reading native events.
+3. Mark each in-flight Router interaction `Transferring`. That disarms its
+   `CancellationMarker`, so no `Cancelled` write happens.
+4. Send upstream any decision the broker already recorded but the owner had not
+   yet written to the native connection. It's one write, already decided.
+5. Close the owner's native connection, with no interrupt.
+6. Close and join the broker's write tracker. Today's untracked drop task
+   becomes a tracked write, and transferred records are skipped.
+
+Only then is `Deactivated` sent. So no old-process history write happens after
+`Deactivated`, and broker history keeps a single writer across the overlap
+(6.1). Today's unbounded holder drain is never part of an E4 replacement; it
+remains only in the full-stop shutdown path.
+
+**Rebinding replayed requests (RC2).** The handover carries a native→Router
+mapping for each owner's pending interactions:
+`(thread, turn, native request id) → Router request id`, plus their state,
+`Pending` or `DecidedUnsent{decision}`. After resume, the adopted owner matches
+each replayed native request by native request id. It awaits the **existing**
+Router request, which the reread history still shows `Pending` and which the
+broker holds live, as in 6.11's `HeldForSnapshot`. It mints no new identity
+and sends no new notice.
+
+- A decision made through the Router id while adoption is still in progress is
+  accepted and held, then written upstream once the request is bound.
+- A `DecidedUnsent` decision is written upstream as soon as it matches.
+- A transferred interaction whose native request is absent from the replay was
+  resolved upstream meanwhile, or its turn ended. It settles as
+  `withdrawn{turnEnded}` from the snapshot.
+- Pending rows not in any handover keep today's
+  `Cancelled{HostRestarted}` reconciliation, now run at Activate (6.1).
+
+**Adoption keeps responsibility until it ends (RC4).** Adoption runs after
+`Active`, off the interruption path, but the owner is registered **before** the
+accept loops start. So a front door's `session/load` finds a Router owner, and
+its observer is fed by that owner. Each resume attempt is bounded by
+`ADOPT_DEADLINE` and retried on `SERVICES_CRASH_BACKOFF` for as long as
+generation N is current. Responsibility ends only in one of three ways:
+
+- `adopted`: the owner serves the turn to its end.
+- `endedInGap`: the snapshot shows the **handed-over turn id** finished. That
+  turn settles from the snapshot, including a no-content end.
+- `generationGone`: N stopped. That is the owner-accepted app-server-restart
+  loss, so the turn is `lost`.
+
+While adoption is pending, status shows services
+`Degraded{component: CodexTurnAdoption}`. The old E4's group stop waits only
+for its release and quiescence, never for adoption.
+
+**The handover body (`ServicesHandover`, owned by
+`agent-collaboration-services`):**
+
+```rust
+#[serde(tag = "version")]
+enum ServicesHandover { #[serde(rename = "1")] V1 { generation: GenerationId, owners: Vec<HandedOverTurn> } }
+struct HandedOverTurn {
+    session_id: CodexThreadId,          // materialized threads only (RC1)
+    turn_id: TurnId,                    // the live turn this owner served
+    working_directory: AbsolutePath,
+    mcp_configuration: Option<McpConfigurationRecord>,
+    requested_access: Option<RequestedAccess>,
+    approval_route: Option<ApprovalRouteRecord>,
+    persisted_effort: Option<ReasoningEffort>,
+    pending: Vec<TransferredInteraction>,
+}
+struct TransferredInteraction { native_request_id: NativeRequestId, router_request_id: RouterRequestId, state: TransferredState }
+enum TransferredState { Pending, DecidedUnsent { decision: InteractionDecisionRecord } }
+```
+
+The incoming E4 validates the body with `TryFrom` into these types. It
+**rebuilds** the rest from its own state:
+
+- the native connection, fresh on N's alias;
+- the payload schemas, from its admission snapshot for N, which must equal
+  `generation`;
+- the settings observation, from the validated resume response.
+
+A `generation` different from the incoming's committed one means a concurrent
+generation change, so the result is `generationGone`. The keeper relays the
+body unread (`RoleHandover`).
+
+**Unmaterialized held bindings are not handed over (RC1).** Upstream can't
+resume a thread that has no rollout. So an E4 replacement drops a held
+unfinished create, exactly as any Host restart does today. The creator's next
+prompt on that session fails with the existing missing-thread error, and status
+counts the dropped bindings. This is a recorded residual. No upstream change,
+socket transfer or new persistence is introduced to avoid it.
+
+**A handover across a generation change** (a schema-changing restart replaces
+services with the N+1 payload, 6.3): threads on N can't be resumed on N+1 while
+N lives, because of the writer lock, and N stops after the settle. They end
+`generationGone`, inside the owner-accepted turn loss for app-server restarts.
+
+**Crash is not handover.** An E4 that crashes hands nothing over. Its turns keep
+running upstream with no owner, and their pending requests wait for the next
+resume, as today after a Host crash.
+
+**Observers.** `session/load` of an Active thread installs `Attached{turn}`
+instead of refusing Busy. If this E4 owns or is adopting the turn, the observer
+subscribes to the owner's projection in process, without a second native
+subscription. Only when no Router owner exists, for example a turn a direct TUI
+started, does it open its own native connection and `thread/resume`. Requests
+replayed to it are left unanswered, because the originating client answers
+them. When the turn ends, it emits the terminal `_session/state.turn` and
+returns to Ready.
+
+**Unchanged rules:**
+
+- **Explicit cancel stays intact.** `session/cancel` from the owner's frontend,
+  or from an observer of a turn this E4 owns, goes through the owner: the
+  broker's cancelling mark, then `InterruptTurn`. `LifecycleRelease` is never
+  set by a client action.
 - **Real client disconnect** is the shipped caller detach (#88/#89). The owner
-  keeps serving, and the observer simply ends. This replaces the earlier
-  "keeps today's cancel semantics", which #88 made stale.
+  keeps serving, and the observer simply ends.
 - **Native connection loss while observing** (the generation retiring or
   crashed) gives `turn.status = lost`, kept distinct from `failed`.
 - **Clients without the State element** receive the history and content updates
@@ -1342,30 +1497,44 @@ If the current generation crashes while a transition is held, a candidate
 already being prepared becomes the recovery candidate. Otherwise recovery waits
 for the settling predecessor's group stop, so the two-live invariant holds.
 
-**Which image a child runs: the keeper's pinned image.** Homebrew deletes an
+**Which image a child runs: a retained slot image (RC6).** Homebrew deletes an
 upgraded formula's old keg as part of `brew upgrade`, unless
 `HOMEBREW_NO_INSTALL_CLEANUP` is set (`brew help upgrade`; on the owner's Mac only
-the current `Cellar/codex-router/<version>` exists). A keeper that respawns
-from its own Cellar path would then fail, and one that respawns from the
-`/opt/homebrew/bin` symlink would quietly mix builds. So:
+the current `Cellar/codex-router/<version>` exists). A keeper that respawned
+from a Cellar path would fail after an upgrade. Respawning from the
+`/opt/homebrew/bin` symlink would silently run new code in one role. Recovery
+stays **slot-local**:
 
-- The keeper records its **launch path** at start and carries it across
-  self-exec. That is the path it was invoked by, for example
-  `/opt/homebrew/bin/codex-router`, and it is the default E7 target.
-- Each child slot records its **slot image**: the canonical file it was
-  spawned from, with device, inode, size and mtime.
-  - A fresh start pins every slot to the keeper's own image.
-  - An E7 pins each replaced slot to the update target.
-  - A crash respawn reuses the slot image. So every role keeps running the
-    build it was last deliberately given, including across a partial E7, such
-    as a deferred keeper exec (CC2).
-- If a crash respawn finds its slot image gone or changed, the keeper does not
-  respawn from it. It runs an E7 against the launch path instead (6.2). That
-  replaces whichever children differ, and the keeper last, and it never touches
-  the app-server. The crashed slot is filled by that update's spawn.
-  `ChildState::Crashed` keeps counting until that slot is `Active`.
-- This needs no version handshake between roles. It extends owner D1,
-  automatic replacement, to the case where Homebrew removed a running image.
+- **The launch path.** The keeper records its launch path at start, for example
+  `/opt/homebrew/bin/codex-router`. It is the default E7 target and is carried
+  across self-exec.
+- **The slot image.** Each child slot has one, and it is the only file that
+  slot's children are ever spawned from.
+  - **Retention.** When a slot is pinned, the keeper **hard-links** the source
+    file into its owner-private runtime directory
+    `<router-root>/keeper/images/<sha256-of-file>/codex-router`. The inode
+    survives `brew cleanup`, and the signature, code identity and assessed
+    first-exec state are unchanged. On this Mac the Cellar and the Router root
+    are on one volume (`stat` device 16777230). If `link` returns `EXDEV`, the
+    keeper copies the file instead, then runs `build-info` on the copy off path
+    to pay first-exec cost.
+  - **When it's pinned:**
+    - a fresh start pins every slot to the keeper's own image;
+    - an E7 pins a slot to the update target when it sends `Deactivate` to that
+      slot's outgoing child, so an incoming child's crash, before or after a
+      migration, recovers with the incoming image (6.1);
+    - a crash respawn reuses the slot image unchanged.
+- **Garbage collection.** At keeper start and after each E7, retained images
+  that no slot references are removed.
+- **What this buys.** A crash respawns exactly the code that slot was running,
+  even after its keg is gone, and even mid-E7 with a deferred keeper exec (CC2).
+  It never replaces another role, so R16's provider isolation holds. No crash
+  ever triggers an E7. These are runtime files in the owner-private Router
+  root: no state store, and nothing outlives the slots that use it.
+- **Only failure:** a retained image that is missing or no longer matches its
+  recorded identity, for example deleted by hand. Then the slot stays
+  `Crashed{ImageUnavailable}`, status shows `host restart`, and the other roles
+  keep running.
 
 ### 6.8 Group stop (R8)
 
@@ -1435,13 +1604,14 @@ A keeper-owned startup step, `DesktopReconciler`, lives in
 codex-router host
   → prepare_router_tool_locations (best effort, every mode) · desktop launch policy (OwnerProduction only) — unchanged, before the singleton (6.1)
   → acquire singleton (HostInstance::acquire, moved) — AlreadyRunning if held
-  → record the launch path; pin every slot to this image (6.7)
+  → record the launch path (6.7)
   → inspect E1: absent → ok · dangling → remove · live and not managed by this epoch → refuse (existing live-owner message)
-  → ListenerRegistry binds all endpoints
-  → ChildSupervisor: provider host (E11) prepare and activate FIRST (services' Prepare depends on it)
+  → ListenerRegistry binds all endpoints · retain and pin every slot image (6.7)
+  → ChildSupervisor: proxy Prepare{Fresh} (local token, Keychain key, store marker, affinity secret, pooled-credential migration, state DB) and Activate FIRST · as today, these prerequisites come before anything that reads them (startup_convergence.rs:23-31; RC7)
+  → provider host (E11) Prepare{Fresh} (reads the token and proxy endpoint, claude_provider_launch_environment.rs:25-77) and Activate (services' Prepare depends on it)
   → GenerationController: generation 1 (6.3 without predecessor)
-  → services Prepare{Fresh} (its generation-1 payload, including the server display name, plus a standby attach to E11) and proxy Prepare{Fresh} (local token, pooled-credential migration, store open), in parallel
-  → publish E1 · services and proxy Activate
+  → services Prepare{Fresh} (its generation-1 payload, including the server display name, plus a standby attach to E11)
+  → publish E1 · services Activate
   → DesktopReconciler (6.9a, OwnerProduction only): relaunch the desktop app if it launched before generation 1 became current (R19)
   → OperatorService accepts on host.sock
 ```
@@ -1654,7 +1824,7 @@ None stands in for another.
 | child phase | runtime | `Granted → Prepared → Active → Deactivating`; `any → Quiesced → (Resume) → previous` | Activate before Prepared → `PrepareFailed{FrameInvalid}` |
 | `OperatorService` | admission | `Idle → Mutating(ActiveMutation) → Idle`; `GenerationTransition` outlives its terminal reply until group-empty; `Update` carried across exec | a second mutation → `Busy{active}` |
 | `ProviderHostRuntime` | link | `Unlinked → Linked(epoch)`; `Linked → Unlinked` (EOF: keep sessions, keep pending interactions, keep buffering); `Standby(e') → Active(e')` on Promote (the old Active link is demoted then closed); a new Attach never supersedes the Active link | frames from a demoted or closed link are dropped |
-| broker (E4) | pre-restart Pending rows | `HeldForSnapshot → Live` (in `AttachSnapshot.pending_interactions`) \| `CancelledHostRestarted` (absent from that snapshot); held without limit while the link is interrupted (no timeout inference, H1) | answering a held row before reconciliation → the existing unavailable result |
+| broker (E4) | pre-restart Pending rows, reread at Activate (RC3) | provider rows: `HeldForSnapshot → Live` (in `AttachSnapshot.pending_interactions`) \| `CancelledHostRestarted` (absent from that snapshot), held without limit while the link is interrupted (no timeout inference, H1). Codex rows: `HeldForAdoption → Bound` (matched by native request id on replay; a decision received meanwhile is held, then written upstream) \| `Withdrawn{TurnEnded}` (absent from the replay) \| `CancelledHostRestarted` (in no handover). Outgoing side: `Pending → Transferring` at `LifecycleRelease`, with no write | a Transferring row written by the old process after `Deactivated`: unrepresentable, because its write tracker was joined |
 | `SessionConnectionRegistry` | ACP slot (today `Loading`, `Ready`, `Busy`, `Detached`, `session_connection_registry.rs:11-16`) | `Loading → Ready → Busy` (prompt); `Busy → Detached` (frontend gone, owner keeps serving, #89); `Loading → Attached{turn}` (load of an Active thread, replacing today's Busy refusal); `Attached → Ready` (terminal state emitted) | a prompt while Attached → the existing busy error |
 | turn owner (E4) | per live Router turn | `Serving → Released` (`LifecycleRelease` at Deactivate) → handed over; incoming: `Adopting → Serving` \| `EndedInGap` \| `GenerationGone` \| `Unadoptable{reason}`; `Serving → Settled` | a released owner answering a native request: unrepresentable (its native connection is closed) |
 
@@ -1677,10 +1847,14 @@ None stands in for another.
 | A store holds migrations the candidate doesn't know (downgrade) | Prepare's applied-set check | `PrepareFailed{StoreSchemaNewerThanImage}`; the old child stays Active; nothing migrated | the role |
 | Activate fails after it applied migrations | `Active` missing or SIGCHLD | the outgoing image is never reactivated against a migrated store; the crash path respawns from the slot image (6.7) | `ChildSupervisor` |
 | Candidate proxy's secret store not `Ready` (Keychain prompt, locked keychain, key unavailable) | Prepare under `Replacement` | `PrepareFailed{SecretStoreUnavailable}`; the old proxy keeps serving; the blocked Keychain call dies with the candidate | `ProxyRoleRuntime` |
-| Crash respawn finds its slot image deleted or replaced (Homebrew upgrade cleanup) | slot-image identity check before spawn | E7 against the launch path (6.7); `Crashed` until that slot is Active | `ChildSupervisor`, `UpdateCoordinator` |
+| Homebrew removes a running slot's keg (`brew upgrade` cleanup) | none needed | the slot's retained hard-linked image keeps the inode; crash respawn is slot-local with the same code (6.7) | `ChildSupervisor` |
+| A retained slot image is missing or changed | identity check before spawn | `Crashed{ImageUnavailable}`; the other roles keep running; status points to `host restart` | `ChildSupervisor` |
 | A thread loaded on N is resumed on N+1 during the settle | upstream `-32600 … already has an active writer` (W18 §4) | refused while N lives: Router reports `heldByAnotherClient`, and the 0.160 TUI shows its read-only "open in another app" view with retry. Two writers can't happen. Services re-admission waits for N's group to be empty (6.3). Replaces the earlier owner-accepted overlap residual with a narrower one. | upstream; `GenerationController` ordering |
 | Services commit not acknowledged after E1 publication | `COMMIT_DEADLINE` | services replacement with the N+1 payload; if that fails, N is retained, the transition stays held, replacement retries on backoff, and the result is `ServicesReplacementFailed` (CC3) | `GenerationController` |
 | Keeper exec while an old child is still retiring | exec admission | `Failed{DeferredChildRetiring}`; no exec; the old image keeps ownership (CC2) | `UpdateCoordinator` |
+| Incoming E4 can't accept the outgoing E4's handover version, or the body exceeds `MAX_FRAME_BYTES`, while turns are live | old E4 checks before release | `DeactivateRefused`; the old E4 keeps serving and owning its turns; the candidate is stopped; `Failed{HandoverRefused}`. It succeeds when idle, or through `host keeper restart` | `CollaborationRuntime`, `ChildSupervisor` |
+| Adoption resume fails or times out | `ADOPT_DEADLINE` per attempt | retry on backoff while N is current; `Degraded{CodexTurnAdoption, AdoptionPending}`; ends only adopted, `endedInGap` or `generationGone` | `CollaborationRuntime` |
+| Pre-exec handoff manifest truncated or tampered | header length and digest | `HandoffInvalid::ManifestMismatch`: fatal; no signals (6.4) | `KeeperHandoff` |
 | Old proxy mid-renewal at Deactivate | `Deactivated` then `Drained` | admission closed; pre-claim renewals cancelled; post-claim renewals reach durable disposition; stop starts only after `Drained` (overrun is recorded, never signalled) | `ChildSupervisor` |
 | Unresponsive old proxy SIGKILLed mid-renewal | forced path | a `Refresh` claim without a successor → the account may become `reauth_required` (existing recovery, `credential_renewal.rs:512-525`); recorded residual | operator |
 | Ring overflow during a long E4 outage | `retained_from` greater than what the front door last saw | `ReplayComplete{TruncatedBefore}` → the front door gets `historyUnavailable` for the gap (RSP code) | `ProviderHostRuntime` |
@@ -1694,6 +1868,7 @@ None stands in for another.
   - fds go only to the keeper's own children, spawned from their slot image (6.7). "Verified" means what it means today for `RestartHost`: an absolute path to a regular executable file (`request_admission.rs:392-404`), plus `build-info` for E7. Distribution signing is verified by the release and tap jobs (`release.yml:391-424`). The keeper adds no signature check (W17 §10).
   - Handoff and channel frames travel only on anonymous socketpairs.
   - Each received fd is type-checked against its role and made CLOEXEC before any spawn.
+  - Retained slot images (6.7) live under the owner-private Router root, as hard links or copies of the signed executables the keeper was given. Nothing else is executed.
   - The schema bundle directory is 0700.
   - No new network listener.
 - **State.** No new persistent store. The update mechanism itself writes
@@ -1743,8 +1918,8 @@ None stands in for another.
 | U | R | E | owner | interface | shape and home | state | failure | proof |
 |---|---|---|---|---|---|---|---|---|
 | U1, U5 | R1: update replaces only changed children; generation and direct connections untouched | E2, E4, E5, E6, E7 | `UpdateCoordinator` | `Update` → 6.2 | `BuildInfo`, `UpdateOutcome`, `KeeperToChild` · keeper-protocol | child slot handover; E2 untouched | prepare failure: old child stays Active | V1 |
-| U2 | R2: hosted session rejoins the same live turn and sees its outcome; detached turns keep being served across an E4 replacement | E4, E8, E9 | turn owner + `SessionConnectionRegistry` + `LiveTurnAttachment` | `LifecycleRelease`; `Deactivated{handover}` → `Activate{handover}`; adoption by `thread/resume`; `session/load` → `Attached`; `_session/state.turn` | `RoleHandover` · keeper-protocol; `ServicesHandover` · agent-collaboration-services; ACP · codex-acp-adapter; `_session/state` · RSP session-event-model | owner `Serving → Released → Adopting → Serving`; slot `Loading → Attached → Ready` | release never cancels; explicit cancel interrupts; unadoptable → keeps running upstream, recorded; native loss → `lost` | V1 (real ACP and relay; pinned Codex; blocked-output detach; no-content completion; handover cases below) |
-| U5 | R3: services crash → automatic respawn | E3, E4 | `ChildSupervisor` | SIGCHLD → 6.7 | `ChildState::Crashed` · keeper-protocol | `Active → Crashed → Starting` | backoff cap 5 s | V6 (functional ACP after respawn) |
+| U2 | R2: hosted session rejoins the same live turn and sees its outcome; detached turns keep being served across an E4 replacement | E4, E8, E9 | turn owner + broker + `SessionConnectionRegistry` + `LiveTurnAttachment` | `Prepared{accepts}` / `Deactivate{handover_to}` admissibility; `LifecycleRelease` at the broker boundary; `Deactivated{handover}` → `Activate{handover}`; reread; adoption by `thread/resume` and rebinding by native request id; `session/load` → `Attached`; `_session/state.turn` | `RoleHandover`, `DeactivateRefusal` · keeper-protocol; `ServicesHandover::V1` · agent-collaboration-services; ACP · codex-acp-adapter; `_session/state` · RSP session-event-model | owner `Serving → Released → Adopting → Serving`; broker `Transferring` / `HeldForAdoption → Bound`; slot `Loading → Attached → Ready` | inadmissible handover → refused before release; release never cancels and never writes; adoption retries until adopted, `endedInGap` or `generationGone`; native loss → `lost` | V1 (real ACP and relay; pinned Codex; blocked-output detach; no-content completion; handover cases below) |
+| U5 | R3: services crash → automatic respawn of the same code | E3, E4 | `ChildSupervisor` | SIGCHLD → 6.7 | `ChildState::Crashed`, `SlotImage` · keeper-protocol | `Active → Crashed → Starting` from the retained slot image | backoff cap 5 s; `Crashed{ImageUnavailable}` only if the retained image is gone | V6 (functional ACP after respawn, including after the original keg is deleted) |
 | U3 | R4: E1 always connectable; crash exception | E1, E2 | `GenerationController` | E1 symlink rename | `DefaultEndpointPath`, `GenerationAliasPath` · keeper-protocol | routed(N) | `UnavailabilityRecord` during a crash | V2 |
 | U3 | R5: candidate first; services adopted; 1 s settle; no fallback caused by retirement | E2, E8 | `GenerationController` | 6.3 | `GenerationCurrentPayload`, `GenerationState` · keeper-protocol | transition slot `Candidate → Settling → None` | Busy during the settle; rejected evidence → Failed | V2 (real `codex` launched during a swap; handshake distribution) |
 | U3, then U4 | R6: failed candidate leaves the old one current; truthful failure | E1, E2 | `GenerationController` | 6.3 failure branch | `GenerationFailure`, `GenerationRestartFailed` · keeper-protocol | `Starting → Failed` | E1 unchanged | V4 (including adoption fallback and an occupied transition) |
@@ -1779,7 +1954,7 @@ None stands in for another.
 
 | Seam | Real | Replaced | Observation |
 |---|---|---|---|
-| V1 turn handover | the pinned Codex app-server, the real old and new E4 binaries, a real ACP client and a detached `conversation prompt` | none | across one E4 replacement: (a) a detached turn with a command approval pending at release has that approval replayed to the adopted owner with the same native request id, answered once through the new broker, and the turn completes; (b) a turn that ends during the gap settles `endedInGap` from the resume snapshot; (c) a held unmaterialized thread is still resumable after the replacement; (d) a reconnecting client gets `Attached` with `_session/state.turn` running, then terminal; (e) an unknown `ServicesHandover` version leaves the turn running upstream and its approval answerable by the next resume; (f) no native request is answered by the released E4 (broker history has one writer) |
+| V1 turn handover | the pinned Codex app-server, real old and new E4 binaries, a real ACP client and a detached `conversation prompt` | none | across one E4 replacement: (a) a detached turn whose command approval was pending inside the broker wait at release: the original Router approval id stays actionable once, the replayed native request binds to it by native request id, no new notice or identity appears, and upstream gets one response; (b) a decision racing release, and one recorded but unsent at release: each applied exactly once; (c) no old-process history write after `Deactivated`; (d) the old process adds a route and settles an approval after the candidate is Prepared: both survive the incoming child's first write (RC3); (e) a turn that ends in the gap, including a no-content end, settles `endedInGap` by the handed-over turn id; (f) a reconnect before adoption gets `Attached` fed by the adopting owner; a detached turn with no reconnect completes, and its approval is answered; (g) an unsupported handover version, and an oversized body, while a turn is live: refused before release, and the old E4 keeps serving; (h) an adoption resume timeout retries without losing responsibility; (i) a held unmaterialized binding is dropped and counted, not resumed (RC1) |
 | V1, V2, V10 (Codex behavior) | the pinned managed Codex at implementation time (0.160.0 at the re-anchor; main's real-TUI acceptance tests still assert 0.157.1, `router_session_app_server_tui_tests.rs:6-32`, and are re-pinned with this work); the real ACP adapter and relay; a real `codex` TUI launched during swaps (debug log line `starting embedded app server` on fallback); an ACP client that advertises State | none | same turn id; `_session/state.turn` terminal status, including no-content completion; zero fallback lines; E1 and alias `readlink` |
 | V2 Remote Control | the real app-server with Remote Control enabled, in an isolated non-production setup authorized by the owner | none | both generations' readiness and pairing through the settle; a gap is reported if no such setup exists |
 | V3, V6, V7, V8, V9 | compiled CLI at temporary install paths (extending `compiled_cli_host_acceptance.rs:207-306`); the real keeper, services and proxy | the test app-server fixture (`:702-733`), extended to publish `--listen` as a symlink and hold a fake in-progress turn | pids and pgids, `KeeperStatus`, `HandoverRecord`, CLI frames, timestamped protocol requests (not raw connects) |
@@ -1790,7 +1965,11 @@ None stands in for another.
 | Platforms | Linux CI (#82) and macOS | none | SCM_RIGHTS, CLOEXEC after receipt, process groups and the symlink swap exercised on both; Linux-only flags (`MSG_CMSG_CLOEXEC`) are not relied on |
 | Generation publication (V2, V4, V7) | real keeper, fixture or pinned app-server, real services | none | rename failure after services staged N+1 (services stays on N); an N connection kept through promotion; retirement of N after N+1 is committed never drops N+1 admissions; commit-not-applied and commit-applied-but-ack-lost, each followed by a failed recovery Prepare (N retained, transition held, truthful `ServicesReplacementFailed`), for both `host app-server restart` and `update` |
 | Exec admission (V7, V10) | real keeper with controlled stop observations | an uninterruptible wait is simulated by the stop-observation seam, not manufactured | `DeferredChildRetiring{Draining}` after the drain bound and `{StuckAfterKill}` immediately: terminal `UpdateCompleted`, admission released, no exec, ownership retained |
-| Handoff (V10) | the real exec on macOS and Linux | none | child fd inventory (no leaked lock, listeners or channels), including after a later `RequestListener` grant; partial and oversized frames rejected; quiesce with held output; failed-exec resume; a manifest naming a live unrelated pid (`NotOurChild`) → never signalled, role restarted fresh |
+| Handoff (V10) | the real exec on macOS and Linux | none | child fd inventory (no leaked lock, listeners or channels), including after a later `RequestListener` grant; partial and oversized frames rejected; quiesce with held output; failed-exec resume; a manifest naming a live unrelated pid (`NotOurChild`) → never signalled, role restarted fresh ; the pre-exec header plus manifest file carrying a near-`MAX_FRAME_BYTES` manifest and 64 fds on macOS and Linux; a truncated manifest and a digest mismatch (`ManifestMismatch`, no signals); a stale `handoff-*.json` swept at the next start |
+| Prepare effects (RC5, RC3, V8) | real candidate E4 and E5 binaries against a snapshot of the shared state root (isolated debug root) | none | under `Replacement` with complete, missing and degraded prerequisites, then a forced Prepare failure: the snapshot is byte-identical. That covers the Keychain item (isolated keychain), store marker, token, affinity secret, service identity, control schema, histories and SQLite schema. Under `Fresh`, the creators run once |
+| Migration-bearing activation (V8) | real E4 and E5 with an **unapplied** migration over representative data: the #121 participant-history backfill over a realistic board, and a state-DB migration while the old proxy is mid-renewal | none | activation time including the migration and the broker reread, against `ACTIVATE_DEADLINE`. A measured overrun is a design break returned to the owner, never a quietly raised deadline. The old proxy finishes its claimed renewal against the migrated state DB. An already-migrated DB is not accepted as this proof |
+| Fresh startup order (RC7) | an empty isolated Router root with Claude configured | none | the token exists before E11 Prepare reads it; E11 becomes ready and E4 attaches; the existing-root and Keychain-unavailable cases stay distinct |
+| Slot images (RC6) | real keeper on macOS with a fixture "keg" directory removed after pinning | none | crash respawn of E4 after its source file is deleted runs the same code from the retained hard link; E11 and its provider pids are unchanged; no E7 runs; a deferred keeper exec (CC2) with E4 already on a new image respawns the new image; `EXDEV` takes the copy path; unreferenced images are collected |
 
 Runtime evidence uses isolated debug roots, ports, Codex home and
 `CODEX_ROUTER_DEBUG_APP_SERVER_SOCKET`. Production processes are never touched.

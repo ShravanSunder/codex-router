@@ -282,10 +282,17 @@ and no PID discovery or signalling. Basis: U5 (then), U6 (then).
   is an old E5 that does not respond to deactivation and has to be killed, and
   that exception is recorded.
 - **State.** No update, restart or cutover resets router state, Codex
-  session state, credentials or Remote Control pairing. None of them migrates
-  that state beyond what the incoming code does on its own start, exactly as a
-  fresh start of that version would. Those start-time writes never run while
-  another process of the same role is serving.
+  session state, credentials or Remote Control pairing, and none adds a store.
+  The only migrations allowed are the incoming version's own schema migrations.
+  They are applied when its child activates, after the outgoing child of the
+  same role has stopped writing. There are two exceptions:
+  - the proxy's shared state DB, whose migrations stay compatible with a
+    still-running older writer, as they must already be today;
+  - the proxy's one-time pooled-credential migration, which runs only on a
+    fresh start.
+
+  Once a migration commits, the older version is never reactivated on that data
+  (owner decision A1, 2026-10-03).
 - **Observability.** Each E2 swap, E4 or E5 replacement, forced termination
   (R8) and E7 outcome is recorded with the generation or incarnation and
   fingerprint involved, readable through `host status` and existing telemetry.

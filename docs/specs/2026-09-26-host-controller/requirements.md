@@ -141,6 +141,13 @@ Further owner confirmations on 2026-09-26, after design review:
   until the old one stops. The residual is a brief refusal, never two writers.
 - **R7 exception.** If an incoming child dies between being prepared and being
   active, that one replacement follows the crash path and may exceed 1 s.
+- **Migrations in hot updates (A1, 2026-10-03).** A hot update may apply the
+  incoming version's own schema migrations when its child activates, after the
+  outgoing child of the same role has stopped writing. There is no reset and no
+  new store, and the older version is never reactivated on migrated data. V8
+  measures activation with a real unapplied migration. An overrun of the 1 s
+  target comes back to the owner rather than raising the deadline. Option B,
+  where migration-bearing releases need a full restart, was rejected.
 
 The owner confirmed this goal boundary on 2026-09-26 and set "fast" (U4) as a
 hard target of about 1 s, measured on a warm binary.
