@@ -210,6 +210,85 @@ async fn new_session_mints_scoped_configuration_receipt_and_checks_effective_cwd
 }
 
 #[tokio::test]
+async fn aggregate_cold_load_skips_history_larger_than_adapter_replay_capacity() {
+    let mut catalog = AcpSchemaCatalog::load().unwrap_or_else(|error| panic!("catalog: {error}"));
+    let definitions: serde_json::Map<String, Value> = [
+        "ThreadFork",
+        "ThreadLoadedList",
+        "ThreadRead",
+        "ThreadResume",
+        "ThreadStart",
+        "TurnInterrupt",
+        "TurnStart",
+        "TurnSteer",
+    ]
+    .into_iter()
+    .flat_map(|name| {
+        [
+            (format!("{name}Params"), json!({"type":"object"})),
+            (format!("{name}Response"), json!({"type":"object"})),
+        ]
+    })
+    .collect();
+    let bundle = NativeSchemaBundle::from_documents(BTreeMap::from([(
+        "codex_app_server_protocol.schemas.json".to_owned(),
+        serde_json::to_vec(&json!({"definitions":{"v2":definitions}}))
+            .unwrap_or_else(|error| panic!("JSON: {error}")),
+    )]))
+    .unwrap_or_else(|error| panic!("bundle: {error}"));
+    let schemas = Arc::new(
+        NativePayloadSchemas::from_bundle(&bundle)
+            .unwrap_or_else(|error| panic!("schemas: {error}")),
+    );
+    let generation = serde_json::from_value(
+        json!({"serviceEpoch":"00000000-0000-4000-8000-000000000001","generation":1}),
+    )
+    .unwrap_or_else(|error| panic!("generation: {error}"));
+    let (client, server) = tokio::net::UnixStream::pair().unwrap();
+    let connection = NativeProtocolConnection::from_websocket(
+        WebSocketStream::from_raw_socket(client, Role::Client, None).await,
+    );
+    let items = (0..1025)
+        .map(|index| json!({"type":"agentMessage","id":format!("message-{index}"),"text":"old reply"}))
+        .collect::<Vec<_>>();
+    let fixture = tokio::spawn(async move {
+        let mut server = WebSocketStream::from_raw_socket(server, Role::Server, None).await;
+        let frame = server.next().await.unwrap().unwrap();
+        let request: Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+        assert_eq!(request["method"], "thread/resume");
+        assert_eq!(request["params"]["threadId"], "long-thread");
+        server.send(Message::Text(json!({
+            "id":request["id"],
+            "result":{"cwd":"/work","thread":{"id":"long-thread","cwd":"/work","status":{"type":"idle"},"turns":[{"id":"turn-1","status":"completed","items":items}]}}
+        }).to_string().into())).await.unwrap();
+    });
+
+    let result = AcpSessionBinding::load_existing(
+        &mut catalog,
+        SessionSetupInputs {
+            operation_id: None,
+            recorder: Arc::new(AcceptingConversationRecorder),
+            connection,
+            schemas,
+            generation,
+            params: json!({
+                "sessionId":"long-thread",
+                "cwd":"/work",
+                "mcpServers":[],
+                "_meta":{"codex-router/replayHistory":false}
+            }),
+            approval_broker: Arc::new(codex_acp_adapter::RejectingApprovalBroker),
+        },
+    )
+    .await;
+
+    let (session, history) = result.unwrap_or_else(|error| panic!("cold aggregate load: {error}"));
+    assert_eq!(session.session_id(), "long-thread");
+    assert!(history.is_empty());
+    fixture.await.unwrap();
+}
+
+#[tokio::test]
 async fn fork_session_sends_exact_model_choice_to_native_runtime() {
     ensure_test_scratch();
     // The second case omits both choices: the source thread's own values govern.

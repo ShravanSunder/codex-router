@@ -41,6 +41,47 @@ fn codex_running_prompt_is_a_successful_typed_tool_result() {
 }
 
 #[test]
+fn codex_prompt_tool_result_exposes_final_reply_without_stream_updates() {
+    let target: collaboration_protocol::SessionRef = serde_json::from_value(serde_json::json!({
+        "endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"codex-local"},
+        "sessionId":"answered-thread"
+    }))
+    .expect("target");
+    let result = super::conversation_tool_result::<collaboration_client::ConversationOperationResult>(
+        Ok(
+            collaboration_client::ConversationOperationResult::Completed {
+                target: target.clone(),
+                operation_id: None,
+                settlement: collaboration_client::ConversationSettlement {
+                    target,
+                    stop_reason: Some(collaboration_client::ConversationStopReason::Completed),
+                    detail: collaboration_client::ConversationSettlementDetail::CodexPrompt {
+                        output: collaboration_client::ProviderPromptOutput::Available {
+                            text: Some(
+                                collaboration_protocol::MessageText::try_from(
+                                    "final reply".to_owned(),
+                                )
+                                .expect("valid reply"),
+                            ),
+                        },
+                        permission_required: false,
+                        result: Some(serde_json::json!({"stopReason":"end_turn"})),
+                    },
+                },
+            },
+        ),
+        None,
+    );
+    assert_eq!(result.is_error, Some(false));
+    let structured = result.structured_content.expect("structured prompt result");
+    assert_eq!(
+        structured["settlement"]["detail"]["output"],
+        serde_json::json!({"kind":"available","text":"final reply"})
+    );
+    assert!(structured["settlement"]["detail"].get("updates").is_none());
+}
+
+#[test]
 fn unavailable_provider_error_keeps_catalog_endpoint_reason_and_fix() {
     let operation_id = OperationId::generate();
     let endpoint = serde_json::json!({
@@ -202,7 +243,7 @@ fn prompt_carrier_preserves_permission_required_and_explicit_approver() {
             "kind":"prompt","createOperationId":create_operation_id,
             "prompt":{"kind":"completed","target":target,"settlement":{
                 "target":target,"stopReason":"cancelled","detail":{
-                    "kind":"codexPrompt","updates":[],"permissionRequired":true,
+                    "kind":"codexPrompt","output":{"kind":"available","text":null},"permissionRequired":true,
                     "result":{"stopReason":"cancelled"}
                 }
             }}
@@ -214,6 +255,15 @@ fn prompt_carrier_preserves_permission_required_and_explicit_approver() {
     assert_eq!(
         structured["prompt"]["settlement"]["detail"]["permissionRequired"],
         true
+    );
+    assert_eq!(
+        structured["prompt"]["settlement"]["detail"]["output"],
+        serde_json::json!({"kind":"available","text":null})
+    );
+    assert!(
+        structured["prompt"]["settlement"]["detail"]
+            .get("updates")
+            .is_none()
     );
     assert_eq!(
         structured["prompt"]["settlement"]["stopReason"],

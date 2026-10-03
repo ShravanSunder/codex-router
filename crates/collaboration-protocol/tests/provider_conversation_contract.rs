@@ -380,6 +380,39 @@ fn inspection_and_wait_keep_durable_metadata_separate_from_ephemeral_output() {
 }
 
 #[test]
+fn output_limit_reasons_decode_strictly_and_validate_in_operation_wait() {
+    let schema = control_schema_document(None).unwrap_or_else(|error| panic!("schema: {error}"));
+    let wait_validator = method_validator(&schema, "conversation/operationWait", "response")
+        .unwrap_or_else(|error| panic!("wait validator: {error}"));
+
+    for reason in ["outputLimitExceeded", "outputInvalid"] {
+        let typed_reason: collaboration_protocol::ConversationOutputUnavailableReason =
+            serde_json::from_value(json!(reason)).expect("new output reason decodes");
+        assert_eq!(serde_json::to_value(typed_reason).unwrap(), json!(reason));
+
+        let response = json!({
+            "jsonrpc":"2.0",
+            "id":"wait-output-limit",
+            "result":{
+                "operation":operation_snapshot(),
+                "output":{"kind":"outputUnavailable","reason":reason}
+            }
+        });
+        assert!(
+            wait_validator.is_valid(&response),
+            "conversation/operationWait rejected {reason}"
+        );
+    }
+
+    assert!(
+        serde_json::from_value::<collaboration_protocol::ConversationOutputUnavailableReason>(
+            json!("futureReason")
+        )
+        .is_err()
+    );
+}
+
+#[test]
 fn validated_provider_collections_and_paths_reject_ambiguous_values() {
     let duplicate_capabilities = json!([
         {"name": "prompt", "status": "supported", "evidence": "advertised"},

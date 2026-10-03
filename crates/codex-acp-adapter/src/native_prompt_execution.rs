@@ -1,4 +1,5 @@
 //! Retained native prompt connection with explicit terminal and callback handoff.
+use crate::final_reply_selection::FinalReplySelection;
 use crate::{
     AcpSchemaCatalog, AcpSessionBinding, NativeInterruptionState, NativePromptTerminal,
     PromptSettlement, PromptTarget, project_assistant_text, translate_prompt_content,
@@ -55,6 +56,7 @@ pub struct PendingAcpPrompt {
     detached: bool,
     session: AcpSessionBinding,
     settlement: PromptSettlement,
+    final_reply: FinalReplySelection,
     /// Absent on resume, where the thread's persisted effort governs.
     requested_effort: Option<String>,
 }
@@ -92,6 +94,7 @@ impl PendingAcpPrompt {
             session,
             settlement: PromptSettlement::new(request_id)
                 .map_err(|_| PromptExecutionError::InvalidPrompt)?,
+            final_reply: FinalReplySelection::new(),
             requested_effort: effort,
         };
         let thread_state = pending
@@ -159,6 +162,12 @@ impl PendingAcpPrompt {
             return Err(PromptExecutionError::ReceiptProjection(
                 "serverMessageSchema",
             ));
+        }
+        if !self.settlement.is_settled()
+            && let Some(turn_id) = self.settlement.turn_id().map(str::to_owned)
+        {
+            self.final_reply
+                .observe_completed_item(&self.session.session_id, &turn_id, &message);
         }
         if message.get("id").is_some() && message.get("method").is_some() {
             if matches!(
@@ -288,6 +297,7 @@ impl PendingAcpPrompt {
                 .as_mut()
                 .filter(|response| response.get("result").is_some())
             {
+                attach_final_reply(response, self.final_reply.metadata());
                 let read = self
                     .session
                     .connection
@@ -362,14 +372,21 @@ impl PendingAcpPrompt {
             return None;
         }
         self.settlement.request_cancel();
-        match tokio::time::timeout(std::time::Duration::from_secs(30), self.cancel_inner()).await {
-            Ok(response) => response,
-            Err(_) => {
-                self.detached = true;
-                self.settlement
-                    .settle_cancel(NativeInterruptionState::Unknown)
-            }
+        let mut response =
+            match tokio::time::timeout(std::time::Duration::from_secs(30), self.cancel_inner())
+                .await
+            {
+                Ok(response) => response,
+                Err(_) => {
+                    self.detached = true;
+                    self.settlement
+                        .settle_cancel(NativeInterruptionState::Unknown)
+                }
+            };
+        if let Some(response) = response.as_mut() {
+            attach_final_reply(response, self.final_reply.metadata());
         }
+        response
     }
     async fn cancel_inner(&mut self) -> Option<Value> {
         let target = self.settlement.request_cancel().map(str::to_owned);
@@ -410,5 +427,97 @@ impl PendingAcpPrompt {
         } else {
             Ok(self.session)
         }
+    }
+}
+
+fn attach_final_reply(response: &mut Value, final_reply: Value) {
+    let Some(result) = response.get_mut("result").and_then(Value::as_object_mut) else {
+        return;
+    };
+    if result.get("_meta").is_none_or(Value::is_null) {
+        result.insert("_meta".to_owned(), json!({}));
+    }
+    if let Some(metadata) = result.get_mut("_meta").and_then(Value::as_object_mut) {
+        metadata.insert("codex-router/finalReply".to_owned(), final_reply);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::attach_final_reply;
+    use crate::final_reply_selection::FinalReplySelection;
+    use crate::{NativeInterruptionState, NativePromptTerminal, PromptSettlement};
+    use serde_json::json;
+
+    fn accepted_prompt_settlement() -> PromptSettlement {
+        let mut settlement = PromptSettlement::new(json!("prompt")).expect("prompt ID");
+        settlement.mark_dispatched().expect("dispatch");
+        settlement
+            .accepted_turn("turn-a".to_owned())
+            .expect("accepted turn");
+        settlement
+    }
+
+    #[test]
+    fn unavailable_output_does_not_change_completion_and_cancel_keeps_interruption_metadata() {
+        for (text, reason) in [
+            ("x".repeat(1_048_577), "outputLimitExceeded"),
+            ("before\u{0001}after".to_owned(), "outputInvalid"),
+        ] {
+            let mut selection = FinalReplySelection::new();
+            selection.observe_completed_item(
+                "thread-a",
+                "turn-a",
+                &json!({"method":"item/completed","params":{"threadId":"thread-a","turnId":"turn-a","item":{"type":"agentMessage","phase":"final_answer","text":text}}}),
+            );
+            let mut settlement = accepted_prompt_settlement();
+            let mut response = settlement
+                .observe_terminal(Some("turn-a"), NativePromptTerminal::Completed)
+                .expect("completed result");
+            attach_final_reply(&mut response, selection.metadata());
+
+            assert_eq!(response["result"]["stopReason"], "end_turn");
+            assert_eq!(
+                response["result"]["_meta"]["codex-router/finalReply"],
+                json!({"kind":"unavailable","reason":reason})
+            );
+        }
+
+        let mut selection = FinalReplySelection::new();
+        selection.observe_completed_item(
+            "thread-a",
+            "turn-a",
+            &json!({"method":"item/completed","params":{"threadId":"thread-a","turnId":"turn-a","item":{"type":"agentMessage","phase":"final_answer","text":"reply before cancellation"}}}),
+        );
+        let mut settlement = accepted_prompt_settlement();
+        assert_eq!(settlement.request_cancel(), Some("turn-a"));
+        let mut response = settlement
+            .settle_cancel(NativeInterruptionState::Confirmed)
+            .expect("cancelled result");
+        attach_final_reply(&mut response, selection.metadata());
+
+        assert_eq!(response["result"]["stopReason"], "cancelled");
+        assert_eq!(
+            response["result"]["_meta"]["codex-router/nativeInterruption"]["state"],
+            "confirmed"
+        );
+        assert_eq!(
+            response["result"]["_meta"]["codex-router/finalReply"],
+            json!({"kind":"available","text":"reply before cancellation"})
+        );
+
+        let mut no_reply_settlement = accepted_prompt_settlement();
+        assert_eq!(no_reply_settlement.request_cancel(), Some("turn-a"));
+        let mut no_reply_response = no_reply_settlement
+            .settle_cancel(NativeInterruptionState::Confirmed)
+            .expect("cancelled before any reply item");
+        attach_final_reply(
+            &mut no_reply_response,
+            FinalReplySelection::new().metadata(),
+        );
+        assert_eq!(
+            no_reply_response["result"]["_meta"]["codex-router/finalReply"],
+            json!({"kind":"available","text":null})
+        );
     }
 }

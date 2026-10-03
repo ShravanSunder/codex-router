@@ -1,5 +1,12 @@
 # Release Notes
 
+## 0.1.63
+
+- **Breaking (CLI/MCP JSON):** Codex prompt results from `agent-collaboration conversation prompt --json` and MCP `conversation_prompt` / `conversation_create_and_prompt` return the agent's final reply as `output` (`{"kind":"available","text":...}` or `{"kind":"unavailable","reason":...}`, the shape Claude and Cursor already use) instead of an `updates` array of every streamed update. Long turns no longer fail with `ACP prompt updates overflow` and lose the reply.
+- The Codex adapter picks the reply from the turn's completed native items: the last completed plan, otherwise the last `final_answer` message, otherwise the last message with no phase; commentary is never the reply. A turn without one reports `text: null`. A reply over 1 MiB reports `outputLimitExceeded` and invalid text reports `outputInvalid`; the turn's outcome is unchanged either way.
+- Aggregate prompts on an existing conversation skip history replay, so threads with long history load without hitting the setup update limit. Streaming loads still replay.
+- Version skew: against a Host older than 0.1.63, prompt results report `output` as `unavailable` / `notRetained`, and long-thread loads can still fail at setup. Restart the Host after upgrading. The Control schema digest changes with the two new reasons.
+
 ## 0.1.62
 
 - Add a Credits tab beside Resets in account options, with provider-reported balance and freshness, explicit refresh, and a saved Allow/Disallow preference.

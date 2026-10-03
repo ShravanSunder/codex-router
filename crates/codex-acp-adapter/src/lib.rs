@@ -7,6 +7,7 @@ mod approval_broker;
 mod assistant_text_projection;
 mod connection_negotiation;
 mod conversation_operation_recorder;
+mod final_reply_selection;
 mod history_projection;
 mod lazy_codex_session_route;
 mod mcp_configuration;

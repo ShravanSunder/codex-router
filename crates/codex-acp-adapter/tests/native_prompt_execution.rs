@@ -35,6 +35,39 @@ impl UnmaterializedBindingStore for TestBindingHolder {
 }
 const TEST_SCRATCH: &str =
     "/tmp/router-acp-tests/scratch/session-00000000-0000-4000-8000-000000000099";
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FinalReplyFixture {
+    Available,
+    Invalid,
+    Oversized,
+    NoReply,
+    Commentary,
+    CancelBeforeText,
+    PlanOnly,
+    PlanWithProse,
+}
+#[path = "native_prompt_execution/early_cancellation.rs"]
+mod early_cancellation;
+fn expected_final_reply(fixture: FinalReplyFixture) -> Value {
+    match fixture {
+        FinalReplyFixture::Available => json!({"kind":"available","text":"selected answer"}),
+        FinalReplyFixture::Invalid => {
+            json!({"kind":"unavailable","reason":"outputInvalid"})
+        }
+        FinalReplyFixture::Oversized => {
+            json!({"kind":"unavailable","reason":"outputLimitExceeded"})
+        }
+        FinalReplyFixture::NoReply
+        | FinalReplyFixture::Commentary
+        | FinalReplyFixture::CancelBeforeText => {
+            json!({"kind":"available","text":null})
+        }
+        FinalReplyFixture::PlanOnly => json!({"kind":"available","text":"first plan"}),
+        FinalReplyFixture::PlanWithProse => {
+            json!({"kind":"available","text":"last completed plan"})
+        }
+    }
+}
 /// Omits the effort key entirely when the caller requested none.
 fn prompt_metadata(effort: Option<&str>) -> Value {
     effort.map_or_else(|| json!({}), |effort| json!({"effort": effort}))
@@ -47,193 +80,115 @@ fn ensure_test_scratch() {
 }
 
 #[tokio::test]
-async fn prompt_rechecks_native_activity_before_starting_a_turn() {
-    let mut catalog = AcpSchemaCatalog::load().unwrap();
-    let definitions: serde_json::Map<String, Value> = [
-        "ThreadRead",
-        "ThreadResume",
-        "ThreadStart",
-        "ThreadLoadedList",
-        "TurnStart",
-        "TurnSteer",
-        "TurnInterrupt",
-    ]
-    .into_iter()
-    .flat_map(|name| {
-        [
-            (format!("{name}Params"), json!({"type":"object"})),
-            (format!("{name}Response"), json!({"type":"object"})),
-        ]
-    })
-    .collect();
-    let bundle = NativeSchemaBundle::from_documents(BTreeMap::from([(
-        "codex_app_server_protocol.schemas.json".to_owned(),
-        serde_json::to_vec(&json!({"definitions":{"v2":definitions,"ServerRequest":{"type":"object"},"ServerNotification":{"type":"object"}}})).unwrap(),
-    )]))
-    .unwrap();
-    let schemas = Arc::new(NativePayloadSchemas::from_bundle(&bundle).unwrap());
-    let generation = serde_json::from_value(
-        json!({"serviceEpoch":"00000000-0000-4000-8000-000000000001","generation":1}),
-    )
-    .unwrap();
-    let (client, server) = tokio::net::UnixStream::pair().unwrap();
-    let connection = NativeProtocolConnection::from_websocket(
-        WebSocketStream::from_raw_socket(client, Role::Client, None).await,
-    );
-    let backend = tokio::spawn(async move {
-        let mut socket = WebSocketStream::from_raw_socket(server, Role::Server, None).await;
-        for (method, status) in [("thread/resume", "idle"), ("thread/read", "active")] {
-            let frame = socket.next().await.unwrap().unwrap();
-            let request: Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
-            assert_eq!(request["method"], method);
-            socket.send(Message::Text(json!({"id":request["id"],"result":{"cwd":"/work","thread":{"id":"thread-a","cwd":"/work","status":{"type":status},"turns":[]}}}).to_string().into())).await.unwrap();
-        }
-        if let Some(Ok(frame)) = socket.next().await {
-            assert!(
-                frame.is_close(),
-                "busy prompt sent another native request: {frame}"
-            );
-        }
-    });
-    let (session, _) = AcpSessionBinding::load_existing(
-        &mut catalog,
-        SessionSetupInputs {
-            operation_id: None,
-            recorder: Arc::new(AcceptingConversationRecorder),
-            connection,
-            schemas,
-            generation,
-            params: json!({"sessionId":"thread-a","cwd":"/work","mcpServers":[]}),
-            approval_broker: Arc::new(codex_acp_adapter::RejectingApprovalBroker),
-        },
-    )
-    .await
-    .unwrap();
-    let error = PendingAcpPrompt::start(
-        session,
-        &mut catalog,
-        json!("prompt"),
-        &json!({"sessionId":"thread-a","prompt":[{"type":"text","text":"work"}]}),
-    )
-    .await
-    .err()
-    .expect("active native thread must reject prompt");
-    assert_eq!(error.to_string(), "native session has an active turn");
-    backend.await.unwrap();
-}
-
-#[tokio::test]
-async fn failed_native_turn_keeps_its_error_instead_of_projecting_a_result() {
-    let mut catalog = AcpSchemaCatalog::load().unwrap();
-    let definitions: serde_json::Map<String, Value> = [
-        "ThreadRead",
-        "ThreadResume",
-        "ThreadStart",
-        "ThreadLoadedList",
-        "TurnStart",
-        "TurnSteer",
-        "TurnInterrupt",
-    ]
-    .into_iter()
-    .flat_map(|name| {
-        [
-            (format!("{name}Params"), json!({"type":"object"})),
-            (format!("{name}Response"), json!({"type":"object"})),
-        ]
-    })
-    .collect();
-    let bundle = NativeSchemaBundle::from_documents(BTreeMap::from([(
-        "codex_app_server_protocol.schemas.json".to_owned(),
-        serde_json::to_vec(&json!({"definitions":{"v2":definitions,"ServerRequest":{"type":"object"},"ServerNotification":{"type":"object"}}})).unwrap(),
-    )])).unwrap();
-    let schemas = Arc::new(NativePayloadSchemas::from_bundle(&bundle).unwrap());
-    let generation = serde_json::from_value(
-        json!({"serviceEpoch":"00000000-0000-4000-8000-000000000001","generation":1}),
-    )
-    .unwrap();
-    let (client, server) = tokio::net::UnixStream::pair().unwrap();
-    let connection = NativeProtocolConnection::from_websocket(
-        WebSocketStream::from_raw_socket(client, Role::Client, None).await,
-    );
-    let backend = tokio::spawn(async move {
-        let mut socket = WebSocketStream::from_raw_socket(server, Role::Server, None).await;
-        for (method, result) in [
-            (
-                "thread/resume",
-                json!({"cwd":"/work","thread":{"id":"thread-a","cwd":"/work","status":{"type":"idle"},"turns":[]}}),
-            ),
-            (
-                "thread/read",
-                json!({"thread":{"id":"thread-a","status":{"type":"idle"},"turns":[]}}),
-            ),
-            ("turn/start", json!({"turn":{"id":"turn-a"}})),
-        ] {
-            let frame = socket.next().await.unwrap().unwrap();
-            let request: Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
-            assert_eq!(request["method"], method);
-            socket
-                .send(Message::Text(
-                    json!({"id":request["id"],"result":result})
-                        .to_string()
-                        .into(),
-                ))
-                .await
-                .unwrap();
-        }
-        socket.send(Message::Text(json!({"method":"turn/completed","params":{"threadId":"thread-a","turn":{"id":"turn-a","status":"failed"}}}).to_string().into())).await.unwrap();
-        if let Some(Ok(frame)) = socket.next().await {
-            assert!(
-                frame.is_close(),
-                "failed terminal caused another native request: {frame}"
-            );
-        }
-    });
-    let (session, _) = AcpSessionBinding::load_existing(
-        &mut catalog,
-        SessionSetupInputs {
-            operation_id: None,
-            recorder: Arc::new(AcceptingConversationRecorder),
-            connection,
-            schemas,
-            generation,
-            params: json!({"sessionId":"thread-a","cwd":"/work","mcpServers":[]}),
-            approval_broker: Arc::new(codex_acp_adapter::RejectingApprovalBroker),
-        },
-    )
-    .await
-    .unwrap();
-    let mut prompt = PendingAcpPrompt::start(
-        session,
-        &mut catalog,
-        json!("prompt"),
-        &json!({"sessionId":"thread-a","prompt":[{"type":"text","text":"work"}]}),
-    )
-    .await
-    .unwrap();
-    let Some(PromptEvent::Terminal(terminal)) = prompt.next_event(&mut catalog).await.unwrap()
-    else {
-        panic!("failed terminal was not delivered");
-    };
-    assert_eq!(
-        terminal["error"]["message"],
-        "Native prompt did not complete successfully"
-    );
-    assert!(terminal.get("result").is_none());
-    drop(prompt);
-    backend.await.unwrap();
-}
-
-#[tokio::test]
 async fn prompt_buffers_early_output_and_settles_native_completion_once() {
     ensure_test_scratch();
-    // The fourth case omits the effort: the thread's own effort governs. The
-    // fifth resumes a thread that kept "medium" while asking for "high".
-    for (use_task, malformed_callback, requested_effort, resumed) in [
-        (false, false, Some("medium"), false),
-        (true, false, Some("medium"), false),
-        (false, true, Some("medium"), false),
-        (false, false, None, false),
-        (false, false, Some("high"), true),
+    // The fourth case omits effort; the fifth resumes with the inherited
+    // effort. Later cases prove invalid output does not short-circuit callbacks.
+    for (use_task, malformed_callback, requested_effort, resumed, reply, cancel) in [
+        (
+            false,
+            false,
+            Some("medium"),
+            false,
+            FinalReplyFixture::Available,
+            false,
+        ),
+        (
+            true,
+            false,
+            Some("medium"),
+            false,
+            FinalReplyFixture::Available,
+            false,
+        ),
+        (
+            false,
+            true,
+            Some("medium"),
+            false,
+            FinalReplyFixture::Available,
+            false,
+        ),
+        (
+            false,
+            false,
+            None,
+            false,
+            FinalReplyFixture::Available,
+            false,
+        ),
+        (
+            false,
+            false,
+            Some("high"),
+            true,
+            FinalReplyFixture::Available,
+            false,
+        ),
+        (
+            false,
+            false,
+            Some("medium"),
+            false,
+            FinalReplyFixture::Invalid,
+            false,
+        ),
+        (
+            false,
+            false,
+            Some("medium"),
+            false,
+            FinalReplyFixture::Oversized,
+            false,
+        ),
+        (
+            false,
+            false,
+            Some("medium"),
+            false,
+            FinalReplyFixture::NoReply,
+            false,
+        ),
+        (
+            false,
+            false,
+            Some("medium"),
+            false,
+            FinalReplyFixture::Commentary,
+            false,
+        ),
+        (
+            false,
+            false,
+            Some("medium"),
+            false,
+            FinalReplyFixture::PlanOnly,
+            false,
+        ),
+        (
+            false,
+            false,
+            Some("medium"),
+            false,
+            FinalReplyFixture::PlanWithProse,
+            false,
+        ),
+        (
+            false,
+            false,
+            Some("medium"),
+            false,
+            FinalReplyFixture::NoReply,
+            true,
+        ),
+        (
+            false,
+            false,
+            Some("medium"),
+            false,
+            FinalReplyFixture::CancelBeforeText,
+            true,
+        ),
     ] {
         let mut catalog =
             AcpSchemaCatalog::load().unwrap_or_else(|error| panic!("catalog: {error}"));
@@ -261,7 +216,7 @@ async fn prompt_buffers_early_output_and_settles_native_completion_once() {
                     }}
                 }},
                 "ServerNotification":{"type":"object","required":["method","params"],"properties":{
-                    "method":{"enum":["item/agentMessage/delta","turn/completed"]},"params":{"type":"object"}
+                    "method":{"enum":["item/agentMessage/delta","item/completed","turn/completed"]},"params":{"type":"object"}
                 }}
             }}))
                 .unwrap_or_else(|error| panic!("schema JSON: {error}")),
@@ -284,6 +239,24 @@ async fn prompt_buffers_early_output_and_settles_native_completion_once() {
         let thread_effort = requested_effort.unwrap_or("high");
         // The effort the resumed thread already carried, before this turn.
         let persisted_effort = if resumed { "medium" } else { thread_effort };
+        let completed_reply = match reply {
+            FinalReplyFixture::Available => Some("selected answer".to_owned()),
+            FinalReplyFixture::Invalid => Some("before\u{0001}after".to_owned()),
+            FinalReplyFixture::Oversized => Some("x".repeat(1_048_577)),
+            FinalReplyFixture::NoReply => None,
+            FinalReplyFixture::Commentary => Some("commentary only".to_owned()),
+            FinalReplyFixture::CancelBeforeText | FinalReplyFixture::PlanOnly => None,
+            FinalReplyFixture::PlanWithProse => Some("surrounding prose".to_owned()),
+        };
+        let reply_phase = match reply {
+            FinalReplyFixture::Commentary => "commentary",
+            _ => "final_answer",
+        };
+        let cancel = cancel || matches!(reply, FinalReplyFixture::CancelBeforeText);
+        let has_early_delta = !matches!(
+            reply,
+            FinalReplyFixture::PlanOnly | FinalReplyFixture::CancelBeforeText
+        );
         // The thread's own recency, not the prompt's, sets idleSeconds.
         let thread_updated_at = chrono::Utc::now().timestamp() - IDLE_FIXTURE_SECONDS;
         let thread_created_at = thread_updated_at - 600;
@@ -324,7 +297,9 @@ async fn prompt_buffers_early_output_and_settles_native_completion_once() {
                         request["params"].get("effort").and_then(Value::as_str),
                         requested_effort
                     );
-                    socket.send(Message::Text(json!({"method":"item/agentMessage/delta","params":{"threadId":"thread-a","turnId":"turn-a","itemId":"message-a","delta":"early output"}}).to_string().into())).await.unwrap_or_else(|error| panic!("early output: {error}"));
+                    if has_early_delta {
+                        socket.send(Message::Text(json!({"method":"item/agentMessage/delta","params":{"threadId":"thread-a","turnId":"turn-a","itemId":"message-a","delta":"early output"}}).to_string().into())).await.unwrap_or_else(|error| panic!("early output: {error}"));
+                    }
                     json!({"turn":{"id":"turn-a"}})
                 };
                 socket
@@ -335,6 +310,30 @@ async fn prompt_buffers_early_output_and_settles_native_completion_once() {
                     ))
                     .await
                     .unwrap_or_else(|error| panic!("response: {error}"));
+            }
+            if matches!(
+                reply,
+                FinalReplyFixture::PlanOnly | FinalReplyFixture::PlanWithProse
+            ) {
+                socket.send(Message::Text(json!({"method":"item/completed","params":{"threadId":"thread-a","turnId":"turn-a","item":{"type":"plan","id":"plan-first","text":"first plan"}}}).to_string().into())).await.unwrap_or_else(|error| panic!("first plan: {error}"));
+            }
+            if let Some(text) = completed_reply.as_ref()
+                && reply != FinalReplyFixture::PlanWithProse
+            {
+                socket.send(Message::Text(json!({"method":"item/completed","params":{"threadId":"thread-a","turnId":"turn-a","item":{"type":"agentMessage","id":"final-a","phase":reply_phase,"text":text}}}).to_string().into())).await.unwrap_or_else(|error| panic!("completed message: {error}"));
+            }
+            if reply == FinalReplyFixture::PlanWithProse {
+                socket.send(Message::Text(json!({"method":"item/completed","params":{"threadId":"thread-a","turnId":"turn-a","item":{"type":"plan","id":"plan-last","text":"last completed plan"}}}).to_string().into())).await.unwrap_or_else(|error| panic!("last plan: {error}"));
+                let text = completed_reply
+                    .as_ref()
+                    .unwrap_or_else(|| panic!("plan fixture prose"));
+                socket.send(Message::Text(json!({"method":"item/completed","params":{"threadId":"thread-a","turnId":"turn-a","item":{"type":"agentMessage","id":"prose-after-plan","phase":"final_answer","text":text}}}).to_string().into())).await.unwrap_or_else(|error| panic!("prose after last plan: {error}"));
+            }
+            if matches!(
+                reply,
+                FinalReplyFixture::Invalid | FinalReplyFixture::Oversized
+            ) {
+                socket.send(Message::Text(json!({"method":"item/agentMessage/delta","params":{"threadId":"thread-a","turnId":"turn-a","itemId":"message-after-reply","delta":"continued after unavailable reply"}}).to_string().into())).await.unwrap_or_else(|error| panic!("continuation after unavailable reply: {error}"));
             }
             socket.send(Message::Text(json!({"id":9007199254740993_i64,"method":"item/commandExecution/requestApproval","params":{"threadId":"thread-a","turnId":"turn-a","itemId":"tool-a","command":if malformed_callback {json!(42)} else {json!("cargo test")},"availableDecisions":["accept","decline"]}}).to_string().into())).await.unwrap_or_else(|error| panic!("permission: {error}"));
             if malformed_callback {
@@ -355,6 +354,13 @@ async fn prompt_buffers_early_output_and_settles_native_completion_once() {
                 reply,
                 json!({"id":9007199254740993_i64,"result":{"decision":"cancel"}})
             );
+            if cancel {
+                let interrupt = socket.next().await.unwrap().unwrap();
+                let request: Value = serde_json::from_str(interrupt.to_text().unwrap()).unwrap();
+                assert_eq!(request["method"], "turn/interrupt");
+                socket.send(Message::Text(json!({"id":request["id"],"result":{"turn":{"id":"turn-a","status":"interrupted"}}}).to_string().into())).await.unwrap();
+                return;
+            }
             socket.send(Message::Text(json!({"method":"turn/completed","params":{"threadId":"thread-a","turn":{"id":"turn-a","status":"completed"}}}).to_string().into())).await.unwrap_or_else(|error| panic!("complete: {error}"));
             let frame = socket
                 .next()
@@ -420,6 +426,7 @@ async fn prompt_buffers_early_output_and_settles_native_completion_once() {
                 }
                 let terminal=frames.recv().await.unwrap_or_else(||panic!("terminal"));
                 assert_eq!(terminal["result"]["stopReason"],"end_turn");
+                assert_eq!(terminal["result"]["_meta"]["codex-router/finalReply"],expected_final_reply(reply));
                 assert!(!registry.has_pending());
             }).await;
             assert!(observed.is_ok(), "registry deadline");
@@ -433,13 +440,49 @@ async fn prompt_buffers_early_output_and_settles_native_completion_once() {
             )
             .await
             .unwrap_or_else(|error| panic!("prompt: {error}"));
-            let update = prompt
-                .next_event(&mut catalog)
-                .await
-                .unwrap_or_else(|error| panic!("update: {error}"));
-            assert!(
-                matches!(update,Some(PromptEvent::Update(value)) if value["params"]["update"]["content"]["text"]=="early output")
-            );
+            if has_early_delta {
+                let update = prompt
+                    .next_event(&mut catalog)
+                    .await
+                    .unwrap_or_else(|error| panic!("update: {error}"));
+                assert!(
+                    matches!(update,Some(PromptEvent::Update(value)) if value["params"]["update"]["content"]["text"]=="early output")
+                );
+            }
+            if matches!(reply, FinalReplyFixture::PlanOnly) {
+                assert!(matches!(
+                    prompt.next_event(&mut catalog).await.unwrap(),
+                    Some(PromptEvent::NativeNotification(value))
+                        if value["params"]["item"]["type"] == "plan"
+                ));
+            } else if matches!(reply, FinalReplyFixture::PlanWithProse) {
+                for expected_type in ["plan", "plan", "agentMessage"] {
+                    assert!(matches!(
+                        prompt.next_event(&mut catalog).await.unwrap(),
+                        Some(PromptEvent::NativeNotification(value))
+                            if value["params"]["item"]["type"] == expected_type
+                    ));
+                }
+            } else if !matches!(
+                reply,
+                FinalReplyFixture::NoReply | FinalReplyFixture::CancelBeforeText
+            ) {
+                assert!(matches!(
+                    prompt.next_event(&mut catalog).await.unwrap(),
+                    Some(PromptEvent::NativeNotification(value))
+                        if value["method"] == "item/completed"
+                ));
+            }
+            if matches!(
+                reply,
+                FinalReplyFixture::Invalid | FinalReplyFixture::Oversized
+            ) {
+                assert!(matches!(
+                    prompt.next_event(&mut catalog).await.unwrap(),
+                    Some(PromptEvent::Update(value))
+                        if value["params"]["update"]["content"]["text"] == "continued after unavailable reply"
+                ));
+            }
             if malformed_callback {
                 assert!(
                     prompt.next_event(&mut catalog).await.is_err(),
@@ -456,6 +499,22 @@ async fn prompt_buffers_early_output_and_settles_native_completion_once() {
             assert!(
                 matches!(decision, Some(PromptEvent::NativeNotification(value)) if value["kind"] == "approvalDecisionSubmitted")
             );
+            if cancel {
+                let Some(response) = prompt.cancel().await else {
+                    panic!("cancel response")
+                };
+                assert_eq!(response["result"]["stopReason"], "cancelled");
+                assert_eq!(
+                    response["result"]["_meta"]["codex-router/nativeInterruption"]["state"],
+                    "confirmed"
+                );
+                assert_eq!(
+                    response["result"]["_meta"]["codex-router/finalReply"],
+                    json!({"kind":"available","text":null})
+                );
+                fixture.await.unwrap();
+                continue;
+            }
             let terminal = prompt
                 .next_event(&mut catalog)
                 .await
@@ -472,6 +531,10 @@ async fn prompt_buffers_early_output_and_settles_native_completion_once() {
             let Some(PromptEvent::Terminal(terminal)) = &terminal else {
                 panic!("terminal receipt")
             };
+            assert_eq!(
+                terminal["result"]["_meta"]["codex-router/finalReply"],
+                expected_final_reply(reply)
+            );
             assert_eq!(
                 terminal["result"]["_meta"]["codexRouter"]["effectiveAccess"],
                 expected_access

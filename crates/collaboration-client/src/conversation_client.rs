@@ -432,7 +432,11 @@ impl ConversationClient {
                 let mut emit = |_event| Ok(());
                 match tokio::time::timeout(
                     timeout,
-                    acp.open_session_with_context(&request, &mut emit),
+                    acp.open_session_with_context(
+                        &request,
+                        &mut emit,
+                        crate::acp_conversation::SetupUpdateDelivery::StreamToCaller,
+                    ),
                 )
                 .await
                 {

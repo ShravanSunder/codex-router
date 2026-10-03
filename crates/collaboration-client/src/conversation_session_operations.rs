@@ -60,7 +60,13 @@ impl ConversationClient {
                     root_message_id: None,
                 };
                 let mut emit = |_event| Ok(());
-                let loaded = acp.open_session_with_context(&request, &mut emit).await?;
+                let loaded = acp
+                    .open_session_with_context(
+                        &request,
+                        &mut emit,
+                        crate::acp_conversation::SetupUpdateDelivery::StreamToCaller,
+                    )
+                    .await?;
                 Ok(ConversationOperationResult::Completed {
                     target: loaded.clone(),
                     operation_id: None,
@@ -182,7 +188,7 @@ impl ConversationClient {
                         target: prompted.target,
                         stop_reason: Some(stop_reason),
                         detail: ConversationSettlementDetail::CodexPrompt {
-                            updates: prompted.updates,
+                            output: prompted.output,
                             permission_required: prompted.permission_required,
                             result: prompted.result,
                         },
