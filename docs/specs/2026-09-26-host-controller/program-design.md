@@ -1,10 +1,12 @@
 # Host controller — Program Design
 
-Governing: [Requirements](requirements.md) U1–U7 → [Specification](specification.md)
-E1–E10, R1–R15, V1–V10. This document is the How. Design prose uses the
+Governing: [Requirements](requirements.md) U1–U9 → [Specification](specification.md)
+E1–E11, R1–R19, V1–V12. This document is the How. Design prose uses the
 Specification's entity terms. Code names appear in home and shape cells and in
-code blocks. Current-code anchors are relative to the repository root at
-`ad0b6b5`. Upstream anchors are Codex `rust-v0.157.1`. The cross-track contract
+code blocks. Current-code anchors are relative to the repository root at main
+`9e947528` (re-anchored 2026-10-03 from `b8d76af` by Worker evidence W15–W19).
+Upstream anchors are Codex `rust-v0.160.0`, the managed version at the
+re-anchor (W18; unchanged from 0.157.1 except where noted). The cross-track contract
 for R2 is the Router session protocol (RSP) `_session/state` element's `turn`
 record, defined by the RSP track (coordination root `01a0dd96`).
 
@@ -77,11 +79,11 @@ flowchart TB
   - fds, child snapshots and any in-flight update cross the exec as one framed SCM_RIGHTS message on stdin.
 - **Kept:**
   - collaboration behavior;
-  - the Codex launch plan, schema export and readiness probe;
+  - the Codex launch plan as it is projected today (#114, #116, #118): model-only routing profile, Router permission profiles, default `workspace-write` sandbox and direct network as root overrides, debug overrides after the shared ones (`app_server_launch.rs:22-37`, `router_profile_projection.rs:22-92`); schema export; the readiness probe;
   - the operator framing and single-mutation admission;
   - the lock file;
   - private socket rules;
-  - the existing launch-argument reconstruction (`foreground_launch.rs:194-222`).
+  - the existing launch-argument reconstruction (`foreground_launch.rs:262-311`), which now also carries the owner Human identity and `--require-debug-isolation` for isolated launches (#94).
 - **Removed:**
   - child ownership inside the services process (`lifecycle_owner`);
   - whole-process stop-then-exec (`host_replacement_activation.rs`, `update_activation.rs:149-176`);
@@ -114,7 +116,7 @@ frequent keeper changes.
 | Reaping | `rustix::process::waitpid(Some(pid), NOHANG)` per owned PID on SIGCHLD | `tokio::process::Child` cannot survive exec. `waitpid(-1)` would steal Tokio's statuses. |
 | Where provider processes live (owner P3) | A fourth keeper child, `agent-provider-services`, runs `acp-client-runtime` and owns the provider processes. It is replaced only when its fingerprint changes. | **P1:** providers stay in services, so every services restart ends their turns (`lost`). **P2:** hand provider stdio and live ACP connection state from old services to new, which is delicate mid-stream JSON-RPC adoption. |
 | Provider process boundary | `acp-client-runtime`'s own three ports (`AgentSessionClient` commands, `SessionEventSink`, `InteractionPort`; agreed with RSP main) carried by ProviderLink | **`SessionCommandPort` / hub:** that is RSP PR 4's front-door port in the collaboration layer, composed over supervisor and delivery (W9 §4-5). Splitting there would move the hub and broker out of collaboration. |
-| Proxy auth during handover | Existing cross-process refresh safety: per-account file lock plus a durable claim before egress (`codex-router-secret-store/src/account_credential_lock.rs:19-47`, `codex-router-auth/src/resolver/credential_renewal.rs:346-618`). Upkeep and quota workers start only at Activate. Deactivate lets an in-flight renewal finish before any stop signal. | A new refresh lease: redundant with #83. Killing the old proxy mid-renewal: leaves an `in_progress` claim with no successor, so the account becomes `reauth_required` (`credential_renewal.rs:389-436`). |
+| Proxy auth during handover | Existing cross-process refresh safety: per-account file lock plus a durable `Refresh` claim before egress, for OpenAI and Claude alike (`codex-router-secret-store/src/account_credential_lock.rs:19-47`, unchanged; `codex-router-auth/src/resolver/credential_renewal.rs:414-773`, lock `:423-438`, claim then egress `:614-647`; provider dispatch `resolver.rs:308-355`). Upkeep and quota workers start only at Activate. Deactivate lets an in-flight renewal finish before any stop signal. | A new refresh lease: redundant with #83. Killing the old proxy mid-renewal: leaves a `Refresh` claim with no successor, so the account becomes `reauth_required` (`credential_renewal.rs:512-525`). `Login` claims belong to the CLI login commands (`credential_activation.rs:81-208`), not to E5, and recover differently (`credential_renewal.rs:527-545`). |
 | Provider containment | Providers are their own groups (SDK `process_group(0)`, `acp_agent.rs:250-306`); they are services' graceful responsibility and exit on stdio EOF (Specification R8 scope) | Keeper-tracked provider pgids (`OwnedGroups`): not crash-atomic, and pgid reuse risks signalling the wrong group (review O1). Deleted. |
 
 ## 3. Where each entity lives
@@ -151,7 +153,7 @@ flowchart LR
 | E2 App-server generation | `GenerationController` | `codex-router-keeper` (new); launch plan, schema export and probe moved from `codex-router-host::managed_app_server` to `codex-native-integration` (modified) | `codex_router_keeper_protocol::app_server_generation` (new) | Keeper → services: `PrepareGeneration{generation, alias, evidence}`, `CommitGeneration`, `AbandonGeneration`, `RetireGeneration`. Operator: `GenerationStatus`. Handoff: `HandoffGeneration`. | derived (memory; carried in handoff) | tagged enums, newtypes |
 | E3 Keeper | `KeeperEventLoop` | `codex-router-keeper` (new); lock logic moved from `host_singleton_authority` | `codex_router_keeper_protocol::keeper_handoff` (new) | Self-exec: a `KeeperHandoff` frame with SCM_RIGHTS on stdin | derived | versioned tagged enum |
 | E4 Agent collaboration services | `ChildSupervisor` (lifecycle); `CollaborationRuntime` (behavior) | `codex-router-keeper`; crate `agent-collaboration-services` (renamed from `codex-router-host`, minus lifecycle, operator and lock) | `codex_router_keeper_protocol::keeper_channel` (new) | KeeperChannel frames on the child's stdin socket | derived | tagged enums |
-| E5 Agent proxy services | `ChildSupervisor` | `codex-router-keeper`; `codex-router-proxy` (modified: `LoopbackRouterRuntime::prepare`/`activate` replace `start` and `AsyncLoopbackServerRuntime::bind`, `server.rs:242,512-616`); upkeep and quota worker starts move from `codex-router-cli/src/lib.rs:263-291` into the role's Activate | `codex_router_keeper_protocol::keeper_channel` | KeeperChannel | derived | tagged enums |
+| E5 Agent proxy services | `ChildSupervisor` (lifecycle); `ProxyRoleRuntime` (behavior) | `codex-router-keeper`; crate `agent-proxy-services` (new role crate, mirroring E4 and E11): the role entrypoint plus the serve-owned modules that today live in `codex-router-cli` and so sit outside the proxy crate's closure: `credential_upkeep_worker.rs`, `quota/quota_background_refresh_worker.rs` and the `quota_refresh_service.rs` it drives, `credential_runtime.rs`, `token_reload_watcher.rs`, and the serve startup at `lib.rs:271-313`. `codex-router-cli` keeps its quota and account commands by depending on this crate. `codex-router-proxy` (modified: `LoopbackRouterRuntime::prepare`/`activate` replace `start`, `server.rs:600-612,646-766`, and `AsyncLoopbackServerRuntime::bind`, `:262-277`) | `codex_router_keeper_protocol::keeper_channel` | KeeperChannel | derived | tagged enums |
 | E11 Agent provider services | `ChildSupervisor` (lifecycle); `ProviderHostRuntime` (behavior) | `codex-router-keeper`; crate `agent-provider-services` (new): hosts one `acp_client_runtime::AgentSessionClient<LinkInteractionPort>` per provider with a `RingEventSink`; provider configuration reading (`providers.json`) moves here from `codex-router-host::provider_configuration_file` | `provider_link_protocol` crate (new; payloads are `session-event-model` types) | ProviderLink: length-prefixed JSON frames on a keeper-granted Unix socket (`ListenerKind::ProviderLink`), accepted by E11 and dialed by E4 | derived (provider sessions live in provider processes; the ring is memory) | tagged enums; RSP serde types |
 | E6 Component fingerprint (kinds: keeper, services, proxy, provider) | `BuildFingerprints` | `codex-router-cli` `build.rs` (new) | `codex_router_keeper_protocol::component_fingerprint` (new) | `codex-router build-info --json` → `BuildInfo`. Channel: `ChildToKeeper::Prepared{fingerprint}`. | derived (compiled in) | newtype |
 | E7 Update | `UpdateCoordinator` | `codex-router-keeper` | `codex_router_keeper_protocol::component_update` (new) | Operator: `Update` → `UpdateOutcome`; `AwaitUpdateResult`. Handoff: `InFlightUpdate`. | derived | tagged enums |
@@ -208,7 +210,7 @@ pub enum GenerationFailure {
     SpawnFailed, ExitedBeforeReady, ReadinessTimedOut, VersionMismatch,
     SchemaExportFailed, AliasOccupied, ServicesDidNotAdopt, PublicationFailed,
 }
-pub struct GenerationEvidence {                 // reused publication boundary (collaboration_runtime.rs:516-547,631-661)
+pub struct GenerationEvidence {                 // reused publication boundary (collaboration_runtime.rs:719-750,834-865)
     pub executable: ExecutableIdentity,         // existing codex-native-integration type
     pub schema_digest: NativeSchemaDigest,      // existing
     pub schema_bundle_dir: PathBuf,             // keeper-private 0700 dir, content-addressed by digest
@@ -223,7 +225,7 @@ pub struct GenerationEvidence {                 // reused publication boundary (
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum KeeperToChild {
     ListenerGrant { listeners: Vec<ListenerKind> }, // rights in list order
-    Prepare { generation: Option<GenerationCurrentPayload> }, // services: always Some once a generation exists
+    Prepare { generation: Option<GenerationCurrentPayload>, mode: PrepareMode }, // services: generation always Some once one exists
     Activate,
     Deactivate { reason: DeactivateReason },
     PrepareGeneration(GenerationCurrentPayload),     // services: stage and validate; admission unchanged (H5)
@@ -239,9 +241,16 @@ pub struct GenerationCurrentPayload {
     pub generation: GenerationId,
     pub alias: GenerationAliasPath,
     pub evidence: GenerationEvidence,
+    pub server_display_name: ServerDisplayName, // existing validated readiness value (managed_app_server.rs:19-76,275-301), consumed by collaboration identity (collaboration_lifecycle.rs:25-57)
 }
-pub enum ListenerKind { CollaborationControl, NativeRelay, AcpChannel, McpHttp, ProxyHttp, RouterSessionFace { provider: ProviderId }, ProviderLink }
-// RouterSessionFace = RSP app-server face socket router-sessions/<provider>.sock (RSP PR 4, lane C)
+// Fresh: no other child of this kind is alive (fresh keeper start, crash respawn). Prepare may run the role's
+//   one-time startup writes: proxy pooled-credential migration (today Host startup, startup_convergence.rs:23-31).
+// Replacement: an Active child of this kind is serving. Prepare is non-mutating (6.1).
+pub enum PrepareMode { Fresh, Replacement }
+pub enum ListenerKind { CollaborationControl, NativeRelay, AcpChannel, McpHttp, ProxyHttp, RouterSessionFace { endpoint: EndpointId }, ProviderLink }
+// RouterSessionFace = RSP app-server face socket router-sessions/<endpoint-id>.sock (e.g. claude-local.sock), bound today
+// only when the provider has a model catalog AND the owner Human identity resolved (collaboration_runtime.rs:554-603);
+// EndpointId is the existing collaboration endpoint id type
 pub enum DeactivateReason { Replacement, KeeperFullRestart, Shutdown }
 pub enum NoGenerationReason { StartupPending, CurrentExited, RecoveryExhausted }
 
@@ -267,7 +276,13 @@ pub struct ChildSnapshot {
     pub degraded: Vec<(ServicesComponent, ServicesDegradation)>,
 }
 pub enum ChildPhase { Prepared, Active, Deactivating }
-pub enum PrepareFailure { StoreOpenFailed, SecretStoreUnavailable, ListenerGrantInvalid, SchemaEvidenceRejected, FrameInvalid }
+pub enum PrepareFailure {
+    StoreOpenFailed,
+    StoreSchemaNewerThanImage { store: StoreKind },  // the store has migrations this image doesn't know: never downgrade
+    SecretStoreUnavailable,                          // Replacement requires the encrypted store Ready; Fresh tolerates KeyUnavailable as today
+    ListenerGrantInvalid, SchemaEvidenceRejected, FrameInvalid,
+}
+pub enum StoreKind { ProjectBoard, Automation, ProviderOperations, RouterState }
 pub enum EvidenceRejection { ExecutableMismatch, DigestMismatch, BundleUnreadable }
 pub enum ServicesComponent { Board, Delivery, Automation, Schedules, Mcp, AcpChannel, NativeRelay, Providers }
 pub enum ServicesDegradation { StoreUnavailable, SchemaMismatch, NoCurrentGeneration, ProviderUnavailable }
@@ -397,6 +412,7 @@ pub enum KeeperHandoff {
     #[serde(rename = "2")]
     V2 {
         epoch: KeeperEpoch,
+        launch_path: InstalledExecutablePath,     // default E7 target; carried, never re-derived (6.7)
         next_generation: GenerationNumber,
         recovery_budget: RecoveryBudget,
         fds: Vec<HandoffFdRole>,                  // rights order; each role at most once, except Listener by kind
@@ -418,7 +434,8 @@ pub enum HandoffFdRole {
     ChildStderr { of: StderrOwner },
 }
 pub struct HandoffGeneration { pub id: GenerationId, pub pid: ChildPid, pub alias: GenerationAliasPath, pub evidence: GenerationEvidence }
-pub struct HandoffChild { pub pid: ChildPid, pub snapshot: ChildSnapshot, pub held_output: Vec<ChildToKeeper> }
+pub struct HandoffChild { pub pid: ChildPid, pub snapshot: ChildSnapshot, pub held_output: Vec<ChildToKeeper>, pub image: SlotImage }
+pub struct SlotImage { pub path: PathBuf, pub device: u64, pub inode: u64, pub size: u64, pub modified: SystemTime } // the file a slot's child was spawned from (6.7)
 pub struct InFlightUpdate {
     pub update_id: UpdateId,
     pub target: BuildInfo,
@@ -490,21 +507,47 @@ pub enum ServicesToProvider {
     Attach { epoch: LinkEpoch, role: LinkRole },        // first frame; Standby during E4 Prepare
     Promote { epoch: LinkEpoch },                       // Standby → Active; the previous Active link is demoted and closed
     Command { request_id: LinkRequestId, provider: ProviderId, command: AgentSessionCommand }, // Active only
+    Query { request_id: LinkRequestId, provider: ProviderId, query: AgentSessionQuery },       // Active only; never ledgered
     InteractionDecision { interaction_id: InteractionId, decision: LinkDecision },              // Active only; idempotent
     OperationSettled { operation: ProviderOperationRef },  // E4 has durably settled it; E11 may drop the ledger record
 }
 
+// The link covers every AgentSessionClient method E4 calls today (acp-client-runtime
+// agent_session_client/provider_client_operations.rs:43-449; approval_turn_cancellation.rs:105-112;
+// provider_approval_dispatch.rs:15). Completeness is enforced by the forbidden edge
+// agent-collaboration-services → acp-client-runtime: a call the link doesn't carry doesn't compile.
 #[serde(tag = "command", rename_all = "camelCase")]
-pub enum AgentSessionCommand {            // mirrors AgentSessionClient's command API
+pub enum AgentSessionCommand {            // mutations
     Create { operation: ProviderOperationRef, cwd: WorkingDirectory, settings: SessionSettings },
     Load { operation: ProviderOperationRef, session_id: String, cwd: WorkingDirectory },
     Resume { operation: ProviderOperationRef, session_id: String, cwd: WorkingDirectory },
     Close { operation: ProviderOperationRef, session_id: String },
     SetSetting { session_id: String, setting: SessionSettingChange },
+    AcceptSessionSettings { session_id: String },   // accept_session_settings (:80); not operation-bearing, like SetSetting
     Prompt { operation: ProviderOperationRef, session_id: String, input_id: InputId, content: PromptContent },
     Steer { operation: ProviderOperationRef, session_id: String, input_id: InputId, content: PromptContent },
-    Cancel { session_id: String, target: ProviderOperationRef }, // targeted, as today (external_provider_supervisor.rs:801-840); sent only after the broker's cancelling mark (RSP R1)
+    Cancel { session_id: String, target: ProviderOperationRef }, // targeted, as today (external_provider_supervisor.rs:978-1024); sent only after the broker's cancelling mark (RSP R1)
 }
+
+// Reads answered from E11's live state at the time of the query. E4 never caches them across a link:
+// presence and LoadedOnly rechecks (provider_acp_session_loading.rs:93-125;
+// provider_acp_delivery_route/session_delivery_route.rs:37-84) need the provider's current answer.
+#[serde(tag = "query", rename_all = "camelCase")]
+pub enum AgentSessionQuery {
+    ListSessions { cwd: Option<WorkingDirectory> },            // list_sessions (:295)
+    SessionActivity { session_id: String },                    // session_activity (:404)
+    ActivePromptOperation { session_id: String },              // active_prompt_operation (:420)
+    WaitSessionIdle { session_id: String, within: Duration },  // wait_session_idle (:435); bounded by the caller
+    CapabilityReport { session_id: String },                   // capability_report (:47)
+    SettingsCatalog { session_id: Option<String> },            // settings_catalog / last_settings_catalog (:58,69)
+    SettingsUnresolved { session_id: String },                 // settings_unresolved (:73)
+    ActiveApprovalOperation { session_id: String },            // active_approval_operation (:184)
+    PermissionObservation,                                     // permission_observation (:142)
+    ApprovalRefusalWarnings,                                   // approval_refusal_warnings (:176)
+}
+// Static per-provider facts travel in ProviderSnapshot, not as queries: admission() (:43) and the endpoint id
+// (set_endpoint_id, :171). retirement() (:167) is ProviderRetired. Test-only methods (take_test_tool_calls,
+// abort_owner_for_test) are not carried.
 
 #[serde(tag = "decision", rename_all = "camelCase")]
 pub enum LinkDecision { Approval(LinkApprovalOutcome), Question(QuestionResponse) }
@@ -514,6 +557,7 @@ pub enum ProviderToServices {
     Attached(AttachSnapshot),               // cut atomically at snapshot_seq (B3)
     Promoted { epoch: LinkEpoch, cut: AttachSnapshot }, // fresh authoritative cut taken AFTER the old Active link is demoted (C1, S1)
     CommandResult { request_id: LinkRequestId, result: AgentSessionCommandResult },
+    QueryResult { request_id: LinkRequestId, result: AgentSessionQueryResult }, // one serde mirror variant per AgentSessionQuery, same exhaustive-conversion rule (C2)
     Event(LinkEvent),                       // one ordered FIFO per provider
     InteractionRequest(LinkInteractionRequest),
     InteractionWithdrawn { interaction_id: InteractionId, reason: InteractionWithdrawal },
@@ -533,6 +577,8 @@ pub struct AttachSnapshot {
 }
 pub struct ProviderSnapshot {
     pub provider: ProviderId,
+    pub endpoint: EndpointId,                           // set_endpoint_id today; E11 derives it from providers.json
+    pub admission: LinkProviderAdmission,               // mirror of ExternalProviderAdmission (provider_client_operations.rs:43)
     pub state: ProviderRuntimeState,                    // Ready | Retired{reason}
     pub sessions: Vec<SessionSnapshot>,
 }
@@ -598,7 +644,7 @@ pub struct LinkRefusedApprovalOffer {                 // full mirror of acp-clie
     pub reason: LinkRefusalReason,
 }
 pub enum LinkRefusalReason { /* mirror of the serde enum that replaces RefusedApprovalOffer.reason: &'static str (P3 owns that change, agreed with RSP) */ }
-// E4 converts LinkRefusedApprovalOffer into the broker's existing RefusedTypedApproval record (acp_interaction_port.rs:234-251).
+// E4 converts LinkRefusedApprovalOffer into the broker's existing RefusedTypedApproval record (acp_interaction_port.rs:284-324).
 ```
 
 **Rules the types cannot express alone:**
@@ -654,7 +700,7 @@ boundary:
 | `FORCED_TERM_GRACE` | 150 ms | forced handover path: group SIGTERM before SIGKILL (R8, H6) |
 | `KILL_OBSERVE_BOUND` | 100 ms | forced path: observe up to this bound after SIGKILL, then Activate whether or not the group is reaped (owner D2) |
 | `EVENT_RING_EVENTS` / `EVENT_RING_BYTES` | 4096 / 8 MiB per provider | E11 replay ring (RSP-recommended) |
-| `RENEWAL_DRAIN_BOUND` | 45 s (15 s HTTP, `resolver.rs:295-296`, plus 30 s commit and disposition retries, `credential_renewal.rs:579-618`) | expected drain; never a kill deadline for a responsive proxy (H4) |
+| `RENEWAL_DRAIN_BOUND` | 60 s: the slower provider's refresh HTTP timeout (Claude 30 s, `claude_oauth.rs:36,243-278`; OpenAI 15 s, `resolver.rs:381-383`) plus the branch-local 30 s persistence retry (failure disposition `credential_renewal.rs:667-695`, or successor commit `:709-761`) | expected drain; never a kill deadline for a responsive proxy (H4). Nominal, not an absolute bound: lock waits and pruning (`:763-770`) are outside it. |
 
 **Illegal states:**
 
@@ -667,7 +713,7 @@ boundary:
 | A keeper-only outcome on a child | separate `KeeperUpdateOutcome` / `ChildUpdateOutcome` | type |
 | Update in progress without a carried result | `IdentityDefect::UpdateWithoutOutcome` / `OutcomeWithoutUpdate` | runtime guard at the trusted entry |
 | A received fd leaking into a later child | Every `recvmsg` of rights and its `fcntl_setfd(FD_CLOEXEC)` run under a process-wide **spawn gate** (an `RwLock`: receipt takes it for writing, every child spawn for reading). That covers role startup and later `RequestListener` grants on macOS, which has no `MSG_CMSG_CLOEXEC`. On Linux, `MSG_CMSG_CLOEXEC` is also set. | runtime guard |
-| A child unlinking a keeper-owned socket path | Children build listeners only from granted fds (`from_std`), never from a path, so drop closes the fd and never unlinks. The RSP façade's `PrivateSocketListener` path binding (`router_session_app_server.rs:74-91`) moves to the keeper's `ListenerRegistry`. The keeper binds each façade path once, on the first `RequestListener`, and grants duplicates to every later incarnation. | type |
+| A child unlinking a keeper-owned socket path | Children build listeners only from granted fds (`from_std`), never from a path, so drop closes the fd and never unlinks. The RSP façade's `PrivateSocketListener` path binding (`router_session_app_server.rs:76-93`) moves to the keeper's `ListenerRegistry`. The keeper binds each façade path once, on the first `RequestListener`, and grants duplicates to every later incarnation. | type |
 | An unsafe fd conversion | `unsafe_code = "forbid"`; fds arrive only as `OwnedFd` | lint |
 
 ## 5. Components
@@ -676,7 +722,7 @@ boundary:
 |---|---|---|---|
 | `KeeperEventLoop` | The only mutable keeper state: one Tokio task receiving `KeeperEvent`s (operator requests, SIGCHLD, channel frames, timers), with no shared mutex. Startup and shutdown order. A `TaskTracker` plus a `CancellationToken` for helper tasks (channel readers, stderr readers, probes). | all keeper components | the keeper's process model changes |
 | `ListenerRegistry` | Binding each endpoint once (`host.sock`, `control.sock`, `codex-native.sock`, `codex-acp.sock`, MCP HTTP, proxy HTTP) under the existing private rules (`private_socket_listener.rs:13-45`, `host_singleton_authority.rs:107-125`); duplicates for grants and handoff | `ChildSupervisor`, `KeeperHandoff` | a new endpoint kind |
-| `GenerationController` | E2 states and the transition slot; alias naming; E1 publication; settle and retire; schema export and evidence (moved from `managed_app_server.rs:75-116`); readiness probe (`:205-250`); recovery budget (policy moved from `lifecycle_owner.rs:606-674`); alias and physical-socket sweep | `UpdateCoordinator`, `OperatorService`, `ChildSupervisor` | Codex endpoint or lifecycle changes |
+| `GenerationController` | E2 states and the transition slot; alias naming; E1 publication; settle and retire; schema export and evidence (moved from `managed_app_server.rs:122-163`); readiness probe (`:252-313`, which now also carries the validated server display name); recovery budget (policy moved from `lifecycle_owner.rs:613-681`); alias and physical-socket sweep | `UpdateCoordinator`, `OperatorService`, `ChildSupervisor` | Codex endpoint or lifecycle changes |
 | `ChildSupervisor` | E4, E5 and E11 slots; spawn with a channel socket as stdin; `ListenerGrant`; prepare, deactivate, activate; the handover budget; crash respawn; stderr telemetry (existing behavior); group stop (6.8) | `UpdateCoordinator`, `OperatorService`, `GenerationController` (services preparation for schema changes) | the child launch contract changes |
 | `UpdateCoordinator` | E7: `build-info`, fingerprint comparison, parallel child replacements, keeper replacement last, `InFlightUpdate`, `UpdateOutcome` | `OperatorService` | update policy changes |
 | `KeeperHandoff` | Quiesce, the framed SCM_RIGHTS bundle, exec, receive, phase-1 validation, phase-2 health classification and recovery dispatch, and exec-failure resume | `UpdateCoordinator`, `KeeperEventLoop` startup | the handoff format changes |
@@ -684,18 +730,20 @@ boundary:
 | `KeeperChannelEndpoint` (child side, `codex_router_keeper_protocol::keeper_channel_endpoint`) | Framing, grant receipt with CLOEXEC, the child phase machine, the quiesce hold buffer | services and proxy role entrypoints | the channel protocol changes |
 | `CollaborationRuntime` (moved into `agent-collaboration-services`) | Collaboration behavior, split into the effect classes in §6.1 | ACP, relay, control and MCP clients | collaboration features change |
 | `SessionConnectionRegistry` + `LiveTurnAttachment` (`codex-acp-adapter`, modified and new) | Lifecycle detach without cancel (6.5); the `Attached{turn}` slot; the live-turn reader emitting `_session/state.turn` through the RSP codec | ACP clients | ACP projection or RSP profile changes |
-| `ProviderHostRuntime` (new, crate `agent-provider-services`) | One `AgentSessionClient<LinkInteractionPort>` per configured provider (the process, stdio ACP connection, session actors: all RSP `acp-client-runtime`). `RingEventSink` keeps a bounded per-provider ring of **folded** events: `ItemUpdated` is folded per `item_id`, matching the hub's per-item folding and per-session locks (RSP review B1/M7), never raw cumulative chunks. It forwards to the link. `LinkInteractionPort` turns `request_approval` into `InteractionRequest` and awaits `InteractionDecision`, and keeps pending requests alive across link loss. `ProviderLinkServer` accepts one active link and supersedes an older link epoch. | E4's `ProviderLinkClient` | provider hosting or ACP client changes |
-| `ProviderLinkClient` (new, in `agent-collaboration-services`) | Replaces in-process `ExternalProviderRuntime` ownership of `AgentSessionClient`. It implements the runtime API that `ExternalProviderSupervisor` and delivery routes already call, over ProviderLink. It republishes `Event`s to the session-event hub in order, feeds `InteractionRequest`s to the typed broker, and maps `ProviderRetired` to RSP R5 settlement. | `ExternalProviderSupervisor`, hub, broker | the link protocol changes |
-| `LoopbackRouterRuntime` (`codex-router-proxy`, modified) | Proxy behavior, split into prepare and activate; runs on the role entrypoint's single Tokio runtime (no internal `block_on`, `server.rs:520-547` changed) | Codex app-server model calls | proxy features change |
+| `ProviderHostRuntime` (new, crate `agent-provider-services`) | One `AgentSessionClient<LinkInteractionPort>` per configured provider (the process, stdio ACP connection, session actors: all RSP `acp-client-runtime`). `RingEventSink` keeps a bounded per-provider ring of **folded** events: `ItemUpdated` is folded per `item_id`, matching the hub's per-item folding and per-session locks (RSP review B1/M7), never raw cumulative chunks. It forwards to the link. `LinkInteractionPort` turns `request_approval` into `InteractionRequest` and awaits `InteractionDecision`, and keeps pending requests alive across link loss. `ProviderLinkServer` accepts one active link and supersedes an older link epoch. Provider process environment is configured against the proxy endpoint and the local Router token, as collaboration does today (`collaboration_lifecycle.rs:33-57`); E11 reads both in Prepare. | E4's `ProviderLinkClient` | provider hosting or ACP client changes |
+| `ProviderLinkClient` (new, in `agent-collaboration-services`) | Replaces in-process `ExternalProviderRuntime` ownership of `AgentSessionClient` (`external_provider_runtime.rs:118-122,172-204`; composed by `provider_startup_composition.rs:55-113`). It implements the runtime API that `ExternalProviderSupervisor`, the provider ACP and app-server routes, the presence and LoadedOnly rechecks, and the queue paths already call, over ProviderLink commands and queries. It republishes `Event`s to the session-event hub in order, feeds `InteractionRequest`s to the typed broker, and maps `ProviderRetired` to RSP R5 settlement. | `ExternalProviderSupervisor`, hub, broker | the link protocol changes |
+| `LoopbackRouterRuntime` (`codex-router-proxy`, modified) | Proxy behavior, split into prepare and activate; runs on the role entrypoint's single Tokio runtime (no internal `block_on`, `server.rs:656-680` changed). One listener serves both `/v1` (Responses, WebSocket) and `/anthropic/v1/messages` (`routes.rs:74-81`, `server.rs:704`). | Codex app-server model calls; Claude Code launched through Router (`claude_launch_target.rs:91-140`, #110); routed Claude ACP providers | proxy features change |
+| `ProxyRoleRuntime` (new, crate `agent-proxy-services`) | The E5 role: owns `LoopbackRouterRuntime`, the one renewal tracker, and the serve-owned workers moved from `codex-router-cli` (credential upkeep, quota refresh and floor notifier, `LocalTokenReloadWatcher`), all on the role's single runtime. Deactivate and `Drained` (6.1). | `ChildSupervisor` | the proxy role's lifecycle or workers change |
 
 **Dependency direction** (crate `Cargo.toml` edges plus a workspace dependency
 test):
 
 ```text
-codex-router-cli              → codex-router-keeper, agent-collaboration-services, codex-router-proxy, codex-router-keeper-protocol
+codex-router-cli              → codex-router-keeper, agent-collaboration-services, agent-proxy-services, agent-provider-services, codex-router-keeper-protocol
 codex-router-keeper           → codex-router-keeper-protocol, codex-native-integration
 agent-collaboration-services  → codex-router-keeper-protocol, collaboration-service, codex-acp-adapter, …
-codex-router-proxy            → codex-router-keeper-protocol, …
+agent-proxy-services          → codex-router-proxy, codex-router-keeper-protocol, codex-router-auth, codex-router-quota, codex-router-secret-store, codex-router-state
+codex-router-proxy            → (no keeper or role crate), …
 agent-provider-services       → acp-client-runtime, session-event-model, provider-link-protocol, codex-router-keeper-protocol
 agent-collaboration-services  → provider-link-protocol (not acp-client-runtime once P3 lands)
 provider-link-protocol        → session-event-model, serde, uuid (never acp-client-runtime; the conversions live in agent-provider-services and agent-collaboration-services)
@@ -707,7 +755,8 @@ codex-router-keeper-protocol  → codex-native-integration (ExecutableIdentity, 
 
 - `codex-router-keeper` → `agent-collaboration-services`, `collaboration-*`, `codex-acp-adapter`, `codex-router-proxy`;
 - `agent-collaboration-services` → `codex-router-keeper`;
-- `codex-router-proxy` → `codex-router-keeper`;
+- `agent-proxy-services` → `codex-router-keeper`;
+- `codex-router-proxy` → `codex-router-keeper`, `codex-router-keeper-protocol`;
 - `agent-collaboration-services` → `acp-client-runtime`. Provider processes are
   reached only through ProviderLink.
 - `agent-provider-services` → `collaboration-service`. The hub, broker and
@@ -739,51 +788,100 @@ sequenceDiagram
   C-->>CS: Active
 ```
 
-**Effect classes**, derived from the current startup (W8 §F; review G11 anchors):
+**Effect classes**, derived from the current startup (W8 §F; review G11
+anchors; re-derived at `9e947528` by W15–W17). Prepare under
+`PrepareMode::Replacement` is **non-mutating**: it reads, validates and builds in
+memory, and writes nothing another process reads. Today's `open` and `load`
+helpers are not like that: each migrates, restores or rewrites as a side effect.
+So the split below names the read half that Prepare calls and the write half
+that moves to Activate.
 
 | Effect | Services | Proxy | Phase |
 |---|---|---|---|
-| Open store connections; read configuration; compile payload schemas from `GenerationEvidence` (validated as today, `collaboration_runtime.rs:516-547,631-661`); build in-memory services | yes | open state DB and secret store; build the resolver factory (`credential_runtime.rs:152-185`, which does no refresh); build runtime state without actors | **Prepare** (concurrent with the old child, read-only) |
-| Credential upkeep worker (`codex-router-cli/src/credential_upkeep_worker.rs:29-56,137-202`); background quota refresh and floor notifier (`quota/quota_background_refresh_worker.rs:95-185`, `server.rs:642`); runtime maintenance hints (`server.rs:613`) | — | yes (#83) | **Activate** only. Cross-process refresh safety comes from #83's file lock plus durable claim, but duplicate quota polls, maintenance and floor signals must not run in a Prepared process. |
-| Lifecycle journal prepare and retention (`collaboration_runtime.rs:208-219`, `lifecycle_store.rs:174-185`); address book rebuild (`address_book_rebuild.rs:8-23`); automation configuration recovery (`:422-445`); service manifest publication; provider supervisor start; wake, schedule and retention workers; MCP, control, relay and ACP accept loops | yes | write and maintenance actors (`server.rs:553-603`); accept loop | **Activate** (exclusive; old child already Deactivated or killed) |
-| Broker history writes (`approval-history.json`, `interaction-history.json`, RSP PR 3); session-event hub population (RSP PR 3, in memory) | yes | — | **Activate** only; single-writer across the Prepare overlap |
-| Stop accepting; lifecycle-detach ACP (6.5); cancel and join workers (bounded); close ProviderLink (providers keep running in E11); flush the journal | yes | stop accepting; reply `Deactivated` at once; close renewal admission; cancel pre-claim renewals; await post-claim renewals to durable disposition (≤ `RENEWAL_DRAIN_BOUND`, never killed while responsive); reply `Drained` (see below) | **Deactivate** |
+| Read configuration; compile payload schemas from `GenerationEvidence` (validated as today, `collaboration_runtime.rs:719-750,834-865`); build in-memory services, including `SubscriptionDeliveryService::new` (`subscription_service.rs:73-101`, no spawn and no write) | yes | build the resolver factory (`credential_runtime.rs:160-180`, which does no refresh); build runtime state without actors | **Prepare** |
+| Open stores **without migrating**: connect, then compare the applied migration set with this image's. A store with migrations this image doesn't know → `PrepareFailed{StoreSchemaNewerThanImage}` (never downgrade). Pending migrations are recorded and run first thing at Activate. Today every opener migrates on open: board (`board_connection.rs:24-33`, `board_schema_migrations.rs:38-90`, including the #121 participant-history backfill), automation (`automation_connection.rs:101-110`) and provider operations (`provider_operation_store.rs:105-115`). Each gains a non-migrating open, and the migrating open stays for Activate. | yes | the state DB (`codex-router-state` migrations, including #110's claim purpose and #115's credit state), the same way | **Prepare** (read) / **Activate** (migrate) |
+| Read broker histories **without rewriting them**. Today's `InteractionHistoryStore::load` rewrites every Pending row to `Cancelled{HostRestarted}` and upgrades undated rows, then persists (`interaction_history_store.rs:58-124`). It splits into a pure parse and a reconciliation write, and the write runs at Activate (6.11). | yes | — | **Prepare** (read) / **Activate** (write) |
+| Secret store and local credentials | — | open the encrypted store with the ordinary opener: Keychain read plus a store-wide lock held for the open only (`encrypted_credential_store.rs:62-99`; the ready handle caches the data key and keeps no lock, `:45-58,75-78`). Under `Replacement`, the store must come up `Ready`, otherwise `PrepareFailed{SecretStoreUnavailable}` and the old proxy keeps serving. A Keychain prompt or a locked keychain therefore fails the candidate, not the service. The call runs on `spawn_blocking` under `PREPARE_DEADLINE`, because it has no deadline of its own. Ensure the local Router token and the affinity secret (both write only if absent, `affinity_secret.rs:58-77`). | **Prepare** |
+| Pooled-credential migration (legacy store → format v2; writes a marker and deletes legacy payloads, `credential_migration.rs:100-125,218-312`) | — | `Fresh` only. Today the Host runs it before spawning `serve` (`startup_convergence.rs:23-31`, `router_credential_migration.rs:15-55`) and on explicit router restart (`explicit_router_restart.rs:57-64`). Under `Replacement` it never runs: the ordinary opener reports an incomplete legacy store as unavailable (`encrypted_credential_store.rs:180-195`), which fails the candidate. | **Prepare (`Fresh`)** |
+| Credential upkeep worker (both providers, `credential_upkeep_worker.rs:111-128,141-204,300-337`); background quota refresh, including Claude quota and its 401 recovery (`quota_background_refresh_worker.rs:93-188`, `quota_refresh_service.rs:152-215,316-355`); floor notifier (`server.rs:792-795`); runtime maintenance hints (`server.rs:763-765`); `LocalTokenReloadWatcher` (50 ms poll, `token_reload_watcher.rs:15-52`) | — | yes | **Activate** only. Cross-process refresh safety comes from #83's file lock plus durable claim. Duplicate quota polls, credit observations, maintenance and floor signals must not run in a Prepared process. |
+| Apply pending migrations recorded at Prepare. The old child is already `Deactivated`, so nothing else is writing. Once a store is migrated, the outgoing image is never reactivated: any Activate failure takes the crash path (6.7) with the installed image. | yes | yes | **Activate**, first step |
+| Lifecycle journal prepare and retention (`collaboration_runtime.rs:259-270`, `lifecycle_store.rs:174-185`); address book rebuild (`address_book_rebuild.rs:8-23`); automation configuration recovery and manifest publication (`collaboration_runtime.rs:605-627`); provider supervisor start; wake, schedule and retention workers; MCP, control, relay, ACP and façade accept loops | yes | write and maintenance actors (`server.rs:709-723`); accept loop | **Activate** (exclusive; old child already Deactivated or killed) |
+| `SubscriptionDeliveryService::start`. Subscription restore clears every window's in-flight markers under `BEGIN IMMEDIATE` (`thread_subscription_records.rs:469-503`). Direct-message restore settles interrupted pushes as `outcome_unknown`, never resending them (`direct_message_recovery.rs:65-88`). Then it spawns one owner per reader (`subscription_service.rs:103-143,270-306`), and those owners write and egress (`direct_message_push.rs:121-145`, `subscription_push.rs:178-205`). | yes | — | **Activate** only. Running it in a Prepared process would clear the Active child's in-flight state and start duplicate readers (W15 item 14). |
+| Broker history reconciliation write and session-event hub population (in memory) | yes | — | **Activate** only; single-writer across the Prepare overlap |
+| Stop accepting. Hand detached Codex turns over (6.5). Stop subscription reader owners (cancel and join, `subscription_service.rs:247-254`): a push already marked attempted whose egress hasn't returned is settled by the incoming child's restore as `outcome_unknown` and never resent, which is today's crash semantics. Cancel and join the other workers (bounded). Close ProviderLink (providers keep running in E11). Flush the journal. | yes | stop accepting; reply `Deactivated` at once; close renewal admission; cancel pre-claim renewals; join response-side tasks (Claude passive quota observation and affinity publication, compressed SSE completion; the existing `affinity_record_tasks` tracker, `claude_edge/server_pipeline.rs:196-228,408-431`, `response_completion.rs:65-79`); await post-claim renewals until they return (≤ `RENEWAL_DRAIN_BOUND`, never killed while responsive); reply `Drained` (see below) | **Deactivate** |
 | ProviderLink standby attach, and warming hub history from `AttachSnapshot` (6.11) | yes | — | **Prepare**: read-only toward E11 and toward `InteractionHistoryStore` and `ProviderOperationStore`; the first write comes after `Promoted`. Old E4's `Deactivated` means both stores are flushed. (S2) |
 | ProviderLink `Promote`; broker orphan reconciliation; ledger settlement | yes | — | **Activate** (message-sized, inside the window) |
 
+**Keeper startup effects** (fresh start only, before the singleton, as today):
+`prepare_router_tool_locations` creates the shared tool directories in HOME on
+a best-effort basis, in every launch mode (`foreground_launch.rs:101-113`,
+`router_tool_locations.rs:13-144`). The production-only desktop launch policy
+also runs here (`foreground_launch.rs:330-342`). Neither moves into a child.
+
 The child role entrypoint owns the process's single Tokio runtime. The proxy's
-internal runtime and `block_on` (`server.rs:520-547`) are removed in favor of
+internal runtime and `block_on` (`server.rs:656-680`) are removed in favor of
 `async fn prepare` and `async fn activate` on the entrypoint runtime.
 
 **Proxy Deactivate and `Drained`: a complete credential boundary (H4).** All
 renewal producers first move onto the role's single runtime and one renewal
-tracker. That covers request-path and 401 renewals
-(`credential_runtime.rs:152-185`), the upkeep worker
-(`credential_upkeep_worker.rs:137-202`, today on its own thread and runtime) and
-the quota worker (`quota_background_refresh_worker.rs:115-139`, likewise).
-Deactivate then runs these steps in order:
+tracker in `ProxyRoleRuntime`. The producers at `9e947528` (W16 §3, §6):
+
+- request-path and 401 renewals for OpenAI HTTP and WebSocket and for Claude
+  (`credential_runtime.rs:160-221`; Claude resolve and 401 recovery at
+  `claude_edge/server_pipeline.rs:453-460,700-724`);
+- the upkeep worker for both providers (`credential_upkeep_worker.rs:141-204`,
+  today on its own thread and runtime, building its own resolvers at
+  `:312-317`);
+- the quota worker, including Claude quota resolution and 401 recovery
+  (`quota_background_refresh_worker.rs:115-158`, `quota_refresh_service.rs:213-215,316-355`;
+  today on its own thread, with a runtime per cycle and its own resolver,
+  `cli/credential_runtime.rs:71-88`).
+
+`Login` claims are not E5's. The CLI's login commands exchange tokens first and
+then claim and install a login generation under the same account lock
+(`credential_activation.rs:81-208`). An E5 replacement neither drains nor
+interrupts them. Deactivate then runs these steps in order:
 
 1. **Stop accepting**, and send `Deactivated`. The handover proceeds from here.
 2. **Close renewal admission.** Any renewal not yet started is refused with
-   `RenewalAdmissionClosed`. A request that needs one, such as a late 401 on an
-   old stream, fails, and Codex retries it against the new proxy. Stop the
-   upkeep and quota schedulers.
+   `RenewalAdmissionClosed`, which is new: today the tracker only closes
+   (`credential_renewal.rs:37-40`). A request that needs one, such as a late 401
+   on an old stream, fails, and its client resamples against the new proxy (W18
+   §5). Stop the upkeep and quota schedulers and the token watcher.
 3. **Cancel renewals still waiting for the account lock.** They hold no durable
-   claim yet, so cancelling is safe.
-4. **Await every renewal already past its claim** until it reaches durable
-   disposition. That means either the successor committed and activated, or the
-   failure disposition was written (`credential_renewal.rs:346-618`). The bound
-   comes from the source: `RENEWAL_DRAIN_BOUND` = 15 s HTTP timeout
-   (`resolver.rs:295-296`) + 30 s commit/disposition retry budget, so 45 s.
-5. **Send `Drained`.** Only then does the proxy's group stop (6.8) begin.
+   claim yet, so cancelling is safe. Today renewal work is spawned before it
+   waits for the lock (`:283-301`), so this needs a pre-claim cancellation token.
+4. **Await every renewal already past its claim** until its task returns. It
+   returns in one of three ways:
+   - the successor committed and activated;
+   - the failure disposition was written (`:667-695`);
+   - the branch's 30 s persistence retry ran out (`RefreshUnavailable`,
+     `:758-759`). Then the durable `Refresh` claim stays authoritative, and the
+     existing recovery applies at the next resolve (`:461-549`). This is
+     today's behavior under a persistent local storage fault, not something the
+     replacement causes.
+
+   `RENEWAL_DRAIN_BOUND` = 60 s nominal: Claude's 30 s refresh timeout plus
+   the 30 s branch retry (OpenAI: 15 s + 30 s).
+5. **Join response-side tasks** (the `affinity_record_tasks` tracker), then
+   **send `Drained`.** Only then does the proxy's group stop (6.8) begin.
 
 A responsive proxy is never signalled mid-rotation. If a cooperative drain
 somehow passes `RENEWAL_DRAIN_BOUND`, the old proxy is **left running, already
 deactivated**. No signal is sent, `StopRecord{DrainOverrun}` is recorded, and it
 is stopped when it finally reports `Drained`. The only path that can interrupt a
 renewal is the forced path for an unresponsive proxy (the Specification's
-Credentials exception). The upkeep's own 30 s shutdown budget
-(`credential_upkeep_worker.rs:32`) is subsumed by step 4.
+Credentials exception). Today's two independent 30 s budgets, the factory drain
+(`server.rs:761,984-991`) and the upkeep drop (`credential_upkeep_worker.rs:36`),
+are subsumed by step 4.
+
+**Keychain identity.** Each proxy process holds its own cached data key, and
+overlapping old and new handles are compatible with the source (W16 §2).
+Whether a candidate opens without a prompt depends on its code identity.
+Release images carry the stable Developer ID identity (#120), and approvals
+granted to it carry across upgrades. Debug images have a separate `.debug`
+identity on purpose. A prompt only fails that candidate (above). V8 observes
+it on a real signed install.
 
 **Activate cost is bounded by proof, not assumed.** The journal and address-book
 rebuild are the heaviest activation effects. V8 measures activation with
@@ -809,7 +907,7 @@ sequenceDiagram
   CLI->>OPS: Update{executable} [changed]
   OPS->>OPS: admit ActiveMutation::Update{update_id}
   OPS-->>CLI: Progress UpdateAdmitted{update_id} [added]
-  UC->>New: build-info --json → BuildInfo (pays first-exec cost) [added]
+  UC->>New: build-info --json → BuildInfo (pays first-exec cost: 0.69-0.89 s for a fresh copy of the signed 0.1.62 image on macOS 26.5.2, about 7 ms after; Developer ID and ad hoc similar, W17 §11) [added]
   UC->>UC: per-kind comparison: Equal or Different
   opt provider host Different (always before services) [C6]
     CS->>CS: replace E11 (6.11 replacement, its own deactivate schedule) · the active E4 re-attaches to the new incarnation
@@ -903,8 +1001,8 @@ sequenceDiagram
     alt services committed on N+1 (ack, or the replacement Active)
       OPS-->>OPS: Terminal GenerationRestarted{N+1, services_commit: Committed | ServicesReplaced} · admission stays held
       Note over GN: Settling for GENERATION_SETTLE
-      GC->>SVC: RetireGeneration{N} · retires only admissions of N (generation-targeted) · clients reconnect to N+1
-      GC->>GN: group stop (6.8) · N's Remote Control transport ends with the process [PR2 fence]
+      GC->>GN: group stop (6.8) · N's Remote Control transport and its rollout writer locks end with the process [PR2 fence · W18 §4] [changed order]
+      GC->>SVC: RetireGeneration{N} after N's group is empty · retires only N's admissions (generation-targeted; their native connections already closed with N) · their sessions re-admit on N+1 without racing N's writer lock
       opt resolved Remote Control launch policy = Enabled (production), after N's group is empty [C3]
         GC->>GM: remoteControl/enable {ephemeral: true} · observe ≤ REMOTE_CONTROL_OBSERVE_DEADLINE (10 s) → Connected | LocalReadyRemoteDegraded · updates KeeperStatus, not the earlier terminal [C2]
       end
@@ -929,9 +1027,22 @@ sequenceDiagram
 - A second restart during the settle gets `Busy{GenerationTransition}` (review
   G4).
 - A services connection admitted on N before the commit keeps talking to N's
-  alias with N's schemas. It ends at `RetireGeneration{N}` and reconnects to N+1.
-  No mixed snapshot is possible (G5). A failure before the commit leaves services
-  on N, because preparation never switched admission (H5).
+  alias with N's schemas. It ends when N stops, is retired by
+  `RetireGeneration{N}`, and re-admits on N+1. No mixed snapshot is possible
+  (G5). A failure before the commit leaves services on N, because preparation
+  never switched admission (H5).
+- **One writer per thread across generations** (W18 §4). Codex's rollout writer
+  lock is cross-process under one `CODEX_HOME` (upstream
+  `rollout/src/writer_lock.rs:1-22`). While N is alive, N+1 refuses
+  `thread/resume` of any thread N has loaded, with `-32600 thread <id> already has an
+  active writer`. Router already classifies that as `heldByAnotherClient`
+  (`message_effect_state.rs:54-72`). That is why `RetireGeneration{N}` waits
+  for N's group to be empty. A direct client that resumes such a thread on
+  N+1 during the settle gets the same refusal. Codex 0.160's TUI shows its
+  read-only "open in another app" view with retry (upstream
+  `tui/src/app/startup.rs:508-547`). This replaces the earlier "same thread on N
+  and N+1" residual: two writers can't happen, and a resume during the settle is
+  refused instead.
 - **`NativeGenerationGate` is modified, not unchanged.** Today it refuses
   activation while another admission exists and retires its only current token
   (`native_generation_gate.rs:43-91`). It becomes a generation-keyed gate:
@@ -1070,22 +1181,37 @@ sequenceDiagram
 
 ### 6.5a Codex admission after RSP PR 4
 
-RSP lane C makes Codex admission **per Codex Session and lazy**. The ACP
-connection router's Codex route acquires from the (generation-keyed, see 6.3) `NativeGenerationGate`
-per session, and re-acquires after a retirement. This design keeps `acquire` as the route's call, and makes `retire`
-generation-targeted (6.3). Its admission snapshot gains the generation alias
-(G5), and the keeper's `PrepareGeneration` / `CommitGeneration` / `AbandonGeneration` / `RetireGeneration` drive the gate
-instead of `lifecycle_owner`. `lifecycle_detach` and `LiveTurnAttachment` are
-built on lane C's route shape, not today's per-connection registry.
+RSP lane C (#86/#87) shipped Codex admission as **lazy, per ACP-connection
+route**. Each Codex route on an ACP connection holds at most one
+`ActiveGeneration`. It acquires on the first admission request
+(`session/new|load|resume|list`) when it has none, and every session it then
+serves belongs to that generation until retirement. Retirement fails all of the
+route's sessions and pending requests with "Codex generation retired"
+(`lazy_codex_session_route.rs:45-165`). Provider sessions need no Codex
+generation (`provider_face_composition.rs:31`).
+
+This design keeps `acquire` as the route's call, and makes `retire`
+generation-targeted (6.3). After `CommitGeneration{N+1}`, a route still on N
+keeps all its sessions on N. Only a new route, or a route re-acquiring after
+`RetireGeneration{N}`, lands on N+1. The admission snapshot gains the generation
+alias (G5), and the keeper's `PrepareGeneration` / `CommitGeneration` /
+`AbandonGeneration` / `RetireGeneration` drive the gate instead of
+`lifecycle_owner`. Detached-turn handover and `LiveTurnAttachment` (6.5) are
+built on this route shape.
 
 The RSP session-event hub is in memory. A services restart empties it, and front
-doors recover through `session/load` replay. The owner's session list survives
-through the durable provider-operation store. This is RSP's accepted debt, and
-this design does not change it.
+doors recover through `session/load` replay. The owner's list of **hosted**
+sessions survives through the durable provider-operation store. This is RSP's
+accepted debt, and this design does not change it. Interactive Claude Code
+sessions (#92) are listed from the owner-local live registry plus process
+liveness (`provider_session_inventory_dispatch.rs:189-253`,
+`claude_code_session_registry.rs:91-169`). They are not E11 processes. E4 reads
+that registry at request time and carries no state for it across a
+replacement.
 
 ### 6.6 Native relay (R2)
 
-The relay is still a byte pass-through (`native_channel_relay.rs:64-94`). Its
+The relay is still a byte pass-through (`native_channel_relay.rs:12-54,64-94`). Its
 admission snapshot now carries the committed generation's alias (`CommitGeneration`)
 instead of the default path. On Deactivate or `RetireGeneration{N}` the relay
 streams close, and the client's own reconnect sends `thread/resume{T}`: live on
@@ -1110,6 +1236,31 @@ flowchart TB
 If the current generation crashes while a transition is held, a candidate
 already being prepared becomes the recovery candidate. Otherwise recovery waits
 for the settling predecessor's group stop, so the two-live invariant holds.
+
+**Which image a child runs: the keeper's pinned image.** Homebrew deletes an
+upgraded formula's old keg as part of `brew upgrade`, unless
+`HOMEBREW_NO_INSTALL_CLEANUP` is set (`brew help upgrade`; on the owner's Mac only
+the current `Cellar/codex-router/<version>` exists). A keeper that respawns
+from its own Cellar path would then fail, and one that respawns from the
+`/opt/homebrew/bin` symlink would quietly mix builds. So:
+
+- The keeper records its **launch path** at start and carries it across
+  self-exec. That is the path it was invoked by, for example
+  `/opt/homebrew/bin/codex-router`, and it is the default E7 target.
+- Each child slot records its **slot image**: the canonical file it was
+  spawned from, with device, inode, size and mtime.
+  - A fresh start pins every slot to the keeper's own image.
+  - An E7 pins each replaced slot to the update target.
+  - A crash respawn reuses the slot image. So every role keeps running the
+    build it was last deliberately given, including across a partial E7, such
+    as a deferred keeper exec (CC2).
+- If a crash respawn finds its slot image gone or changed, the keeper does not
+  respawn from it. It runs an E7 against the launch path instead (6.2). That
+  replaces whichever children differ, and the keeper last, and it never touches
+  the app-server. The crashed slot is filled by that update's spawn.
+  `ChildState::Crashed` keeps counting until that slot is `Active`.
+- This needs no version handshake between roles. It extends owner D1,
+  automatic replacement, to the case where Homebrew removed a running image.
 
 ### 6.8 Group stop (R8)
 
@@ -1177,12 +1328,14 @@ A keeper-owned startup step, `DesktopReconciler`, lives in
 
 ```text
 codex-router host
+  → prepare_router_tool_locations (best effort, every mode) · desktop launch policy (OwnerProduction only) — unchanged, before the singleton (6.1)
   → acquire singleton (HostInstance::acquire, moved) — AlreadyRunning if held
+  → record the launch path; pin every slot to this image (6.7)
   → inspect E1: absent → ok · dangling → remove · live and not managed by this epoch → refuse (existing live-owner message)
   → ListenerRegistry binds all endpoints
   → ChildSupervisor: provider host (E11) prepare and activate FIRST (services' Prepare depends on it)
   → GenerationController: generation 1 (6.3 without predecessor)
-  → services Prepare (its generation-1 payload plus a standby attach to E11) and proxy Prepare, in parallel
+  → services Prepare{Fresh} (its generation-1 payload, including the server display name, plus a standby attach to E11) and proxy Prepare{Fresh} (local token, pooled-credential migration, store open), in parallel
   → publish E1 · services and proxy Activate
   → DesktopReconciler (6.9a, OwnerProduction only): relaunch the desktop app if it launched before generation 1 became current (R19)
   → OperatorService accepts on host.sock
@@ -1204,16 +1357,28 @@ codex-router host
   version.
 - A v1 handoff marker is rejected with the bootstrap instruction.
 - `serve` and `host router restart` are gone.
-- Untouched: router state, Codex state, credentials, Remote Control pairing.
-- Rollback: reinstall the old version, then stop and start.
+- Untouched by the cutover itself: router state, Codex state, credentials,
+  Remote Control pairing. The new code's own start-time writes (§10 State) are
+  the same as any release's.
+- Rollback: reinstall the old version, then stop and start. As with any release
+  today, an older image refuses a store that a newer one has migrated, so
+  rollback across a migration-bearing release is not supported.
 
 ### 6.11 Provider host: collaboration restart with providers intact (R16, R17, R18)
 
-**Current path** (W9 §1-3; main `b8d76af`):
+**Current path** (W9 §1-3; re-anchored at `9e947528`, W15 §7, §10):
 
-- the Host process constructs `AgentSessionClient` in `ExternalProviderRuntime`;
-- a Host restart ends the provider process;
-- RSP R5 settles those sessions as `lost`.
+- the Host process constructs `AgentSessionClient` in `ExternalProviderRuntime`
+  (`external_provider_runtime.rs:118-122,172-204`, composed by
+  `provider_startup_composition.rs:55-113`);
+- a Host restart ends the provider process: supervisor shutdown cancels
+  retirement and joins the runtime (`external_provider_supervisor.rs:410-425`);
+- the connection task emits `TurnEnded{Lost{ProviderRetired}}` and `Unloaded`,
+  then kills the provider group (`acp-client-runtime`
+  `provider_connection_task.rs:647-679`), so RSP R5 settles those sessions as
+  `lost`;
+- on the next start the broker loader cancels every pending interaction
+  (`interaction_history_store.rs:58-124`).
 
 **Changed:** the providers live in E11. E4 reaches them through ProviderLink.
 
@@ -1254,9 +1419,9 @@ sequenceDiagram
 | Question | Authority | Rule |
 |---|---|---|
 | Is the provider host the same? | `ProviderHostIncarnation` in `Attached`; the keeper's `KeeperToChild::ProviderHostExited{incarnation}` | A link drop alone proves nothing (H1, B2). E4 marks provider sessions `linkInterrupted`: prompts are refused with a typed error and interactions are held. Sessions become `lost{providerRetired}` only on `ProviderRetired`, on attach to a **different** incarnation, when that incarnation reports the session missing, or when the keeper reports `ProviderHostExited`. |
-| Is an interaction still answerable? | the **`Promoted` cut**'s `pending_interactions`, the complete set after the old link is demoted. The standby snapshot is warm-up only. | A pre-restart Pending row that appears in that set stays live. Rows absent from it settle `cancelled{hostRestarted}`, and only once the snapshot is in hand. There is no timeout inference. RSP's staged history loader, which eagerly cancels pending rows (`interaction_history.rs:280-323` on `rsp/3`), is replaced by this deferred reconciliation (agreed with RSP main). |
+| Is an interaction still answerable? | the **`Promoted` cut**'s `pending_interactions`, the complete set after the old link is demoted. The standby snapshot is warm-up only. | A pre-restart Pending row that appears in that set stays live. Rows absent from it settle `cancelled{hostRestarted}`, and only once the snapshot is in hand. There is no timeout inference. The merged loader eagerly cancels pending rows on load (`interaction_history_store.rs:58-124`). It is split into a read at Prepare and this deferred reconciliation at Activate (6.1; agreed with RSP main). |
 | Did a decision land? | `InteractionDecisionResult` | E4 reports decide success only on `Applied`. If the link drops before the ack, the recorded decision is re-sent to the same `InteractionId` after re-attach; it's idempotent, so it applies at most once. If the interaction has meanwhile been withdrawn, the result is `AlreadySettled`. A persistent option such as "allow always" is never reported as applied without `Applied` (B4). |
-| What happened to operation O? | E11's ledger in the **`Promoted` cut** | `Running` keeps O unresolved; `Ended`, `Completed` and `Rejected` settle O. An operation absent from the ledger never reached E11, so it settles `notSubmitted{hostRestarted}` and is **never re-sent**. Queued inputs held in E4 memory (`provider_acp_delivery_route.rs:54`) die with E4 and fall under that same rule. |
+| What happened to operation O? | E11's ledger in the **`Promoted` cut** | `Running` keeps O unresolved; `Ended`, `Completed` and `Rejected` settle O. An operation absent from the ledger never reached E11, so it settles `notSubmitted{hostRestarted}` and is **never re-sent**. Queued inputs held in E4 memory (`provider_acp_delivery_route.rs:84-97`, `provider_acp_message_fifo.rs:43-88`, `provider_queue_operation_registry.rs:18-49`) die with E4 and fall under that same rule. The durable `ProviderOperationStore` keeps metadata only, with no turn id (`provider_operation_store.rs:1-75`). It is not this ledger. |
 | Current state versus history | `snapshot_seq` | Replay events (seq ≤ cut) only rebuild item history. Live events (seq > cut) apply state. The FIFO order puts `HistoryReplayBegin` before its replayed updates, which honors the awaited `begin_history_replay` (RSP R13). |
 | Transcript gap | `SessionSnapshot.history` | `TruncatedBefore` marks a leading gap for that session only, and front doors get `historyUnavailable` for that session. Terminal turn state never depends on the ring, because it lives in the ledger (H2). |
 | A front door from before the restart | hub epoch | Every attach carrying an older hub epoch gets `resyncRequired`. That includes an abrupt E4 crash, where the old E4 never told anyone anything. |
@@ -1281,7 +1446,7 @@ reaches E4 is recorded `cancelled{turnCancelled}` and never presented.
   1. Prepare the new E11: read `providers.json`, no spawn, no accept.
   2. Deactivate the old E11. For every running turn it runs R1 settlement and
      sends `session/cancel`, waits `STOP_GRACE`, then calls the provider
-     runtime's own shutdown (`acp-client-runtime` `provider_connection_task.rs:432-457`
+     runtime's own shutdown (`acp-client-runtime` `provider_connection_task.rs:647-679`
      kills and waits its provider group). It does **not** just close stdio (H7).
      Turns that end in time finish `ended{cancelled}`; the rest end
      `lost{providerRetired}`.
@@ -1326,7 +1491,7 @@ reaches E4 is recorded `cancelled{turnCancelled}` and never presented.
 |---|---|---|
 | keeper | `codex-router-cli/src/role_entry/keeper_role.rs` | the full resolved dependency closure (normal, build, and proc-macro) of `codex-router-keeper` |
 | agent-collaboration-services | `…/agent_collaboration_services_role.rs` | same, for `agent-collaboration-services` |
-| agent-proxy-services | `…/agent_proxy_services_role.rs` | same, for `codex-router-proxy` |
+| agent-proxy-services | `…/agent_proxy_services_role.rs` | same, for the `agent-proxy-services` role crate. That closure includes `codex-router-proxy` and the serve-owned workers moved out of `codex-router-cli` (§3 E5). Today they live in the CLI, outside the proxy crate's closure (W16 §11), and only moving them makes the proxy fingerprint cover what serve runs. External inputs now include `async-compression` (proxy) and AES-GCM, keyring and security-framework (secret-store). The new `codex-router-state` migrations (#110 claim purpose, Claude freshness, #115 credit) are included files. |
 | agent-provider-services | `…/agent_provider_services_role.rs` | same, for `agent-provider-services`, which includes RSP's `acp-client-runtime` and `session-event-model` |
 
 **Inputs**, hashed in sorted relative order with the domain separator
@@ -1337,7 +1502,7 @@ reaches E4 is recorded `cancelled{turnCancelled}` and never presented.
 2. For every **workspace** crate in the closure: **every file under the crate
    directory** except the exclusion list below. That covers `src/`, `build.rs`,
    `migrations/`, `legacy-migrations/` (`codex-router-state`'s `include_str!`
-   assets, `account_migrations.rs:16-20`), `.sqlx/`, and any other
+   assets, `account_migrations.rs:17-21`), `.sqlx/`, and any other
    `include_*!` assets. Its `Cargo.toml` is included with `package.version`
    removed.
 3. For every **external** crate in the closure: `name`, `version`, `source`,
@@ -1357,6 +1522,18 @@ is deliberate.
 
 **Accepted debt:** a colocated test edit inside `src/` moves the fingerprint.
 Payer: one unnecessary restart.
+
+**Not an input: the final image.** Release signing (#120) runs after the build
+(`release.yml:146-184`). It changes the Mach-O bytes and no fingerprint input
+(W17 §12). Three identities stay distinct:
+
+- the role fingerprint, which is what this section computes;
+- the signer identity, `dev.shravansunder.<executable>` under team
+  `974QD84WVC`, which owns Keychain approval;
+- the managed Codex `ExecutableIdentity`, a whole-file hash,
+  `native_executable_identity.rs:16-18,178-201`.
+
+None stands in for another.
 
 ## 8. State
 
@@ -1385,27 +1562,42 @@ Payer: one unnecessary restart.
 | Invalid handoff | phase 1 | no signals; exit; operator runs a full stop/start (accepted debt) | `KeeperHandoff` |
 | New image dies after exec | the process is gone | children orphaned; next start refuses on a live E1 (accepted debt) | operator |
 | Truncated or oversized frame, or wrong fd count | recvmsg flags and counts | reject the frame; the channel counts as broken for that child → child replacement | `KeeperChannelEndpoint` |
-| Two services processes during Prepare | by design | Prepare is read-only (6.1 table); exclusive effects happen only at Activate | `CollaborationRuntime` |
-| Same thread on N and N+1 during the settle | none (≤ 1 s) | accepted residual (owner) | none |
+| Two services processes during Prepare | by design | Prepare under `Replacement` is non-mutating (6.1): non-migrating store opens, broker histories parsed but not rewritten, `SubscriptionDeliveryService` built but not started. Every exclusive effect happens at Activate. | `CollaborationRuntime` |
+| A store holds migrations the candidate doesn't know (downgrade) | Prepare's applied-set check | `PrepareFailed{StoreSchemaNewerThanImage}`; the old child stays Active; nothing migrated | the role |
+| Activate fails after it applied migrations | `Active` missing or SIGCHLD | the outgoing image is never reactivated against a migrated store; the crash path respawns from the slot image (6.7) | `ChildSupervisor` |
+| Candidate proxy's secret store not `Ready` (Keychain prompt, locked keychain, key unavailable) | Prepare under `Replacement` | `PrepareFailed{SecretStoreUnavailable}`; the old proxy keeps serving; the blocked Keychain call dies with the candidate | `ProxyRoleRuntime` |
+| Crash respawn finds its slot image deleted or replaced (Homebrew upgrade cleanup) | slot-image identity check before spawn | E7 against the launch path (6.7); `Crashed` until that slot is Active | `ChildSupervisor`, `UpdateCoordinator` |
+| A thread loaded on N is resumed on N+1 during the settle | upstream `-32600 … already has an active writer` (W18 §4) | refused while N lives: Router reports `heldByAnotherClient`, and the 0.160 TUI shows its read-only "open in another app" view with retry. Two writers can't happen. Services re-admission waits for N's group to be empty (6.3). Replaces the earlier owner-accepted overlap residual with a narrower one. | upstream; `GenerationController` ordering |
 | Services commit not acknowledged after E1 publication | `COMMIT_DEADLINE` | services replacement with the N+1 payload; if that fails, N is retained, the transition stays held, replacement retries on backoff, and the result is `ServicesReplacementFailed` (CC3) | `GenerationController` |
 | Keeper exec while an old child is still retiring | exec admission | `Failed{DeferredChildRetiring}`; no exec; the old image keeps ownership (CC2) | `UpdateCoordinator` |
 | Old proxy mid-renewal at Deactivate | `Deactivated` then `Drained` | admission closed; pre-claim renewals cancelled; post-claim renewals reach durable disposition; stop starts only after `Drained` (overrun is recorded, never signalled) | `ChildSupervisor` |
-| Unresponsive old proxy SIGKILLed mid-renewal | forced path | account may become `reauth_required` (existing recovery, `credential_renewal.rs:389-436`); recorded residual | operator |
+| Unresponsive old proxy SIGKILLed mid-renewal | forced path | a `Refresh` claim without a successor → the account may become `reauth_required` (existing recovery, `credential_renewal.rs:512-525`); recorded residual | operator |
 | Ring overflow during a long E4 outage | `retained_from` greater than what the front door last saw | `ReplayComplete{TruncatedBefore}` → the front door gets `historyUnavailable` for the gap (RSP code) | `ProviderHostRuntime` |
 | Provider stdout EOF while unlinked | E11's client retires the provider (#82 semantics) | `ProviderRetired` is sent on the next Attach snapshot as `Retired{reason}`; sessions are `lost` | `ProviderHostRuntime` |
-| Remote Control with two live generations | prevented by a process-lifetime fence (PR2) | Every generation shares `installation_id` and the cached enrollment, and upstream has no duplicate-host arbitration (W14). A `Disabled` reply does not prove the transport has stopped (`remote_control/mod.rs:373-398`). So the candidate is launched with Remote Control **disabled** (no `--remote-control`, plus `CODEX_INTERNAL_APP_SERVER_REMOTE_CONTROL_DISABLED=1`; repo precedent `app_server_launch.rs:36-53`). Remote Control is enabled on N+1 only **after N's process group is empty**, at the end of the settle and group stop. Only one Remote Control transport can exist, and the cost is an iPhone gap of about the settle plus the stop. Enable is observed for the existing 10 s deadline (`host_configuration.rs:197-206`). If it doesn't connect, the result is the existing `LocalReadyRemoteDegraded` classification (`lifecycle_state.rs:248-257`), shown in status, while the upstream transport keeps retrying. There is **no** rollback to N after publication (PR3). Enable happens **only when the resolved Remote Control launch policy is Enabled**, which is the owner's production launch. A policy of Disabled (debug and isolated launches, `app_server_launch.rs:36-53`) keeps every generation disabled (C3). The terminal reply carries the condition as of the reply; the post-fence enable updates status. Under the CC3 branch, enable waits until services commits N+1 and N's group is empty, and never holds the original reply. The same rule applies to fresh generation 1, crash recovery and R11 adoption fallback. The internal marker is pinned to the verified Codex version and checked by V2. | `GenerationController` |
+| Remote Control with two live generations | prevented by a process-lifetime fence (PR2) | Every generation shares `installation_id` and the cached enrollment, and upstream has no duplicate-host arbitration (W14). A `Disabled` reply does not prove the transport has stopped (`remote_control/mod.rs:373-398`). So the candidate is launched with Remote Control **disabled** (no `--remote-control`, plus `CODEX_INTERNAL_APP_SERVER_REMOTE_CONTROL_DISABLED=1`; repo precedent `app_server_launch.rs:30-56`). Remote Control is enabled on N+1 only **after N's process group is empty**, at the end of the settle and group stop. Only one Remote Control transport can exist, and the cost is an iPhone gap of about the settle plus the stop. Enable is observed for the existing 10 s deadline (`host_configuration.rs:208-214`). If it doesn't connect, the result is the existing `LocalReadyRemoteDegraded` classification (`lifecycle_state.rs:248-257`), shown in status, while the upstream transport keeps retrying. There is **no** rollback to N after publication (PR3). Enable happens **only when the resolved Remote Control launch policy is Enabled**, which is the owner's production launch. A policy of Disabled (debug and isolated launches, `app_server_launch.rs:30-56`) keeps every generation disabled (C3). The terminal reply carries the condition as of the reply; the post-fence enable updates status. Under the CC3 branch, enable waits until services commits N+1 and N's group is empty, and never holds the original reply. The same rule applies to fresh generation 1, crash recovery and R11 adoption fallback. The internal marker is pinned to the verified Codex version and checked by V2. | `GenerationController` |
 
 ## 10. Cross-cutting
 
 - **Trust.**
   - Existing owner-private permissions stay.
-  - fds go only to the keeper's own children, spawned from the verified installed executable.
+  - fds go only to the keeper's own children, spawned from their slot image (6.7). "Verified" means what it means today for `RestartHost`: an absolute path to a regular executable file (`request_admission.rs:392-404`), plus `build-info` for E7. Distribution signing is verified by the release and tap jobs (`release.yml:391-424`). The keeper adds no signature check (W17 §10).
   - Handoff and channel frames travel only on anonymous socketpairs.
   - Each received fd is type-checked against its role and made CLOEXEC before any spawn.
   - The schema bundle directory is 0700.
   - No new network listener.
-- **State.** No new persistent store; existing router, Codex and automation state
-  and credentials are untouched.
+- **State.** No new persistent store. The update mechanism itself writes
+  nothing to router, Codex or automation state or to credentials. The only
+  writes are the ones the incoming code makes on its own start, exactly as on a
+  fresh start, and the split in 6.1 makes them exclusive:
+  - schema migrations at Activate;
+  - the proxy's pooled-credential migration, under `Fresh` only.
+  Merged features add durable state that every replacement must respect (W15
+  §14-16):
+  - board subscriptions and their windows;
+  - participant role history;
+  - Router push records and their `outcome_unknown` recovery;
+  - credential claim purposes;
+  - credit observations.
 - **Observability.**
   - Telemetry events:
     - `generation_promoted`
@@ -1420,7 +1612,7 @@ Payer: one unnecessary restart.
 - **Performance (R7).**
   - The handover window is Deactivate plus Activate, at most 1000 ms on the forced path (250 + 150 + 100 + 500).
   - An E2 swap has zero interruption for new connects.
-  - A keeper exec queues connects on inherited listeners, and first-exec cost is paid by `build-info`.
+  - A keeper exec queues connects on inherited listeners, and first-exec cost is paid by `build-info` (about 0.7–0.9 s on a fresh signed copy, W17 §11; mechanism unattributed).
 - **Async.**
   - A single event loop owns keeper state.
   - `TaskTracker` plus `CancellationToken` (tracking does not cancel on its own).
@@ -1447,7 +1639,7 @@ Payer: one unnecessary restart.
 | U3, then U4 | R6: failed candidate leaves the old one current; truthful failure | E1, E2 | `GenerationController` | 6.3 failure branch | `GenerationFailure`, `GenerationRestartFailed` · keeper-protocol | `Starting → Failed` | E1 unchanged | V4 (including adoption fallback and an occupied transition) |
 | U4 | R7: ≤ 1 s first-request unavailability; exception for incoming death | E1, E2, E4, E5, E10 | `ChildSupervisor` | prepare, deactivate, activate; `build-info` first | `KeeperToChild`, `HandoverRecord` · keeper-protocol | Deactivating → Active | forced path within budget; exception recorded | V8 (fresh image; ignoring old child; realistic stored state; schema-changing update) |
 | U4 | R8: group TERM, ≤ 1 s, group KILL; done when the group is empty | E2, E4, E5 | `ChildSupervisor`, `GenerationController` | 6.8 | `ChildPgid`, `StopRecord` · keeper-protocol | 6.8 states | `TimedOutStillRunning` recorded | V5 (parent exits while a descendant lives; ignoring parent; provider EOF exit) |
-| U6 | R9: proxy replaced only when its fingerprint changed; the port never refuses | E5, E6, E7 | `UpdateCoordinator`, `ChildSupervisor` | §7; 6.2 | `ComponentFingerprints`, `ListenerKind::ProxyHttp` · keeper-protocol | slot handover | in-flight model calls: Codex retries | V3 (legacy-migration, shared-crate and version-only edits; first HTTP response) |
+| U6 | R9: proxy replaced only when its fingerprint changed; the port never refuses | E5, E6, E7 | `UpdateCoordinator`, `ChildSupervisor` | §7; 6.2 | `ComponentFingerprints`, `ListenerKind::ProxyHttp` · keeper-protocol | slot handover | in-flight model calls MAY fail. Codex resamples from turn history; it does not continue the stream (W18 §5). Claude Code and routed Claude providers (`/anthropic`) retry by their own policy. A new request always connects, because the keeper holds the port. | V3 (legacy-migration, shared-crate and version-only edits; first HTTP response on `/v1` and `/anthropic`) |
 | U6, then U4 | R10: truthful per-component outcome | E7 | `UpdateCoordinator` | `UpdateOutcome` | `KeeperUpdateOutcome`, `ChildUpdateOutcome` · keeper-protocol | admission `Mutating(Update)` | partial results listed | V7 |
 | U1, U5 | R11: automatic keeper self-replacement with re-adoption | E2, E3, E6 | `KeeperHandoff` | 6.4 | `KeeperHandoff::V2`, `ValidatedHandoff`, `HandoffInvalid` · keeper-protocol | same PID; per-item recovery | quiesce timeout / exec failure → the old image continues; invalid → exit, no signals | V10 |
 | U7 | R12: control surface available with complete status | E10 | `OperatorService` | `Status` | `KeeperStatus` · keeper-protocol | none: read | none: keeper-held listener | V9 (during prepare, handover, settle and exec) |
@@ -1469,20 +1661,20 @@ Payer: one unnecessary restart.
 - Accepted debts, each owner-confirmed or recorded with its payer:
   - orphans after a post-exec crash or an invalid handoff: operator;
   - test-edit fingerprint moves: one unnecessary restart;
-  - same-thread settle overlap;
+  - same-thread settle overlap, now narrower: a resume of a thread N holds is refused on N+1 until N stops (W18 §4; §9);
   - the R7 incoming-death exception.
 
 ## 12. Proof seams
 
 | Seam | Real | Replaced | Observation |
 |---|---|---|---|
-| V1, V2, V10 (Codex behavior) | pinned Codex 0.157.1; the real ACP adapter and relay; a real `codex` TUI launched during swaps (debug log line `starting embedded app server` on fallback); an ACP client that advertises State | none | same turn id; `_session/state.turn` terminal status, including no-content completion; zero fallback lines; E1 and alias `readlink` |
+| V1, V2, V10 (Codex behavior) | the pinned managed Codex at implementation time (0.160.0 at the re-anchor; main's real-TUI acceptance tests still assert 0.157.1, `router_session_app_server_tui_tests.rs:6-32`, and are re-pinned with this work); the real ACP adapter and relay; a real `codex` TUI launched during swaps (debug log line `starting embedded app server` on fallback); an ACP client that advertises State | none | same turn id; `_session/state.turn` terminal status, including no-content completion; zero fallback lines; E1 and alias `readlink` |
 | V2 Remote Control | the real app-server with Remote Control enabled, in an isolated non-production setup authorized by the owner | none | both generations' readiness and pairing through the settle; a gap is reported if no such setup exists |
-| V3, V6, V7, V8, V9 | compiled CLI at temporary install paths (extending `compiled_cli_host_acceptance.rs:78-171`); the real keeper, services and proxy | the test app-server fixture (`:375-425`), extended to publish `--listen` as a symlink and hold a fake in-progress turn | pids and pgids, `KeeperStatus`, `HandoverRecord`, CLI frames, timestamped protocol requests (not raw connects) |
+| V3, V6, V7, V8, V9 | compiled CLI at temporary install paths (extending `compiled_cli_host_acceptance.rs:207-306`); the real keeper, services and proxy | the test app-server fixture (`:702-733`), extended to publish `--listen` as a symlink and hold a fake in-progress turn | pids and pgids, `KeeperStatus`, `HandoverRecord`, CLI frames, timestamped protocol requests (not raw connects) |
 | Fingerprints | two builds differing in exactly one input class | none | the `build-info` diff and the resulting `UpdateOutcome` |
 | Group stop (V5) | fixtures: parent ignores TERM; parent exits while a descendant lives; a provider-group child that exits on EOF | none | ESRCH within the bounds; `StopRecord` |
 | V11 provider survival | real `claude-agent-acp` and Cursor `agent acp` (their own logins, isolated homes), real E4 and E11, front doors via ACP and the RSP app-server face | none | two refused approvals in one operation, recorded with their own request ids and offers (CC1); same E11 incarnation and provider pids across an E4 replacement and an abrupt E4 crash; same turn id reaching a terminal `_session/state.turn`, including a turn that ended while unlinked with its transcript evicted (settled from the ledger); a pending approval answerable after the restart; a decision in transit when the link drops (applied once, `InteractionDecisionResult`); a delayed standby attach with the provider alive (no false `lost`); a snapshot cut racing a settings change and a turn end (no double apply); per-session `TruncatedBefore`; a late interaction for a cancelling turn never presented; E11 replacement sends `session/cancel` and uses the runtime's group shutdown, checked with a provider wrapper that ignores stdin EOF |
-| Auth during handover (V8) | the real proxy with #83 upkeep against a test OAuth endpoint (existing quota-reset harness patterns) | the provider token endpoint | no second refresh of a generation; a successful token response near the 15 s timeout followed by a delayed secret and DB commit completes before `Drained`; a failure-disposition retry completes; a late 401 on an old stream after `Deactivated` starts no renewal; simultaneous upkeep and quota renewals both settle; the account is not `reauth_required`; durable credential state is checked, not only request counts |
+| Auth during handover (V8) | the real proxy with #83 upkeep and the Claude edge against test OAuth endpoints for both providers (existing quota-reset harness patterns) | the provider token endpoints | no second refresh of a generation; a successful token response near each provider's timeout (Claude 30 s, OpenAI 15 s) followed by a delayed secret and DB commit completes before `Drained`; a CLI login claim running across the replacement is neither drained nor interrupted; a candidate whose secret store isn't `Ready` fails Prepare while the old proxy serves; on a real signed install (owner-authorized, non-production root), the candidate opens the store without a Keychain prompt; a failure-disposition retry completes; a late 401 on an old stream after `Deactivated` starts no renewal; simultaneous upkeep and quota renewals both settle; the account is not `reauth_required`; durable credential state is checked, not only request counts |
 | Platforms | Linux CI (#82) and macOS | none | SCM_RIGHTS, CLOEXEC after receipt, process groups and the symlink swap exercised on both; Linux-only flags (`MSG_CMSG_CLOEXEC`) are not relied on |
 | Generation publication (V2, V4, V7) | real keeper, fixture or pinned app-server, real services | none | rename failure after services staged N+1 (services stays on N); an N connection kept through promotion; retirement of N after N+1 is committed never drops N+1 admissions; commit-not-applied and commit-applied-but-ack-lost, each followed by a failed recovery Prepare (N retained, transition held, truthful `ServicesReplacementFailed`), for both `host app-server restart` and `update` |
 | Exec admission (V7, V10) | real keeper with controlled stop observations | an uninterruptible wait is simulated by the stop-observation seam, not manufactured | `DeferredChildRetiring{Draining}` after the drain bound and `{StuckAfterKill}` immediately: terminal `UpdateCompleted`, admission released, no exec, ownership retained |

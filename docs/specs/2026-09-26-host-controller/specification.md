@@ -276,13 +276,17 @@ and no PID discovery or signalling. Basis: U5 (then), U6 (then).
   It MUST NOT cause an account to require re-authentication. The one exception
   is an old E5 that does not respond to deactivation and has to be killed, and
   that exception is recorded.
-- **State.** No update, restart or cutover resets or migrates router state,
-  Codex session state, credentials or Remote Control pairing.
+- **State.** No update, restart or cutover resets router state, Codex
+  session state, credentials or Remote Control pairing. None of them migrates
+  that state beyond what the incoming code does on its own start, exactly as a
+  fresh start of that version would. Those start-time writes never run while
+  another process of the same role is serving.
 - **Observability.** Each E2 swap, E4 or E5 replacement, forced termination
   (R8) and E7 outcome is recorded with the generation or incarnation and
   fingerprint involved, readable through `host status` and existing telemetry.
-- **Upstream compatibility.** Behavior is specified against Codex 0.157.1's
-  default-endpoint probe and reconnect. An upstream change to the conventional
+- **Upstream compatibility.** Behavior is specified against Codex's
+  default-endpoint probe, reconnect, and cross-process thread writer lock,
+  verified at 0.157.1 and re-verified at 0.160.0. An upstream change to the conventional
   path or probe is a compatibility event that reopens R4.
 - **Not applicable:** accessibility and UI, since there is no new visual
   surface.

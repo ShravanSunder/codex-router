@@ -57,9 +57,9 @@ flowchart LR
 
 | Class | Job | Current pain (evidence) |
 | --- | --- | --- |
-| Direct Codex TUI user | Runs `codex` or `codex --remote unix://` against the shared app-server. | A Host update stops app-server. Upstream reconnect gives up after about 15 s and asks for a relaunch (`tui/src/app/reconnect.rs`, `chatwidget/reconnect.rs` at rust-v0.157.1). |
+| Direct Codex TUI user | Runs `codex` or `codex --remote unix://` against the shared app-server. | A Host update stops app-server. Upstream reconnect gave up after about 15 s at rust-v0.157.1. At rust-v0.160.0 it retries at 0, 1, 2 and 4 s, then every 8 s, up to a shared 120 s deadline (`tui/src/app/reconnect.rs:51-56,113-121`, W18 §3). Longer survival, the same pain while the app-server is down. |
 | Hosted session user | Works through agent-collaboration sessions relayed by the Host. | An app-server-only restart cancels every relay, and new relays are refused until the next generation is ready (`native_generation_gate.rs:84-93`, `backend_publication.rs:65-102`). |
-| Newly launched `codex` | Joins the shared app-server with no flags. | A missing or refused default socket silently selects an embedded private app-server, with only a debug log (`tui/src/lib.rs:507-603` at rust-v0.157.1). |
+| Newly launched `codex` | Joins the shared app-server with no flags. | A missing or refused default socket silently selects an embedded private app-server, with only a debug log (50 ms probe; `tui/src/lib.rs:281-283,513-584` at rust-v0.160.0, unchanged from 0.157.1). |
 | Owner/operator | Updates codex-router and Codex and restarts pieces. | Every update is a whole-Host event; `serve` stop has a 10 s grace with no forced stop (`owned_router.rs:10-28`). |
 | Agent Studio (future) | Talks to the broker and message routers. | No surface outlives a Host restart. |
 
@@ -110,8 +110,8 @@ All rows marked `authorized` are normative-eligible.
   (owner decision D1, 2026-09-26).
 - **No new infrastructure:** no launchd or system service, no public
   process-control surface, no automatic rollback, no binary download.
-- **No upstream Codex changes.** The design follows Codex 0.157.1 endpoint
-  behavior.
+- **No upstream Codex changes.** The design follows Codex endpoint behavior
+  as verified at 0.157.1 and re-verified at 0.160.0 (W18).
 - **Agent Studio is out of scope** beyond the existence and stability of the
   control surface (U7).
 - **Validation stays isolated:** use isolated debug runtimes only. The
@@ -136,7 +136,9 @@ Further owner confirmations on 2026-09-26, after design review:
   ACP providers, are the component's own responsibility.
 - **Same-thread overlap.** During the 1 s settle, a thread may be opened on the
   new app-server while it is still running on the old one. This is accepted as a
-  rare residual.
+  rare residual. Re-anchor note, 2026-10-03 (W18 §4): Codex's thread writer
+  lock is cross-process, so the new app-server refuses to open that thread
+  until the old one stops. The residual is a brief refusal, never two writers.
 - **R7 exception.** If an incoming child dies between being prepared and being
   active, that one replacement follows the crash path and may exceed 1 s.
 
