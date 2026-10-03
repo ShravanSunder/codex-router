@@ -3,21 +3,18 @@
 use codex_router_core::provider::Provider;
 use codex_router_core::routes::RouteBand;
 
-use super::BurnDownAccountInput;
-use super::CreditBackedEligibility;
-use super::QuotaWindowStatus;
-use super::V1_SHORT_WINDOW_SECONDS;
-use super::V1_WEEKLY_WINDOW_SECONDS;
-use super::WindowAssessment;
-use super::assess_window;
-use super::missing_required_weekly_window;
+use super::assessment_input::{BurnDownAccountInput, CreditBackedEligibility};
+use super::routing_policy::BurnDownRouteBandPolicy;
+use super::window_assessment::{WindowAssessment, assess_window, missing_required_weekly_window};
+use super::window_facts::QuotaWindowStatus;
+use super::{V1_SHORT_WINDOW_SECONDS, V1_WEEKLY_WINDOW_SECONDS};
 
 pub(super) fn canonical_responses_compact_window_assessments(
     input: &BurnDownAccountInput,
     route_band: RouteBand,
     own_windows: &[WindowAssessment],
     now_unix_seconds: u64,
-    policy: super::BurnDownRouteBandPolicy,
+    policy: BurnDownRouteBandPolicy,
 ) -> Option<Vec<WindowAssessment>> {
     if route_band != RouteBand::ResponsesCompact
         || input.provider != Provider::Openai
