@@ -158,7 +158,7 @@ flowchart LR
 | E6 Component fingerprint (kinds: keeper, services, proxy, provider) | `BuildFingerprints` | `codex-router-cli` `build.rs` (new) | `codex_router_keeper_protocol::component_fingerprint` (new) | `codex-router build-info --json` → `BuildInfo`. Channel: `ChildToKeeper::Prepared{fingerprint}`. | derived (compiled in) | newtype |
 | E7 Update | `UpdateCoordinator` | `codex-router-keeper` | `codex_router_keeper_protocol::component_update` (new) | Operator: `Update` → `UpdateOutcome`; `AwaitUpdateResult`. Handoff: `InFlightUpdate`. | derived | tagged enums |
 | E8 Live turn | upstream app-server | upstream | upstream; RSP `_session/state.turn` (RSP codec in `session-event-model`, RSP PR 3 slice 3.5) | Native `thread/resume` (upstream `thread_processor.rs:4211-4255`); ACP `_session/state{turn:{turnId,status,stopReason?,reason?}}` | persisted by Codex (rollout) | upstream / RSP |
-| E9 Relay connection | `NativeRelayListener`, `AcpChannelListener` | `collaboration-service` (modified: granted listeners, generation alias dial); `codex-acp-adapter` (modified: lifecycle detach, `Attached` slot, `LiveTurnAttachment`) | existing | Unix WebSocket pass-through (existing); ACP JSON-RPC | derived | existing |
+| E9 Relay connection | `NativeRelayListener`, `AcpChannelListener` | `collaboration-service` (modified: granted listeners, generation alias dial, `ServicesHandover` build and adoption); `codex-acp-adapter` (modified: `LifecycleRelease` for turn owners, adopted owners, the `Attached` slot, `LiveTurnAttachment`) | `agent_collaboration_services::services_handover` (new, versioned) | Unix WebSocket pass-through (existing); ACP JSON-RPC; `RoleHandover` body on KeeperChannel | derived | existing; versioned tagged enum |
 | E10 Control surface | `OperatorService` | `codex-router-keeper` (moved from `codex-router-host::operator_*`) | `codex_router_keeper_protocol::operator_protocol` (moved, modified) | `host.sock` versioned JSON lines (existing framing, `operator_messages.rs:87-164`) | derived | tagged enums |
 
 **Design-only concepts and what they serve:**
@@ -170,7 +170,7 @@ flowchart LR
 | KeeperChannel | R1–R3, R5, R7 |
 | `KeeperHandoff`, `ChildSnapshot` | R11, R13, R14 |
 | `UpdateId`, `KeeperRestartId` | R10, R14 |
-| `LiveTurnAttachment` | R2 |
+| `LiveTurnAttachment`, turn owner and observer, `ServicesHandover`, `LifecycleRelease` | R2 |
 | ProviderLink, `ProviderLinkClient`, `RingEventSink`, `LinkInteractionPort` | R16, R17, R18 |
 | the generation transition slot | E2's at-most-two invariant, R5 |
 | `codex-router-keeper-protocol` crate | E4, E5, E10: the single schema home for three processes and the CLI |
@@ -226,7 +226,7 @@ pub struct GenerationEvidence {                 // reused publication boundary (
 pub enum KeeperToChild {
     ListenerGrant { listeners: Vec<ListenerKind> }, // rights in list order
     Prepare { generation: Option<GenerationCurrentPayload>, mode: PrepareMode }, // services: generation always Some once one exists
-    Activate,
+    Activate { handover: Option<RoleHandover> },     // services: the outgoing child's ServicesHandover, relayed unread (6.5)
     Deactivate { reason: DeactivateReason },
     PrepareGeneration(GenerationCurrentPayload),     // services: stage and validate; admission unchanged (H5)
     CommitGeneration { generation: GenerationId },   // services: new admissions → generation; earlier admissions stay live
@@ -247,6 +247,10 @@ pub struct GenerationCurrentPayload {
 //   one-time startup writes: proxy pooled-credential migration (today Host startup, startup_convergence.rs:23-31).
 // Replacement: an Active child of this kind is serving. Prepare is non-mutating (6.1).
 pub enum PrepareMode { Fresh, Replacement }
+// Opaque to the keeper: a role-owned, versioned body passed from the outgoing child to the incoming one.
+// serde_json::Value is right here because the keeper does not own this schema; agent-collaboration-services
+// parses it with TryFrom into its own ServicesHandover::V1 and treats an unknown version as unadoptable (6.5).
+pub struct RoleHandover { pub role: ComponentKind, pub body: serde_json::Value } // bounded by MAX_FRAME_BYTES
 pub enum ListenerKind { CollaborationControl, NativeRelay, AcpChannel, McpHttp, ProxyHttp, RouterSessionFace { endpoint: EndpointId }, ProviderLink }
 // RouterSessionFace = RSP app-server face socket router-sessions/<endpoint-id>.sock (e.g. claude-local.sock), bound today
 // only when the provider has a model catalog AND the owner Human identity resolved (collaboration_runtime.rs:554-603);
@@ -259,7 +263,7 @@ pub enum ChildToKeeper {
     Prepared { fingerprint: ComponentFingerprint },
     PrepareFailed { reason: PrepareFailure },
     Active,
-    Deactivated,
+    Deactivated { handover: Option<RoleHandover> }, // services: released turn owners (6.5); None for other roles
     Drained,                                        // proxy: in-flight credential renewals finished after Deactivated
     GenerationPrepared { generation: GenerationId },
     GenerationCommitted { generation: GenerationId },
@@ -696,6 +700,7 @@ boundary:
 | `SERVICES_CRASH_BACKOFF` | 0, 250 ms, 1 s, 5 s cap | |
 | `MAX_FRAME_BYTES` | 1 MiB | |
 | `MAX_FRAME_FDS` | 64 | |
+| `ADOPT_DEADLINE` | 5 s per handed-over thread | incoming E4 adoption by `thread/resume`; after `Active`, off the interruption path (6.5) |
 | `STANDBY_ATTACH_DEADLINE` | 10 s | E4 Prepare waits this long for a standby `Attached`; off the interruption path (H6) |
 | `FORCED_TERM_GRACE` | 150 ms | forced handover path: group SIGTERM before SIGKILL (R8, H6) |
 | `KILL_OBSERVE_BOUND` | 100 ms | forced path: observe up to this bound after SIGKILL, then Activate whether or not the group is reaped (owner D2) |
@@ -729,7 +734,7 @@ boundary:
 | `OperatorService` | `host.sock` sessions, admission, status composition, bounded records (last update, stops, handovers) | CLI, Agent Studio | operator protocol changes |
 | `KeeperChannelEndpoint` (child side, `codex_router_keeper_protocol::keeper_channel_endpoint`) | Framing, grant receipt with CLOEXEC, the child phase machine, the quiesce hold buffer | services and proxy role entrypoints | the channel protocol changes |
 | `CollaborationRuntime` (moved into `agent-collaboration-services`) | Collaboration behavior, split into the effect classes in §6.1 | ACP, relay, control and MCP clients | collaboration features change |
-| `SessionConnectionRegistry` + `LiveTurnAttachment` (`codex-acp-adapter`, modified and new) | Lifecycle detach without cancel (6.5); the `Attached{turn}` slot; the live-turn reader emitting `_session/state.turn` through the RSP codec | ACP clients | ACP projection or RSP profile changes |
+| `SessionConnectionRegistry` + `LiveTurnAttachment` (`codex-acp-adapter`, modified and new) | Turn owners (prompt task, detached drain, adopted owner) and `LifecycleRelease` without cancel (6.5); the `Attached{turn}` observer slot; `_session/state.turn` through the merged RSP codec | ACP clients; `ServicesHandover` | ACP projection or RSP profile changes |
 | `ProviderHostRuntime` (new, crate `agent-provider-services`) | One `AgentSessionClient<LinkInteractionPort>` per configured provider (the process, stdio ACP connection, session actors: all RSP `acp-client-runtime`). `RingEventSink` keeps a bounded per-provider ring of **folded** events: `ItemUpdated` is folded per `item_id`, matching the hub's per-item folding and per-session locks (RSP review B1/M7), never raw cumulative chunks. It forwards to the link. `LinkInteractionPort` turns `request_approval` into `InteractionRequest` and awaits `InteractionDecision`, and keeps pending requests alive across link loss. `ProviderLinkServer` accepts one active link and supersedes an older link epoch. Provider process environment is configured against the proxy endpoint and the local Router token, as collaboration does today (`collaboration_lifecycle.rs:33-57`); E11 reads both in Prepare. | E4's `ProviderLinkClient` | provider hosting or ACP client changes |
 | `ProviderLinkClient` (new, in `agent-collaboration-services`) | Replaces in-process `ExternalProviderRuntime` ownership of `AgentSessionClient` (`external_provider_runtime.rs:118-122,172-204`; composed by `provider_startup_composition.rs:55-113`). It implements the runtime API that `ExternalProviderSupervisor`, the provider ACP and app-server routes, the presence and LoadedOnly rechecks, and the queue paths already call, over ProviderLink commands and queries. It republishes `Event`s to the session-event hub in order, feeds `InteractionRequest`s to the typed broker, and maps `ProviderRetired` to RSP R5 settlement. | `ExternalProviderSupervisor`, hub, broker | the link protocol changes |
 | `LoopbackRouterRuntime` (`codex-router-proxy`, modified) | Proxy behavior, split into prepare and activate; runs on the role entrypoint's single Tokio runtime (no internal `block_on`, `server.rs:656-680` changed). One listener serves both `/v1` (Responses, WebSocket) and `/anthropic/v1/messages` (`routes.rs:74-81`, `server.rs:704`). | Codex app-server model calls; Claude Code launched through Router (`claude_launch_target.rs:91-140`, #110); routed Claude ACP providers | proxy features change |
@@ -1122,62 +1127,162 @@ sequenceDiagram
 restart the readers, and report `Failed{ExecFailed}`. The originals were never
 closed, because only duplicates were sent.
 
-### 6.5 Hosted-session replacement: ACP detach and live-turn rejoin (R2)
+### 6.5 Hosted-session replacement: turn handover and live-turn rejoin (R2)
 
-**Current behavior** (W8 §A; review G1 anchors):
+**Current behavior** (re-anchored at `9e947528`; W15 §1-4, W17 §15):
 
-- `sessions.shutdown()` sends Cancel, which becomes `InterruptTurn`
-  (`session_connection_registry.rs:206-227`, `native_prompt_execution.rs:335-369`).
-- A failed output send calls `pending.cancel()` directly
-  (`prompt_connection_task.rs:96-110`).
-- `session/load` installs Ready with no reader (`acp_connection_dispatch.rs:75-110`).
+- **Caller detach shipped (#88/#89).** Frontend EOF or a failed output send
+  marks the slot `Detached`. The prompt task keeps draining the native turn, and
+  it answers native approval requests through the broker
+  (`prompt_connection_task.rs:100-130`, `native_prompt_execution.rs:163-278`).
+  Connection shutdown moves the prompt joins onto the holder's Host-lifetime
+  `TaskTracker`, which drains with no deadline
+  (`session_connection_registry.rs:206-236`,
+  `unmaterialized_thread_holder.rs:1-33`).
+- **Explicit cancel** (`PromptCommand::Cancel`) still runs `pending.cancel()`,
+  which becomes `InterruptTurn` (`native_prompt_execution.rs:360-395`). An
+  unsupported native callback or a projection error also cancels the turn, even
+  after detach (`prompt_connection_task.rs:131-142`).
+- **Generation retirement ends the task** with "Native backend connection lost"
+  (`:106-107`). So today a detached turn is served only until its E4 or its
+  generation goes away.
+- **`session/load` of an Active thread is refused** with `-32600`,
+  `data.kind = "busy"` (`session_creation.rs:513-540`,
+  `session_setup_task.rs:50-63`, asserted by `tests/prompt_detach.rs:300-328`).
+  An idle load still installs Ready with no reader
+  (`acp_connection_dispatch.rs:84-119`). The Codex route emits no
+  `_session/state`.
 
-**Changed:**
+**Upstream facts this relies on** (W19, verified at `rust-v0.160.0`):
+
+- Closing an app-server connection removes its subscriptions and never
+  interrupts a turn (`message_processor.rs:864-899`,
+  `thread_state.rs:606-630`).
+- A loaded thread unloads only when it is inactive and has had no subscribers
+  for `thread_unload_delay`, 60 s by default (`thread_lifecycle.rs:20-81`).
+- Pending thread-scoped server requests stay registered after their recipient
+  closes: command and file-change approval, `request_user_input`, MCP
+  elicitation, permissions. A `thread/resume` re-sends them to the resuming
+  connection with the same request id, and that connection can answer them
+  (`outgoing_message.rs:446-465,582-596`).
+- The exception is a `UserVerification` elicitation. It is connection-owned and
+  cancelled when its owner closes. Router treats it as an unsupported native
+  callback today, which cancels the turn anyway.
+- Several connections can subscribe to one loaded thread on one app-server. The
+  cross-process writer lock (6.3) only matters between app-server processes.
+- Resume returns a snapshot, including the active turn's id and status, plus
+  every later notification. Notifications emitted while nobody was subscribed
+  are not replayed (`outgoing_message.rs:199-209`).
+
+**Two roles for one live Router turn:**
+
+| Role | Who | Does | Never |
+|---|---|---|---|
+| **Turn owner**, exactly one per E4 per live turn that Router started | the prompt task while its frontend is attached; the same task once detached (#89); after an E4 replacement, an **adopted owner** in the incoming E4 | drains native events; answers native requests through the broker (the single writer of broker history); settles the turn; holds an unmaterialized binding when the turn ends | runs in a Deactivated E4 |
+| **Observer**, any number | an `Attached{turn}` ACP slot created by `session/load` of an Active thread | projects updates and `_session/state.turn` to its front door | answers a native request, cancels, or settles |
+
+**Changed: an E4 replacement hands its turn owners to the incoming E4.**
 
 ```mermaid
 sequenceDiagram
   autonumber
   participant K as keeper
-  participant Reg as SessionConnectionRegistry (old)
-  participant Task as prompt task
+  participant Old as old E4
   participant App as app-server gen N
+  participant New as new E4
   participant Cl as ACP client
-  participant New as new services
-  K->>Reg: Deactivate{Replacement}
-  Reg->>Reg: set LifecycleDetach on the registry (atomic flag, read by every cancel site) [added]
-  Reg->>Task: fire retirement token
-  Note over Task: every cancel site (command closed, output send failed, projection error) checks LifecycleDetach first → return without cancel() [changed]
-  Task-->>Reg: quiescent (JoinSet drained ≤ DEACTIVATE_DEADLINE)
-  Reg->>Reg: drop bindings · close the frontend transports only now [changed order]
-  Note over App: turn T keeps running
+  Note over Old,App: turn T running · owned by Old (frontend attached, or caller-detached) · approval A pending
+  K->>Old: Deactivate{Replacement}
+  Old->>Old: stop accepting · every owner gets LifecycleRelease: stop reading, answer nothing more, no cancel [added]
+  Old->>App: close each owner's native connection · unmaterialized held bindings too [added]
+  Note over App: T keeps running · A stays registered (W19 §1-2)
+  Old-->>K: Deactivated{handover: ServicesHandover{generation N, threads [T: turn t, routing facts]}} [changed]
+  K->>New: Activate{handover} [changed]
+  New-->>K: Active (accept loops on; the window ends here)
+  New->>App: per handed-over thread: open a native connection on N's alias · thread/resume{T} [added]
+  App-->>New: snapshot: T active, turn t InProgress · replay of A, same request id
+  New->>New: adopted owner(t): answer A through this E4's broker · keep draining [added]
   Cl->>New: reconnect · initialize (advertises State) · session/load{T}
-  New->>App: thread/resume{T} via the gen-N alias · live thread joined
-  App-->>New: history + turns (T in progress, turn id t)
-  New-->>Cl: history as session/update · load reply
-  New-->>Cl: _session/state{state: running, turn:{turnId: t, status: running}} [added]
-  New->>New: LiveTurnAttachment(t) · slot Attached{t}
-  App-->>New: item notifications
-  New-->>Cl: session/update (existing projections)
-  App-->>New: turn/completed | interrupted
-  New-->>Cl: _session/state{state: idle, turn:{turnId: t, status: completed|interrupted|failed, stopReason?}} · slot Ready
+  New-->>Cl: history · _session/state{running, turn{t, running}} · slot Attached{t} fed by the owner's projection [added]
+  App-->>New: turn/completed
+  New-->>Cl: _session/state{idle, turn{t, completed|interrupted, stopReason?}} · slot Ready
+  New->>New: owner settles · unmaterialized binding → holder
 ```
 
-- **Explicit cancel stays intact.** `session/cancel` while Busy or Attached sends
-  `InterruptTurn`; `LifecycleDetach` is never set by a client action.
-- **Real client disconnect.** While Busy (no lifecycle detach), it keeps today's
-  cancel semantics. While Attached, it drops the attachment without
-  interrupting, because the turn belonged to an earlier connection.
-- **Native connection loss while Attached** (generation retiring or crashed):
-  `turn.status = lost`, the RSP code for "outcome unknown", kept distinct from
-  `failed`.
+**Rules:**
+
+- **Release is message-sized.** `LifecycleRelease` stops every owner without
+  awaiting a turn. That keeps `Deactivated` inside `DEACTIVATE_DEADLINE`.
+  Today's unbounded holder drain is never part of an E4 replacement; it
+  remains only in the full-stop shutdown path. Once released, an owner answers
+  nothing, so broker history keeps a single writer across the overlap (6.1).
+- **Break before make.** The old connection closes before the new one resumes.
+  A request raised in the gap waits upstream and is replayed to the adopted
+  owner, so no request reaches two Router answerers. The gap is the handover
+  window plus one resume round trip, far inside the 60 s unload delay. That
+  delay only applies to inactive threads anyway, so a held unmaterialized
+  thread survives too.
+- **Adoption runs after `Active`,** off the interruption path. It is bounded
+  per thread by `ADOPT_DEADLINE`, and every outcome is recorded in services
+  telemetry:
+  - `adopted`;
+  - `endedInGap`: the snapshot shows the turn finished, so it is settled from
+    the snapshot;
+  - `generationGone`: N stopped meanwhile, so T is `lost`, the owner-accepted
+    app-server-restart loss;
+  - `unadoptable{reason}`: the schema, a resume error, or `heldByAnotherClient`.
+  An unadoptable turn keeps running upstream, and its pending requests wait for
+  whichever client resumes that thread next. Nothing is cancelled because
+  adoption failed.
+- **The handover carries routing facts, not sockets.** `ServicesHandover` is
+  versioned and owned by `agent-collaboration-services`. For each thread it
+  carries the session id, the live turn id (none for an idle held binding),
+  whether it is materialized, and the binding's routing facts:
+  - working directory;
+  - MCP configuration;
+  - requested access;
+  - approval route;
+  - persisted effort.
+
+  The incoming E4 rebuilds the binding with its own broker and a fresh native
+  connection. The keeper relays the body unread, capped by `MAX_FRAME_BYTES`.
+  An unknown version makes every thread `unadoptable{schema}`, following the
+  rule above.
+- **A handover across a generation change** (a schema-changing restart replaces
+  services with the N+1 payload, 6.3): threads on N can't be resumed on N+1
+  while N lives (writer lock), and N stops after the settle. They end `lost`,
+  inside the owner-accepted turn loss for app-server restarts.
+- **Crash is not handover.** An E4 that crashes hands nothing over. Its turns
+  keep running upstream unowned, and their pending requests wait for the next
+  resume, as today after a Host crash.
+- **Observers.** `session/load` of an Active thread installs `Attached{turn}`
+  instead of refusing Busy. If this E4 owns the turn, the observer subscribes to
+  the owner's projection in process, without a second native subscription.
+  Otherwise, for example when a direct TUI started the turn, it opens its own
+  native connection and `thread/resume`. Requests replayed to it are left
+  unanswered, because the originating client answers them. When the turn ends,
+  it emits the terminal `_session/state.turn` and returns to Ready.
+- **Explicit cancel stays intact.** `session/cancel` from the owner's own
+  frontend, or from an observer of a turn this E4 owns, goes through the owner:
+  the broker's cancelling mark, then `InterruptTurn`. `LifecycleRelease` is
+  never set by a client action.
+- **Real client disconnect** is the shipped caller detach (#88/#89). The owner
+  keeps serving, and the observer simply ends. This replaces the earlier
+  "keeps today's cancel semantics", which #88 made stale.
+- **Native connection loss while observing** (the generation retiring or
+  crashed) gives `turn.status = lost`, kept distinct from `failed`.
 - **Clients without the State element** receive the history and content updates
-  only (Specification R2).
+  only (Specification R2). `_session/state` uses the merged codec
+  (`session_profile_codec.rs:370-445`): camelCase turn fields, snake_case state
+  values, and `turn` omitted when absent.
 - **Router conversation operations.** An in-flight `session/prompt` response is
-  lost with the old connection (no durable record, W8 §A5). The caller reloads,
-  and the `turn` record carries the outcome. No new store is added.
-- **Sequencing with RSP.** The codec comes from RSP PR 3 lane B (slice 3.5).
-  Emission sits behind RSP PR 4 lane C's per-session connection router, and our
-  call site in the Codex route is agreed with lane C before implementation.
+  lost with the old frontend connection. The caller reloads, and the `turn`
+  record carries the outcome. Codex creates already have a durable operation
+  record (`codex_conversation_operation_recorder.rs:1-22`). No new store is
+  added.
+- **Sequencing with RSP.** The codec and lane C's route shape are merged
+  (#86/#87). The Codex route's emission call site sits in
+  `lazy_codex_session_route` (6.5a).
 
 ### 6.5a Codex admission after RSP PR 4
 
@@ -1461,26 +1566,31 @@ reaches E4 is recorded `cancelled{turnCancelled}` and never presented.
   terminals are `ProviderRestarted` and `ProviderRestartFailed{reason}`.
 - **`providers.json` changes** take effect on E11 replacement.
 
-### 6.10 Build sequencing with RSP (agreed with RSP main, 2026-09-26)
+### 6.10 Build sequencing with RSP (agreed with RSP main, 2026-09-26; updated 2026-10-03)
 
-- **Build now on main, integrate after RSP PR 4:**
+RSP PRs 3 and 4 merged (#86 and #87, then #88, #89, #92, #97, #99, #106, #108
+and #112). The earlier "only after RSP PR 4" gate is satisfied, so every group
+below can build on main:
+
+- **Independent of collaboration internals:**
   - the `codex-router-keeper` and `codex-router-keeper-protocol` crates;
   - `ListenerRegistry`, KeeperChannel framing and the SCM_RIGHTS handoff;
   - `GenerationController` with the blue/green E1 swap;
-  - fingerprints.
-- **Only after RSP PR 4 merges:**
+  - fingerprints;
+  - the `agent-proxy-services` role crate and the proxy prepare/activate split.
+- **Collaboration and RSP-touching:**
   - the crate rename;
-  - the CollaborationRuntime prepare/activate split, which splits the final
-    PR 3 and PR 4 shape once;
+  - the CollaborationRuntime prepare/activate split, including the
+    non-mutating opens (6.1);
   - granted-fd construction in `collaboration-service` and `codex-acp-adapter`;
   - generation-gate wiring;
-  - `lifecycle_detach`, `Attached` and `LiveTurnAttachment`;
-  - the provider host (6.11). This moves RSP's `AgentSessionClient` composition
-    out of the collaboration process, so it lands after RSP PR 3 and PR 4, and the
-    ProviderLink protocol gets reviewed by RSP main first (R1, R5, R16, R24, R25).
-
-  The last group also needs RSP PR 3 lane B slice 3.5 (the `_session/state.turn`
-  codec) and an agreed call site with lane C.
+  - turn owners, `LifecycleRelease`, `ServicesHandover`, `Attached` and
+    `LiveTurnAttachment` (6.5);
+  - the provider host (6.11). It moves RSP's `AgentSessionClient` composition
+    out of the collaboration process. RSP main reviewed the ProviderLink
+    protocol on 2026-09-27; this revision adds `Query`, `QueryResult` and the
+    endpoint and admission fields of `ProviderSnapshot`, and they go back to
+    RSP main before implementation.
 
 ## 7. Fingerprint input contract (E6)
 
@@ -1545,7 +1655,8 @@ None stands in for another.
 | `OperatorService` | admission | `Idle → Mutating(ActiveMutation) → Idle`; `GenerationTransition` outlives its terminal reply until group-empty; `Update` carried across exec | a second mutation → `Busy{active}` |
 | `ProviderHostRuntime` | link | `Unlinked → Linked(epoch)`; `Linked → Unlinked` (EOF: keep sessions, keep pending interactions, keep buffering); `Standby(e') → Active(e')` on Promote (the old Active link is demoted then closed); a new Attach never supersedes the Active link | frames from a demoted or closed link are dropped |
 | broker (E4) | pre-restart Pending rows | `HeldForSnapshot → Live` (in `AttachSnapshot.pending_interactions`) \| `CancelledHostRestarted` (absent from that snapshot); held without limit while the link is interrupted (no timeout inference, H1) | answering a held row before reconciliation → the existing unavailable result |
-| `SessionConnectionRegistry` | ACP slot | `Reserved → Ready → Busy` (prompt); `Ready → Attached{turn}` (load of a live turn); `Attached → Ready` (terminal state emitted) | a prompt while Attached → the existing busy error |
+| `SessionConnectionRegistry` | ACP slot (today `Loading`, `Ready`, `Busy`, `Detached`, `session_connection_registry.rs:11-16`) | `Loading → Ready → Busy` (prompt); `Busy → Detached` (frontend gone, owner keeps serving, #89); `Loading → Attached{turn}` (load of an Active thread, replacing today's Busy refusal); `Attached → Ready` (terminal state emitted) | a prompt while Attached → the existing busy error |
+| turn owner (E4) | per live Router turn | `Serving → Released` (`LifecycleRelease` at Deactivate) → handed over; incoming: `Adopting → Serving` \| `EndedInGap` \| `GenerationGone` \| `Unadoptable{reason}`; `Serving → Settled` | a released owner answering a native request: unrepresentable (its native connection is closed) |
 
 ## 9. Failure and interleavings
 
@@ -1632,7 +1743,7 @@ None stands in for another.
 | U | R | E | owner | interface | shape and home | state | failure | proof |
 |---|---|---|---|---|---|---|---|---|
 | U1, U5 | R1: update replaces only changed children; generation and direct connections untouched | E2, E4, E5, E6, E7 | `UpdateCoordinator` | `Update` → 6.2 | `BuildInfo`, `UpdateOutcome`, `KeeperToChild` · keeper-protocol | child slot handover; E2 untouched | prepare failure: old child stays Active | V1 |
-| U2 | R2: hosted session rejoins the same live turn and sees its outcome | E4, E8, E9 | `SessionConnectionRegistry` + `LiveTurnAttachment` | `lifecycle_detach`; `session/load` → `Attached`; `_session/state.turn` | ACP (existing) · codex-acp-adapter; `_session/state` · RSP session-event-model | `Ready → Attached → Ready` | detach never cancels; explicit cancel interrupts; native loss → `lost` | V1 (real ACP and relay; pinned Codex; blocked-output detach; no-content completion) |
+| U2 | R2: hosted session rejoins the same live turn and sees its outcome; detached turns keep being served across an E4 replacement | E4, E8, E9 | turn owner + `SessionConnectionRegistry` + `LiveTurnAttachment` | `LifecycleRelease`; `Deactivated{handover}` → `Activate{handover}`; adoption by `thread/resume`; `session/load` → `Attached`; `_session/state.turn` | `RoleHandover` · keeper-protocol; `ServicesHandover` · agent-collaboration-services; ACP · codex-acp-adapter; `_session/state` · RSP session-event-model | owner `Serving → Released → Adopting → Serving`; slot `Loading → Attached → Ready` | release never cancels; explicit cancel interrupts; unadoptable → keeps running upstream, recorded; native loss → `lost` | V1 (real ACP and relay; pinned Codex; blocked-output detach; no-content completion; handover cases below) |
 | U5 | R3: services crash → automatic respawn | E3, E4 | `ChildSupervisor` | SIGCHLD → 6.7 | `ChildState::Crashed` · keeper-protocol | `Active → Crashed → Starting` | backoff cap 5 s | V6 (functional ACP after respawn) |
 | U3 | R4: E1 always connectable; crash exception | E1, E2 | `GenerationController` | E1 symlink rename | `DefaultEndpointPath`, `GenerationAliasPath` · keeper-protocol | routed(N) | `UnavailabilityRecord` during a crash | V2 |
 | U3 | R5: candidate first; services adopted; 1 s settle; no fallback caused by retirement | E2, E8 | `GenerationController` | 6.3 | `GenerationCurrentPayload`, `GenerationState` · keeper-protocol | transition slot `Candidate → Settling → None` | Busy during the settle; rejected evidence → Failed | V2 (real `codex` launched during a swap; handshake distribution) |
@@ -1668,6 +1779,7 @@ None stands in for another.
 
 | Seam | Real | Replaced | Observation |
 |---|---|---|---|
+| V1 turn handover | the pinned Codex app-server, the real old and new E4 binaries, a real ACP client and a detached `conversation prompt` | none | across one E4 replacement: (a) a detached turn with a command approval pending at release has that approval replayed to the adopted owner with the same native request id, answered once through the new broker, and the turn completes; (b) a turn that ends during the gap settles `endedInGap` from the resume snapshot; (c) a held unmaterialized thread is still resumable after the replacement; (d) a reconnecting client gets `Attached` with `_session/state.turn` running, then terminal; (e) an unknown `ServicesHandover` version leaves the turn running upstream and its approval answerable by the next resume; (f) no native request is answered by the released E4 (broker history has one writer) |
 | V1, V2, V10 (Codex behavior) | the pinned managed Codex at implementation time (0.160.0 at the re-anchor; main's real-TUI acceptance tests still assert 0.157.1, `router_session_app_server_tui_tests.rs:6-32`, and are re-pinned with this work); the real ACP adapter and relay; a real `codex` TUI launched during swaps (debug log line `starting embedded app server` on fallback); an ACP client that advertises State | none | same turn id; `_session/state.turn` terminal status, including no-content completion; zero fallback lines; E1 and alias `readlink` |
 | V2 Remote Control | the real app-server with Remote Control enabled, in an isolated non-production setup authorized by the owner | none | both generations' readiness and pairing through the settle; a gap is reported if no such setup exists |
 | V3, V6, V7, V8, V9 | compiled CLI at temporary install paths (extending `compiled_cli_host_acceptance.rs:207-306`); the real keeper, services and proxy | the test app-server fixture (`:702-733`), extended to publish `--listen` as a symlink and hold a fake in-progress turn | pids and pgids, `KeeperStatus`, `HandoverRecord`, CLI frames, timestamped protocol requests (not raw connects) |

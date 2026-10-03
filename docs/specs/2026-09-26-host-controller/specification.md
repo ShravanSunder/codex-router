@@ -69,7 +69,12 @@ Basis: U1, U5.
 **R2.** If an E4 replacement closes an E9, then a hosted-session client that
 reconnects MUST be able to resume its thread and observe the same E8 (same turn
 id) still `in-progress` or reaching `completed`, not `interrupted`. The E4
-replacement itself MUST NOT interrupt the E8.
+replacement itself MUST NOT interrupt the E8. A turn whose caller has already
+detached (the shipped caller-detach contract, #88/#89) MUST keep being served by
+the incoming E4. Its pending approvals and questions stay answerable, and its
+outcome is still recorded. The one exception is a turn on an app-server
+generation that is being replaced at the same time, which is the owner-accepted
+app-server restart loss.
 
 For ACP clients, "observe" means the Router session state extension's `turn`
 record: the turn id while running, and its terminal status when it ends, even
