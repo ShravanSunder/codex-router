@@ -1,10 +1,12 @@
 //! Select the completed native assistant item that represents one turn's final reply.
-use collaboration_protocol::{MAX_CONTROL_FRAME_BYTES, MessageText};
+use collaboration_protocol::{
+    ConversationOutputUnavailableReason, MAX_CONTROL_FRAME_BYTES, MessageText,
+};
 use serde_json::{Value, json};
 
 enum ReplyCandidate {
-    Available(String),
-    Unavailable(&'static str),
+    Available(MessageText),
+    Unavailable(ConversationOutputUnavailableReason),
 }
 
 #[derive(Default)]
@@ -83,12 +85,12 @@ impl FinalReplySelection {
 impl ReplyCandidate {
     fn from_text(text: &str) -> Self {
         if text.len() > MAX_CONTROL_FRAME_BYTES {
-            return Self::Unavailable("outputLimitExceeded");
+            return Self::Unavailable(ConversationOutputUnavailableReason::OutputLimitExceeded);
         }
-        if MessageText::try_from(text.to_owned()).is_err() {
-            return Self::Unavailable("outputInvalid");
-        }
-        Self::Available(text.to_owned())
+        MessageText::try_from(text.to_owned()).map_or(
+            Self::Unavailable(ConversationOutputUnavailableReason::OutputInvalid),
+            Self::Available,
+        )
     }
 }
 

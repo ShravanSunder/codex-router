@@ -18,6 +18,15 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 
 const FRAME_LIMIT: usize = 64 * 1024 * 1024;
+
+/// What happens to the agent's setup updates (history replay and session notices)
+/// while a session opens. Streaming callers receive them; aggregate prompts keep
+/// none, so they also ask the adapter not to replay history.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SetupUpdateDelivery {
+    StreamToCaller,
+    Discard,
+}
 pub struct AcpConversation {
     stream: BufReader<UnixStream>,
     frame: Vec<u8>,
@@ -74,12 +83,12 @@ impl AcpConversation {
             Ok(())
         };
         let (target, end) = conversation
-            .open_and_prompt_with_replay_policy(
+            .open_and_prompt_with_setup_updates(
                 &request.create,
                 request.prompt,
                 cancel,
                 &mut emit,
-                false,
+                SetupUpdateDelivery::Discard,
             )
             .await?;
         Ok(ConversationCreatePromptResult {
@@ -98,23 +107,29 @@ impl AcpConversation {
         cancel: CancellationToken,
         emit: &mut impl FnMut(ConversationEvent) -> Result<(), ClientError>,
     ) -> Result<(SessionRef, ConversationEnd), ConversationCreatePromptError> {
-        self.open_and_prompt_with_replay_policy(create, prompt, cancel, emit, true)
-            .await
+        self.open_and_prompt_with_setup_updates(
+            create,
+            prompt,
+            cancel,
+            emit,
+            SetupUpdateDelivery::StreamToCaller,
+        )
+        .await
     }
 
-    async fn open_and_prompt_with_replay_policy(
+    async fn open_and_prompt_with_setup_updates(
         &mut self,
         create: &ConversationCreateRequest,
         prompt: ConversationPromptRequest,
         cancel: CancellationToken,
         emit: &mut impl FnMut(ConversationEvent) -> Result<(), ClientError>,
-        replay_history: bool,
+        setup_updates: SetupUpdateDelivery,
     ) -> Result<(SessionRef, ConversationEnd), ConversationCreatePromptError> {
         prompt
             .validate()
             .map_err(|source| crate::OperationError::before_dispatch("validation", None, source))?;
         let target = self
-            .open_session_with_context(create, emit, replay_history)
+            .open_session_with_context(create, emit, setup_updates)
             .await?;
         let end = self
             .prompt_and_wait(prompt, cancel, emit)
@@ -197,7 +212,7 @@ impl AcpConversation {
             root_message_id: None,
         };
         let target = self
-            .open_session_with_context(&create, &mut emit, false)
+            .open_session_with_context(&create, &mut emit, SetupUpdateDelivery::Discard)
             .await?;
         let end = self
             .prompt_and_wait(request.prompt, cancel, &mut emit)
@@ -270,7 +285,7 @@ impl AcpConversation {
             .request(
                 "initialize",
                 initialize,
-                true,
+                SetupUpdateDelivery::StreamToCaller,
                 "InitializeRequest",
                 "InitializeResponse",
             )
@@ -304,7 +319,7 @@ impl AcpConversation {
         validate_conversation_endpoint(&client.endpoint, &request.endpoint)
             .map_err(|source| crate::OperationError::before_dispatch("validation", None, source))?;
         let target = client
-            .open_session_with_context(&request, emit, true)
+            .open_session_with_context(&request, emit, SetupUpdateDelivery::StreamToCaller)
             .await?;
         Ok((client, ConversationCreateResult { target }))
     }
@@ -313,7 +328,7 @@ impl AcpConversation {
         request: &ConversationCreateRequest,
         emit: &mut impl FnMut(ConversationEvent) -> Result<(), ClientError>,
     ) -> Result<SessionRef, ClientError> {
-        self.open_session_with_context(request, emit, true)
+        self.open_session_with_context(request, emit, SetupUpdateDelivery::StreamToCaller)
             .await
             .map_err(crate::OperationError::into_source)
     }
@@ -322,7 +337,7 @@ impl AcpConversation {
         &mut self,
         request: &ConversationCreateRequest,
         emit: &mut impl FnMut(ConversationEvent) -> Result<(), ClientError>,
-        replay_history: bool,
+        setup_updates: SetupUpdateDelivery,
     ) -> Result<SessionRef, crate::OperationError> {
         validate_conversation_create_request(request)
             .map_err(|source| crate::OperationError::before_dispatch("validation", None, source))?;
@@ -358,7 +373,7 @@ impl AcpConversation {
                 router_metadata_effort(request.effort.as_deref()),
             );
             metadata.insert("router".to_owned(), json!({"sessionRef":target}));
-            if !replay_history {
+            if setup_updates == SetupUpdateDelivery::Discard {
                 metadata.insert("codex-router/replayHistory".to_owned(), json!(false));
             }
             let params = json!({"sessionId":id,"cwd":request.cwd,"mcpServers":[],"_meta":metadata});
@@ -369,7 +384,7 @@ impl AcpConversation {
             self.request(
                 "session/load",
                 params,
-                replay_history,
+                setup_updates,
                 "LoadSessionRequest",
                 "LoadSessionResponse",
             )
@@ -435,7 +450,7 @@ impl AcpConversation {
                 .request(
                     "session/new",
                     params,
-                    replay_history,
+                    setup_updates,
                     "NewSessionRequest",
                     "NewSessionResponse",
                 )
@@ -566,7 +581,7 @@ impl AcpConversation {
         &mut self,
         method: &str,
         params: Value,
-        retain_setup_updates: bool,
+        setup_updates: SetupUpdateDelivery,
         input: &str,
         output: &str,
     ) -> Result<Value, ClientError> {
@@ -576,7 +591,7 @@ impl AcpConversation {
                 let frame = self.read().await?;
                 if frame.get("method").is_some() {
                     if let Some(update) = self.handle_callback(&frame).await?
-                        && retain_setup_updates
+                        && setup_updates == SetupUpdateDelivery::StreamToCaller
                     {
                         self.pending_bytes += serde_json::to_vec(&update)
                             .map_err(|_| ClientError::Protocol("ACP update encoding failed"))?

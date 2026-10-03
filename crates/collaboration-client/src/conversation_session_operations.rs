@@ -61,7 +61,11 @@ impl ConversationClient {
                 };
                 let mut emit = |_event| Ok(());
                 let loaded = acp
-                    .open_session_with_context(&request, &mut emit, true)
+                    .open_session_with_context(
+                        &request,
+                        &mut emit,
+                        crate::acp_conversation::SetupUpdateDelivery::StreamToCaller,
+                    )
                     .await?;
                 Ok(ConversationOperationResult::Completed {
                     target: loaded.clone(),
