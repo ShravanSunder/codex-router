@@ -83,7 +83,7 @@ impl codex_acp_adapter::ConversationOperationRecorder for AcceptingConversationR
     }
 }
 
-fn native_payload_schemas() -> Arc<NativePayloadSchemas> {
+fn native_payload_schemas() -> Result<Arc<NativePayloadSchemas>, String> {
     let definitions: serde_json::Map<String, Value> = [
         "ThreadFork",
         "ThreadLoadedList",
@@ -102,32 +102,29 @@ fn native_payload_schemas() -> Arc<NativePayloadSchemas> {
         ]
     })
     .collect();
+    let schema_bytes = serde_json::to_vec(&json!({"definitions":{
+        "v2":definitions,
+        "ServerRequest":{"type":"object"},
+        "ServerNotification":{"type":"object"}
+    }}))
+    .map_err(|error| error.to_string())?;
     let bundle = NativeSchemaBundle::from_documents(BTreeMap::from([(
         "codex_app_server_protocol.schemas.json".to_owned(),
-        serde_json::to_vec(&json!({"definitions":{
-            "v2":definitions,
-            "ServerRequest":{"type":"object"},
-            "ServerNotification":{"type":"object"}
-        }}))
-        .unwrap_or_else(|error| panic!("schema JSON: {error}")),
+        schema_bytes,
     )]))
-    .unwrap_or_else(|error| panic!("schema bundle: {error}"));
-    Arc::new(
-        NativePayloadSchemas::from_bundle(&bundle)
-            .unwrap_or_else(|error| panic!("native schemas: {error}")),
-    )
+    .map_err(|error| error.to_string())?;
+    let schemas = NativePayloadSchemas::from_bundle(&bundle).map_err(|error| error.to_string())?;
+    Ok(Arc::new(schemas))
 }
 
-async fn next_native_message(socket: &mut WebSocketStream<UnixStream>) -> Value {
+async fn next_native_message(socket: &mut WebSocketStream<UnixStream>) -> Result<Value, String> {
     loop {
-        let frame = socket
-            .next()
-            .await
-            .unwrap_or_else(|| panic!("native connection closed"))
-            .unwrap_or_else(|error| panic!("native frame: {error}"));
+        let Some(frame) = socket.next().await else {
+            return Err("native connection closed".to_owned());
+        };
+        let frame = frame.map_err(|error| error.to_string())?;
         if let Message::Text(text) = frame {
-            return serde_json::from_str(&text)
-                .unwrap_or_else(|error| panic!("native message JSON: {error}"));
+            return serde_json::from_str(&text).map_err(|error| error.to_string());
         }
     }
 }
@@ -136,7 +133,7 @@ async fn send_native_result(
     socket: &mut WebSocketStream<UnixStream>,
     request: &Value,
     result: Value,
-) {
+) -> Result<(), String> {
     socket
         .send(Message::Text(
             json!({"id":request["id"],"result":result})
@@ -144,20 +141,27 @@ async fn send_native_result(
                 .into(),
         ))
         .await
-        .unwrap_or_else(|error| panic!("native response: {error}"));
+        .map_err(|error| error.to_string())
 }
 
-async fn send_native_notification(socket: &mut WebSocketStream<UnixStream>, value: Value) {
+async fn send_native_notification(
+    socket: &mut WebSocketStream<UnixStream>,
+    value: Value,
+) -> Result<(), String> {
     socket
         .send(Message::Text(value.to_string().into()))
         .await
-        .unwrap_or_else(|error| panic!("native notification: {error}"));
+        .map_err(|error| error.to_string())
 }
 
 #[tokio::test]
 async fn aggregate_long_turn_settles_through_real_adapter_after_many_native_updates() {
-    let unique_name = uuid::Uuid::now_v7().to_string();
-    let root = std::path::PathBuf::from(format!("/tmp/acp-real-{}", &unique_name[..12]));
+    let unique_prefix = uuid::Uuid::now_v7()
+        .to_string()
+        .chars()
+        .take(12)
+        .collect::<String>();
+    let root = std::path::PathBuf::from(format!("/tmp/acp-real-{unique_prefix}"));
     std::fs::DirBuilder::new()
         .mode(0o700)
         .create(&root)
@@ -194,13 +198,15 @@ async fn aggregate_long_turn_settles_through_real_adapter_after_many_native_upda
     let mut native_task = tokio::spawn(async move {
         let (stream, _) = native_listener.accept().await.unwrap();
         let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
-        let initialize = next_native_message(&mut socket).await;
+        let initialize = next_native_message(&mut socket).await.unwrap();
         assert_eq!(initialize["method"], "initialize");
-        send_native_result(&mut socket, &initialize, json!({})).await;
-        let initialized = next_native_message(&mut socket).await;
+        send_native_result(&mut socket, &initialize, json!({}))
+            .await
+            .unwrap();
+        let initialized = next_native_message(&mut socket).await.unwrap();
         assert_eq!(initialized["method"], "initialized");
 
-        let resume = next_native_message(&mut socket).await;
+        let resume = next_native_message(&mut socket).await.unwrap();
         assert_eq!(resume["method"], "thread/resume");
         assert_eq!(resume["params"]["threadId"], "long-thread");
         let historical_items = (0..1025)
@@ -211,14 +217,15 @@ async fn aggregate_long_turn_settles_through_real_adapter_after_many_native_upda
             &resume,
             json!({"cwd":native_cwd,"model":"gpt-5.6-sol","thread":{"id":"long-thread","cwd":native_cwd,"status":{"type":"idle"},"reasoningEffort":"low","turns":[{"id":"history-turn","status":"completed","items":historical_items}]}}),
         )
-        .await;
+        .await
+        .unwrap();
 
         for (turn_index, turn_id, final_text) in [
             (0, "turn-a", "the selected final reply"),
             (1, "turn-b", "reply after existing-binding resume"),
         ] {
             if turn_index > 0 {
-                let resume = next_native_message(&mut socket).await;
+                let resume = next_native_message(&mut socket).await.unwrap();
                 assert_eq!(resume["method"], "thread/resume");
                 assert_eq!(resume["params"]["threadId"], "long-thread");
                 let historical_items = (0..1025)
@@ -229,21 +236,25 @@ async fn aggregate_long_turn_settles_through_real_adapter_after_many_native_upda
                     &resume,
                     json!({"cwd":native_cwd,"model":"gpt-5.6-sol","thread":{"id":"long-thread","cwd":native_cwd,"status":{"type":"idle"},"reasoningEffort":"low","turns":[{"id":"history-turn-again","status":"completed","items":historical_items}]}}),
                 )
-                .await;
+                .await
+                .unwrap();
             }
 
-            let thread_read = next_native_message(&mut socket).await;
+            let thread_read = next_native_message(&mut socket).await.unwrap();
             assert_eq!(thread_read["method"], "thread/read");
             send_native_result(
                 &mut socket,
                 &thread_read,
                 json!({"thread":{"id":"long-thread","status":{"type":"idle"},"turns":[]}}),
             )
-            .await;
+            .await
+            .unwrap();
 
-            let turn_start = next_native_message(&mut socket).await;
+            let turn_start = next_native_message(&mut socket).await.unwrap();
             assert_eq!(turn_start["method"], "turn/start");
-            send_native_result(&mut socket, &turn_start, json!({"turn":{"id":turn_id}})).await;
+            send_native_result(&mut socket, &turn_start, json!({"turn":{"id":turn_id}}))
+                .await
+                .unwrap();
 
             if turn_index == 0 {
                 for index in 0..1025 {
@@ -251,38 +262,44 @@ async fn aggregate_long_turn_settles_through_real_adapter_after_many_native_upda
                         &mut socket,
                         json!({"method":"item/agentMessage/delta","params":{"threadId":"long-thread","turnId":turn_id,"itemId":"message-a","delta":format!("chunk-{index} ")}}),
                     )
-                    .await;
+                    .await
+                    .unwrap();
                 }
                 send_native_notification(
                     &mut socket,
                     json!({"method":"item/started","params":{"threadId":"long-thread","turnId":turn_id,"item":{"type":"commandExecution","id":"tool-a","status":"inProgress","command":"cargo test"}}}),
                 )
-                .await;
+                .await
+                .unwrap();
                 send_native_notification(
                     &mut socket,
                     json!({"method":"item/completed","params":{"threadId":"long-thread","turnId":turn_id,"item":{"type":"commandExecution","id":"tool-a","status":"completed","command":"cargo test","aggregatedOutput":"passed"}}}),
                 )
-                .await;
+                .await
+                .unwrap();
             }
             send_native_notification(
                 &mut socket,
                 json!({"method":"item/completed","params":{"threadId":"long-thread","turnId":turn_id,"item":{"type":"agentMessage","id":format!("final-{turn_id}"),"phase":"final_answer","text":final_text}}}),
             )
-            .await;
+            .await
+            .unwrap();
             send_native_notification(
                 &mut socket,
                 json!({"method":"turn/completed","params":{"threadId":"long-thread","turn":{"id":turn_id,"status":"completed"}}}),
             )
-            .await;
+            .await
+            .unwrap();
 
-            let receipt_read = next_native_message(&mut socket).await;
+            let receipt_read = next_native_message(&mut socket).await.unwrap();
             assert_eq!(receipt_read["method"], "thread/read");
             send_native_result(
                 &mut socket,
                 &receipt_read,
                 json!({"thread":{"id":"long-thread","model":"gpt-5.6-sol","reasoningEffort":"low","createdAt":1_800_000_000_i64,"updatedAt":1_800_000_000_i64,"sandbox":{"type":"workspaceWrite"},"approvalPolicy":"on-request","approvalsReviewer":"auto_review"}}),
             )
-            .await;
+            .await
+            .unwrap();
         }
     });
 
@@ -302,7 +319,7 @@ async fn aggregate_long_turn_settles_through_real_adapter_after_many_native_upda
                     "generation":1
                 }))
                 .unwrap(),
-                schemas: native_payload_schemas(),
+                schemas: native_payload_schemas().unwrap(),
                 stored_sessions: Arc::new(EmptyStoredSessionCatalog),
                 retired: CancellationToken::new(),
                 approval_broker: Arc::new(codex_acp_adapter::RejectingApprovalBroker),

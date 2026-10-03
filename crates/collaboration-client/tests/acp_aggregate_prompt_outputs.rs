@@ -10,7 +10,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio_util::sync::CancellationToken;
 
 #[tokio::test]
-async fn aggregate_existing_prompt_maps_missing_metadata_and_preserves_old_host_load_failure() {
+async fn aggregate_existing_prompt_handles_missing_reply_and_history_setup_failure() {
     let root = std::path::PathBuf::from(format!(
         "/tmp/acp-existing-prompt-flow-{}",
         std::process::id()
@@ -98,7 +98,7 @@ async fn aggregate_existing_prompt_maps_missing_metadata_and_preserves_old_host_
             .write_all(
                 format!(
                     "{}\n",
-                    json!({"jsonrpc":"2.0","id":load["id"],"error":{"code":-32603,"message":"Native session setup rejected"}})
+                    json!({"jsonrpc":"2.0","id":load["id"],"error":{"code":-32603,"message":"Native session setup rejected","data":{"kind":"protocolViolation","stage":"load","message":"ACP history replay exceeded the setup update limit"}}})
                 )
                 .as_bytes(),
             )
@@ -163,6 +163,15 @@ async fn aggregate_existing_prompt_maps_missing_metadata_and_preserves_old_host_
     .expect_err("older Host load failure stays an operation failure");
     let (failure, failed_target, _) = old_host_error.into_parts();
     assert_eq!(failure.stage, "load");
+    assert_eq!(
+        failure.kind,
+        collaboration_protocol::OperationFailureKind::Rejected
+    );
+    assert_eq!(failure.service_kind.as_deref(), Some("protocolViolation"));
+    assert_eq!(
+        failure.message,
+        "ACP history replay exceeded the setup update limit"
+    );
     assert_eq!(
         failure.effect,
         collaboration_protocol::OperationEffect::Unknown
