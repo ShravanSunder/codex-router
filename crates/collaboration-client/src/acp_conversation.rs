@@ -5,8 +5,10 @@ use crate::conversation_contract::{
     ConversationPromptRequest, ExistingConversationPromptError, ExistingConversationPromptRequest,
     ExistingConversationPromptResult, PublicPromptContent,
 };
-use crate::{AcpTransportConnection, ClientError};
-use collaboration_protocol::{AcpSchemaCatalog, EndpointId, EndpointRef, SessionRef};
+use crate::{AcpTransportConnection, ClientError, ProviderPromptOutput};
+use collaboration_protocol::{
+    AcpSchemaCatalog, ConversationOutputUnavailableReason, EndpointId, EndpointRef, SessionRef,
+};
 use serde_json::{Value, json};
 use std::{collections::BTreeSet, path::Path, time::Duration};
 use tokio::{
@@ -16,39 +18,14 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 
 const FRAME_LIMIT: usize = 64 * 1024 * 1024;
-const MAX_PROMPT_RESULT_UPDATES: usize = 1024;
-const MAX_PROMPT_RESULT_BYTES: usize = FRAME_LIMIT;
 
-struct BoundedPromptUpdates {
-    updates: Vec<Value>,
-    bytes: usize,
-}
-
-impl BoundedPromptUpdates {
-    const fn new() -> Self {
-        Self {
-            updates: Vec::new(),
-            bytes: 0,
-        }
-    }
-
-    fn push(&mut self, update: Value) -> Result<(), ClientError> {
-        let bytes = serde_json::to_vec(&update)
-            .map_err(|_| ClientError::Protocol("ACP update encoding failed"))?
-            .len();
-        if self.updates.len() >= MAX_PROMPT_RESULT_UPDATES
-            || self.bytes.saturating_add(bytes) > MAX_PROMPT_RESULT_BYTES
-        {
-            return Err(ClientError::Protocol("ACP prompt updates overflow"));
-        }
-        self.bytes += bytes;
-        self.updates.push(update);
-        Ok(())
-    }
-
-    fn into_updates(self) -> Vec<Value> {
-        self.updates
-    }
+/// What happens to the agent's setup updates (history replay and session notices)
+/// while a session opens. Streaming callers receive them; aggregate prompts keep
+/// none, so they also ask the adapter not to replay history.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SetupUpdateDelivery {
+    StreamToCaller,
+    Discard,
 }
 pub struct AcpConversation {
     stream: BufReader<UnixStream>,
@@ -90,25 +67,34 @@ impl AcpConversation {
         let mut conversation = Self::connect_with_context(directory, endpoint_id).await?;
         validate_conversation_endpoint(conversation.endpoint(), &request.create.endpoint)
             .map_err(|source| crate::OperationError::before_dispatch("validation", None, source))?;
-        let mut updates = BoundedPromptUpdates::new();
+        let mut output = None;
         let mut permission_required = false;
         let mut prompt_result = None;
         let mut emit = |event| {
             match event {
-                ConversationEvent::SessionUpdate { update, .. } => updates.push(update)?,
+                ConversationEvent::SessionUpdate { .. } => {}
                 ConversationEvent::PermissionRequired(_) => permission_required = true,
-                ConversationEvent::PromptResult { result, .. } => prompt_result = Some(result),
+                ConversationEvent::PromptResult { result, .. } => {
+                    output = Some(codex_final_reply_output(&result)?);
+                    prompt_result = Some(result);
+                }
                 ConversationEvent::SessionReady(_) => {}
             }
             Ok(())
         };
         let (target, end) = conversation
-            .open_and_prompt(&request.create, request.prompt, cancel, &mut emit)
+            .open_and_prompt_with_setup_updates(
+                &request.create,
+                request.prompt,
+                cancel,
+                &mut emit,
+                SetupUpdateDelivery::Discard,
+            )
             .await?;
         Ok(ConversationCreatePromptResult {
             target,
             end,
-            updates: updates.into_updates(),
+            output: output.unwrap_or_else(unavailable_codex_output),
             permission_required,
             result: prompt_result,
         })
@@ -121,10 +107,30 @@ impl AcpConversation {
         cancel: CancellationToken,
         emit: &mut impl FnMut(ConversationEvent) -> Result<(), ClientError>,
     ) -> Result<(SessionRef, ConversationEnd), ConversationCreatePromptError> {
+        self.open_and_prompt_with_setup_updates(
+            create,
+            prompt,
+            cancel,
+            emit,
+            SetupUpdateDelivery::StreamToCaller,
+        )
+        .await
+    }
+
+    async fn open_and_prompt_with_setup_updates(
+        &mut self,
+        create: &ConversationCreateRequest,
+        prompt: ConversationPromptRequest,
+        cancel: CancellationToken,
+        emit: &mut impl FnMut(ConversationEvent) -> Result<(), ClientError>,
+        setup_updates: SetupUpdateDelivery,
+    ) -> Result<(SessionRef, ConversationEnd), ConversationCreatePromptError> {
         prompt
             .validate()
             .map_err(|source| crate::OperationError::before_dispatch("validation", None, source))?;
-        let target = self.open_session_with_context(create, emit).await?;
+        let target = self
+            .open_session_with_context(create, emit, setup_updates)
+            .await?;
         let end = self
             .prompt_and_wait(prompt, cancel, emit)
             .await
@@ -177,14 +183,17 @@ impl AcpConversation {
                 source,
             )
         })?;
-        let mut updates = BoundedPromptUpdates::new();
+        let mut output = None;
         let mut permission_required = false;
         let mut prompt_result = None;
         let mut emit = |event| {
             match event {
-                ConversationEvent::SessionUpdate { update, .. } => updates.push(update)?,
+                ConversationEvent::SessionUpdate { .. } => {}
                 ConversationEvent::PermissionRequired(_) => permission_required = true,
-                ConversationEvent::PromptResult { result, .. } => prompt_result = Some(result),
+                ConversationEvent::PromptResult { result, .. } => {
+                    output = Some(codex_final_reply_output(&result)?);
+                    prompt_result = Some(result);
+                }
                 ConversationEvent::SessionReady(_) => {}
             }
             Ok(())
@@ -202,7 +211,9 @@ impl AcpConversation {
             approver: None,
             root_message_id: None,
         };
-        let target = self.open_session_with_context(&create, &mut emit).await?;
+        let target = self
+            .open_session_with_context(&create, &mut emit, SetupUpdateDelivery::Discard)
+            .await?;
         let end = self
             .prompt_and_wait(request.prompt, cancel, &mut emit)
             .await
@@ -212,7 +223,7 @@ impl AcpConversation {
         Ok(ExistingConversationPromptResult {
             target,
             end,
-            updates: updates.into_updates(),
+            output: output.unwrap_or_else(unavailable_codex_output),
             permission_required,
             result: prompt_result,
         })
@@ -274,6 +285,7 @@ impl AcpConversation {
             .request(
                 "initialize",
                 initialize,
+                SetupUpdateDelivery::StreamToCaller,
                 "InitializeRequest",
                 "InitializeResponse",
             )
@@ -306,7 +318,9 @@ impl AcpConversation {
         let mut client = Self::connect_with_context(directory, endpoint_id).await?;
         validate_conversation_endpoint(&client.endpoint, &request.endpoint)
             .map_err(|source| crate::OperationError::before_dispatch("validation", None, source))?;
-        let target = client.open_session_with_context(&request, emit).await?;
+        let target = client
+            .open_session_with_context(&request, emit, SetupUpdateDelivery::StreamToCaller)
+            .await?;
         Ok((client, ConversationCreateResult { target }))
     }
     pub async fn open_session(
@@ -314,7 +328,7 @@ impl AcpConversation {
         request: &ConversationCreateRequest,
         emit: &mut impl FnMut(ConversationEvent) -> Result<(), ClientError>,
     ) -> Result<SessionRef, ClientError> {
-        self.open_session_with_context(request, emit)
+        self.open_session_with_context(request, emit, SetupUpdateDelivery::StreamToCaller)
             .await
             .map_err(crate::OperationError::into_source)
     }
@@ -323,6 +337,7 @@ impl AcpConversation {
         &mut self,
         request: &ConversationCreateRequest,
         emit: &mut impl FnMut(ConversationEvent) -> Result<(), ClientError>,
+        setup_updates: SetupUpdateDelivery,
     ) -> Result<SessionRef, crate::OperationError> {
         validate_conversation_create_request(request)
             .map_err(|source| crate::OperationError::before_dispatch("validation", None, source))?;
@@ -352,10 +367,16 @@ impl AcpConversation {
                 ));
             }
             self.target = Some(target.clone());
-            let params = json!({"sessionId":id,"cwd":request.cwd,"mcpServers":[],"_meta":{
-                "codexRouter":router_metadata_effort(request.effort.as_deref()),
-                "router":{"sessionRef":target}
-            }});
+            let mut metadata = serde_json::Map::new();
+            metadata.insert(
+                "codexRouter".to_owned(),
+                router_metadata_effort(request.effort.as_deref()),
+            );
+            metadata.insert("router".to_owned(), json!({"sessionRef":target}));
+            if setup_updates == SetupUpdateDelivery::Discard {
+                metadata.insert("codex-router/replayHistory".to_owned(), json!(false));
+            }
+            let params = json!({"sessionId":id,"cwd":request.cwd,"mcpServers":[],"_meta":metadata});
             self.validate("LoadSessionRequest", &params)
                 .map_err(|source| {
                     crate::OperationError::before_dispatch("load", Some(target.clone()), source)
@@ -363,6 +384,7 @@ impl AcpConversation {
             self.request(
                 "session/load",
                 params,
+                setup_updates,
                 "LoadSessionRequest",
                 "LoadSessionResponse",
             )
@@ -428,6 +450,7 @@ impl AcpConversation {
                 .request(
                     "session/new",
                     params,
+                    setup_updates,
                     "NewSessionRequest",
                     "NewSessionResponse",
                 )
@@ -558,6 +581,7 @@ impl AcpConversation {
         &mut self,
         method: &str,
         params: Value,
+        setup_updates: SetupUpdateDelivery,
         input: &str,
         output: &str,
     ) -> Result<Value, ClientError> {
@@ -566,7 +590,9 @@ impl AcpConversation {
             loop {
                 let frame = self.read().await?;
                 if frame.get("method").is_some() {
-                    if let Some(update) = self.handle_callback(&frame).await? {
+                    if let Some(update) = self.handle_callback(&frame).await?
+                        && setup_updates == SetupUpdateDelivery::StreamToCaller
+                    {
                         self.pending_bytes += serde_json::to_vec(&update)
                             .map_err(|_| ClientError::Protocol("ACP update encoding failed"))?
                             .len();
@@ -734,6 +760,24 @@ fn conversation_prompt_text(message: &PublicPromptContent) -> &str {
         PublicPromptContent::Agent { text, .. } | PublicPromptContent::HumanUser { text } => {
             text.as_str()
         }
+    }
+}
+
+fn codex_final_reply_output(result: &Value) -> Result<ProviderPromptOutput, ClientError> {
+    let final_reply = result
+        .get("_meta")
+        .and_then(Value::as_object)
+        .and_then(|metadata| metadata.get("codex-router/finalReply"));
+    let Some(final_reply) = final_reply else {
+        return Ok(unavailable_codex_output());
+    };
+    serde_json::from_value(final_reply.clone())
+        .map_err(|_| ClientError::Protocol("invalid Codex final reply metadata"))
+}
+
+fn unavailable_codex_output() -> ProviderPromptOutput {
+    ProviderPromptOutput::Unavailable {
+        reason: ConversationOutputUnavailableReason::NotRetained,
     }
 }
 

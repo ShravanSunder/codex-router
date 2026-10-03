@@ -68,7 +68,7 @@ async fn create_and_first_prompt_share_one_connection_and_return_correlated_sett
             .write_all(
                 format!(
                     "{}\n",
-                    json!({"jsonrpc":"2.0","id":prompt["id"],"result":{"stopReason":"end_turn"}})
+                    json!({"jsonrpc":"2.0","id":prompt["id"],"result":{"stopReason":"end_turn","_meta":{"codex-router/finalReply":{"kind":"available","text":"final answer"}}}})
                 )
                 .as_bytes(),
             )
@@ -111,13 +111,20 @@ async fn create_and_first_prompt_share_one_connection_and_return_correlated_sett
     )
     .await
     .unwrap();
-    assert_eq!(String::from(result.target.session_id), "fresh-thread");
+    assert_eq!(
+        String::from(result.target.session_id.clone()),
+        "fresh-thread"
+    );
     assert_eq!(result.end, ConversationEnd::Completed);
-    assert!(
-        result
-            .updates
-            .iter()
-            .any(|update| update.to_string().contains("FIRST_RESULT"))
+    let encoded_result = serde_json::to_value(&result).expect("result encoding");
+    assert_eq!(
+        encoded_result["output"],
+        json!({"kind":"available","text":"final answer"})
+    );
+    assert!(encoded_result.get("updates").is_none());
+    assert_eq!(
+        encoded_result["result"]["stopReason"], "end_turn",
+        "the ACP result remains part of the settlement"
     );
     peer.await.unwrap();
     stop.cancel();
@@ -226,110 +233,8 @@ async fn create_and_first_prompt_backend_rejection_retains_created_target() {
     std::fs::remove_dir(root).unwrap();
 }
 
-#[tokio::test]
-async fn streamed_prompt_updates_hit_aggregate_count_bound_and_retain_target() {
-    let root = std::path::PathBuf::from(format!(
-        "/tmp/acp-prompt-aggregate-bound-{}",
-        std::process::id()
-    ));
-    std::fs::DirBuilder::new()
-        .mode(0o700)
-        .create(&root)
-        .unwrap();
-    let service_id = "00000000-0000-4000-8000-000000000005";
-    let digest = format!("sha256:{}", "c".repeat(64));
-    let endpoint = json!({"serviceId":service_id,"endpointId":"codex-local"});
-    let identity=ServiceIdentity::new(service_id,service_id,&digest).unwrap().with_endpoints(vec![serde_json::from_value(json!({"endpoint":endpoint,"label":"ACP aggregate fixture","availability":{"state":"available","observedAt":"2026-09-06T00:00:00Z"},"channels":[{"kind":"acp","transport":"unixJsonLines","path":"acp.sock","schemaDigest":format!("sha256:{}",collaboration_protocol::ACP_SCHEMA_DIGEST)}]})).unwrap()]).unwrap();
-    let listener = LocalControlService::bind(&root.join("control.sock"), identity).unwrap();
-    let manifest:collaboration_protocol::ServiceManifest=serde_json::from_value(json!({"version":2,"serviceId":service_id,"serviceEpoch":service_id,"machineLabel":"fixture-host","control":{"transport":"unixJsonLines","path":"control.sock"},"controlSchemaDigest":digest,"mcp":{"transport":"streamableHttp","url":"http://127.0.0.1:0/mcp"}})).unwrap();
-    let publication = ManifestPublication::publish(&root, &manifest).unwrap();
-    let stop = CancellationToken::new();
-    let service = tokio::spawn(listener.run(stop.clone()));
-    let acp = tokio::net::UnixListener::bind(root.join("acp.sock")).unwrap();
-    let peer = tokio::spawn(async move {
-        let (stream, _) = acp.accept().await.unwrap();
-        let (reader, mut writer) = stream.into_split();
-        let mut lines = BufReader::new(reader).lines();
-        let initialize: Value =
-            serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
-        writer.write_all(format!("{}\n",json!({"jsonrpc":"2.0","id":initialize["id"],"result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true},"authMethods":[]}})).as_bytes()).await.unwrap();
-        let create: Value =
-            serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
-        writer.write_all(format!("{}\n",json!({"jsonrpc":"2.0","id":create["id"],"result":{"sessionId":"aggregate-thread"}})).as_bytes()).await.unwrap();
-        let prompt: Value =
-            serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
-        for index in 0..=1024 {
-            let update = json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"aggregate-thread","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":format!("chunk-{index}")}}}});
-            if writer
-                .write_all(format!("{update}\n").as_bytes())
-                .await
-                .is_err()
-            {
-                break;
-            }
-        }
-        let _ = writer
-            .write_all(
-                format!(
-                    "{}\n",
-                    json!({"jsonrpc":"2.0","id":prompt["id"],"result":{"stopReason":"end_turn"}})
-                )
-                .as_bytes(),
-            )
-            .await;
-    });
-    let endpoint_ref: collaboration_protocol::EndpointRef =
-        serde_json::from_value(endpoint).unwrap();
-    let sender: collaboration_protocol::SessionRef =
-        serde_json::from_value(json!({"endpoint":endpoint_ref,"sessionId":"aggregate-sender"}))
-            .unwrap();
-    let error = AcpConversation::create_and_prompt(
-        &root,
-        ConversationCreatePromptRequest {
-            create: ConversationCreateRequest {
-                operation_id: collaboration_protocol::OperationId::generate(),
-                endpoint: sender.endpoint.clone(),
-                cwd: root.clone(),
-                session: None,
-                fork: None,
-                model: Some("gpt-5.6-luna".to_owned()),
-                effort: Some("low".to_owned()),
-                access: Some("workspace-write".to_owned()),
-                created_by: Some(sender.clone()),
-                approver: Some(sender.clone()),
-                root_message_id: None,
-            },
-            prompt: ConversationPromptRequest {
-                message: PublicPromptContent::Agent {
-                    sender,
-                    text: MessageText::try_from("aggregate proof".to_owned()).unwrap(),
-                },
-                effort: Some("low".to_owned()),
-                timeout_seconds: 3,
-            },
-        },
-        CancellationToken::new(),
-    )
-    .await
-    .expect_err("aggregate update overflow must fail explicitly");
-    let (failure, target, turn_id) = error.into_parts();
-    assert_eq!(String::from(target.unwrap().session_id), "aggregate-thread");
-    assert_eq!(
-        failure.message,
-        "Control protocol violation: ACP prompt updates overflow"
-    );
-    assert_eq!(
-        failure.effect,
-        collaboration_protocol::OperationEffect::Unknown
-    );
-    assert!(turn_id.is_none());
-    peer.await.unwrap();
-    stop.cancel();
-    service.await.unwrap().unwrap();
-    drop(publication);
-    std::fs::remove_file(root.join("acp.sock")).unwrap();
-    std::fs::remove_dir(root).unwrap();
-}
+#[path = "acp_aggregate_prompt_outputs.rs"]
+mod aggregate_prompt_outputs;
 
 #[tokio::test]
 async fn reusable_acp_client_orders_load_updates_and_detaches_on_caller_cancel() {
@@ -365,6 +270,12 @@ async fn reusable_acp_client_orders_load_updates_and_detaches_on_caller_cancel()
                 serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
             assert_eq!(frame["method"], method);
             if method == "session/load" {
+                assert!(
+                    frame
+                        .pointer("/params/_meta/codex-router~1replayHistory")
+                        .is_none(),
+                    "streaming load must retain adapter history replay"
+                );
                 let expected = json!({"endpoint":endpoint,"sessionId":"owned"});
                 if frame.pointer("/params/_meta/router/sessionRef") != Some(&expected) {
                     writer.write_all(format!("{}\n",json!({"jsonrpc":"2.0","id":frame["id"],"error":{"code":-32602,"message":"ACP Session endpoint unknown; include _meta.router.sessionRef"}})).as_bytes()).await.unwrap();

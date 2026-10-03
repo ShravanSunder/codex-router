@@ -28,13 +28,15 @@ fn cli_conversation_carrier_preserves_permission_required_and_approver_identity(
     let result = ConversationCreatePromptResult {
         target,
         end: ConversationEnd::Cancelled,
-        updates: vec![],
+        output: collaboration_client::ProviderPromptOutput::Available { text: None },
         permission_required: true,
         result: Some(json!({"stopReason":"cancelled"})),
     };
     let encoded = serde_json::to_value(result).unwrap_or_default();
     assert_eq!(encoded["permissionRequired"], true);
     assert_eq!(encoded["end"], "cancelled");
+    assert_eq!(encoded["output"], json!({"kind":"available","text":null}));
+    assert!(encoded.get("updates").is_none());
 }
 
 #[test]

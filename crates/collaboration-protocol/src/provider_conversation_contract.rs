@@ -592,6 +592,8 @@ pub enum ConversationOperationSettlement {
 pub enum ConversationOutputUnavailableReason {
     HostRestarted,
     NotRetained,
+    OutputLimitExceeded,
+    OutputInvalid,
 }
 
 #[derive(Clone, Debug, JsonSchema, Serialize, Deserialize)]

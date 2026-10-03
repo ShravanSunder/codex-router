@@ -2,6 +2,15 @@
 use crate::AcpSchemaCatalog;
 use serde_json::{Value, json};
 
+pub(crate) fn history_replay_requested(params: &Value) -> bool {
+    params
+        .get("_meta")
+        .and_then(Value::as_object)
+        .and_then(|metadata| metadata.get("codex-router/replayHistory"))
+        .and_then(Value::as_bool)
+        != Some(false)
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum HistoryProjectionError {
     #[error("invalid native history response")]

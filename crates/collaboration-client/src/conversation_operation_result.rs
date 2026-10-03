@@ -108,7 +108,7 @@ pub enum ConversationStopReason {
 )]
 pub enum ConversationSettlementDetail {
     CodexPrompt {
-        updates: Vec<Value>,
+        output: ProviderPromptOutput,
         permission_required: bool,
         result: Option<Value>,
     },

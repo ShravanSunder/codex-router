@@ -114,7 +114,7 @@ pub struct ExistingConversationPromptRequest {
 pub struct ExistingConversationPromptResult {
     pub target: SessionRef,
     pub end: ConversationEnd,
-    pub updates: Vec<Value>,
+    pub output: crate::ProviderPromptOutput,
     pub permission_required: bool,
     pub result: Option<Value>,
 }
@@ -131,7 +131,7 @@ pub struct ConversationCreatePromptRequest {
 pub struct ConversationCreatePromptResult {
     pub target: SessionRef,
     pub end: ConversationEnd,
-    pub updates: Vec<Value>,
+    pub output: crate::ProviderPromptOutput,
     pub permission_required: bool,
     pub result: Option<Value>,
 }
