@@ -1,5 +1,6 @@
 use super::*;
 
+/// Tracks active local WebSocket streams by local token generation.
 const MAX_WEBSOCKET_REGISTRY_SAMPLE_COUNTS: usize = 1024;
 const MAX_CAPACITY_RETRY_SESSION_IDENTITIES: usize = 1024;
 

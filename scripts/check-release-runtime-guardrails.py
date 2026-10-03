@@ -5,6 +5,7 @@ import argparse
 import glob
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -27,6 +28,25 @@ RELEASE_RUNTIME_CRATES = (
     "codex-router-secret-store",
     "codex-router-selection",
     "codex-router-state",
+)
+# These roots have production modules moved into explicit child directories.
+# Test-only coordinators in similarly named directories are excluded by their
+# parent module's cfg(test) declaration during production module discovery.
+SPLIT_MODULE_SUBTREES = {
+    "crates/codex-router-proxy/src/account_selection.rs": (
+        "crates/codex-router-proxy/src/account_selection"
+    ),
+    "crates/codex-router-proxy/src/lib.rs": "crates/codex-router-proxy/src/proxy_tests",
+    "crates/codex-router-proxy/src/websocket.rs": "crates/codex-router-proxy/src/websocket",
+    "crates/codex-router-selection/src/burn_down.rs": "crates/codex-router-selection/src/burn_down",
+    "crates/codex-router-state/src/lib.rs": "crates/codex-router-state/src/state_tests",
+    "crates/codex-router-state/src/sqlite.rs": "crates/codex-router-state/src/sqlite",
+}
+NON_CODE_RUST = re.compile(
+    r'//[^\n]*|/\*.*?\*/|(?:br|r)(?P<hashes>\#{0,255})".*?"(?P=hashes)|'
+    r'(?:b)?"(?:\\.|[^"\\])*"|'
+    r"(?:b)?'(?:\\(?:[nrt0\\'\"]|x[0-9a-fA-F]{2}|u\{[0-9a-fA-F_]+\})|[^\\'\n])'",
+    re.DOTALL,
 )
 
 
@@ -257,23 +277,39 @@ def main() -> int:
     if args.row_id is None:
         parser.error("row_id is required unless --print-release-source-paths is set")
     check = CHECKS[args.row_id]
-    production_sources: dict[str, str] = {}
+    production_sources: dict[str, tuple[tuple[str, str], ...]] = {}
     release_sources = release_runtime_sources()
     failures: list[dict[str, str]] = []
 
     for relative_path, needle in check.forbidden + check.required:
         if relative_path not in production_sources:
-            production_sources[relative_path] = strip_cfg_test_items(REPO_ROOT / relative_path)
-        source = production_sources[relative_path]
-        if (relative_path, needle) in check.forbidden and needle in source:
+            production_sources[relative_path] = tuple(
+                (
+                    module_path,
+                    strip_cfg_test_items(REPO_ROOT / module_path),
+                )
+                for module_path in production_subtree_paths(relative_path)
+            )
+        sources = production_sources[relative_path]
+        forbidden_match = next(
+            (
+                module_path
+                for module_path, source in sources
+                if (relative_path, needle) in check.forbidden and needle in source
+            ),
+            None,
+        )
+        if forbidden_match is not None:
             failures.append(
                 {
                     "kind": "forbidden_present",
-                    "path": relative_path,
+                    "path": forbidden_match,
                     "needle": needle,
                 }
             )
-        if (relative_path, needle) in check.required and needle not in source:
+        if (relative_path, needle) in check.required and not any(
+            needle in source for _module_path, source in sources
+        ):
             failures.append(
                 {
                     "kind": "required_missing",
@@ -357,6 +393,79 @@ def strip_cfg_test_items(path: Path) -> str:
         output.append(line)
 
     return "\n".join(output)
+
+
+def declared_production_modules(relative_path: str, text: str) -> list[str]:
+    """Return external modules declared by this production source file."""
+    module_directory = Path(relative_path).parent / Path(relative_path).stem
+    modules: list[str] = []
+    attributes: list[str] = []
+    code = NON_CODE_RUST.sub(
+        lambda match: "".join("\n" if character == "\n" else " " for character in match.group()),
+        text,
+    )
+    brace_depth = 0
+    for line, code_line in zip(text.splitlines(), code.splitlines(), strict=True):
+        stripped = line.strip()
+        if brace_depth == 0:
+            if stripped.startswith("#["):
+                attributes.append(stripped)
+            else:
+                module = re.fullmatch(
+                    r"(?:(?:pub(?:\([^)]*\))?)\s+)?mod\s+([A-Za-z_][A-Za-z_0-9]*)\s*;",
+                    stripped,
+                )
+                if module is not None:
+                    test_only = any(
+                        re.fullmatch(r"#\[cfg\(\s*test\s*\)\]", attribute)
+                        for attribute in attributes
+                    )
+                    if not test_only:
+                        path_attribute = next(
+                            (
+                                match.group(1)
+                                for attribute in attributes
+                                if (
+                                    match := re.fullmatch(
+                                        r'#\[path\s*=\s*"([^"]+)"\]', attribute
+                                    )
+                                )
+                            ),
+                            None,
+                        )
+                        module_path = (
+                            Path(relative_path).parent / path_attribute
+                            if path_attribute is not None
+                            else module_directory / f"{module.group(1)}.rs"
+                        )
+                        modules.append(module_path.as_posix())
+                attributes.clear()
+        else:
+            attributes.clear()
+        brace_depth += code_line.count("{") - code_line.count("}")
+    return modules
+
+
+def production_subtree_paths(relative_path: str) -> list[str]:
+    """Resolve production child modules within one split root's module directory."""
+    module_subtree = SPLIT_MODULE_SUBTREES.get(relative_path)
+    if module_subtree is None:
+        return [relative_path]
+
+    module_subtree_path = Path(module_subtree)
+    pending = [relative_path]
+    visited: set[str] = set()
+    while pending:
+        current = pending.pop()
+        if current in visited:
+            continue
+        visited.add(current)
+        source = strip_cfg_test_items(REPO_ROOT / current)
+        for module_path in declared_production_modules(current, source):
+            if Path(module_path).is_relative_to(module_subtree_path):
+                pending.append(module_path)
+
+    return sorted(visited)
 
 
 def write_receipt(check: Check, failures: list[dict[str, str]]) -> Path:

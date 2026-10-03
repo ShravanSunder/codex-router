@@ -20,7 +20,6 @@ fn credential_failure_or_websocket_selection_close_reason(
     selection_close_reason_from_http_error(error)
 }
 
-/// WebSocket frame subset needed before upstream connection opens.
 impl<'a, S, C> AuthenticatedWebSocketRouter<'a, S, C>
 where
     S: AccountDecisionSelector,

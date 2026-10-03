@@ -135,6 +135,7 @@ mod forwarding_tests;
 #[path = "websocket/session_registry_tests.rs"]
 mod registry_tests;
 
+/// WebSocket frame subset needed before upstream connection opens.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum WebSocketFrame {
     /// Text frame bytes.
