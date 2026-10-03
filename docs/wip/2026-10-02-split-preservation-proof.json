@@ -461,5 +461,14 @@
     "State source guard root/production child collection with compiler-gated fixture-module exclusion",
     "Burn-down source guard widening to production children",
     "Proof script production module collection and full test filter path updates, including one preexisting stale leaf rename"
-  ]
+  ],
+  "post_merge_label_correction": {
+    "actual_isolation_label": "runtime-owns-maintenance-actor",
+    "not_row": "G-25",
+    "G-25_owner": "scripts/check-http-streaming-guard.py",
+    "outcomes_unchanged": true,
+    "reviewed_head": "c10af389afaf6593e52080767522b85116b9c2a6",
+    "merged_main": "9e947528a5122fbd09745bbd36fa0548a6daf14f",
+    "independent_review": "READY; F1/F2 closed; no new findings"
+  }
 }
