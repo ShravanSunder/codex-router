@@ -535,8 +535,12 @@ impl AcpSessionBinding {
         if barrier.is_some_and(|barrier| !barrier.resolved_by_resume(&response)) {
             return Err(SessionSetupError::CancellationUnresolved);
         }
-        let history = crate::project_history(catalog, session.session_id(), &response)
-            .map_err(|_| SessionSetupError::OutcomeUnknown)?;
+        let history = if crate::history_projection::history_replay_requested(&inputs.params) {
+            crate::project_history(catalog, session.session_id(), &response)
+                .map_err(|_| SessionSetupError::OutcomeUnknown)?
+        } else {
+            Vec::new()
+        };
         Ok((session, history))
     }
     pub fn into_connection(self) -> (NativeProtocolConnection, Arc<NativePayloadSchemas>) {

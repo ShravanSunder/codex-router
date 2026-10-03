@@ -70,9 +70,17 @@ pub(crate) async fn run_session_setup(inputs: SetupTaskInputs) -> SetupTaskOutpu
             {
                 Err(SessionSetupError::CancellationUnresolved)
             }
-            Ok(response) => crate::project_history(&mut catalog, session.session_id(), &response)
-                .map(|history| (history, json!({})))
-                .map_err(|_| SessionSetupError::OutcomeUnknown),
+            Ok(response) => {
+                let history = if crate::history_projection::history_replay_requested(&inputs.params)
+                {
+                    crate::project_history(&mut catalog, session.session_id(), &response)
+                } else {
+                    Ok(Vec::new())
+                };
+                history
+                    .map(|history| (history, json!({})))
+                    .map_err(|_| SessionSetupError::OutcomeUnknown)
+            }
             Err(error) => Err(error),
         };
         let detached = matches!(
@@ -179,5 +187,173 @@ pub(crate) async fn run_session_setup(inputs: SetupTaskInputs) -> SetupTaskOutpu
                 outcome: Err(error),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{SetupTaskInputs, run_session_setup};
+    use crate::{
+        AcpSchemaCatalog, AcpSessionBinding, ConversationOperationRecorder,
+        ConversationRecordFuture, RejectingApprovalBroker, SessionSetupInputs,
+    };
+    use codex_native_integration::{
+        NativePayloadSchemas, NativeProtocolConnection, NativeSchemaBundle,
+    };
+    use collaboration_protocol::{CodexGeneration, OperationId, SessionId};
+    use futures_util::{SinkExt, StreamExt};
+    use serde_json::{Value, json};
+    use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
+    use tokio_tungstenite::{
+        WebSocketStream,
+        tungstenite::{Message, protocol::Role},
+    };
+
+    struct AcceptingRecorder;
+
+    impl ConversationOperationRecorder for AcceptingRecorder {
+        fn admit_create<'a>(
+            &'a self,
+            _operation_id: &'a OperationId,
+            _generation: &'a CodexGeneration,
+        ) -> ConversationRecordFuture<'a> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn before_native_dispatch<'a>(
+            &'a self,
+            _operation_id: &'a OperationId,
+        ) -> ConversationRecordFuture<'a> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn record_created<'a>(
+            &'a self,
+            _operation_id: &'a OperationId,
+            _session_id: &'a SessionId,
+        ) -> ConversationRecordFuture<'a> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn record_failure<'a>(
+            &'a self,
+            _operation_id: &'a OperationId,
+            _known_not_submitted: bool,
+        ) -> ConversationRecordFuture<'a> {
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+    fn native_schemas() -> Arc<NativePayloadSchemas> {
+        let definitions: serde_json::Map<String, Value> = [
+            "ThreadFork",
+            "ThreadLoadedList",
+            "ThreadRead",
+            "ThreadResume",
+            "ThreadStart",
+            "TurnInterrupt",
+            "TurnStart",
+            "TurnSteer",
+        ]
+        .into_iter()
+        .flat_map(|name| {
+            [
+                (format!("{name}Params"), json!({"type":"object"})),
+                (format!("{name}Response"), json!({"type":"object"})),
+            ]
+        })
+        .collect();
+        let bundle = NativeSchemaBundle::from_documents(BTreeMap::from([(
+            "codex_app_server_protocol.schemas.json".to_owned(),
+            serde_json::to_vec(&json!({"definitions":{"v2":definitions}}))
+                .unwrap_or_else(|error| panic!("JSON: {error}")),
+        )]))
+        .unwrap_or_else(|error| panic!("bundle: {error}"));
+        Arc::new(
+            NativePayloadSchemas::from_bundle(&bundle)
+                .unwrap_or_else(|error| panic!("schemas: {error}")),
+        )
+    }
+
+    #[tokio::test]
+    async fn aggregate_existing_binding_resume_skips_history_replay_capacity() {
+        let schemas = native_schemas();
+        let generation: CodexGeneration = serde_json::from_value(
+            json!({"serviceEpoch":"00000000-0000-4000-8000-000000000001","generation":1}),
+        )
+        .unwrap_or_else(|error| panic!("generation: {error}"));
+        let (client, server) = tokio::net::UnixStream::pair().unwrap();
+        let connection = NativeProtocolConnection::from_websocket(
+            WebSocketStream::from_raw_socket(client, Role::Client, None).await,
+        );
+        let long_items = (0..1025)
+            .map(|index| {
+                json!({"type":"agentMessage","id":format!("message-{index}"),"text":"old reply"})
+            })
+            .collect::<Vec<_>>();
+        let fixture = tokio::spawn(async move {
+            let mut server = WebSocketStream::from_raw_socket(server, Role::Server, None).await;
+            for items in [Vec::new(), long_items] {
+                let frame = server.next().await.unwrap().unwrap();
+                let request: Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+                assert_eq!(request["method"], "thread/resume");
+                assert_eq!(request["params"]["threadId"], "thread-a");
+                server
+                    .send(Message::Text(
+                        json!({
+                            "id":request["id"],
+                            "result":{"cwd":"/work","thread":{"id":"thread-a","cwd":"/work","status":{"type":"idle"},"turns":[{"id":"turn-a","status":"completed","items":items}]}}
+                        })
+                        .to_string()
+                        .into(),
+                    ))
+                    .await
+                    .unwrap();
+            }
+        });
+
+        let mut catalog =
+            AcpSchemaCatalog::load().unwrap_or_else(|error| panic!("catalog: {error}"));
+        let params = json!({
+            "sessionId":"thread-a",
+            "cwd":"/work",
+            "mcpServers":[],
+            "_meta":{"codex-router/replayHistory":false}
+        });
+        let (binding, initial_history) = AcpSessionBinding::load_existing(
+            &mut catalog,
+            SessionSetupInputs {
+                operation_id: None,
+                recorder: Arc::new(AcceptingRecorder),
+                connection,
+                schemas: Arc::clone(&schemas),
+                generation: generation.clone(),
+                params: params.clone(),
+                approval_broker: Arc::new(RejectingApprovalBroker),
+            },
+        )
+        .await
+        .unwrap_or_else(|error| panic!("initial load: {error}"));
+        assert!(initial_history.is_empty());
+
+        let resumed = run_session_setup(SetupTaskInputs {
+            known_session: Some(binding),
+            adopt_unmaterialized: false,
+            backend_path: PathBuf::new(),
+            schemas,
+            generation,
+            params,
+            create_new: false,
+            operation_id: None,
+            recorder: Arc::new(AcceptingRecorder),
+            cancellation_barrier: None,
+            approval_broker: Arc::new(RejectingApprovalBroker),
+        })
+        .await;
+        let (_history, _) = resumed
+            .outcome
+            .unwrap_or_else(|error| panic!("existing-binding resume: {error}"));
+        assert!(resumed.binding.is_some());
+        fixture.await.unwrap();
     }
 }
