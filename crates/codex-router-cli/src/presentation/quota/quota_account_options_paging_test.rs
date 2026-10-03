@@ -256,7 +256,6 @@ fn NewInspectionPageResetProbe(
         let mut account_options = account_options;
         let mut reset_target = reset_target;
         let mut inventory_page_start = inventory_page_start;
-        let command_port = command_port.clone();
         let reset_intent_sender = props.reset_intent_sender.clone();
         move |event| {
             let TerminalEvent::Key(KeyEvent {
