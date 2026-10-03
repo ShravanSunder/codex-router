@@ -396,4 +396,12 @@ impl ResetWorkflowSnapshot {
             last_processed_inspection_tab_request: None,
         }
     }
+
+    pub(crate) fn with_last_processed_inspection_tab_request_for_test(
+        mut self,
+        request_id: InspectionTabRequestId,
+    ) -> Self {
+        self.last_processed_inspection_tab_request = Some(request_id);
+        self
+    }
 }

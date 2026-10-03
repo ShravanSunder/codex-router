@@ -78,16 +78,18 @@ fn run_saved_switch_band_websocket_case(with_healthy_peer: bool) {
         9,
         "graceful-floor-access",
     );
-    let mutation = must_ok(
-        test_async_runtime().block_on(AsyncWeeklyQuotaFloorMutationStore::open(&state_path)),
-    );
-    must_ok(
-        test_async_runtime().block_on(mutation.set_weekly_quota_floor_by_account_id(
-            &floor_account_id,
-            Some(must_ok(WeeklyQuotaFloorBasisPoints::new(500))),
-        )),
-    );
-    test_async_runtime().block_on(mutation.close());
+    test_async_runtime().block_on(async {
+        let mutation = must_ok(AsyncWeeklyQuotaFloorMutationStore::open(&state_path).await);
+        must_ok(
+            mutation
+                .set_weekly_quota_floor_by_account_id(
+                    &floor_account_id,
+                    Some(must_ok(WeeklyQuotaFloorBasisPoints::new(500))),
+                )
+                .await,
+        );
+        mutation.close().await;
+    });
 
     let upstream_listener = must_ok(TcpListener::bind("127.0.0.1:0"));
     let upstream_address = must_ok(upstream_listener.local_addr());

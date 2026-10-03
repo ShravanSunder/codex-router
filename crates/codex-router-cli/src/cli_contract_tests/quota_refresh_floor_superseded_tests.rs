@@ -122,7 +122,7 @@ async fn write_floor_http_response(stream: &mut tokio::net::TcpStream, body: &st
         .unwrap_or_else(|error| panic!("loopback quota provider should respond: {error}"));
 }
 
-fn expired_zero_weekly_usage_body() -> &'static str {
+fn superseded_zero_weekly_usage_body() -> &'static str {
     r#"{
         "rate_limit": {
             "primary_window": {
@@ -226,7 +226,7 @@ async fn superseded_responses_completion_notifies_from_latest_committed_weekly_w
             &resolver,
             &provider,
             QuotaRefreshObservationContext {
-                observed_unix_seconds: 1_100,
+                observed_unix_seconds: SUPERSEDED_REFRESH_CYCLE_NOW_UNIX_SECONDS,
                 schedule: QuotaRefreshSchedule::Background {
                     interval_seconds: 180,
                 },
@@ -304,18 +304,60 @@ async fn superseded_responses_completion_notifies_from_latest_committed_weekly_w
 
 #[tokio::test]
 async fn expired_committed_zero_weekly_window_does_not_signal_floor_after_superseded_read() {
-    let test_root = TestRoot::new("quota-refresh-expired-zero-floor-intent");
+    run_superseded_floor_commit_case(SupersededFloorCommitCase {
+        test_root_name: "quota-refresh-expired-zero-floor-intent",
+        account_name: "acct_expired_zero_floor_intent",
+        account_label: "expired-zero-floor-intent",
+        observed_unix_seconds: 1_000,
+        stale_after_unix_seconds: 1_001,
+        weekly_remaining_percent: 0,
+        expected_intent: None,
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn future_committed_below_floor_window_signals_after_superseded_cycle() {
+    let observed_unix_seconds = 1_200;
+    assert!(observed_unix_seconds > SUPERSEDED_REFRESH_CYCLE_NOW_UNIX_SECONDS);
+    run_superseded_floor_commit_case(SupersededFloorCommitCase {
+        test_root_name: "quota-refresh-future-committed-floor-intent",
+        account_name: "acct_future_committed_floor_intent",
+        account_label: "future-committed-floor-intent",
+        observed_unix_seconds,
+        stale_after_unix_seconds: 1_560,
+        weekly_remaining_percent: 4,
+        expected_intent: Some(WeeklyQuotaFloorIntent::HardStop),
+    })
+    .await;
+}
+
+#[derive(Clone, Copy)]
+struct SupersededFloorCommitCase {
+    test_root_name: &'static str,
+    account_name: &'static str,
+    account_label: &'static str,
+    observed_unix_seconds: u64,
+    stale_after_unix_seconds: u64,
+    weekly_remaining_percent: u32,
+    expected_intent: Option<WeeklyQuotaFloorIntent>,
+}
+
+const SUPERSEDED_REFRESH_CYCLE_NOW_UNIX_SECONDS: u64 = 1_100;
+
+async fn run_superseded_floor_commit_case(test_case: SupersededFloorCommitCase) {
+    let test_root = TestRoot::new(test_case.test_root_name);
     must_ok(fs::create_dir(test_root.path()));
     let state_path = test_root.path().join("state.sqlite");
     let state = must_ok(AsyncSqliteStateStore::open(&state_path).await);
-    let account_id = account_id("acct_expired_zero_floor_intent");
+    let account_id = account_id(test_case.account_name);
     must_ok(
         state
             .upsert_account(
                 &AccountRecord::new(
                     codex_router_core::provider::Provider::Openai,
                     account_id.clone(),
-                    "expired-zero-floor-intent",
+                    test_case.account_label,
                     AccountStatus::Enabled,
                 )
                 .with_active_credential_generation(1),
@@ -365,7 +407,7 @@ async fn expired_committed_zero_weekly_window_does_not_signal_floor_after_supers
                         server_release_usage_response.notified().await;
                     }
                     let body = if is_usage_request {
-                        expired_zero_weekly_usage_body()
+                        superseded_zero_weekly_usage_body()
                     } else {
                         "{}"
                     };
@@ -416,25 +458,34 @@ async fn expired_committed_zero_weekly_window_does_not_signal_floor_after_supers
         .begin_credit_refresh_attempt(&account_id, 1)
         .await
         .expect("newer same-generation refresh should allocate");
-    let expired_window = [persisted_responses_window(&account_id, 604_800, 0, 1_000)];
-    let expired_history = [successful_responses_history_observation(
+    let latest_window = [persisted_responses_window(
         &account_id,
         604_800,
-        0,
-        1_000,
+        test_case.weekly_remaining_percent,
+        test_case.observed_unix_seconds,
+    )];
+    let latest_history = [successful_responses_history_observation(
+        &account_id,
+        604_800,
+        test_case.weekly_remaining_percent,
+        test_case.observed_unix_seconds,
     )];
     state
         .record_responses_refresh_success(ResponsesRefreshSuccessCommit {
             attempt: &latest_attempt,
-            selector_windows: &expired_window,
-            observed_unix_seconds: 1_000,
-            stale_after_unix_seconds: 1_001,
+            selector_windows: &latest_window,
+            observed_unix_seconds: test_case.observed_unix_seconds,
+            stale_after_unix_seconds: test_case.stale_after_unix_seconds,
             provider_observation: &CreditProviderObservation::missing(),
-            history_observations: &expired_history,
-            snapshot: &successful_responses_snapshot(&account_id, 0, 1_000),
+            history_observations: &latest_history,
+            snapshot: &successful_responses_snapshot(
+                &account_id,
+                test_case.weekly_remaining_percent,
+                test_case.observed_unix_seconds,
+            ),
         })
         .await
-        .expect("newer expired zero observation should commit before the older read returns");
+        .expect("newer committed observation should precede the older read completion");
     assert_eq!(latest_attempt.sequence(), 2);
     release_usage_response.notify_one();
 
@@ -448,15 +499,21 @@ async fn expired_committed_zero_weekly_window_does_not_signal_floor_after_supers
 
     must_ok(refresh_result);
     assert_eq!(requests.len(), 4, "both route bands should use HTTP reads");
+    let expected_account_ids = test_case
+        .expected_intent
+        .map(|_| account_id.clone())
+        .into_iter()
+        .collect::<Vec<_>>();
     assert_eq!(
         *lock_test_mutex(&observer.account_ids, "weekly floor accounts"),
-        Vec::<AccountId>::new(),
-        "expired zero quota evidence must not notify the floor observer"
+        expected_account_ids,
+        "only a fresh latest committed window should notify the floor observer"
     );
+    let expected_intents = test_case.expected_intent.into_iter().collect::<Vec<_>>();
     assert_eq!(
         *lock_test_mutex(&observer.intents, "weekly floor intents"),
-        Vec::<WeeklyQuotaFloorIntent>::new(),
-        "stale committed zero quota must not create a HardStop floor intent"
+        expected_intents,
+        "the floor intent should reflect the latest committed weekly window"
     );
 
     let observation = state
@@ -472,8 +529,14 @@ async fn expired_committed_zero_weekly_window_does_not_signal_floor_after_supers
         observation.committed_attempt(),
         Some(latest_attempt.sequence())
     );
-    assert_eq!(observation.observed_unix_seconds(), Some(1_000));
-    assert_eq!(observation.stale_after_unix_seconds(), Some(1_001));
+    assert_eq!(
+        observation.observed_unix_seconds(),
+        Some(test_case.observed_unix_seconds)
+    );
+    assert_eq!(
+        observation.stale_after_unix_seconds(),
+        Some(test_case.stale_after_unix_seconds)
+    );
     assert_eq!(
         observation.provider_observation().availability(),
         &codex_router_core::credit_usage::CreditAvailability::Unknown,

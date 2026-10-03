@@ -245,22 +245,26 @@ fn saved_floor_refresh_reconnects_established_websocket_before_later_response_cr
         9,
         "floor-excluded-cli-access-canary",
     );
-    let mutation = must_ok(
-        test_async_runtime().block_on(AsyncWeeklyQuotaFloorMutationStore::open(&state_path)),
-    );
-    must_ok(
-        test_async_runtime().block_on(mutation.set_weekly_quota_floor_by_account_id(
-            &floor_account_id,
-            Some(must_ok(WeeklyQuotaFloorBasisPoints::new(1_000))),
-        )),
-    );
-    must_ok(
-        test_async_runtime().block_on(mutation.set_weekly_quota_floor_by_account_id(
-            &excluded_cli_account_id,
-            Some(must_ok(WeeklyQuotaFloorBasisPoints::new(1_000))),
-        )),
-    );
-    test_async_runtime().block_on(mutation.close());
+    test_async_runtime().block_on(async {
+        let mutation = must_ok(AsyncWeeklyQuotaFloorMutationStore::open(&state_path).await);
+        must_ok(
+            mutation
+                .set_weekly_quota_floor_by_account_id(
+                    &floor_account_id,
+                    Some(must_ok(WeeklyQuotaFloorBasisPoints::new(1_000))),
+                )
+                .await,
+        );
+        must_ok(
+            mutation
+                .set_weekly_quota_floor_by_account_id(
+                    &excluded_cli_account_id,
+                    Some(must_ok(WeeklyQuotaFloorBasisPoints::new(1_000))),
+                )
+                .await,
+        );
+        mutation.close().await;
+    });
     let edited_status = run_cli(
         [
             "codex-router",

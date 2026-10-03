@@ -40,9 +40,12 @@ pub(super) fn canonical_responses_compact_window_assessments(
 
 fn compact_own_windows_need_canonical_responses(windows: &[WindowAssessment]) -> bool {
     windows.is_empty()
-        || windows
-            .iter()
-            .any(|window| window.status == QuotaWindowStatus::Unknown)
+        || windows.iter().any(|window| {
+            matches!(
+                window.status,
+                QuotaWindowStatus::Unknown | QuotaWindowStatus::Stale
+            )
+        })
         || (missing_required_weekly_window(windows)
             && !windows.iter().any(|window| {
                 window.status == QuotaWindowStatus::Eligible && window.remaining_basis_points > 0

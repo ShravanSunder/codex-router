@@ -88,10 +88,100 @@ fn assembled_disallow_compact_keeps_its_own_band_selection() {
 }
 
 #[test]
+fn assembled_disallow_compact_without_own_windows_keeps_unknown_fallback() {
+    let fixture = CompactFixture::new("compact_disallow_absent_own_band");
+    fixture.add_credit_account(
+        "acct_compact_disallow_absent",
+        "compact-disallow-absent",
+        "disallow-unknown-compact-token",
+        false,
+        compact_available_credits("3.25"),
+    );
+    fixture.assert_route(
+        "disallow_absent_own_band_canonical_exhaustion",
+        Some("disallow-unknown-compact-token"),
+        Some("unknown_fallback_preferred"),
+    );
+}
+
+#[test]
+fn assembled_stale_own_compact_yields_to_canonical_included_peer() {
+    let fixture = CompactFixture::new("compact_stale_own_included_peer");
+    let exhausted_account = fixture.add_credit_account(
+        "acct_compact_stale_exhausted",
+        "compact-stale-exhausted",
+        "must-not-route-stale-credit-token",
+        true,
+        compact_available_credits("0"),
+    );
+    replace_selector_windows(
+        &fixture.database_path,
+        exhausted_account.account_id(),
+        "responses_compact",
+        fixture.now_unix_seconds,
+        SelectorQuotaWindowStatus::Stale,
+        72,
+    );
+    let included_account = fixture.add_credit_account(
+        "acct_compact_fresh_included",
+        "compact-fresh-included",
+        "fresh-included-compact-token",
+        true,
+        compact_available_credits("3.25"),
+    );
+    replace_selector_windows(
+        &fixture.database_path,
+        included_account.account_id(),
+        "responses",
+        fixture.now_unix_seconds,
+        SelectorQuotaWindowStatus::Eligible,
+        72,
+    );
+    fixture.assert_route(
+        "stale_own_compact_exhausted_invalid_credit_with_included_peer",
+        Some("fresh-included-compact-token"),
+        None,
+    );
+}
+
+#[test]
+fn assembled_compact_holds_credit_behind_unknown_canonical_peer() {
+    let fixture = CompactFixture::new("compact_credit_unknown_peer");
+    fixture.add_credit_account(
+        "acct_compact_credit_held",
+        "compact-credit-held",
+        "must-not-spend-credit-token",
+        true,
+        compact_available_credits("3.25"),
+    );
+    let unknown_account = fixture.add_credit_account(
+        "acct_compact_unknown_peer",
+        "compact-unknown-peer",
+        "unknown-peer-compact-token",
+        true,
+        compact_available_credits("3.25"),
+    );
+    replace_selector_windows(
+        &fixture.database_path,
+        unknown_account.account_id(),
+        "responses",
+        fixture.now_unix_seconds,
+        SelectorQuotaWindowStatus::Unknown,
+        72,
+    );
+    fixture.assert_route(
+        "unknown_canonical_peer_before_credit",
+        Some("unknown-peer-compact-token"),
+        Some("unknown_fallback_preferred"),
+    );
+}
+
+#[test]
 fn assembled_compact_blocks_credit_without_entitlement_floor_or_clean_bands() {
     #[derive(Clone, Copy)]
     enum CompactCreditGuard {
         None,
+        StaleOwnWindows,
         WeeklyFloor,
         SuspectRoute(&'static str),
         PendingRefresh,
@@ -144,6 +234,21 @@ fn assembled_compact_blocks_credit_without_entitlement_floor_or_clean_bands() {
             compact_available_credits("3.25"),
             CompactCreditGuard::SpendControlReached,
         ),
+        (
+            "stale_own_windows_zero_balance",
+            compact_available_credits("0"),
+            CompactCreditGuard::StaleOwnWindows,
+        ),
+        (
+            "stale_own_windows_depleted",
+            codex_router_core::credit_usage::CreditAvailability::Depleted,
+            CompactCreditGuard::StaleOwnWindows,
+        ),
+        (
+            "stale_own_windows_unknown_entitlement",
+            codex_router_core::credit_usage::CreditAvailability::Unknown,
+            CompactCreditGuard::StaleOwnWindows,
+        ),
     ];
 
     for (case_name, availability, guard) in guard_cases {
@@ -158,6 +263,16 @@ fn assembled_compact_blocks_credit_without_entitlement_floor_or_clean_bands() {
 
         match guard {
             CompactCreditGuard::None => {}
+            CompactCreditGuard::StaleOwnWindows => {
+                replace_selector_windows(
+                    &fixture.database_path,
+                    account.account_id(),
+                    "responses_compact",
+                    fixture.now_unix_seconds,
+                    SelectorQuotaWindowStatus::Stale,
+                    72,
+                );
+            }
             CompactCreditGuard::WeeklyFloor => {
                 set_weekly_floor_for_test(&fixture.database_path, account.label(), 500);
             }

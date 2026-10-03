@@ -933,10 +933,11 @@ async fn notify_weekly_floor_from_latest_committed_responses(
     let Some(stale_after_unix_seconds) = observation.stale_after_unix_seconds() else {
         return Ok(());
     };
+    // A newer manual commit can land while this older refresh cycle waits on provider IO.
+    let evaluation_now_unix_seconds = now_unix_seconds.max(observed_unix_seconds);
     if observation.credential_generation() != expected_credential_generation
         || observation.committed_attempt() != Some(observation.latest_started_attempt())
-        || observed_unix_seconds > now_unix_seconds
-        || now_unix_seconds >= stale_after_unix_seconds
+        || evaluation_now_unix_seconds >= stale_after_unix_seconds
     {
         return Ok(());
     }
@@ -946,7 +947,7 @@ async fn notify_weekly_floor_from_latest_committed_responses(
         .iter()
         .filter(|window| {
             window.observed_unix_seconds() == observed_unix_seconds
-                && window.observed_unix_seconds() <= now_unix_seconds
+                && window.observed_unix_seconds() <= evaluation_now_unix_seconds
                 && matches!(
                     window.status(),
                     SelectorQuotaWindowStatus::Eligible | SelectorQuotaWindowStatus::Ineligible

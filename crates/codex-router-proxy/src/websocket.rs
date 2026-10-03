@@ -6891,7 +6891,38 @@ fn is_response_incomplete_text(text: &str) -> bool {
 }
 
 fn is_response_terminal_error_text(text: &str) -> bool {
-    bounded_top_level_json_string_field_equals(text.as_bytes(), b"type", b"error")
+    if text.len() > WEBSOCKET_METADATA_SCAN_LIMIT_BYTES {
+        return false;
+    }
+    let Ok(error_envelope) = serde_json::from_str::<serde_json::Value>(text) else {
+        return false;
+    };
+    if error_envelope
+        .get("type")
+        .and_then(serde_json::Value::as_str)
+        != Some("error")
+    {
+        return false;
+    }
+
+    let has_non_success_status = error_envelope
+        .get("status")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|status| u16::try_from(status).ok())
+        .and_then(|status| http::StatusCode::from_u16(status).ok())
+        .is_some_and(|status| !status.is_success());
+    let terminal_error_code = error_envelope
+        .get("error")
+        .and_then(|error| error.get("code"))
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|code| {
+            matches!(
+                code,
+                "websocket_connection_limit_reached" | "previous_response_not_found"
+            )
+        });
+
+    has_non_success_status || terminal_error_code
 }
 
 fn has_forbidden_top_level_websocket_auth_carrier(body: &[u8]) -> bool {

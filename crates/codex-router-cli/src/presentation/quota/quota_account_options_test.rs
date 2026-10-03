@@ -412,6 +412,7 @@ fn credit_options_truncate_dynamic_status_and_help_inside_narrow_pane() {
 
     assert!(frame.contains("Weekly floor"), "{frame}");
     assert!(frame.contains("blocks credit routing"), "{frame}");
+    assert!(frame.contains("Included quota"), "{frame}");
     assert!(frame.contains("Provider spend-control"), "{frame}");
     assert!(frame.contains("credit preference save failed"), "{frame}");
     assert!(frame.contains("Credit refresh failed"), "{frame}");
@@ -419,7 +420,7 @@ fn credit_options_truncate_dynamic_status_and_help_inside_narrow_pane() {
         frame
             .lines()
             .filter(|line| {
-                line.contains("Credits may")
+                line.contains("Included quota")
                     || line.contains("Allow is limited")
                     || line.contains("Credit refresh failed")
             })
@@ -797,6 +798,7 @@ fn acknowledged_event_stream(
                         ),
                     }
                 }
+                while acknowledgement_receiver.try_recv().is_ok() {}
             }
             let (event, next_expected_frame) = pending_events.next()?;
             Some((
@@ -884,3 +886,7 @@ fn control_key(character: char) -> KeyEvent {
     event.modifiers = KeyModifiers::CONTROL;
     event
 }
+
+#[cfg(test)]
+#[path = "quota_account_options_paging_test.rs"]
+mod quota_account_options_paging_test;

@@ -82,6 +82,7 @@ impl AccountTurnAdmission {
             if self.hard_reconnect.is_cancelled() || self.early_reconnect.is_cancelled() {
                 return true;
             }
+            let active_turn_when_source_assessment_started = *active_turn;
             drop(active_turn);
             if self.source_account_requires_reconnect().await {
                 let active_turn = tokio::select! {
@@ -100,6 +101,10 @@ impl AccountTurnAdmission {
                             if changed.is_err() { return true; }
                         }
                     }
+                    continue;
+                }
+                if active_turn_when_source_assessment_started {
+                    drop(active_turn);
                     continue;
                 }
                 self.early_reconnect.cancel();

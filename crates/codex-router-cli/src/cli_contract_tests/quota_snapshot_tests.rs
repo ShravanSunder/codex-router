@@ -94,16 +94,18 @@ fn responses_observation_transaction_failure_sends_no_floor_signal_or_windows() 
                 ),
             ),
         );
-        let mutation = must_ok(
-            test_async_runtime().block_on(AsyncWeeklyQuotaFloorMutationStore::open(&state_path)),
-        );
-        must_ok(
-            test_async_runtime().block_on(mutation.set_weekly_quota_floor_by_account_id(
-                &account_id,
-                Some(must_ok(WeeklyQuotaFloorBasisPoints::new(500))),
-            )),
-        );
-        test_async_runtime().block_on(mutation.close());
+        test_async_runtime().block_on(async {
+            let mutation = must_ok(AsyncWeeklyQuotaFloorMutationStore::open(&state_path).await);
+            must_ok(
+                mutation
+                    .set_weekly_quota_floor_by_account_id(
+                        &account_id,
+                        Some(must_ok(WeeklyQuotaFloorBasisPoints::new(500))),
+                    )
+                    .await,
+            );
+            mutation.close().await;
+        });
         let resolver =
             RouterCredentialResolver::new(&state, &secrets, NoopCredentialRefreshClient, 1_000);
         let provider = FaultingFloorRefreshProvider {
@@ -404,22 +406,30 @@ fn saved_quota_observations_switch_clear_and_floor_disable_intents() {
     must_ok(secrets.write_secret(&key, &must_ok(bundle.to_secret_string())));
     let resolver =
         RouterCredentialResolver::new(&state, &secrets, NoopCredentialRefreshClient, 1_000);
-    let mutation = must_ok(
-        test_async_runtime().block_on(AsyncWeeklyQuotaFloorMutationStore::open(&state_path)),
-    );
-    must_ok(
-        test_async_runtime().block_on(mutation.set_weekly_quota_floor_by_account_id(
-            &account_id,
-            Some(must_ok(WeeklyQuotaFloorBasisPoints::new(500))),
-        )),
-    );
+    test_async_runtime().block_on(async {
+        let mutation = must_ok(AsyncWeeklyQuotaFloorMutationStore::open(&state_path).await);
+        must_ok(
+            mutation
+                .set_weekly_quota_floor_by_account_id(
+                    &account_id,
+                    Some(must_ok(WeeklyQuotaFloorBasisPoints::new(500))),
+                )
+                .await,
+        );
+        mutation.close().await;
+    });
     let observer = RecordingWeeklyFloorObserver::default();
     for (index, remaining) in [8, 9, 8, 8].into_iter().enumerate() {
         if index == 3 {
-            must_ok(
-                test_async_runtime()
-                    .block_on(mutation.set_weekly_quota_floor_by_account_id(&account_id, None)),
-            );
+            test_async_runtime().block_on(async {
+                let mutation = must_ok(AsyncWeeklyQuotaFloorMutationStore::open(&state_path).await);
+                must_ok(
+                    mutation
+                        .set_weekly_quota_floor_by_account_id(&account_id, None)
+                        .await,
+                );
+                mutation.close().await;
+            });
         }
         let provider = StaticQuotaRefreshProvider::new(vec![
             QuotaRefreshProviderWindow {
@@ -472,7 +482,6 @@ fn saved_quota_observations_switch_clear_and_floor_disable_intents() {
             WeeklyQuotaFloorIntent::Clear,
         ]
     );
-    test_async_runtime().block_on(mutation.close());
 }
 
 #[test]

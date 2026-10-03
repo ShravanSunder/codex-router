@@ -7,6 +7,7 @@ use super::credit_turn_test_support::next_client_text;
 use super::credit_turn_test_support::wait_for_source_assessment;
 use crate::account_selection::AccountSourceAdmission;
 use crate::account_selection::LiveAccountAdmissionAssessor;
+use crate::websocket::is_response_terminal_error_text;
 use codex_router_core::credit_usage::CreditUsagePolicy;
 use codex_router_core::routes::RouteBand;
 use futures_util::future::pending;
@@ -48,36 +49,185 @@ async fn credit_source_assessment_does_not_wait_for_selection_reservation_lock()
 }
 
 #[tokio::test]
+async fn response_terminal_during_blocked_source_read_rechecks_denial() {
+    let source_account_id =
+        AccountId::new("acct_terminal_race_source").expect("source account id should parse");
+    let (observed_source_results, mut source_results) = mpsc::unbounded_channel();
+    let assessor_control = Arc::new(TerminalDuringSourceReadAssessor {
+        first_source_assessment_started: Notify::new(),
+        first_source_assessment_gate: tokio::sync::Semaphore::new(0),
+        source_assessment_count: std::sync::atomic::AtomicUsize::new(0),
+        observed_source_results,
+    });
+    let assessor: Arc<dyn LiveAccountAdmissionAssessor> = assessor_control.clone();
+    let (_intent_sender, intent) = watch::channel(FloorSwitchIntent::default());
+    let early_reconnect = CancellationToken::new();
+    let admission = AccountTurnAdmission::new(
+        intent,
+        early_reconnect.clone(),
+        CancellationToken::new(),
+        Some(source_account_id),
+        Some(1),
+        Some(assessor),
+        true,
+    )
+    .with_credit_backed_admission_seen(true);
+    let admission_task = tokio::spawn({
+        let admission = admission.clone();
+        async move { admission.before_next_create().await }
+    });
+
+    tokio::time::timeout(
+        Duration::from_secs(1),
+        assessor_control.first_source_assessment_started.notified(),
+    )
+    .await
+    .expect("first source assessment should block before terminal delivery");
+    assert_eq!(
+        assessor_control
+            .source_assessment_count
+            .load(std::sync::atomic::Ordering::SeqCst),
+        1
+    );
+
+    let mut terminal_was_delivered = false;
+    admission
+        .deliver_terminal_and_release_turn(async {
+            terminal_was_delivered = true;
+            Ok::<(), std::convert::Infallible>(())
+        })
+        .await
+        .expect("current terminal delivery should release the active turn");
+    assert!(terminal_was_delivered);
+
+    assessor_control.first_source_assessment_gate.add_permits(1);
+    assert_eq!(
+        wait_for_source_assessment(&mut source_results).await,
+        AccountSourceAdmission::ReconnectRequired,
+        "the pre-terminal source read should return its denial"
+    );
+    assert_eq!(
+        wait_for_source_assessment(&mut source_results).await,
+        AccountSourceAdmission::Permitted,
+        "a denial from before the terminal must be reassessed after the turn becomes idle"
+    );
+    let should_reconnect = tokio::time::timeout(Duration::from_secs(2), admission_task)
+        .await
+        .expect("the rechecked source admission should complete")
+        .expect("source admission task should complete");
+
+    assert!(
+        !should_reconnect,
+        "the later permitted assessment admits the create"
+    );
+    assert!(
+        !early_reconnect.is_cancelled(),
+        "the pre-terminal denial must not trigger an unnecessary reconnect"
+    );
+    assert_eq!(
+        assessor_control
+            .source_assessment_count
+            .load(std::sync::atomic::Ordering::SeqCst),
+        2,
+        "the source should be checked again exactly once after the terminal"
+    );
+}
+
+#[test]
+fn response_terminal_error_matching_tracks_codex_status_and_codes() {
+    let cases = [
+        (
+            true,
+            r#"{"type":"error","status":400,"error":{"code":"invalid_request_error"}}"#,
+        ),
+        (
+            true,
+            r#"{"type":"error","error":{"code":"websocket_connection_limit_reached"}}"#,
+        ),
+        (
+            true,
+            r#"{"type":"error","error":{"code":"previous_response_not_found"}}"#,
+        ),
+        (
+            false,
+            r#"{"type":"error","status":200,"error":{"code":"invalid_request_error"}}"#,
+        ),
+        (
+            false,
+            r#"{"type":"error","status":"400","error":{"code":"invalid_request_error"}}"#,
+        ),
+        (
+            false,
+            r#"{"type":"error","status":0,"error":{"code":"invalid_request_error"}}"#,
+        ),
+        (
+            false,
+            r#"{"type":"error","status":65536,"error":{"code":"invalid_request_error"}}"#,
+        ),
+        (
+            false,
+            r#"{"type":"error","error":{"code":"invalid_request_error"}}"#,
+        ),
+    ];
+
+    for (expected_terminal, frame) in cases {
+        assert_eq!(
+            is_response_terminal_error_text(frame),
+            expected_terminal,
+            "terminal classification for {frame}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn policy_revocation_waits_for_current_terminal_and_never_forwards_the_next_create() {
     assert_policy_revocation_waits_for_terminal_delivery(
         r#"{"type":"response.completed","turn":2}"#,
+        false,
     )
     .await;
 }
 
 #[tokio::test]
 async fn policy_revocation_rechecks_after_failed_terminal_delivery() {
-    assert_policy_revocation_waits_for_terminal_delivery(r#"{"type":"response.failed","turn":2}"#)
-        .await;
+    assert_policy_revocation_waits_for_terminal_delivery(
+        r#"{"type":"response.failed","turn":2}"#,
+        false,
+    )
+    .await;
 }
 
 #[tokio::test]
 async fn policy_revocation_rechecks_after_incomplete_terminal_delivery() {
     assert_policy_revocation_waits_for_terminal_delivery(
         r#"{"type":"response.incomplete","response":{"id":"resp_2","status":"incomplete"}}"#,
+        false,
     )
     .await;
 }
 
 #[tokio::test]
-async fn policy_revocation_rechecks_after_non_quota_error_delivery() {
+async fn policy_revocation_rechecks_after_status_bearing_response_terminal_error_delivery() {
     assert_policy_revocation_waits_for_terminal_delivery(
-        r#"{"type":"error","error":{"type":"invalid_request_error","code":"invalid_request_error","message":"terminal request error"}}"#,
+        r#"{"type":"error","status":400,"error":{"type":"invalid_request_error","code":"invalid_request_error","message":"terminal request error"}}"#,
+        false,
     )
     .await;
 }
 
-async fn assert_policy_revocation_waits_for_terminal_delivery(terminal_event: &'static str) {
+#[tokio::test]
+async fn policy_revocation_keeps_statusless_error_open_until_response_terminal() {
+    assert_policy_revocation_waits_for_terminal_delivery(
+        r#"{"type":"response.completed","turn":2}"#,
+        true,
+    )
+    .await;
+}
+
+async fn assert_policy_revocation_waits_for_terminal_delivery(
+    terminal_event: &'static str,
+    statusless_error_before_terminal: bool,
+) {
     let directory = CreditTurnTestDirectory::new();
     let fixture = CreditTurnFixture::new(&directory).await;
     assert_eq!(
@@ -220,6 +370,19 @@ async fn assert_policy_revocation_waits_for_terminal_delivery(terminal_event: &'
             "persisted Disallow should fail closed for the active source account"
         );
 
+        if statusless_error_before_terminal {
+            let statusless_error = r#"{"type":"error","error":{"type":"invalid_request_error","code":"bad_request","message":"still streaming"}}"#;
+            upstream_websocket
+                .send(Message::text(statusless_error))
+                .await
+                .expect("statusless error should send before the response terminal");
+            assert_eq!(
+                next_client_text(&mut client_websocket).await,
+                statusless_error,
+                "the statusless error must be forwarded without ending the active turn"
+            );
+        }
+
         upstream_websocket
             .send(Message::text(
                 r#"{"type":"response.output_text.delta","delta":"turn two final output"}"#,
@@ -282,6 +445,51 @@ async fn assert_policy_revocation_waits_for_terminal_delivery(terminal_event: &'
 
 struct BlockingSourceReadAssessor {
     entered: Arc<Notify>,
+}
+
+struct TerminalDuringSourceReadAssessor {
+    first_source_assessment_started: Notify,
+    first_source_assessment_gate: tokio::sync::Semaphore,
+    source_assessment_count: std::sync::atomic::AtomicUsize,
+    observed_source_results: mpsc::UnboundedSender<AccountSourceAdmission>,
+}
+
+impl LiveAccountAdmissionAssessor for TerminalDuringSourceReadAssessor {
+    fn assess_peer<'a>(
+        &'a self,
+        _source_account_id: &'a AccountId,
+        _route_band: RouteBand,
+    ) -> BoxFuture<'a, crate::account_selection::FloorSwitchPeerAssessment> {
+        Box::pin(async { crate::account_selection::FloorSwitchPeerAssessment::NoPeer })
+    }
+
+    fn assess_source_account<'a>(
+        &'a self,
+        _source_account_id: &'a AccountId,
+        _pinned_credential_generation: u64,
+        _route_band: RouteBand,
+        _credit_backed_at_selection: bool,
+    ) -> BoxFuture<'a, AccountSourceAdmission> {
+        let assessment_index = self
+            .source_assessment_count
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let observed_source_results = self.observed_source_results.clone();
+        Box::pin(async move {
+            let assessment = if assessment_index == 0 {
+                self.first_source_assessment_started.notify_one();
+                self.first_source_assessment_gate
+                    .acquire()
+                    .await
+                    .expect("first source assessment gate should remain open")
+                    .forget();
+                AccountSourceAdmission::ReconnectRequired
+            } else {
+                AccountSourceAdmission::Permitted
+            };
+            let _send_result = observed_source_results.send(assessment);
+            assessment
+        })
+    }
 }
 
 impl LiveAccountAdmissionAssessor for BlockingSourceReadAssessor {

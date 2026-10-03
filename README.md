@@ -66,8 +66,9 @@ and `quota status` for SQLite-only status output.
 
 In an interactive terminal, `quota status` lets you browse accounts. Press
 `Ctrl-R` to open options for the focused account, then use Tab or the arrow keys
-to switch between Resets and Credits. On Credits, press `r` to refresh the
-provider-reported credit observation. Press Enter to edit the saved usage policy
+to switch between Resets and Credits. On Credits, press `r` on an eligible
+account to refresh provider quota and credit observations for the whole pool.
+Press Enter to edit the saved usage policy
 (`Disallow` by default), use the arrow keys to choose, Enter to save, or Esc to
 cancel. Credits are the last resort: every eligible account's included quota
 comes first. `Allow` permits credit use for Responses, compact, and image
