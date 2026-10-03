@@ -1,4 +1,5 @@
 //! SQLite sync migrations responsibilities.
+#[cfg(test)]
 use super::policy_mutation::redacted_weekly_floor_sqlite_error;
 use super::*;
 
