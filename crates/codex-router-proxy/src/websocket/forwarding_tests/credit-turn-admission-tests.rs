@@ -7,7 +7,7 @@ use super::credit_turn_test_support::next_client_text;
 use super::credit_turn_test_support::wait_for_source_assessment;
 use crate::account_selection::AccountSourceAdmission;
 use crate::account_selection::LiveAccountAdmissionAssessor;
-use crate::websocket::is_response_terminal_error_text;
+use crate::websocket::response_metadata::is_response_terminal_error_text;
 use codex_router_core::credit_usage::CreditUsagePolicy;
 use codex_router_core::routes::RouteBand;
 use futures_util::future::pending;
