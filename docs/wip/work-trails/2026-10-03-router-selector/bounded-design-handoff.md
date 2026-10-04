@@ -1,6 +1,6 @@
 # Bounded selector design handoff
 
-Current source head: `7a8cbd8943e6fb2dac23bcde7069203925003918`, branch `router-selector-design`. All product sources remain untouched; the existing design artifacts are prepared for an owner-authorized local-only checkpoint. Use `git log -- docs/specs/2026-10-03-router-selector docs/wip/work-trails/2026-10-03-router-selector` for actual checkpoint commits; preparation is not proof of commit success. This is the requested **partial, reviewable design with explicit gaps**, not executable readiness, independent acceptance, a completed implementation plan or a proved tool loop. The owner-directed bound stops research and further Advisor/reviewer calls here.
+Current source head: `7a8cbd8943e6fb2dac23bcde7069203925003918`, branch `router-selector-design`. All product sources remain untouched; the existing design artifacts are captured in signed local-only checkpoint `a0a94f2c24c77e0979e1268ed8108ceda7f01fc9`. A subsequent trail checkpoint records validation and delivery state. Use `git log -- docs/specs/2026-10-03-router-selector docs/wip/work-trails/2026-10-03-router-selector` for actual checkpoint commits; commit history records the actual local checkpoint boundary; no push or merge occurred. This is the requested **partial, reviewable design with explicit gaps**, not executable readiness, independent acceptance, a completed implementation plan or a proved tool loop. The owner-directed bound stops research and further Advisor/reviewer calls here.
 
 ## Current artifacts
 

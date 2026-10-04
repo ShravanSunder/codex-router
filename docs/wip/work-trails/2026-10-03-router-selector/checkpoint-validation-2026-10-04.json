@@ -26,7 +26,9 @@
     "private_paths_and_coordination_ids": "pass",
     "png_structure_and_metadata": "pass",
     "validator_exit_code": 0,
-    "signed_commit": "not established by document validation; consult Git"
+    "signed_commit": "pass; SSH signature verified with Git against existing configured public signing key, using ignored temporary allowed-signers file; exit 0",
+    "staged_and_committed_diff_whitespace": "pass; git diff --cached --check and git diff HEAD^ HEAD --check, exit 0",
+    "committed_scope_and_clean_state": "pass; exactly eight owned artifacts, original design hashes preserved, Git status clean after design commit; exit 0"
   },
   "validation_correction": "Initial private-path scan matched ordinary prose status/home/actual; corrected absolute-path boundary and reran successfully.",
   "proof_limits": [
@@ -34,5 +36,7 @@
     "PNG pixels inspected as illustrations, not runtime screenshots.",
     "Rendered Mermaid and document placement remain unverified.",
     "Feature/design holds remain; no push or merge authorized."
-  ]
+  ],
+  "design_checkpoint_commit": "a0a94f2c24c77e0979e1268ed8108ceda7f01fc9",
+  "signature_verification_limit": "Default git verify-commit could not verify because no allowedSignersFile is configured. The temporary per-command verification list supplied the existing configured public key; no persistent configuration or signer identity changed."
 }
