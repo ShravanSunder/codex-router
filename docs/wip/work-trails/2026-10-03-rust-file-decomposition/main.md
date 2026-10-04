@@ -209,3 +209,11 @@ Applied the bounded integration-test split recorded in `docs/wip/2026-10-04-code
 Proof: `cargo test -p collaboration-service --test codex_app_server_delivery_route` exit0 with9 passed/0 failed; package check exit0; all-target Clippy `-D warnings` exit0; fmt check exit0. Strict checker exits1 with12 remaining oversized files and no longer lists `codex_app_server_delivery_route.rs`.
 
 This slice changes no Codex app-server route/generation/evidence/reconciliation semantics, WebSocket fixtures, persistence, auth/security, CI, or production behavior. It is the next local checkpoint; staging and commit follow after this trace/map write. No push, merge, release, production restart, or final CI gate yet.
+
+## External provider supervisor integration-test cut applied and verified — 2026-10-04
+
+Applied the bounded split recorded in `docs/wip/2026-10-04-external-provider-supervisor-test-cut-map.md`: moved the settings projection test into `settings_projection_tests.rs` and the eleven lifecycle/operation tests into `lifecycle_tests.rs`; the parent retains all shared fixtures, macros and helpers. Parent is568 lines and children234/935 lines. Retained source and lifecycle child comparisons are exact; the settings child only drops the pre-cut terminal blank line under formatting.
+
+Proof: `cargo test -p codex-router-host --test external_provider_supervisor` exit0 with12 passed/0 failed; package check exit0; all-target Clippy `-D warnings` exit0; fmt check exit0. Strict checker exits1 with11 remaining oversized files and no longer lists `external_provider_supervisor.rs`.
+
+This slice changes no external-provider operation/effect/reconciliation semantics, subprocess fixtures, persistence, auth behavior, CI, or production behavior. It is the next local checkpoint; staging and commit follow after this trace/map write. No push, merge, release, production restart, or final CI gate yet.
