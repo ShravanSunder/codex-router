@@ -18,13 +18,13 @@ Choose the user-visible entry and return contract for browsing one configured Ro
 
 ### A. F2 opens a source chooser inside the existing picker (recommended)
 
-F2 opens a bounded machine chooser from the hosted session view. Enter selects one configured/current source, then the picker replaces its rows with that source's read-only inventory and shows an explicit source header. Esc from the source view returns to the prior query and focus without changing the default NEW target. The source context, endpoint, cursor, and request generation travel together; a failed or canceled switch retains the prior view. Alt+Enter then captures a full source identity from that view.
+F2 opens a bounded machine chooser from the hosted session view. Enter selects one configured/current source, then the picker replaces its rows with that source's read-only inventory and shows an explicit source header. The source-view Esc ladder is explicit: close help first, clear a nonempty search second, and when search is empty return to the prior query/focus without changing the default NEW target. This changes empty-search Esc from whole-picker exit to source-view return while the source view is active; that cost is visible in this choice. The source context, endpoint, cursor, and request generation travel together; a failed or canceled switch retains the prior view. Alt+Enter then captures a full source identity from that view.
 
-This preserves the current picker as the navigation owner, keeps existing Enter/resume and Alt+Enter/fork meanings, and matches the already proposed U7/R10 shape. It costs one new source-context state and a source-parameterized loader contract, both already identified as required design work.
+This preserves the current picker as the navigation owner, keeps existing Enter/resume and Alt+Enter/fork meanings, and matches the already proposed U7/R10 shape. It costs one new source-context state, a source-parameterized loader contract, and the source-view Esc precedence above, all already identified as required design work.
 
 ### B. Add a separate source-selection command or pre-picker mode
 
-The command or an earlier global mode selects a Router before the existing picker opens. This can avoid adding F2 handling to the picker, but it introduces a second navigation surface and risks changing the default/list/resume target. It conflicts with the requirement that source browsing be explicit and not a global target write.
+The command or an earlier global mode selects a Router before the existing picker opens. This can avoid adding F2 handling to the picker, but it introduces a second navigation surface and risks changing the default/list/resume target. It conflicts with the requirement that source browsing be explicit and not a global target write. The fallback key or access path when F2 is unavailable remains deferred; it is not silently invented here.
 
 ### C. Do not browse configured sources
 
@@ -36,4 +36,4 @@ Adopt **A**. It is the smallest structure that satisfies U7 while preserving exi
 
 **Owner question:** approve F2 as the source-view entry, with an explicit source header and Esc return that preserves the prior query/focus and never changes the default NEW target?
 
-After this choice, the remaining provenance/default qualification and fork cwd/policy decisions stay separate and must be resolved before planning admission. No implementation or PR readiness is claimed by this brief.
+After this choice, the remaining provenance/default qualification and fork cwd/policy decisions stay separate and must be resolved before planning admission. The fallback access path when F2 is unavailable also remains a named follow-up. No implementation or PR readiness is claimed by this brief.

@@ -77,7 +77,7 @@ The current source path is `agent-sessions → run_sessions_command → sessions
 | Main Alt+Enter → fork popup → same-source fork | **Changed by U7:** same shortcut and underlying source-native operation, with explicit source/destination confirmation before effect; no cross-machine route. |
 | CLI `--new` without choice → default launcher | **Intentionally unchanged:** no added remote probe, prompt or config dependency. |
 | Picker Enter/Ctrl+N/click Start new → machine choice | **Added:** a secondary, content-sized choice when configured names exist; main picker state is retained for Esc/back and no existing session-row identity is rewritten. With no configured names, keep direct default NEW. |
-| Named NEW → connection verifier | **Added:** registry profile, explicit destination cwd and provider launch intent; read-only discovery precedes any creation. |
+| Named NEW → connection verifier | **Added:** registry profile, configured destination cwd and provider launch intent; read-only discovery precedes any creation. |
 | Eligible NEW → native launcher | **Changed for named remote only:** URL and credential-reference projection replace Unix-path projection for this creation action. Default remains the same existing route. |
 | Native launcher → remote session side effect | **Existing upstream protocol over a new configured locator:** first remote `thread/start` creates the session on that app-server. The selector does not separately call create and then create again through the TUI. |
 | Launcher → error/exit | **Added classification:** pre-handoff rejection versus post-handoff uncertain effect; no automatic NEW retry or fallback. |
@@ -96,7 +96,7 @@ sequenceDiagram
   participant MCP as Existing remote MCP exposure
   participant Native as Native Codex TUI
   participant Host as Selected hosted app-server
-  Person->>New: NEW(name, destination cwd)
+  Person->>New: NEW(name, configured default cwd)
   New->>Verify: validate profile and credential references
   Verify->>Verify: supplied exposure and policy prerequisites qualified
   Verify->>MCP: endpoints_list (client call read only)
@@ -175,7 +175,7 @@ The registry is read when the NEW step needs configured machine choices and kept
 stateDiagram-v2
   [*] --> Choosing
   Choosing --> Canceled: user cancels - no effect
-  Choosing --> Verifying: named NEW and destination cwd
+  Choosing --> Verifying: named NEW with configured default cwd
   Choosing --> PickerExited: Ctrl+C or Ctrl+D
   Verifying --> Canceled: Esc invalidates attempt
   Verifying --> PickerExited: Ctrl+C or Ctrl+D invalidates attempt
