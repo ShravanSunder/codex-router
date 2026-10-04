@@ -24,6 +24,7 @@ The proposed renderer compares the selected visible source length with the **ful
 flowchart TB
   producers["Existing producers<br/>DM, wake, schedule, broker"] -->|"snapshot body + facts"| renderer["Shared renderer<br/>source prefix + omitted count<br/>escape, mark, fit ≤1024 bytes"]
   notices["Existing notice resolver<br/>inbox, history"] -->|"same snapshot"| renderer
+  renderer -->|"notice line, no delivery"| list["Inbox/history output<br/>returned to CLI or MCP caller"]
   renderer -->|"prepared line + unchanged push ID"| adapters["Existing native, ACP, peer adapters"]
   adapters --> recipient["Recipient sees … and N more chars"]
   recipient -->|"complete link"| fetch["Existing show handler<br/>full stored record and body"]
