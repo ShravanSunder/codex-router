@@ -155,3 +155,9 @@ Required whole gates in plan: checker exit0, all-target workspace Clippy -D warn
 Applied the interaction broker split from `docs/wip/2026-10-04-interaction-broker-cut-map.md`: shared parent fixtures remain; decision/history tests moved to one private child and question lifecycle tests to another. Parent902 lines; children616/564. Existing turn-cancellation sibling retains `session`/`fixture_broker` visibility.
 
 Proof: fmt exit0; collaboration-service lib tests exit0/27 passed/0 failed/190 filtered; package check exit0; Clippy all-targets -D warnings exit0/9.61s; size checker exit1 with19 remaining oversized files; parent broker test file removed. No interaction semantics/API/storage/CI/production changes.
+
+## Thread participant integration cut applied and verified — 2026-10-04
+
+Applied next test-only cut from `docs/wip/2026-10-04-thread-participants-cut-map.md`: split subscription/handoff tests and corruption/archived/unread tests into two private child modules while retaining the shared BoardStore fixture parent. Parent647 lines; children420/383.
+
+Proof: fmt exit0; full thread_participants integration target exit0/13 passed/0 failed/0 filtered/0.76s; package check exit0/5.01s; package Clippy all-targets -D warnings exit0/8.81s. Size checker exit1 with18 remaining oversized files; thread_participants removed. No BoardStore API/SQLite/schema/participant semantics/CI/production changes.
