@@ -49,3 +49,11 @@ Signature evidence: the checker commit object contains an SSH signature. `git ve
 ## Updated overlapping owner reservation
 
 The fixes track has resumed its separately authorized native-interrupt work and temporarily reserves `crates/collaboration-mcp/src/mcp_server/tests.rs` for real propagation tests. Defer decomposition of that exact test owner until its per-owner handoff supplies current source/test/filter evidence. Other previously cleared oversized-file surfaces remain cleared; this reservation and the decomposition feature-plan hold are distinct. No source edit or build follows this notification.
+
+## Checkpoint reporting outcome
+
+Created local SSH-signed checkpoints `958bf6c5` (existing checker/tests) and `0d1c47f5` (sanitized proposal/citation map/trail). Both include only this task's reviewed files. Post-checkpoint Git state is clean; no push, merge, unsigned fallback or extra implementation occurred.
+
+The requested supported Router reply was rejected as not submitted: requester thread was not found or never started, with a non-retryable receipt. No duplicate thread, identity change, resend, wake, production restart or alternate communication route was attempted. The final user-facing report carries the substantive status until the original requester's continuity is restored. Exact local receipt context remains outside public docs.
+
+Remaining continuation holds: owner release of this task's feature-plan hold, worktree-specific baseline/compile proof and whole executable-plan admission; the active MCP test-owner reservation requires its per-owner handoff. Reported environment recovery elsewhere is not proof here. Local SSH signature trust verification remains unavailable because the allowed-signers file is not configured; signatures are present and no security settings were changed.
