@@ -249,3 +249,11 @@ Applied the bounded account decomposition recorded in `docs/wip/2026-10-04-accou
 Proof: focused moved tests exit0 with6 passed/0 failed; package check exit0; all-target Clippy with required `keychain-test-support` feature exit0; fmt exit0. The broader account filter had84 passes and2 unrelated sandbox-exec `Operation not permitted` failures in existing sandbox tests. Strict checker exits1 with7 remaining oversized files and no longer lists `account.rs`.
 
 This slice changes no account CLI/OAuth/credential/state/auth behavior, CI, or production process. The sandbox denial is an environment proof gap, not a source failure. It is the next local checkpoint; staging and commit follow after this trace/map write. No push, merge, release, production restart, or final CI gate yet.
+
+## MCP server test cut applied and verified — 2026-10-04
+
+Applied the bounded server-test decomposition recorded in `docs/wip/2026-10-04-mcp-server-test-cut-map.md`: split route/effect, catalog, schema, and inspect/snapshot suites into four private children while retaining shared fixture helpers and catalog conversion in the 186-line parent. Children are769/603/519/263 lines.
+
+The first compile surfaced two expected path/boundary corrections: nested production-private calls needed `super::super::` and the snapshot include moved to `../snapshots/main_success_schemas.json`. Final proof: server test subtree exit0 with36 passed/0 failed; package check exit0; all-target Clippy `-D warnings` exit0; fmt exit0. Strict checker exits1 with6 remaining oversized files and no longer lists `mcp_server/tests.rs`.
+
+This slice changes no MCP API/schema/tool behavior, persistence, auth semantics, CI, or production process. It is the next local checkpoint; staging and commit follow after this trace/map write. No push, merge, release, production restart, or final CI gate yet.
