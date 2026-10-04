@@ -265,3 +265,11 @@ Applied the bounded same-crate split recorded in `docs/wip/2026-10-04-mcp-server
 The first compile exposed that the first moved function also needed `pub(super)`; that seam was added and no wider visibility was introduced. Final proof: full collaboration-mcp lib tests exit0 with87 passed/0 failed/2 ignored; package check exit0; all-target Clippy `-D warnings` exit0; fmt exit0. Strict checker exits1 with5 remaining oversized files and no longer lists `mcp_server.rs`.
 
 This slice changes no MCP API/schema/tool behavior, persistence, auth semantics, CI, or production process. It is the next local checkpoint; staging and commit follow after this trace/map write. No push, merge, release, production restart, or final CI gate yet.
+
+## External provider supervisor backend cut applied and verified — 2026-10-04
+
+Applied the bounded same-crate split recorded in `docs/wip/2026-10-04-external-provider-supervisor-backend-cut-map.md`: moved the complete `ProviderConversationBackend` implementation into private `provider_conversation_backend.rs`; the parent retains state, binding/admission, settlement, queue and failure helpers. Parent is719 lines and child603 lines.
+
+One initial test attempt omitted `/usr/bin` from PATH and produced an invalid linker `cc not found` result; the required Apple-clang discovery PATH rerun passed the full host library suite with139 passed/0 failed/5 ignored. Final package check, Clippy and fmt passed. Strict checker exits1 with4 remaining oversized files and no longer lists `external_provider_supervisor.rs`.
+
+This slice changes no provider API/admission/effect/reconciliation/persistence/auth behavior, CI, or production process. It is the next local checkpoint; staging and commit follow after this trace/map write. No push, merge, release, production restart, or final CI gate yet.
