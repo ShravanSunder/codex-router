@@ -1,7 +1,7 @@
 # Host-controller checkpoint — 2026-10-04
 
 This checkpoint records the existing host-controller design work on
-`host-controller-impl`. Implementation remains held. It does not authorize
+`host-controller-impl`. Implementation admission remains held. It does not authorize
 implementation, a push, merge, release or production process replacement.
 
 ## Deliverables and source of truth
@@ -63,6 +63,10 @@ has not been admitted.
 - **Owner hold:** the current request authorizes status reporting and local
   checkpoints of existing owned work. It does not resume feature implementation.
 
+These describe the initial checkpoint boundary. A subsequent instruction resumes
+host-controller work and addressing its holds; it does not waive the unresolved
+design decisions, reviewed planning basis or required proof gates below.
+
 The existing lifetime decision and contract coordination remain outstanding;
 this checkpoint makes no new selection or owner request. Network configuration,
 credentials and production processes remain unchanged. No stand-in has been
@@ -107,10 +111,21 @@ does not perform those steps.
 
 ## Local checkpoint outcome
 
-The signed local commit attempt exited 128: `1Password: failed to fill whole
-buffer`, followed by `fatal: failed to write commit object`. No new checkpoint
-commit was created; existing HEAD remains `95652af5`. Signing remains enabled.
-This public-safe document is the only staged file. Existing local work traces
-remain unstaged, including the implementation contributor's untouched trace.
-The configured signer must be restored before retrying the authorized commit.
-No push, merge, implementation, build, runtime or production action occurred.
+The initial signed local commit attempt exited 128: `1Password: failed to fill
+whole buffer`, followed by `fatal: failed to write commit object`. That attempt
+created no commit. The authorized retry subsequently succeeded, exit 0, at
+`8da9f61f`; the commit object contains an SSH signature. Signing stayed enabled,
+with no unsigned fallback. Signer trust verification is not claimed.
+
+The resumed narrow baseline also passed, exit 0:
+`cargo check --locked -p codex-native-integration`, using pinned Rust 1.98.1,
+the rustup binary directory first on PATH, and process-local removal of the
+inherited compiler/linker overrides. Cargo completed in the debug `dev` profile.
+This resolves the historical dependency/compilation blocker for that package;
+it proves neither host-controller implementation nor any V1–V12 runtime gate.
+
+Only this public-safe checkpoint document was committed. Existing local work
+traces remain unstaged, including the implementation contributor's untouched
+trace. The old plan remains historical, the ProviderLink revision still needs
+its RSP contract check, and the lifetime decision remains pending. No push,
+merge, product implementation, runtime or production action occurred.
