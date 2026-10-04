@@ -1,15 +1,83 @@
+use futures_util::StreamExt;
 use serde_json::{Value, json};
-use std::os::unix::fs::DirBuilderExt;
+use std::os::unix::fs::PermissionsExt;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+// Fixture setup failures must abort the scenario with their specific cause.
+#[allow(clippy::expect_used, clippy::panic)]
+fn workspace_native_cli_tempdir(prefix: &str) -> tempfile::TempDir {
+    let workspace_tmp = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tmp");
+    std::fs::create_dir_all(&workspace_tmp)
+        .unwrap_or_else(|error| panic!("workspace tmp directory: {error}"));
+    let workspace_tmp = std::fs::canonicalize(workspace_tmp)
+        .unwrap_or_else(|error| panic!("canonical workspace tmp directory: {error}"));
+    let temporary = tempfile::Builder::new()
+        .prefix(prefix)
+        .tempdir_in(workspace_tmp)
+        .unwrap_or_else(|error| panic!("private fixture directory: {error}"));
+    std::fs::set_permissions(temporary.path(), std::fs::Permissions::from_mode(0o700))
+        .unwrap_or_else(|error| panic!("private fixture permissions: {error}"));
+    temporary
+}
+
+// Malformed or missing native frames must fail the real CLI scenario.
+#[allow(clippy::expect_used, clippy::panic)]
+async fn read_cli_native_interrupt_frame(
+    socket: &mut tokio_tungstenite::WebSocketStream<tokio::net::UnixStream>,
+) -> Value {
+    let frame = tokio::time::timeout(std::time::Duration::from_secs(3), socket.next())
+        .await
+        .expect("native fixture frame deadline")
+        .expect("native fixture frame")
+        .unwrap_or_else(|error| panic!("native fixture receive: {error}"));
+    serde_json::from_str(
+        frame
+            .to_text()
+            .unwrap_or_else(|error| panic!("native fixture text: {error}")),
+    )
+    .unwrap_or_else(|error| panic!("native fixture JSON: {error}"))
+}
+
+// A failed isolated child process is a fixture failure, not test data.
+#[allow(clippy::panic)]
+async fn run_native_interrupt_cli(
+    service_directory: &std::path::Path,
+    turn_id: &str,
+    machine_output: bool,
+) -> std::process::Output {
+    let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_agent-collaboration"));
+    command.args([
+        "turn",
+        "interrupt",
+        "--endpoint",
+        "codex-local",
+        "--session",
+        "proof-thread",
+        "--turn",
+        turn_id,
+    ]);
+    if machine_output {
+        command.arg("--json");
+    }
+    tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        command
+            .arg("--service-directory")
+            .arg(service_directory)
+            // The timeout drops output(); keep its owned CLI child from escaping the fixture.
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .unwrap_or_else(|error| panic!("CLI command deadline: {error}"))
+    .unwrap_or_else(|error| panic!("CLI command: {error}"))
+}
 
 #[tokio::test]
 async fn interrupt_cli_reports_unknown_when_control_disconnects_after_submission() {
     // Arrange: a Control fixture accepts the exact command and drops its response.
-    let root = std::path::PathBuf::from(format!("/tmp/interrupt-cli-{}", std::process::id()));
-    std::fs::DirBuilder::new()
-        .mode(0o700)
-        .create(&root)
-        .unwrap_or_else(|error| panic!("directory: {error}"));
+    let temporary = workspace_native_cli_tempdir("c1-");
+    let root = temporary.path().to_path_buf();
     let listener = tokio::net::UnixListener::bind(root.join("control.sock"))
         .unwrap_or_else(|error| panic!("listener: {error}"));
     let service_id = "00000000-0000-4000-8000-000000000001";
@@ -83,7 +151,9 @@ async fn interrupt_cli_reports_unknown_when_control_disconnects_after_submission
     drop(publication);
     std::fs::remove_file(root.join("control.sock"))
         .unwrap_or_else(|error| panic!("socket cleanup: {error}"));
-    std::fs::remove_dir(root).unwrap_or_else(|error| panic!("directory cleanup: {error}"));
+    temporary
+        .close()
+        .unwrap_or_else(|error| panic!("directory cleanup: {error}"));
     // Assert.
     assert_eq!(output.status.code(), Some(5));
     let result: Value =
@@ -94,11 +164,8 @@ async fn interrupt_cli_reports_unknown_when_control_disconnects_after_submission
 
 #[tokio::test]
 async fn session_inspect_cli_preserves_native_rejection_message() {
-    let root = std::path::PathBuf::from(format!("/tmp/session-inspect-cli-{}", std::process::id()));
-    std::fs::DirBuilder::new()
-        .mode(0o700)
-        .create(&root)
-        .unwrap_or_else(|error| panic!("directory: {error}"));
+    let temporary = workspace_native_cli_tempdir("c2-");
+    let root = temporary.path().to_path_buf();
     let listener = tokio::net::UnixListener::bind(root.join("control.sock"))
         .unwrap_or_else(|error| panic!("listener: {error}"));
     let service_id = "00000000-0000-4000-8000-000000000001";
@@ -202,7 +269,9 @@ async fn session_inspect_cli_preserves_native_rejection_message() {
     drop(publication);
     std::fs::remove_file(root.join("control.sock"))
         .unwrap_or_else(|error| panic!("socket cleanup: {error}"));
-    std::fs::remove_dir(root).unwrap_or_else(|error| panic!("directory cleanup: {error}"));
+    temporary
+        .close()
+        .unwrap_or_else(|error| panic!("directory cleanup: {error}"));
 
     assert_eq!(
         output.status.code(),
@@ -226,12 +295,8 @@ async fn message_cli_retains_target_after_response_loss_and_keeps_refusal_distin
         ("outcome-unknown", Some("outcomeUnknown"), 5),
         ("native-refusal", Some("nativeRejected"), 4),
     ] {
-        let root =
-            std::path::PathBuf::from(format!("/tmp/message-cli-{label}-{}", std::process::id()));
-        std::fs::DirBuilder::new()
-            .mode(0o700)
-            .create(&root)
-            .unwrap_or_else(|error| panic!("directory: {error}"));
+        let temporary = workspace_native_cli_tempdir("c3-");
+        let root = temporary.path().to_path_buf();
         let listener = tokio::net::UnixListener::bind(root.join("control.sock"))
             .unwrap_or_else(|error| panic!("listener: {error}"));
         let service_id = "00000000-0000-4000-8000-000000000001";
@@ -337,7 +402,7 @@ async fn message_cli_retains_target_after_response_loss_and_keeps_refusal_distin
         peer.await.expect("peer join");
         drop(publication);
         std::fs::remove_file(root.join("control.sock")).expect("socket cleanup");
-        std::fs::remove_dir(&root).expect("directory cleanup");
+        temporary.close().expect("directory cleanup");
 
         assert_eq!(output.status.code(), Some(expected_exit), "{label}");
         let result: Value = serde_json::from_slice(&output.stdout).expect("CLI JSON");
@@ -389,4 +454,213 @@ async fn message_cli_retains_target_after_response_loss_and_keeps_refusal_distin
         }
         assert!(output.stderr.is_empty(), "{label}");
     }
+}
+
+#[tokio::test]
+async fn native_interrupt_cli_formats_real_service_refusals_in_json_and_human_modes() {
+    use collaboration_service::{
+        LocalControlService, ManifestPublication, NativeControlBackend, NativeGenerationGate,
+        ServiceIdentity,
+    };
+    use futures_util::SinkExt;
+    use std::{collections::BTreeMap, os::unix::fs::DirBuilderExt, sync::Arc};
+    use tokio_tungstenite::tungstenite::Message;
+    use tokio_util::sync::CancellationToken;
+
+    let temporary = workspace_native_cli_tempdir("u2-");
+    let service_directory = temporary.path().to_path_buf();
+    let native_directory = temporary.path().join("n");
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&native_directory)
+        .expect("private native socket parent");
+
+    let service_id = "00000000-0000-4000-8000-000000000021";
+    let service_epoch = "00000000-0000-4000-8000-000000000022";
+    let control_digest = format!("sha256:{}", "a".repeat(64));
+    let generation: collaboration_protocol::CodexGeneration = serde_json::from_value(json!({
+        "serviceEpoch":service_epoch,"generation":1
+    }))
+    .expect("native generation");
+    let target: collaboration_protocol::SessionRef = serde_json::from_value(json!({
+        "endpoint":{"serviceId":service_id,"endpointId":"codex-local"},
+        "sessionId":"proof-thread"
+    }))
+    .expect("native target");
+    let native_socket_path = native_directory.join("codex-native.sock");
+    let native_listener =
+        tokio::net::UnixListener::bind(&native_socket_path).expect("native WebSocket listener");
+
+    let mut native_definitions = serde_json::Map::new();
+    for operation in [
+        "ThreadRead",
+        "ThreadResume",
+        "ThreadStart",
+        "ThreadLoadedList",
+        "ThreadTurnsList",
+        "TurnStart",
+        "TurnSteer",
+        "TurnInterrupt",
+        "ThreadQueueAdd",
+        "ThreadSetName",
+    ] {
+        native_definitions.insert(format!("{operation}Params"), json!({"type":"object"}));
+        native_definitions.insert(format!("{operation}Response"), json!({"type":"object"}));
+    }
+    let native_bundle =
+        codex_native_integration::NativeSchemaBundle::from_documents(BTreeMap::from([(
+            "codex_app_server_protocol.schemas.json".to_owned(),
+            serde_json::to_vec(&json!({"definitions":{"v2":native_definitions}}))
+                .expect("native schema JSON"),
+        )]))
+        .expect("native schema bundle");
+    let native_schemas = Arc::new(
+        codex_native_integration::NativePayloadSchemas::from_bundle(&native_bundle)
+            .expect("native schemas"),
+    );
+    let native_digest = native_schemas.schema_digest().to_owned();
+    let endpoint: collaboration_protocol::EndpointDescription = serde_json::from_value(json!({
+        "endpoint":target.endpoint,"label":"CLI interrupt fixture",
+        "availability":{"state":"available","observedAt":"2026-10-04T00:00:00Z"},
+        "channels":[{"kind":"nativeCodex","transport":"unixWebSocket",
+            "path":"codex-native.sock","schemaDigest":native_digest,"generation":generation}]
+    }))
+    .expect("native endpoint");
+    let gate = NativeGenerationGate::default();
+    gate.activate(generation, native_socket_path, Some(native_schemas))
+        .expect("native generation admission");
+    let backend = NativeControlBackend {
+        endpoint: target.endpoint.clone(),
+        gate,
+        codex_home: native_directory,
+    };
+    let identity = ServiceIdentity::new(service_id, service_epoch, &control_digest)
+        .expect("Control service identity")
+        .with_endpoints(vec![endpoint])
+        .expect("endpoint publication")
+        .with_native_backend(backend)
+        .expect("native backend");
+    let control = LocalControlService::bind(&service_directory.join("control.sock"), identity)
+        .expect("Control listener");
+    let manifest: collaboration_protocol::ServiceManifest = serde_json::from_value(json!({
+        "version":2,"serviceId":service_id,"serviceEpoch":service_epoch,
+        "machineLabel":"cli-interrupt-fixture",
+        "control":{"transport":"unixJsonLines","path":"control.sock"},
+        "controlSchemaDigest":control_digest,
+        "mcp":{"transport":"streamableHttp","url":"http://127.0.0.1:0/mcp"}
+    }))
+    .expect("service manifest");
+    let publication =
+        ManifestPublication::publish(&service_directory, &manifest).expect("manifest publication");
+    let control_shutdown = CancellationToken::new();
+    let control_task = tokio::spawn(control.run(control_shutdown.clone()));
+
+    let native_peer = tokio::spawn(async move {
+        let cases = [
+            ("proof-cli-busy", -32000, "thread has an active turn"),
+            ("proof-cli-unknown", -32099, "native host refused this turn"),
+        ];
+        let mut observed_requests = Vec::new();
+        for (expected_turn_id, code, message) in cases {
+            let (stream, _) =
+                tokio::time::timeout(std::time::Duration::from_secs(10), native_listener.accept())
+                    .await
+                    .expect("native accept deadline")
+                    .expect("native accept");
+            let mut socket = tokio_tungstenite::accept_async(stream)
+                .await
+                .expect("native WebSocket upgrade");
+            let initialize = read_cli_native_interrupt_frame(&mut socket).await;
+            assert_eq!(initialize["method"], "initialize");
+            socket
+                .send(Message::Text(
+                    json!({"id":initialize["id"],"result":{}})
+                        .to_string()
+                        .into(),
+                ))
+                .await
+                .expect("native initialize response");
+            let initialized = read_cli_native_interrupt_frame(&mut socket).await;
+            assert_eq!(initialized["method"], "initialized");
+            let request = read_cli_native_interrupt_frame(&mut socket).await;
+            assert_eq!(request["method"], "turn/interrupt");
+            assert_eq!(request["params"]["threadId"], "proof-thread");
+            assert_eq!(request["params"]["turnId"], expected_turn_id);
+            observed_requests.push((
+                request["params"]["threadId"]
+                    .as_str()
+                    .expect("native thread ID")
+                    .to_owned(),
+                request["params"]["turnId"]
+                    .as_str()
+                    .expect("native turn ID")
+                    .to_owned(),
+            ));
+            socket
+                .send(Message::Text(
+                    json!({"id":request["id"],"error":{"code":code,"message":message}})
+                        .to_string()
+                        .into(),
+                ))
+                .await
+                .expect("native explicit refusal");
+        }
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(250),
+                native_listener.accept(),
+            )
+            .await
+            .is_err(),
+            "CLI interruption refusals must not be replayed"
+        );
+        observed_requests
+    });
+
+    let machine_output = run_native_interrupt_cli(&service_directory, "proof-cli-busy", true).await;
+    assert_eq!(machine_output.status.code(), Some(4));
+    assert!(machine_output.stderr.is_empty());
+    let machine_json: Value =
+        serde_json::from_slice(&machine_output.stdout).expect("machine CLI refusal JSON");
+    assert_eq!(machine_json["kind"], "error");
+    assert_eq!(machine_json["error"]["kind"], "nativeRejected");
+    assert_eq!(
+        machine_json["error"]["message"],
+        "thread has an active turn"
+    );
+    let machine_error = machine_json["error"]
+        .as_object()
+        .expect("machine error fields");
+    assert_eq!(
+        machine_error.len(),
+        2,
+        "CLI keeps its existing error field set"
+    );
+    assert!(machine_error.get("reason").is_none());
+    assert!(machine_error.get("nativeCode").is_none());
+
+    let human_output =
+        run_native_interrupt_cli(&service_directory, "proof-cli-unknown", false).await;
+    assert_eq!(human_output.status.code(), Some(4));
+    assert!(human_output.stdout.is_empty());
+    assert_eq!(
+        String::from_utf8(human_output.stderr).expect("human CLI UTF-8"),
+        "native host refused this turn\n"
+    );
+
+    let observed_requests = native_peer.await.expect("native peer task");
+    assert_eq!(
+        observed_requests,
+        vec![
+            ("proof-thread".to_owned(), "proof-cli-busy".to_owned()),
+            ("proof-thread".to_owned(), "proof-cli-unknown".to_owned()),
+        ]
+    );
+    drop(publication);
+    control_shutdown.cancel();
+    control_task
+        .await
+        .expect("Control service task")
+        .expect("Control service shutdown");
+    temporary.close().expect("fixture directory cleanup");
 }

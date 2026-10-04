@@ -440,6 +440,7 @@ mod native_failure_tests {
         NativeConnectionError, native_call_failure, rename_echo_mismatch, valid_session_rename_name,
     };
     use codex_native_integration::NativeOperation;
+    use collaboration_protocol::control_error_is_valid;
     use serde_json::json;
 
     #[test]
@@ -521,6 +522,60 @@ mod native_failure_tests {
                 native_call_failure(json!("1"), "rename", true, &error, None)["error"]["data"]["kind"],
                 "outcomeUnknown",
                 "a dispatched rename must never be reported as refused"
+            );
+        }
+    }
+
+    #[test]
+    fn interrupt_rejections_validate_against_published_error_schema() {
+        let cases = [
+            (
+                "classified busy refusal",
+                -32000,
+                Some(json!({"message":"thread has an active turn"})),
+                "thread has an active turn",
+                "busy",
+                "useDeliverySteer",
+                None,
+            ),
+            (
+                "unclassified bounded refusal",
+                -32099,
+                Some(json!({"message":"native host refused this turn"})),
+                "native host refused this turn",
+                "unknown",
+                "retryLater",
+                Some(-32099),
+            ),
+        ];
+
+        for (label, code, native, message, reason, next_action, native_code) in cases {
+            let frame = native_call_failure(
+                json!("request-1"),
+                "interrupt",
+                true,
+                &NativeConnectionError::Rejected { code },
+                native.as_ref(),
+            );
+
+            assert_eq!(frame["error"]["data"]["kind"], "nativeRejected", "{label}");
+            assert_eq!(frame["error"]["data"]["stage"], "interrupt", "{label}");
+            assert_eq!(frame["error"]["data"]["message"], message, "{label}");
+            assert_eq!(frame["error"]["data"]["reason"], reason, "{label}");
+            assert_eq!(frame["error"]["data"]["nextAction"], next_action, "{label}");
+            match native_code {
+                Some(expected) => {
+                    assert_eq!(frame["error"]["data"]["nativeCode"], expected, "{label}")
+                }
+                None => assert!(
+                    frame["error"]["data"].get("nativeCode").is_none(),
+                    "{label} must not include a code for a classified refusal"
+                ),
+            }
+
+            assert!(
+                control_error_is_valid("codex/turnInterrupt", &frame),
+                "published interrupt error schema rejected actual {label} frame: {frame}"
             );
         }
     }

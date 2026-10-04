@@ -1254,4 +1254,7 @@ mod router_relation_instruction_tests;
 mod conversation_result_tests;
 
 #[cfg(test)]
+mod native_interrupt_tests;
+
+#[cfg(test)]
 mod tests;

@@ -1,4 +1,4 @@
-use collaboration_protocol::control_schema_document;
+use collaboration_protocol::{control_error_is_valid, control_schema_document};
 use serde_json::{Value, json};
 
 #[test]
@@ -157,13 +157,17 @@ fn complete_schema_pairs_all_methods_and_preserves_protocol_boundaries() {
 }
 
 #[test]
-fn native_inspect_and_rename_error_schemas_accept_emitted_diagnostics() {
+fn native_inspect_rename_and_interrupt_error_schemas_accept_emitted_diagnostics() {
     let service_error = |data: Value| {
         json!({"jsonrpc":"2.0","id":"request-1","error":{
             "code":-32050,"message":"Native control operation failed","data":data
         }})
     };
-    for method in ["codex/sessionInspect", "codex/sessionRename"] {
+    for (method, stage) in [
+        ("codex/sessionInspect", "inspect"),
+        ("codex/sessionRename", "rename"),
+        ("codex/turnInterrupt", "interrupt"),
+    ] {
         let mut schema = control_schema_document(None).expect("control schema");
         let error_ref = schema["x-methods"][method]["error"]["$ref"]
             .as_str()
@@ -171,11 +175,6 @@ fn native_inspect_and_rename_error_schemas_accept_emitted_diagnostics() {
             .to_owned();
         schema["$ref"] = json!(error_ref);
         let validator = jsonschema::validator_for(&schema).expect("error validator");
-        let stage = if method == "codex/sessionInspect" {
-            "inspect"
-        } else {
-            "rename"
-        };
         let rejection = service_error(json!({
             "kind":"nativeRejected","stage":stage,
             "message":"Native control operation failed",
@@ -185,6 +184,10 @@ fn native_inspect_and_rename_error_schemas_accept_emitted_diagnostics() {
             validator.is_valid(&rejection),
             "{method} classified rejection"
         );
+        assert!(
+            control_error_is_valid(method, &rejection),
+            "{method} published validator rejects classified diagnostics"
+        );
 
         let unknown = service_error(json!({
             "kind":"nativeRejected","stage":stage,
@@ -192,6 +195,10 @@ fn native_inspect_and_rename_error_schemas_accept_emitted_diagnostics() {
             "reason":"unknown","nextAction":"retryLater","nativeCode":-32099
         }));
         assert!(validator.is_valid(&unknown), "{method} unknown native code");
+        assert!(
+            control_error_is_valid(method, &unknown),
+            "{method} published validator rejects unknown-code diagnostics"
+        );
 
         let held_by_another_client = service_error(json!({
             "kind":"nativeRejected","stage":stage,
@@ -203,6 +210,10 @@ fn native_inspect_and_rename_error_schemas_accept_emitted_diagnostics() {
             validator.is_valid(&held_by_another_client),
             "{method} active-writer rejection"
         );
+        assert!(
+            control_error_is_valid(method, &held_by_another_client),
+            "{method} published validator rejects active-writer diagnostics"
+        );
 
         let mut missing_action = rejection.clone();
         missing_action["error"]["data"]
@@ -212,6 +223,10 @@ fn native_inspect_and_rename_error_schemas_accept_emitted_diagnostics() {
         assert!(
             !validator.is_valid(&missing_action),
             "{method} action required"
+        );
+        assert!(
+            !control_error_is_valid(method, &missing_action),
+            "{method} published validator requires an action"
         );
     }
 
@@ -242,6 +257,135 @@ fn native_inspect_and_rename_error_schemas_accept_emitted_diagnostics() {
     assert!(
         !validator.is_valid(&missing_effective),
         "echoed name required"
+    );
+}
+
+#[test]
+fn interrupt_error_schema_rejects_malformed_and_cross_method_refusals() {
+    let service_error = |data: Value| {
+        json!({"jsonrpc":"2.0","id":"request-1","error":{
+            "code":-32050,"message":"Native control operation failed","data":data
+        }})
+    };
+    let classified = service_error(json!({
+        "kind":"nativeRejected","stage":"interrupt",
+        "message":"thread has an active turn",
+        "reason":"busy","nextAction":"useDeliverySteer"
+    }));
+    let mut schema = control_schema_document(None).expect("control schema");
+    let error_ref = schema["x-methods"]["codex/turnInterrupt"]["error"]["$ref"]
+        .as_str()
+        .expect("interrupt error reference")
+        .to_owned();
+    schema["$ref"] = json!(error_ref);
+    let validator = jsonschema::validator_for(&schema).expect("interrupt error validator");
+    assert!(
+        validator.is_valid(&classified),
+        "classified interrupt refusal"
+    );
+    assert!(
+        control_error_is_valid("codex/turnInterrupt", &classified),
+        "published validator accepts classified interrupt refusal"
+    );
+
+    let mut negatives = Vec::new();
+
+    let mut missing_reason = classified.clone();
+    missing_reason["error"]["data"]
+        .as_object_mut()
+        .expect("error data")
+        .remove("reason");
+    negatives.push(("missing reason", missing_reason));
+
+    let mut missing_action = classified.clone();
+    missing_action["error"]["data"]
+        .as_object_mut()
+        .expect("error data")
+        .remove("nextAction");
+    negatives.push(("missing next action", missing_action));
+
+    let mut extra_field = classified.clone();
+    extra_field["error"]["data"]["unexpected"] = json!(true);
+    negatives.push(("extra refusal field", extra_field));
+
+    let mut wrong_stage = classified.clone();
+    wrong_stage["error"]["data"]["stage"] = json!("steer");
+    negatives.push(("wrong refusal stage", wrong_stage));
+
+    let mut unknown_reason = classified.clone();
+    unknown_reason["error"]["data"]["reason"] = json!("newReason");
+    negatives.push(("unknown reason", unknown_reason));
+
+    let mut unknown_action = classified.clone();
+    unknown_action["error"]["data"]["nextAction"] = json!("retryEventually");
+    negatives.push(("unknown next action", unknown_action));
+
+    let noninteger_native_code = service_error(json!({
+        "kind":"nativeRejected","stage":"interrupt",
+        "message":"native host refused this turn",
+        "reason":"unknown","nextAction":"retryLater","nativeCode":12.5
+    }));
+    negatives.push(("noninteger native code", noninteger_native_code));
+
+    let mut missing_outer_message = classified.clone();
+    missing_outer_message["error"]
+        .as_object_mut()
+        .expect("RPC error")
+        .remove("message");
+    negatives.push(("missing RPC message", missing_outer_message));
+
+    let mut empty_outer_message = classified.clone();
+    empty_outer_message["error"]["message"] = json!("");
+    negatives.push(("empty RPC message", empty_outer_message));
+
+    let mut missing_data_message = classified.clone();
+    missing_data_message["error"]["data"]
+        .as_object_mut()
+        .expect("error data")
+        .remove("message");
+    negatives.push(("missing diagnostic message", missing_data_message));
+
+    let mut empty_data_message = classified.clone();
+    empty_data_message["error"]["data"]["message"] = json!("");
+    negatives.push(("empty diagnostic message", empty_data_message));
+
+    for (label, invalid) in negatives {
+        assert!(
+            !validator.is_valid(&invalid),
+            "schema admitted {label}: {invalid}"
+        );
+        assert!(
+            !control_error_is_valid("codex/turnInterrupt", &invalid),
+            "published validator admitted {label}: {invalid}"
+        );
+    }
+
+    let over_limit_multibyte_message = "é".repeat(513);
+    let mut oversized_outer_message = classified.clone();
+    oversized_outer_message["error"]["message"] = json!(&over_limit_multibyte_message);
+    assert!(
+        validator.is_valid(&oversized_outer_message),
+        "JSON Schema's character limit alone does not enforce the UTF-8 byte cap"
+    );
+    assert!(
+        !control_error_is_valid("codex/turnInterrupt", &oversized_outer_message),
+        "published validator enforces the outer message UTF-8 byte cap"
+    );
+
+    let mut oversized_diagnostic_message = classified.clone();
+    oversized_diagnostic_message["error"]["data"]["message"] = json!(&over_limit_multibyte_message);
+    assert!(
+        validator.is_valid(&oversized_diagnostic_message),
+        "JSON Schema's character limit alone does not enforce diagnostic UTF-8 bytes"
+    );
+    assert!(
+        !control_error_is_valid("codex/turnInterrupt", &oversized_diagnostic_message),
+        "published validator enforces the diagnostic UTF-8 byte cap"
+    );
+
+    assert!(
+        !control_error_is_valid("endpoint/list", &classified),
+        "interrupt refusal diagnostics must not validate for an unrelated method"
     );
 }
 
