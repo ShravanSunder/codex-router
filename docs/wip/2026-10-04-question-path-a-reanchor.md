@@ -1,6 +1,6 @@
 # Path A source re-anchor and conditional realization
 
-Source cutoff: router-fixes0e133612; tagged Codex0.160.0. Lead-owned design input. Owner direction A is settled; this document is not a locally-ready Program Design, a reviewed three-artifact result or an implementation plan. The current RQ2 native-fidelity gap must return to Specification before target acceptance.
+Source cutoff: router-fixes0e133612; tagged Codex0.160.0. Lead-owned design input. Owner direction A is settled; this document is not a locally-ready Program Design, a reviewed three-artifact result or an implementation plan. RQ2 now clarifies shared typed intent and exact literal native delivery after removal of an unsupported native category-marker promise.
 
 Distinct governing identities: Requirements `docs/specs/2026-10-03-router-fixes/requirements.md` U3 and operational boundaries; observable Specification `questions-specification.md` RQ1-RQ7/EQ1-EQ4. No native protocol change, automatic answer, new storage/journal, keeper Question owner, Human approver or authentication change is authorized.
 
@@ -37,8 +37,8 @@ These are the Lead's bounded candidate choices and closure requirements under ow
 
 ## Fidelity disposition and proof
 
-The native reply carries only answer strings. Offered selection and equal Other text cannot carry distinct native intent kinds; optional GuardianApproval retained-context enrichment also matches by label. Preserve approved Other support and return the exact RQ2 fidelity gap through `docs/wip/2026-10-04-question-native-fidelity-decision.md`; no invented native fields or silent narrowing. Typed shared meaning is feasible; native intent-kind fidelity is not supplied by this protocol.
+The native reply carries only answer strings. Offered selection and equal Other text cannot carry distinct native intent kinds; optional GuardianApproval retained-context enrichment also matches by label. Preserve approved Other support under the corrected RQ2 boundary documented in `docs/wip/2026-10-04-question-native-fidelity-decision.md`; no invented native fields or collision restriction. Typed shared meaning is feasible; native intent-kind fidelity is not supplied by this protocol.
 
 Existing rails remain: answer delivered despite later history failure, closed receiver cancellation, scoped withdrawal/retirement, ordinary detach and final reply. New VQ3/VQ4 proof must cover abort before/during persistence, receiver placement before IO, dropped registration observer, post-send caller loss, cancellation history failure, full outer/lazy abort, reader responsiveness with approval/question overlap, actual native resolution and uncertain write, fixed cut/refusal/resume/release, original id replay and no second winner/resend. Store-interface tests use current JSON until separately accepted SQLite lands. Source observations and historical Opus advice do not count as these executions.
 
-Return state: Specification gap for RQ2; structural candidate is not locally-ready. Six host integration questions now have source/ownership dispositions, with exact cut/native-release interfaces and full proof still open. No exact current Opus validation, independent review or implementation admission exists.
+Return state: Program Design gap; RQ2’s unsupported native category-marker overclaim is corrected, and the structural candidate is not locally-ready. Six host integration questions now have source/ownership dispositions, with exact cut/native-release interfaces and full proof still open. No exact current Opus validation, independent review or implementation admission exists.

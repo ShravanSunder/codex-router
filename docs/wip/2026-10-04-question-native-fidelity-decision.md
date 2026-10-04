@@ -1,6 +1,6 @@
-# Native answer fidelity — owner decision
+# Native answer fidelity — contract boundary
 
-Decide whether U3 preserves every literal Other answer while declaring native intent-kind fidelity unavailable, or rejects answers whose intent collapses in the native string representation. This is separate from the selected shared-broker ownership direction.
+U3 preserves literal Other answers and shared typed intent while declaring native intent-kind fidelity unavailable. The stronger native category-marker promise was an agent-added inference, with no independent owner authority in Requirements U3 or the owner’s shared-model extension. This correction is separate from the selected shared-broker ownership direction.
 
 ## Current native model
 
@@ -26,7 +26,7 @@ native intent     -> not represented by the upstream reply contract
 
 Gain: all owner-requested Other text remains usable, with no upstream change or invented encoding. Cost: category fidelity ends at the native string boundary; users and consumers must not infer native intent kind from the literal value. Native optional label-based retained-context enrichment remains upstream behavior. The shared Question subsystem documents and proves this boundary. RQ2 must state shared-input distinction and literal native delivery, rather than a native marker the protocol cannot carry.
 
-## Reject ambiguous answers
+## Considered restriction — not adopted
 
 ```text
 answer would collapse distinct intent
@@ -42,8 +42,8 @@ Gain: accepted answers avoid known label/intent collisions. Cost: some legitimat
 
 Recommend literal answers: preserve the user's value and the shared typed intent, then report the native boundary honestly. Do not add guessed JSON fields, alter native settings or claim native category consumption. The owner chose a shared-model extension, and this keeps its useful text support within the existing native contract.
 
-If deferred, the exact U3 Specification fidelity clause and final Program Design remain blocked. Broker/adapter lifetime source modeling and fixed-cut coordination continue. No U3 implementation or design-ready claim follows from the previously selected ownership direction. Exact current Opus validation remains absent.
+The Specification now states shared typed distinction and literal native delivery. Rejecting equal Other text would introduce a restriction that the approved extension does not require; it is not adopted. Exact structural interfaces and independent validation remain open. No U3 implementation or design-ready claim follows from the ownership selection or this correction.
 
 ## Decision state
 
-Full brief presented to the owner on 2026-10-04, with one pending answer request. No selection is inferred from the earlier shared-model extension or Path A ownership choice. RQ2 remains unchanged until this fidelity decision is settled.
+Full brief presented to the owner on 2026-10-04, with one answer request. Subsequent full Host handback prompted an authority check: Requirements U3 authorizes visible, answerable questions, and its shared-extension clause authorizes Other/free text and secret metadata; neither requires a native category marker. Under the repository’s unauthorized-assumption rule, the unsupported stronger promise is removed while approved outcomes are preserved. RQ2 is clarified transparently. The existing question remains available for optional owner steering and is not a necessary design blocker; no duplicate question is opened. This is the Lead’s disposition, not independent review acceptance.
