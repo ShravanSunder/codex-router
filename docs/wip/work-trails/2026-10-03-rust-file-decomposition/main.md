@@ -225,3 +225,11 @@ Applied the bounded test-module split recorded in `docs/wip/2026-10-04-external-
 Proof: `cargo test -p codex-router-host external_provider_runtime::tests:: --lib` exit0 with35 passed/0 failed/2 ignored; package check exit0; all-target Clippy `-D warnings` exit0; fmt check exit0. Strict checker exits1 with10 remaining oversized files and no longer lists `external_provider_runtime/tests.rs`.
 
 This slice changes no external-provider runtime/API/ACP/subprocess semantics, persistence, auth behavior, CI, or production behavior. It is the next local checkpoint; staging and commit follow after this trace/map write. No push, merge, release, production restart, or final CI gate yet.
+
+## MCP HTTP listener test cut applied and verified — 2026-10-04
+
+Applied the bounded listener-test split recorded in `docs/wip/2026-10-04-mcp-http-listener-test-cut-map.md`: moved the real initialization scenario into `initialization_tests.rs` and eight response-loss/observation scenarios plus their local replay helper into `response_loss_tests.rs`; the parent retains bind/drop/cancellation, schema/origin/IPv6 tests, and shared protocol helpers. Parent is573 lines and children408/725 lines.
+
+The first extraction attempt exposed that `protocol_response_json` and `initialize_mcp_session` were also used by parent and initialization tests. They were returned to the parent shared harness, preserving ownership and avoiding visibility widening. Final proof: listener subtree tests exit0 with17 passed/0 failed; package check exit0; all-target Clippy `-D warnings` exit0; fmt check exit0. Strict checker exits1 with9 remaining oversized files and no longer lists `mcp_http_listener_tests.rs`.
+
+This slice changes no MCP HTTP/API/cancellation/session/response-loss semantics, persistence, auth behavior, CI, or production behavior. It is the next local checkpoint; staging and commit follow after this trace/map write. No push, merge, release, production restart, or final CI gate yet.
