@@ -129,3 +129,9 @@ Applied next test-only cut from `docs/wip/2026-10-04-quota-http-claude-cut-map.m
 Proof: compiled discovery corrected the module path; final focused command with required `keychain-test-support` passed2/0 failed/420 filtered. Package check exit0/1.70s, all-target Clippy with feature exit0/5.69s, fmt exit0. Size checker exit1 with22 remaining oversized files; quota_http_tests removed. No API/HTTP/schema/auth/SQLx/CI/production changes.
 
 This slice remains uncommitted pending staging/checkpoint; whole PR/review/CI incomplete.
+
+## Selection projection cut applied and verified — 2026-10-04
+
+Applied next mechanics-only cut from `docs/wip/2026-10-04-selection-projection-cut-map.md`: moved the complete inline selector test module into private `selection_projection_tests.rs`; parent is896 lines/child611 lines. Added/fixed only the test-only child gate and duplicate-import cleanup.
+
+Proof: fmt exit0; 9 selector tests passed/0 failed/155 filtered; state check exit0/3.95s; state all-target Clippy -D warnings exit0; size checker exit1 with21 remaining oversized files; selector projection removed from violations. No selector behavior/API/SQLx/migration/CI/production changes.
