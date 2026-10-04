@@ -241,3 +241,11 @@ Applied the bounded same-crate split recorded in `docs/wip/2026-10-04-collaborat
 The first validation caught an orphaned lifecycle doc comment left at the old location; it was moved with `listener_failure`. Final proof: fmt exit0; host package check exit0; all-target Clippy `-D warnings` exit0; module-filtered host test compile/run exit0 (0 matched tests, 144 filtered). Strict checker exits1 with8 remaining oversized files and no longer lists `collaboration_runtime.rs`.
 
 This slice changes no runtime API/lifecycle ordering/storage/network/auth/concurrency behavior, CI, or production process. It is the next local checkpoint; staging and commit follow after this trace/map write. No push, merge, release, production restart, or final CI gate yet.
+
+## Account command split applied and verified — 2026-10-04
+
+Applied the bounded account decomposition recorded in `docs/wip/2026-10-04-account-command-cut-map.md`: moved the three account test suites to `account_tests.rs` and the four command-option parsers to `account_options.rs` with `pub(super)` seams only. Parent is962 lines; children are207/213 lines. Explicit sibling `#[path]` wiring preserves the intended homes.
+
+Proof: focused moved tests exit0 with6 passed/0 failed; package check exit0; all-target Clippy with required `keychain-test-support` feature exit0; fmt exit0. The broader account filter had84 passes and2 unrelated sandbox-exec `Operation not permitted` failures in existing sandbox tests. Strict checker exits1 with7 remaining oversized files and no longer lists `account.rs`.
+
+This slice changes no account CLI/OAuth/credential/state/auth behavior, CI, or production process. The sandbox denial is an environment proof gap, not a source failure. It is the next local checkpoint; staging and commit follow after this trace/map write. No push, merge, release, production restart, or final CI gate yet.
