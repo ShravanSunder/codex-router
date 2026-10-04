@@ -55,7 +55,14 @@ The owner supplied these after #123 merged to main as `7a8cbd89`. They were expl
 | U34 branch metadata after relocation | Metadata provenance/freshness investigation, not established live-checkout correctness bug. | Native thread gitInfo can retain creation-time main/null while actual new cwd has a different branch. Determine authoritative provenance before changing discovery semantics. |
 | U35 Codex load access construction | Source-only investigation, not an access exploit finding. | conversation_session_operations.rs builds Codex load with access=None; retained approval route supplies profile. Trace the public access contract and its actual consumers before claiming a vulnerability or repair. |
 
-## Delivery boundary
+## Urgent launch defaults and queued restore DX (2026-10-04)
+
+| ID | Disposition | Decisive source / next proof |
+| --- | --- | --- |
+| U36 global harness defaults | Owner-directed urgent repair. Common Host composer implementation and process proof returned; Lead found incidental global-PATH dependency in existing fixtures and returned corrections. ai-tools pressure runner is a separate owning boundary under implementation. Skill reference proposal review remains pending; no installed cache changes. | `provider_startup_composition.rs`, new private resolver/process tests; ai-tools `acpx-codex-agent-runner.ts` currently deletes CODEX_PATH. Missing global must prevent bundled dispatch. Authentication and warm relationship provenance remain separate. |
+| U37 canonical UUID restore | Owner-admitted; queued behind U36. Selector Lead confirms no implementation reservation or transfer; its held design stays held. | `session_command_dispatch.rs`, `session_commands/session_command_options.rs`, catalog query/records and `claude_launch_target.rs`. Current generic ID route launches Codex. Infer only a unique valid provider candidate in configured/current Router-machine scope; preserve SessionRef and explicit provider, reject collisions actionably. No runtime red or fix yet. |
+
+## Delivery authority
 
 The owner resumed delivery on 2026-10-04 under existing reviewed plans, with U3 still held for its lifetime choice. Locked dependency fetch now passes after the actual cache-write grant; adapter build readiness is being verified. Locked fetch and exact adapter check now pass exit0. Opus implementation launch failed before work on revoked OAuth; login restoration blocks that lane. No product writes, runtime acceptance, PR, version bump or release has yet occurred in this track. Owner separately authorized release after required proof/review/CI; next unused version is at least 0.1.64. All runtime proof must use debug profile/state/socket/port isolation, Remote Control disabled by default, and pre-launch coordination with host-controller Lead. No production endpoint, credentials/Keychain, Desktop or process replacement tests.
 

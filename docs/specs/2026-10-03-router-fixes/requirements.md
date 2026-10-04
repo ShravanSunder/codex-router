@@ -56,6 +56,14 @@ The recurring WebSocket close race in #123 CI strengthens U4's evidence and is n
 
 Migration-reported diagnostics, idle-client lifetime, branch-metadata provenance and public load-access propagation are admitted for investigation as U32–U35 in the backlog. They do not authorize inferred retention mechanisms, trust bypasses or access-policy changes.
 
+## Urgent global-harness correction (2026-10-04)
+
+**U36:** Default agent launches use globally installed harnesses, including Claude. Adapter packages may provide ACP transport, but they must not silently substitute an SDK-bundled native runtime. A missing global harness yields an actionable failure with no bundled fallback. Preserve provider protocol behavior and existing conversation identities. The observed ACPX review launcher and Router startup are distinct owning boundaries; correcting one does not establish the other. Authentication causes remain independent of executable provenance. No authentication/security changes, unrecognized installs, production restart, push, merge or release are authorized by this correction.
+
+## Queued UUID restore (2026-10-04)
+
+**U37 UUID restore:** A canonical positional UUID or `--id UUID` may infer the provider only from one valid candidate in the explicitly configured/current Router-machine scope. Preserve full SessionRef provenance and explicit provider selection; collisions require an explicit choice and missing candidates produce actionable errors. Names, fuzzy matching and cross-machine discovery remain outside this slice. Queue implementation behind U36's global-harness correction.
+
 ## Operational limits
 
 Use the owner's requested `wt` worktree. Keep production Router running on both machines. Exercise unreleased code only through tests, cargo run, or an isolated debug Host. Do not cargo-install Homebrew executables or edit the owner's dotfiles. Follow repository SQLite validation and signing rules. Do not expose secrets, secret references, credential paths or account metadata in public artifacts. No destructive Git commands, directory deletion or unrelated cleanup.
