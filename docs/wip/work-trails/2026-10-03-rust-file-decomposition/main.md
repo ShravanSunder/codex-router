@@ -297,3 +297,11 @@ Applied the bounded same-module responsibility decomposition recorded in `docs/w
 The first include pass exposed item-attribute boundaries (derive/doc/allow annotations); those attributes were moved with their items without changing code. Final proof: test-support lib tests exit0 with19 passed/0 failed/15 ignored; package check exit0; all-target Clippy `-D warnings` exit0; fmt check exit0. Strict checker exits1 with1 remaining oversized file (`server.rs`).
 
 This slice changes no smoke protocol/artifact/subprocess/auth/token/persistence/network behavior, CI, or production process. It is the next local checkpoint; staging and commit follow after this trace/map write. No push, merge, release, production restart, or final CI gate yet.
+
+## Loopback server decomposition applied and verified — 2026-10-04
+
+Applied the bounded same-module decomposition recorded in `docs/wip/2026-10-04-server-cut-map.md`: split the 4931-line server into named listener/runtime/protocol/response/diagnostic/affinity/error/test chunks, retaining same-module `include!` relationships and exports. Parent is179 lines; every chunk is below1000 lines.
+
+The first compile caught error-enum derives left at a chunk boundary; those derives/doc comments were moved with their enums. Final proof: server test subtree exit0 with24 passed/0 failed; package check exit0; all-target Clippy `-D warnings` exit0; fmt exit0; strict checker exit0 across1706 files.
+
+This slice changes no server API/HTTP/WebSocket/persistence/auth behavior, CI, or production process. The Rust decomposition source inventory is now zero violations; checker CI integration and final workspace/review/PR gates remain. This is the next local checkpoint; staging and commit follow after this trace/map write. No push, merge, release, or production restart yet.
