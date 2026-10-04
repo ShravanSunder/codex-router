@@ -311,3 +311,7 @@ This slice changes no server API/HTTP/WebSocket/persistence/auth behavior, CI, o
 Added `python3 scripts/tooling/check-rust-file-size.py` as an explicit step in the existing `lint` job of `.github/workflows/ci.yml`, after workspace Clippy and before SQLx metadata validation. The checker currently exits0 against all1706 Rust files. No warning mode, exclusions, grandfather list, Cargo, SQLx, or production changes were introduced.
 
 This is the final source/CI integration checkpoint before whole-work repository gates, independent review, and draft PR packaging. No push, merge, release, or production restart yet.
+
+## Checker unit suite added to CI lint gate — 2026-10-04
+
+Aligned `.github/workflows/ci.yml` with the admitted final validation plan: the lint job now runs the strict checker and its 16-case `scripts.tests.test_rust_file_size` suite before workspace Clippy, then SQLx metadata validation. Local proof: all16 checker tests passed, checker exit0 across1706 files, and workspace formatting exit0.
