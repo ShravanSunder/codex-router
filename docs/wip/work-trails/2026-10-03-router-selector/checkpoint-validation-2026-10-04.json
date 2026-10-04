@@ -1,0 +1,38 @@
+{
+  "date": "2026-10-04",
+  "scope": "local design-document checkpoint only",
+  "counts": {
+    "documents": 3,
+    "trail_documents": 2,
+    "internal_links": 6,
+    "image_embeds": 6,
+    "trail_links": 6,
+    "requirement_rows": 10,
+    "trace_rows": 10,
+    "config_examples": 1,
+    "assets": 2
+  },
+  "design_hashes": {
+    "2026-10-03-router-selector-program-design.md": "f96c417793cff549f31d94ace8e1bd858d85653f067385c27dbf8b97c7b92e00",
+    "2026-10-03-router-selector-requirements.md": "7adae758016be4c61aeff31aa10a4ced598605007c5eb9d9281cb3a0fb88a0fa",
+    "2026-10-03-router-selector-specification.md": "38e90eeb30bfb5a2959bfc132a1f62368786c683c0cd2fbad857b1852b72ef99"
+  },
+  "historical_design_hashes_match": true,
+  "checks": {
+    "owned_scope_inventory": "pass; only existing selector docs/trail dirty before checkpoint",
+    "local_links_and_fragments": "pass",
+    "balanced_code_fences": "pass",
+    "placeholder_configuration": "pass",
+    "private_paths_and_coordination_ids": "pass",
+    "png_structure_and_metadata": "pass",
+    "validator_exit_code": 0,
+    "signed_commit": "not established by document validation; consult Git"
+  },
+  "validation_correction": "Initial private-path scan matched ordinary prose status/home/actual; corrected absolute-path boundary and reran successfully.",
+  "proof_limits": [
+    "No build, automated implementation test suite, remote runtime or state-portability proof.",
+    "PNG pixels inspected as illustrations, not runtime screenshots.",
+    "Rendered Mermaid and document placement remain unverified.",
+    "Feature/design holds remain; no push or merge authorized."
+  ]
+}
