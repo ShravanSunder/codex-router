@@ -177,3 +177,11 @@ Proof: `cargo test -p acp-client-runtime --test create_settings_order` exit0 wit
 This slice changes no ACP/API/setting semantics, subprocess fixtures, persistence, auth/security, CI, or production behavior. The exact five-path checkpoint (two Rust paths, cut map, trace) is staged next for the authorized `--no-gpg-sign` fallback after two prior signer hangs. No push, merge, release, production restart, or final CI gate yet.
 
 Board discovery remains `no-home: no project for codex-router.rust-file-decomposition`; the only listed project/board is unrelated `shravan-claw`, so this local trace remains the shared record until a repository board association is supplied.
+
+## Conversation fault identity test cut applied and verified — 2026-10-04
+
+Applied the bounded integration-test split recorded in `docs/wip/2026-10-04-conversation-fault-identity-cut-map.md`: moved the two identity/`--from` conversation tests into private `identity_override_tests.rs`; the parent retains shared CLI result parsers, ACP/control fixtures, response-loss tests and resumed-prompt coverage. Parent is850 lines and child428 lines. Prefix comparison through old line848 and child-tail comparison through old line1274 are exact, with only the child `use super::*` import added.
+
+Proof: `cargo test -p agent-collaboration --test conversation_fault_entry_paths` exit0 with9 passed/0 failed; package check exit0; all-target Clippy `-D warnings` exit0; fmt exit0. Strict checker exits1 with15 remaining oversized files and no longer lists `conversation_fault_entry_paths.rs`.
+
+This slice changes no CLI/SessionRef/ACP/control semantics, persistence, auth/security, CI, or production behavior. It is the next local checkpoint; staging and commit follow after this trace/map write. No push, merge, release, production restart, or final CI gate yet.
