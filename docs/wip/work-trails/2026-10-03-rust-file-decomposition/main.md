@@ -257,3 +257,11 @@ Applied the bounded server-test decomposition recorded in `docs/wip/2026-10-04-m
 The first compile surfaced two expected path/boundary corrections: nested production-private calls needed `super::super::` and the snapshot include moved to `../snapshots/main_success_schemas.json`. Final proof: server test subtree exit0 with36 passed/0 failed; package check exit0; all-target Clippy `-D warnings` exit0; fmt exit0. Strict checker exits1 with6 remaining oversized files and no longer lists `mcp_server/tests.rs`.
 
 This slice changes no MCP API/schema/tool behavior, persistence, auth semantics, CI, or production process. It is the next local checkpoint; staging and commit follow after this trace/map write. No push, merge, release, production restart, or final CI gate yet.
+
+## MCP server result-converter cut applied and verified — 2026-10-04
+
+Applied the bounded same-crate split recorded in `docs/wip/2026-10-04-mcp-server-result-converter-cut-map.md`: moved structured success/error, message/reply, board/domain, and wake-wait converters into private `result_converters.rs`; the parent retains the macro-heavy tool router, schema normalization and ServerHandler. Parent is959 lines and child303 lines.
+
+The first compile exposed that the first moved function also needed `pub(super)`; that seam was added and no wider visibility was introduced. Final proof: full collaboration-mcp lib tests exit0 with87 passed/0 failed/2 ignored; package check exit0; all-target Clippy `-D warnings` exit0; fmt exit0. Strict checker exits1 with5 remaining oversized files and no longer lists `mcp_server.rs`.
+
+This slice changes no MCP API/schema/tool behavior, persistence, auth semantics, CI, or production process. It is the next local checkpoint; staging and commit follow after this trace/map write. No push, merge, release, production restart, or final CI gate yet.
