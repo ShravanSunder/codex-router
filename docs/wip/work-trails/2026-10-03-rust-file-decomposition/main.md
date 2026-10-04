@@ -107,3 +107,9 @@ Owner coordination01a108ea supersedes the prior corroboration pause and directs 
 Proof: fmt exit0; four child tests discovered and passed (0 failed, 140 filtered; integration binaries had no matching filters); host package check exit0/22.21s; host all-target Clippy -D warnings exit0; source diff check exit0. Strict size inventory now has25 remaining oversized files. No API/provider semantics/fixture/CI/Cargo/SQLx/migration/auth/security/production changes.
 
 This third cut is not yet committed; commit it as the next local checkpoint using the already authorized post-two-signer fallback. Whole canonical plan/final CI/review/PR still incomplete.
+
+## Approval dispatch cut applied and tested — 2026-10-04
+
+Owner completion criterion now targets a draft PR or genuine blocker; continued mechanics-only work is authorized by coordination01a108ea and the retained stop-review instruction. Applied next cut from `docs/wip/2026-10-04-approval-dispatch-cut-map.md`: moved three permission-outcome tests from `approval_dispatch_tests.rs` into private `permission_outcome_tests.rs`. Parent fixtures/scripts remain; no ACP/API/JSON/auth/CI changes.
+
+Focused proof: three child tests passed/0 failed/141 filtered; integration binaries had no matching tests. Test discovery compile exit0. Formatting and package quality checks are next for this cut. Whole canonical plan, final CI, independent review and draft PR remain incomplete.
