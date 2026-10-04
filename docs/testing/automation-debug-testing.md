@@ -71,7 +71,7 @@ This matrix uses the foreground CLI Host with an isolated `HOME`, `CODEX_HOME`, 
 
 ```sh
 CODEX_AUTOMATION_PROOF_ROOT="$proof_root" \
-  cargo test -p agent-collaboration --test delivery_matrix_debug_acceptance \
+  cargo test -p agent-collaboration --test push_delivery_matrix \
   prepare_delivery_matrix_provider_fixture \
   -- --ignored --exact --nocapture
 ```
@@ -93,8 +93,8 @@ matrix_rustup_home="${RUSTUP_HOME:-$HOME/.rustup}"
 env HOME="$proof_root/home" CODEX_HOME="$proof_root/codex-home" \
   CODEX_AUTOMATION_PROOF_ROOT="$proof_root" \
   CARGO_HOME="$matrix_cargo_home" RUSTUP_HOME="$matrix_rustup_home" \
-  cargo test -p agent-collaboration --test delivery_matrix_debug_acceptance \
-  delivery_matrix_reaches_codex_and_fixture_claude_peer \
+  cargo test -p agent-collaboration --test push_delivery_matrix \
+  push_delivery_matrix_covers_codex_and_claude_peer \
   -- --ignored --exact --nocapture
 ```
 
@@ -102,7 +102,7 @@ The suite exercises CLI and MCP messages, fired wakes, scheduled runs, Board Thr
 
 For a quick load-route regression check, use a separate freshly prepared matrix root and run the ignored `codex_acp_cli_create_then_prompt_load_route` test with the same environment and foreground Host. Its CLI create and prompt calls use separate ACP connections, so a missing `_meta.router.sessionRef` fails at load before the model is invoked.
 
-For the Router-hosted ACP target column, use a **different fresh root** and run `prepare_delivery_matrix_acp_target_fixture` instead of `prepare_delivery_matrix_provider_fixture`. Start the same isolated CLI Host as above, then run `delivery_matrix_reaches_scripted_acp_target` with the same private `HOME`, `CODEX_HOME`, `CODEX_AUTOMATION_PROOF_ROOT`, `CARGO_HOME`, and `RUSTUP_HOME` environment. This variant starts two scripted providers: Cursor receives the six producer inputs, while Claude requests permission from Cursor as Approver. The fixture records each actual `session/prompt` frame and requires each marker in exactly one prompt. The test verifies the approval is still pending after its notice reaches Cursor, then decides deny-once so the requester can settle. The additional busy-target cell requires an `auto` CLI send to return `queued`, then observes its one prompt after the held turn settles, matching the manual's deferred-input contract. Keep the owner settings hash sentinel and stop the foreground Host after the suite.
+For the Router-hosted ACP target column, use a **different fresh root** and run `prepare_delivery_matrix_acp_target_fixture` instead of `prepare_delivery_matrix_provider_fixture`. Start the same isolated CLI Host as above, then run `push_delivery_matrix_reaches_scripted_acp_target` from the `push_delivery_matrix` test target with the same private `HOME`, `CODEX_HOME`, `CODEX_AUTOMATION_PROOF_ROOT`, `CARGO_HOME`, and `RUSTUP_HOME` environment. This variant starts two scripted providers: Cursor receives the six producer inputs, while Claude requests permission from Cursor as Approver. The fixture records each actual `session/prompt` frame and requires each marker in exactly one prompt. The test verifies the approval is still pending after its notice reaches Cursor, then decides deny-once so the requester can settle. The additional busy-target cell requires an `auto` CLI send to return `queued`, then observes its one prompt after the held turn settles, matching the manual's deferred-input contract. Keep the owner settings hash sentinel and stop the foreground Host after the suite.
 
 The ACP column does not attest the Host's `HOME` or `CODEX_HOME`. It relies on `--require-debug-isolation` (launchctl-free), the documented launch environment, and the owner settings hash sentinel; the Host does not yet report its PID or resolved homes (product gap logged).
 

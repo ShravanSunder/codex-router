@@ -99,8 +99,11 @@ DROP TABLE latest_agent_senders;
 
 ## 4. The line (R1–R3)
 
-- **Preview, in this order:** take the first 100 scalars of the body, escape them, then append `(+N)`
-  counting the body scalars not shown.
+- **Preview:** select at most the first 100 source scalars before escaping. If fewer than the full body are
+  shown, append one `…` before the closing quote and add the exact suffix ` (+N more chars)`, where `N`
+  counts original body scalars not shown (excluding the marker). A whole body has no added marker or suffix;
+  a source ellipsis remains content. If byte-budget fitting shortens the preview further, the same marker
+  and original-source count rule applies.
 - **Budget:** assemble the line; while it is over 1024 bytes, trim the machine label, then the name, then the
   schedule name, then the preview (each to a shorter form ending in `…`). The link and the kind emoji are
   never trimmed.

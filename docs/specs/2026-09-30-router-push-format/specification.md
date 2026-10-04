@@ -48,11 +48,11 @@ runs, and the summary worker's read-only thread. Task input is delivered in full
 
 - **R1 — shape.**
   ```
-  <kind emoji> <header facts> · "<preview>"[ (+N)] · router://<machine-id>/push/<push-id>
+  <kind emoji> <header facts> · "<preview>[…]"[ (+N more chars)] · router://<machine-id>/push/<push-id>
   ```
-  - The preview is the first 100 Unicode scalar values of the body, **counted before escaping**.
-  - `(+N)` counts the body scalars not shown.
-  - A body of 100 or fewer shows whole, with no `(+N)`.
+  - The preview shows at most the first 100 Unicode scalar values of the body, **counted before escaping**.
+  - When any body scalars are omitted, append one `…` before the closing quote and use the exact suffix ` (+N more chars)`. `N` counts original body scalars not shown, excluding the added ellipsis.
+  - A body of 100 or fewer that fits shows whole, with no added ellipsis or count suffix; an ellipsis already in the body remains content.
   - Subscription kinds have **no preview** (neutral, U8).
 - **R2 — header facts** (emoji by default):
 
@@ -185,7 +185,7 @@ runs, and the summary worker's read-only thread. Task input is delivered in full
 | # | Given | When | Then |
 | --- | --- | --- | --- |
 | S1 | Main sends a Sidekick "S1 is green" | it arrives | one line: `✉️ ✳️ Main (claude-local/8d47f947) @Sunbook-Pro-M4 → you · "S1 is green" · router://…/push/…` |
-| S2 | a 1,340-char receipt | it arrives | 100 scalars, `(+1240)`, the link; `show` returns everything |
+| S2 | a 1,340-char receipt | it arrives | 100 source scalars, `…" (+1240 more chars)`, the link; `show` returns everything |
 | S3 | the recipient's terminal is closed | a DM is sent | the result says `held`; the DM arrives on resume |
 | S4 | the Sidekick got DMs from A then B | `message reply <A's id> "done"` | A receives it; `message reply "done"` with no id is rejected |
 | S5 | a subscription batch covers 2 threads, held | the owner resumes the session | one 🧵 line, 2 threads, `held since …`; one `show` returns both ranges |
