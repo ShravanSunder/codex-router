@@ -2,6 +2,7 @@
 
 use std::ffi::OsString;
 use std::io::Read;
+use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 use std::path::PathBuf;
 
@@ -34,6 +35,82 @@ impl ExecutableIdentity {
     pub fn canonical_path(&self) -> &Path {
         &self.canonical_path
     }
+}
+
+/// Captured identity of an already-observed executable, not a new file observation.
+#[derive(Clone, Eq, PartialEq)]
+pub struct RecordedExecutableIdentity {
+    recorded_path: PathBuf,
+    content_digest: [u8; 32],
+}
+
+impl std::fmt::Debug for RecordedExecutableIdentity {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RecordedExecutableIdentity")
+            .field("recorded_path", &self.recorded_path)
+            .field("content_digest", &"[REDACTED]")
+            .finish()
+    }
+}
+
+impl RecordedExecutableIdentity {
+    /// Validates captured structure without opening, canonicalizing or hashing the path.
+    pub fn new(
+        recorded_path: PathBuf,
+        content_digest: [u8; 32],
+    ) -> Result<Self, RecordedExecutableIdentityError> {
+        if !recorded_path.is_absolute() {
+            return Err(RecordedExecutableIdentityError::RelativePath);
+        }
+        let path_bytes = recorded_path.as_os_str().as_bytes();
+        if recorded_path.file_name().is_none()
+            || path_bytes.contains(&0)
+            || path_bytes
+                .split(|byte| *byte == b'/')
+                .any(|component| component == b"." || component == b"..")
+        {
+            return Err(RecordedExecutableIdentityError::InvalidPath);
+        }
+        Ok(Self {
+            recorded_path,
+            content_digest,
+        })
+    }
+
+    #[must_use]
+    pub fn recorded_path(&self) -> &Path {
+        &self.recorded_path
+    }
+
+    #[must_use]
+    pub fn content_digest(&self) -> &[u8; 32] {
+        &self.content_digest
+    }
+
+    /// Compares against an observation supplied by the caller; performs no new I/O.
+    #[must_use]
+    pub fn matches_observed(&self, observed: &ExecutableIdentity) -> bool {
+        self.recorded_path == observed.canonical_path && self.content_digest == observed.digest
+    }
+}
+
+impl From<&ExecutableIdentity> for RecordedExecutableIdentity {
+    fn from(observed: &ExecutableIdentity) -> Self {
+        Self {
+            recorded_path: observed.canonical_path.clone(),
+            content_digest: observed.digest,
+        }
+    }
+}
+
+/// Structural record failure; no filesystem operation is attempted.
+#[derive(Debug, Error)]
+pub enum RecordedExecutableIdentityError {
+    #[error("recorded executable path must be absolute")]
+    RelativePath,
+    #[error("recorded executable path must name a file without NUL or dot components")]
+    InvalidPath,
 }
 
 /// Exact official updater command for one resolved managed executable.
