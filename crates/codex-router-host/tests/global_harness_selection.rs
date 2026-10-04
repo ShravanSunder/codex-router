@@ -16,12 +16,14 @@ use collaboration_protocol::EndpointAvailability;
 use serde::Deserialize;
 use std::{
     fs,
-    os::unix::fs::PermissionsExt as _,
+    os::unix::fs::{FileTypeExt as _, PermissionsExt as _},
     path::{Path, PathBuf},
+    time::Duration,
 };
 
 const GLOBAL_VERSION: &str = "9.9.1-global-fixture";
 const BUNDLED_VERSION: &str = "0.0.1-bundled-fixture";
+const FIXTURE_OWNER: &str = "global-harness-fixture-owner";
 
 #[derive(Debug, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -59,6 +61,10 @@ struct StartupObservation {
     adapter_dispatch: Option<AdapterDispatchReceipt>,
     native_execution: Option<NativeExecutionReceipt>,
     provider_transport_exists: bool,
+    provider_transport_is_socket: bool,
+    provider_transport_connects: bool,
+    provider_transport_exists_after_shutdown: bool,
+    uses_fixture_owner: bool,
 }
 
 impl HarnessSelectionFixture {
@@ -191,7 +197,10 @@ print('{version}', flush=True)
                 native_schema: None,
                 peer_registry_directory: None,
                 remote_control_server_name: None,
-                owner_human_id: None,
+                owner_human_id: Some(
+                    message_board::HumanId::try_from(FIXTURE_OWNER.to_owned())
+                        .expect("isolated fixture owner identity"),
+                ),
             },
             vec![ExternalProviderStartup::Launch(binding)],
         )
@@ -212,15 +221,32 @@ print('{version}', flush=True)
             .expect("Claude endpoint disposition")
             .availability
             .clone();
-        let provider_transport_exists = self
+        let provider_transport_path = self
             .runtime_directory
-            .join("router-sessions/claude-local.sock")
-            .exists();
+            .join("router-sessions/claude-local.sock");
+        let provider_transport_exists = provider_transport_path.exists();
+        let provider_transport_is_socket = fs::symlink_metadata(&provider_transport_path)
+            .is_ok_and(|metadata| metadata.file_type().is_socket());
+        // Connection only: no initialize/model/actor request is sent to the facade.
+        let provider_transport_connects = if provider_transport_is_socket {
+            tokio::time::timeout(
+                Duration::from_secs(2),
+                tokio::net::UnixStream::connect(&provider_transport_path),
+            )
+            .await
+            .is_ok_and(|connection| connection.is_ok())
+        } else {
+            false
+        };
+        let fixture_owner = message_board::HumanId::try_from(FIXTURE_OWNER.to_owned())
+            .expect("isolated fixture owner identity");
+        let uses_fixture_owner = runtime.owner_human_id() == Some(&fixture_owner);
         drop(client);
         runtime
             .shutdown()
             .await
             .expect("owned runtime and adapter shutdown");
+        let provider_transport_exists_after_shutdown = provider_transport_path.exists();
         let adapter_dispatch = self.adapter_dispatch_receipt.exists().then(|| {
             serde_json::from_slice(
                 &fs::read(&self.adapter_dispatch_receipt).expect("adapter receipt"),
@@ -234,13 +260,17 @@ print('{version}', flush=True)
             .expect("typed real native execution receipt")
         });
         eprintln!(
-            "global harness process receipts: availability={availability:?}; adapter={adapter_dispatch:?}; native={native_execution:?}"
+            "global harness process receipts: availability={availability:?}; adapter={adapter_dispatch:?}; native={native_execution:?}; fixture_owner={uses_fixture_owner}; facade_exists={provider_transport_exists}; facade_is_socket={provider_transport_is_socket}; facade_connects={provider_transport_connects}; facade_exists_after_shutdown={provider_transport_exists_after_shutdown}"
         );
         StartupObservation {
             availability,
             adapter_dispatch,
             native_execution,
             provider_transport_exists,
+            provider_transport_is_socket,
+            provider_transport_connects,
+            provider_transport_exists_after_shutdown,
+            uses_fixture_owner,
         }
     }
 }
@@ -278,6 +308,22 @@ async fn default_global_claude_executes_instead_of_present_sdk_bundle() {
         observed.availability,
         EndpointAvailability::Available { .. }
     ));
+    assert!(
+        observed.uses_fixture_owner,
+        "the facade must use the isolated fixture owner rather than OS owner discovery"
+    );
+    assert!(
+        observed.provider_transport_exists,
+        "global-present fixture must publish the actual Claude facade"
+    );
+    assert!(
+        observed.provider_transport_is_socket && observed.provider_transport_connects,
+        "the published facade must be a live Unix socket at the expected provider path"
+    );
+    assert!(
+        !observed.provider_transport_exists_after_shutdown,
+        "owned shutdown must remove the published facade socket"
+    );
 }
 
 #[tokio::test]
@@ -295,19 +341,36 @@ async fn missing_global_claude_is_actionable_without_adapter_or_bundled_dispatch
     let observed = fixture.observe_startup().await;
 
     assert!(
+        observed.uses_fixture_owner,
+        "the negative case must retain the same isolated facade owner prerequisite"
+    );
+    assert!(
         observed.adapter_dispatch.is_none() && observed.native_execution.is_none(),
         "missing global Claude must stop before adapter dispatch and bundled native execution"
     );
     let EndpointAvailability::Unavailable { reason, fix, .. } = observed.availability else {
         panic!("missing global Claude must publish existing unavailable disposition")
     };
-    let reason = String::from(reason).to_lowercase();
-    let fix = String::from(fix.expect("actionable global installation guidance")).to_lowercase();
-    assert!(reason.contains("global") && reason.contains("claude"));
-    assert!(fix.contains("install") && fix.contains("claude"));
+    assert_eq!(
+        String::from(reason),
+        "global Claude executable is unavailable on the Host launch PATH",
+        "only the missing-global preflight disposition satisfies this scenario"
+    );
+    assert_eq!(
+        String::from(fix.expect("actionable global installation guidance")),
+        "install Claude Code globally, ensure claude is on the Host PATH, then restart the Host"
+    );
     assert!(
         !observed.provider_transport_exists,
         "no Claude transport was published"
+    );
+    assert!(
+        !observed.provider_transport_is_socket && !observed.provider_transport_connects,
+        "missing global Claude must not expose a socket or connectable facade"
+    );
+    assert!(
+        !observed.provider_transport_exists_after_shutdown,
+        "no facade socket may remain after the missing-global runtime shuts down"
     );
 }
 
@@ -350,4 +413,18 @@ async fn last_declared_path_binds_global_despite_duplicate_bundled_overrides() {
         native_execution.invoked_executable
     );
     assert_eq!(adapter_dispatch.version_stdout, GLOBAL_VERSION);
+    assert!(
+        observed.uses_fixture_owner,
+        "duplicate-override case must use the same isolated facade owner"
+    );
+    assert!(
+        observed.provider_transport_exists
+            && observed.provider_transport_is_socket
+            && observed.provider_transport_connects,
+        "a selected global runtime must also publish its actual provider facade"
+    );
+    assert!(
+        !observed.provider_transport_exists_after_shutdown,
+        "owned shutdown must remove the duplicate-override case's facade socket"
+    );
 }
