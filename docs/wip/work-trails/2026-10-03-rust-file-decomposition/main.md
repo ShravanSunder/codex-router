@@ -281,3 +281,11 @@ Applied the bounded decomposition recorded in `docs/wip/2026-10-04-db-write-acto
 The first compile exposed fixture privacy and copied inline imports; these were corrected with `pub(super)` fixture seams, minimal imports, and no behavior changes. Final proof: focused actor tests exit0 with28 passed/0 failed; package check exit0; all-target Clippy `-D warnings` exit0; fmt check exit0. Strict checker exits1 with3 remaining oversized files and no longer lists `db_write_actor.rs`.
 
 This slice changes no DB schema/persistence/queue/telemetry/auth behavior, CI, or production process. It is the next local checkpoint; staging and commit follow after this trace/map write. No push, merge, release, production restart, or final CI gate yet.
+
+## HTTP/SSE proxy cut applied and verified — 2026-10-04
+
+Applied the bounded HTTP/SSE decomposition recorded in `docs/wip/2026-10-04-http-sse-cut-map.md`: moved public DTO/transport types to `http_types.rs`, affinity/audit and response-id helpers to `http_affinity.rs`, and the inline tests to `tests.rs`. Parent is916 lines; children are619/283/290 lines.
+
+Initial validation found the expected cross-module private-field and service-doc seams; these were corrected with `pub(super)` fields/constructors, preserved `pub(crate)` helper exports, and parent-owned service documentation. Final proof: focused HTTP/SSE tests exit0 with4 passed/0 failed; package check exit0; all-target Clippy `-D warnings` exit0; fmt check exit0. Strict checker exits1 with2 remaining oversized files and no longer lists `http_sse.rs`.
+
+This slice changes no HTTP/SSE API/routing/credential/audit/affinity/persistence/auth behavior, CI, or production process. It is the next local checkpoint; staging and commit follow after this trace/map write. No push, merge, release, production restart, or final CI gate yet.
