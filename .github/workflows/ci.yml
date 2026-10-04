@@ -91,6 +91,8 @@ jobs:
           key: ${{ runner.os }}-${{ runner.arch }}-rust-tools-sqlx-${{ hashFiles('scripts/tooling/tool-versions.tsv', 'scripts/tooling/bootstrap-tools.sh', 'rust-toolchain.toml') }}
       - name: Lint Rust workspace
         run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Enforce Rust file size limit
+        run: python3 scripts/tooling/check-rust-file-size.py
       # Runs after clippy so it reuses the checked dependencies instead of
       # racing clippy for the same target directory.
       - name: Check SQLx query metadata against native migrations

@@ -305,3 +305,9 @@ Applied the bounded same-module decomposition recorded in `docs/wip/2026-10-04-s
 The first compile caught error-enum derives left at a chunk boundary; those derives/doc comments were moved with their enums. Final proof: server test subtree exit0 with24 passed/0 failed; package check exit0; all-target Clippy `-D warnings` exit0; fmt exit0; strict checker exit0 across1706 files.
 
 This slice changes no server API/HTTP/WebSocket/persistence/auth behavior, CI, or production process. The Rust decomposition source inventory is now zero violations; checker CI integration and final workspace/review/PR gates remain. This is the next local checkpoint; staging and commit follow after this trace/map write. No push, merge, release, or production restart yet.
+
+## Strict checker CI integration applied — 2026-10-04
+
+Added `python3 scripts/tooling/check-rust-file-size.py` as an explicit step in the existing `lint` job of `.github/workflows/ci.yml`, after workspace Clippy and before SQLx metadata validation. The checker currently exits0 against all1706 Rust files. No warning mode, exclusions, grandfather list, Cargo, SQLx, or production changes were introduced.
+
+This is the final source/CI integration checkpoint before whole-work repository gates, independent review, and draft PR packaging. No push, merge, release, or production restart yet.
