@@ -193,3 +193,11 @@ Applied the bounded integration-test split recorded in `docs/wip/2026-10-04-prov
 Proof: `cargo test -p agent-collaboration --test provider_conversation_cli` exit0 with11 passed/0 failed/1 ignored (the pre-existing authenticated Cursor test); package check exit0; all-target Clippy `-D warnings` exit0; fmt check exit0. Strict checker exits1 with14 remaining oversized files and no longer lists `provider_conversation_cli.rs`.
 
 This slice changes no provider CLI/operation identity/fixture transport semantics, persistence, auth/security, CI, or production behavior. It is the next local checkpoint; staging and commit follow after this trace/map write. No push, merge, release, production restart, or final CI gate yet.
+
+## Provider ACP failure test cut applied and verified — 2026-10-04
+
+Applied the bounded integration-test split recorded in `docs/wip/2026-10-04-provider-acp-failure-cut-map.md`: moved the final provider-process transport and live-peer recheck tests into private `provider_failure_tests.rs`; the parent retains shared route fixtures and the first six delivery scenarios. Parent is967 lines and child158 lines. Prefix comparison through old line965 and child-tail comparison through old line1121 are exact, with only the child `use super::*` import added.
+
+Proof: `cargo test -p codex-router-host --test provider_acp_delivery_route` exit0 with8 passed/0 failed; package check exit0; all-target Clippy `-D warnings` exit0; fmt exit0. Strict checker exits1 with13 remaining oversized files and no longer lists `provider_acp_delivery_route.rs`.
+
+This slice changes no provider ACP route/delivery effect/operation-store semantics, subprocess fixtures, persistence, auth/security, CI, or production behavior. It is the next local checkpoint; staging and commit follow after this trace/map write. No push, merge, release, production restart, or final CI gate yet.
