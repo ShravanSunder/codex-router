@@ -289,3 +289,11 @@ Applied the bounded HTTP/SSE decomposition recorded in `docs/wip/2026-10-04-http
 Initial validation found the expected cross-module private-field and service-doc seams; these were corrected with `pub(super)` fields/constructors, preserved `pub(crate)` helper exports, and parent-owned service documentation. Final proof: focused HTTP/SSE tests exit0 with4 passed/0 failed; package check exit0; all-target Clippy `-D warnings` exit0; fmt check exit0. Strict checker exits1 with2 remaining oversized files and no longer lists `http_sse.rs`.
 
 This slice changes no HTTP/SSE API/routing/credential/audit/affinity/persistence/auth behavior, CI, or production process. It is the next local checkpoint; staging and commit follow after this trace/map write. No push, merge, release, production restart, or final CI gate yet.
+
+## Installed Codex smoke harness cut applied and verified — 2026-10-04
+
+Applied the bounded same-module responsibility decomposition recorded in `docs/wip/2026-10-04-installed-codex-cut-map.md`: split the 7385-line harness into thirteen named smoke/runtime/transcript/network/test chunks, retaining existing retry and floor-switch children. Parent is114 lines; every new chunk is below 1000 lines.
+
+The first include pass exposed item-attribute boundaries (derive/doc/allow annotations); those attributes were moved with their items without changing code. Final proof: test-support lib tests exit0 with19 passed/0 failed/15 ignored; package check exit0; all-target Clippy `-D warnings` exit0; fmt check exit0. Strict checker exits1 with1 remaining oversized file (`server.rs`).
+
+This slice changes no smoke protocol/artifact/subprocess/auth/token/persistence/network behavior, CI, or production process. It is the next local checkpoint; staging and commit follow after this trace/map write. No push, merge, release, production restart, or final CI gate yet.
