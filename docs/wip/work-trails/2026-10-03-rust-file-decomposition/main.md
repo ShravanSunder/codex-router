@@ -57,3 +57,33 @@ Created local SSH-signed checkpoints `958bf6c5` (existing checker/tests) and `0d
 The requested supported Router reply was rejected as not submitted: requester thread was not found or never started, with a non-retryable receipt. No duplicate thread, identity change, resend, wake, production restart or alternate communication route was attempted. The final user-facing report carries the substantive status until the original requester's continuity is restored. Exact local receipt context remains outside public docs.
 
 Remaining continuation holds: owner release of this task's feature-plan hold, worktree-specific baseline/compile proof and whole executable-plan admission; the active MCP test-owner reservation requires its per-owner handoff. Reported environment recovery elsewhere is not proof here. Local SSH signature trust verification remains unavailable because the allowed-signers file is not configured; signatures are present and no security settings were changed.
+
+## Baseline and exact cut planning — 2026-10-04
+
+The owner-authorized bounded baseline completed after the refreshed environment: `env -u CC -u CXX -u LDFLAGS -u CPPFLAGS PATH=/opt/homebrew/opt/rustup/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin RUSTUP_AUTO_INSTALL=0 cargo check -p codex-router-state --locked` exited0 and finished the dev profile in0.37s. This is current dependency/compiler readiness evidence for the package only; no Rust source change or full workspace proof.
+
+Fixes Lead released the temporary reservation for `crates/collaboration-mcp/src/mcp_server/tests.rs`; it remains untouched. All28 pure-reorganization clearances remain.
+
+Authored exact first-cut map at `docs/wip/2026-10-04-maintenance-actor-cut-map.md`. Proposed write set is only the existing `crates/codex-router-proxy/src/maintenance_actor.rs` declaration/source-guard path plus new private `maintenance_actor/maintenance_behavior_tests.rs`. Parent production lines1–539 and test-only `MaintenanceCompletion` lines69–87 remain; old inline tests lines544–1079 move as complete items; all12 test names/attributes/fixtures/helpers preserved. `server.rs` and proxy test callers retain parent completion type. No implementation applied.
+
+Planning decision: this is the smallest coherent mechanics-only cut now that baseline package compilation is available. Stop conditions are public path/visibility changes, fixture/assertion behavior changes, MCP test-owner collision, or any required mechanism beyond module placement/source-guard relative path. Next execution step, only when proceeding, is red/green list and focused test around this map, then formatting/Clippy/package proof; final CI remains last.
+
+Checkpoint commit `maintenance actor cut map` is staged but not committed: signed `git commit -m 'Map maintenance actor test extraction'` produced no output for ~15 seconds and was interrupted with exit130. No unsigned fallback or signing configuration change was attempted. Exact staged paths remain only the cut map and trace; current blocker is signing availability/Touch ID completion, not source planning.
+
+## Maintenance actor cut applied and verified — 2026-10-04
+
+Applied the exact map in `docs/wip/2026-10-04-maintenance-actor-cut-map.md`. Production parent prefix lines1–539 remained byte-identical; child `crates/codex-router-proxy/src/maintenance_actor/maintenance_behavior_tests.rs` now owns the 12 existing tests/helpers. Parent is543 lines; child532 formatted lines. Only source guard path changed to `include_str!("../maintenance_actor.rs")`; `MaintenanceCompletion` stayed parent-owned for server/proxy test callers. MCP test owner remains untouched and its fixes reservation is released.
+
+Final focused validation: `cargo test -p codex-router-proxy maintenance_actor:: -- --list` exit0, all12 discovered; `cargo test -p codex-router-proxy maintenance_actor::` exit0,12 passed/0 failed/476 filtered/0.06s. `cargo fmt --all -- --check` exit0; `cargo check -p codex-router-proxy --locked` exit0/0.26s; `cargo clippy -p codex-router-proxy --all-targets --locked -- -D warnings` exit0/0.23s. Formatted body comparison exit0 proved moved child equals original inline test body except source-guard path. Size checker exit1 with27 remaining oversized files; maintenance actor removed from violations.
+
+No CI/Cargo/SQLx/migration/public API/security/production edits. Whole refactor/final gate/review/PR remain incomplete. The current docs/cut map and source changes are staged with prior uncommitted planning docs; signed commit remains blocked by prior signer hang (no unsigned fallback).
+
+Signed commit attempt for the applied maintenance cut produced no output for about six seconds and was interrupted with exit130. This is the second signing attempt to block/hang; no unsigned fallback, signing config change or trust bypass was used. The exact four-file cut/validation checkpoint remains staged but uncommitted.
+
+## Blocker classification and A-class correction — 2026-10-04
+
+Applied owner classification: **A** stale artifact claim, corrected now; **B** no unresolved architecture/design decision surfaced for the applied mechanics-only cut; **C** no security/auth decision involved; **D** deliberate hold remains on whole-goal canonical admission/final CI/remaining27 Rust files and on signing bypass.
+
+A-class correction: `docs/wip/2026-10-04-maintenance-actor-cut-map.md` opening now distinguishes pre-cut1080 lines from applied parent543 lines, matching its applied-result section. No source behavior changed. Re-run document link/privacy/whitespace checks before any checkpoint attempt.
+
+Signing remains a recoverable workflow blocker but cannot be bypassed: owner boundary forbids unsigned fallback and signing configuration changes. No new commit attempt in this correction.
