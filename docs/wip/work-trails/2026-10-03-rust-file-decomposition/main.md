@@ -121,3 +121,11 @@ Applied third continuing mechanics cut from `docs/wip/2026-10-04-quota-refresh-c
 Validation: fmt exit0; exact freshness test with required `keychain-test-support` exit0/1 passed; `cargo check -p codex-router-cli --locked` exit0/16.04s; all-target Clippy with feature exit0/29.88s. Initial focused invocation without the required feature failed at the repository's existing compiled CLI acceptance guard; no source issue, corrected by established CI feature. Size checker exit1 with23 remaining oversized files; quota service removed.
 
 No public API/quota persistence/error/concurrency/auth/CI changes. Slice is not yet checkpoint-committed; next action is exact preservation review, stage and local checkpoint. Whole PR/review/CI still incomplete.
+
+## Quota HTTP Claude test cut applied and verified — 2026-10-04
+
+Applied next test-only cut from `docs/wip/2026-10-04-quota-http-claude-cut-map.md`: moved the Claude recovery provider/double and idle-account test into private `quota_http_claude_tests.rs`; parent is991 lines/child260 lines.
+
+Proof: compiled discovery corrected the module path; final focused command with required `keychain-test-support` passed2/0 failed/420 filtered. Package check exit0/1.70s, all-target Clippy with feature exit0/5.69s, fmt exit0. Size checker exit1 with22 remaining oversized files; quota_http_tests removed. No API/HTTP/schema/auth/SQLx/CI/production changes.
+
+This slice remains uncommitted pending staging/checkpoint; whole PR/review/CI incomplete.
