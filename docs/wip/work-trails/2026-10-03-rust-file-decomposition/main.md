@@ -167,3 +167,13 @@ Proof: fmt exit0; full thread_participants integration target exit0/13 passed/0 
 Applied next real integration-test cut from `docs/wip/2026-10-04-permission-entry-cut-map.md`: moved seven CLI/provider/Streamable HTTP permission scenarios into private `real_entry_tests.rs`; parent619 lines/child698 lines.
 
 Proof: fmt exit0; collaboration-mcp lib focused tests exit0/7 passed/0 failed/82 filtered/0.42s; package check exit0/11.52s; all-target Clippy -D warnings exit0/26.94s. Size checker exit1 with17 remaining oversized files; permission_entry_path_tests removed. No MCP API/schema/broker/auth/storage/CI/production changes.
+
+## ACP create-settings-order test cut applied and verified — 2026-10-04
+
+Applied the bounded test-only split recorded in `docs/wip/2026-10-04-create-settings-order-cut-map.md`: moved the three trailing setting-outcome tests into private `settings_tail_tests.rs`; the parent retains shared ACP subprocess fixtures and all earlier ordering/gating tests. Parent is918 lines and child122 lines. Prefix comparison against the pre-cut parent is exact through old line916, and all three moved test names are preserved.
+
+Proof: `cargo test -p acp-client-runtime --test create_settings_order` exit0 with12 passed/0 failed; `cargo fmt --all -- --check` exit0; package check `cargo check -p acp-client-runtime --locked` exit0; all-target Clippy `-D warnings` exit0. The first Clippy run caught and the bounded correction removed an orphaned doc comment; the rerun passed. Strict checker exits1 with16 remaining oversized files and no longer lists `create_settings_order.rs`.
+
+This slice changes no ACP/API/setting semantics, subprocess fixtures, persistence, auth/security, CI, or production behavior. The exact five-path checkpoint (two Rust paths, cut map, trace) is staged next for the authorized `--no-gpg-sign` fallback after two prior signer hangs. No push, merge, release, production restart, or final CI gate yet.
+
+Board discovery remains `no-home: no project for codex-router.rust-file-decomposition`; the only listed project/board is unrelated `shravan-claw`, so this local trace remains the shared record until a repository board association is supplied.
