@@ -141,3 +141,11 @@ Proof: fmt exit0; 9 selector tests passed/0 failed/155 filtered; state check exi
 Applied next test-only cut from `docs/wip/2026-10-04-credential-renewal-cut-map.md`: moved four renewal/retry scenarios plus `RejectingRefreshClient` into private `renewal_retry_tests.rs`; parent is933 lines/child421 lines.
 
 Proof: four renewal tests passed/0 failed/75 filtered/1.10s; auth check exit0/4.45s; auth all-target Clippy -D warnings exit0/4.90s; fmt exit0; source-prefix/test-name preservation passed. Size checker exit1 with20 remaining oversized files; auth outcome test removed. No credential schema/storage/auth/network/security/CI changes.
+
+## Whole-work mechanics plan admitted — 2026-10-04
+
+Owner delivery criterion authorizes this lane toward its own draft PR; stop-review continuation explicitly authorizes remaining pure mechanics. Created current mechanics-only plan (ignored working artifact) at `tmp/plan-workflows/2026-10-04-rust-file-decomposition.md`, planned-at HEAD `32b969b1`, terminal draft PR unmerged, one-pr topology. No product obligation/contract/state/failure/security/proof seam is invented; exact source maps and existing gates govern.
+
+Current committed slices: maintenance actor `96f57779`; control connection `df21ac52`; supervisor failure projection `db75738a`; approval permission outcomes `01aa1bae`; quota helper `936772fc`; quota HTTP Claude `dbffedf1`; selector projection `bd3bd4d5`; credential renewal retry `32b969b1`; checker `958bf6c5`. Working tree clean before this trace update. Size checker reports20 remaining oversized files.
+
+Required whole gates in plan: checker exit0, all-target workspace Clippy -D warnings with keychain feature, nextest workspace/quota harness, SQLx metadata, deny/audit, CLI builds/install, focused slice proofs, source/test inventory, independent review, then own draft PR CI/head verification. CI remains unedited; final integration last. No merge/release/production restart.
