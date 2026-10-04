@@ -79,10 +79,8 @@ CODEX_AUTOMATION_PROOF_ROOT="$proof_root" \
 Start the Host in a separate foreground terminal after setup:
 
 ```sh
-env HOME="$proof_root/home" CODEX_HOME="$proof_root/codex-home" \
-  CODEX_ROUTER_DEBUG_APP_SERVER_SOCKET="$proof_root/native-socket/app-server.sock" \
-  ./target/debug/codex-router host --router-root "$proof_root" \
-  --port 43127 --mcp-bind 127.0.0.1:43128 --require-debug-isolation
+CODEX_AUTOMATION_PROOF_ROOT="$proof_root" \
+  "$proof_root/foreground-host-launcher.py" "$PWD/target/debug/codex-router"
 ```
 
 Require `codex-router host status --router-root "$proof_root" --port 43127 --require-debug-isolation` to report router and app-server ready, and confirm `cursor-local` advertises the scripted fixture. If the isolated home or private Router lacks model access, report that state without copying account data or switching to the owner Codex home.
@@ -111,6 +109,68 @@ A Codex thread active in another app-server or desktop client remains a separate
 The materialized existing Codex target is a pending matrix cell in this isolated run: the private Codex home has no model authentication to finish an initial turn and return the thread to idle. A default-run fake app-server integration test covers its declared cwd and scheduled turn/start. Recipient-observed live proof remains for the post-release real-session run.
 
 After the owner replaces production with a release containing this suite's fixes, repeat one documented pass against real sessions: read the Codex recipient's exact input through `thread/read`, and obtain an explicit receipt confirmation from the Claude Code recipient. Keep that live result separate from the isolated fixture matrix.
+
+### Prove owned native app-server restart without a model
+
+This restart-only scenario verifies the foreground CLI PID and argv, private
+fixture root, and resolved native socket, then calls host app-server restart.
+It makes no model request and needs no model account. The app-server generation
+must change while the foreground CLI PID and argv and Router control service
+identity remain. Do not use the separate model-auth root for this fixture.
+
+Build the real CLI and matrix target:
+
+    PATH=/opt/homebrew/opt/rustup/bin:$PATH env -u CC -u CXX -u LDFLAGS -u CPPFLAGS \
+      cargo build -p codex-router-cli --bin codex-router
+    PATH=/opt/homebrew/opt/rustup/bin:$PATH env -u CC -u CXX -u LDFLAGS -u CPPFLAGS \
+      cargo test -p agent-collaboration --test push_delivery_matrix --no-run
+
+Prepare one fresh, short root under /tmp after confirming port 43127 is free:
+
+    proof_root=/tmp/u6rs-my-check
+    PATH=/opt/homebrew/opt/rustup/bin:$PATH env -u CC -u CXX -u LDFLAGS -u CPPFLAGS \
+      CODEX_AUTOMATION_PROOF_ROOT="$proof_root" \
+      cargo test -p agent-collaboration --test push_delivery_matrix \
+      prepare_foreground_cli_restart_fixture -- --ignored --exact --nocapture
+
+Launch the generated real-CLI wrapper in a foreground terminal:
+
+    CODEX_AUTOMATION_PROOF_ROOT="$proof_root" \
+      "$proof_root/foreground-host-launcher.py" "$PWD/target/debug/codex-router"
+
+Wait for router and app-server readiness with codex-router host status using
+that exact root and port. In another terminal, run the no-model child-restart
+scenario with the same fixture environment and the explicit host grant if the
+sandbox denies its private sockets:
+
+    PATH=/opt/homebrew/opt/rustup/bin:$PATH env -u CC -u CXX -u LDFLAGS -u CPPFLAGS \
+      HOME="$proof_root/home" CODEX_HOME="$proof_root/codex-home" \
+      CODEX_AUTOMATION_PROOF_ROOT="$proof_root" \
+      CARGO_HOME="$HOME/.cargo" RUSTUP_HOME="$HOME/.rustup" \
+      cargo test -p agent-collaboration --test push_delivery_matrix \
+      foreground_cli_app_server_restart_preserves_host_and_control_service \
+      -- --ignored --exact --nocapture
+
+The test requires the private marker, native rendezvous alias, foreground PID
+and exact CLI argv to match the isolated fixture. It verifies the owner-private
+alias resolves to the nonsymlink Unix socket named by SHA-256 of the canonical
+requested socket path bytes in Codex's effective-UID daemon directory under
+canonical `/tmp`; the daemon directory and target socket must have the expected
+owner and private modes. This follows Codex's upstream rendezvous mapping while
+keeping the actual operator and Control sockets inside the fixture root. A
+wrong alias target or hash, unsafe daemon parent, foreign PID, or mismatched
+argv is rejected before operator dispatch. The test does not mutate or scan the
+shared daemon directory. Once those checks pass, it invokes only host
+app-server restart with the verified root and port. It then checks that native
+generation changed, the old ControlClient still lists the same service, and
+the same foreground CLI process remains. Run the separate guard-negative tests
+with:
+
+    PATH=/opt/homebrew/opt/rustup/bin:$PATH env -u CC -u CXX -u LDFLAGS -u CPPFLAGS \
+      cargo test -p agent-collaboration --test push_delivery_matrix \
+      debug_backend_restart::tests:: -- --nocapture
+
+Stop only that owned launcher/CLI with Ctrl-C and retain its private artifacts.
 
 ### Restart the Host for board persistence proof
 

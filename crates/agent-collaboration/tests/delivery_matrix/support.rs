@@ -16,6 +16,8 @@ const PEER_TOKEN: &str = "0123456789abcdef0123456789abcdef";
 enum ProviderFixtureMode {
     CodexAndPeerRecipients,
     AcpTarget,
+    #[allow(dead_code)]
+    RestartOnly,
 }
 
 pub(super) fn prepare_provider_fixture() -> ProofResult<()> {
@@ -24,6 +26,11 @@ pub(super) fn prepare_provider_fixture() -> ProofResult<()> {
 
 pub(super) fn prepare_acp_target_fixture() -> ProofResult<()> {
     prepare_fixture(ProviderFixtureMode::AcpTarget)
+}
+
+#[allow(dead_code)]
+pub(super) fn prepare_foreground_cli_restart_fixture() -> ProofResult<()> {
+    prepare_fixture(ProviderFixtureMode::RestartOnly)
 }
 
 fn prepare_fixture(mode: ProviderFixtureMode) -> ProofResult<()> {
@@ -74,9 +81,16 @@ fn prepare_fixture(mode: ProviderFixtureMode) -> ProofResult<()> {
             "model":"gpt-5.6-luna",
             "port":43127,
             "ownerHome":owner_home,
+            "cliExecutable":foreground_cli_executable()?.canonicalize()?,
         }))?
         .as_bytes(),
     )?;
+    let launcher_path = root.join("foreground-host-launcher.py");
+    write_private_file(
+        &launcher_path,
+        include_bytes!("foreground_host_launcher.py"),
+    )?;
+    std::fs::set_permissions(&launcher_path, std::fs::Permissions::from_mode(0o700))?;
     let script = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .ok_or("crate parent missing")?
@@ -102,7 +116,12 @@ fn prepare_fixture(mode: ProviderFixtureMode) -> ProofResult<()> {
             json!({"action":"respond","requestName":prompt_name,"result":{"stopReason":"end_turn"}}),
         ]);
     }
-    let config = if matches!(mode, ProviderFixtureMode::AcpTarget) {
+    let config = if matches!(mode, ProviderFixtureMode::RestartOnly) {
+        json!({"version":1,"providers":{
+            "claude":{"enabled":false,"executable":null,"arguments":[]},
+            "cursor":{"enabled":false,"executable":null,"arguments":[]}
+        }})
+    } else if matches!(mode, ProviderFixtureMode::AcpTarget) {
         let receipt_path = root.join("provider-prompt-receipts.jsonl");
         let gate_path = root.join("busy-prompt-gate.sock");
         let mut target_steps = vec![
@@ -147,6 +166,17 @@ fn prepare_fixture(mode: ProviderFixtureMode) -> ProofResult<()> {
         format!("{}\n", serde_json::to_string_pretty(&config)?).as_bytes(),
     )?;
     Ok(())
+}
+
+fn foreground_cli_executable() -> ProofResult<PathBuf> {
+    let test_binary = PathBuf::from(env!("CARGO_BIN_EXE_agent-collaboration"));
+    let cli_binary = test_binary.with_file_name("codex-router");
+    if !cli_binary.is_file() {
+        return Err(
+            "Build target/debug/codex-router before preparing the foreground CLI fixture".into(),
+        );
+    }
+    Ok(cli_binary)
 }
 
 fn write_private_file(path: &Path, bytes: &[u8]) -> ProofResult<()> {

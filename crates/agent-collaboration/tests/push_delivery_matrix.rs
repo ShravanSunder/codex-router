@@ -71,6 +71,62 @@ fn prepare_delivery_matrix_acp_target_fixture() -> ProofResult<()> {
     delivery_matrix_support::prepare_acp_target_fixture()
 }
 
+#[test]
+#[ignore = "creates a fresh isolated foreground CLI Host fixture without model accounts"]
+fn prepare_foreground_cli_restart_fixture() -> ProofResult<()> {
+    delivery_matrix_support::prepare_foreground_cli_restart_fixture()
+}
+
+#[tokio::test]
+#[ignore = "requires the documented isolated foreground CLI Host; does not call a model"]
+async fn foreground_cli_app_server_restart_preserves_host_and_control_service() -> ProofResult<()> {
+    let config_guard = delivery_matrix_support::ConfigHashGuard::capture()?;
+    let mut proof = ProofContext::connect().await?;
+    let previous_generation = proof.generation.clone();
+    let service_id = proof.client.identity().service_id.clone();
+    let result: ProofResult<()> = async {
+        debug_backend_restart::restart(&mut proof).await?;
+        if proof.generation == previous_generation {
+            return Err("app-server restart did not publish a new native generation".into());
+        }
+        let inventory = proof.client.list_endpoints().await?;
+        if proof.client.identity().service_id != service_id
+            || !inventory.endpoints.iter().any(|endpoint| {
+                endpoint.endpoint == proof.endpoint
+                    && endpoint.endpoint.service_id == service_id
+                    && endpoint.channels.iter().any(|channel| {
+                        matches!(
+                            channel,
+                            collaboration_client::protocol::ChannelDescription::NativeCodex {
+                                generation: Some(generation),
+                                ..
+                            } if generation == &proof.generation
+                        )
+                    })
+            })
+        {
+            return Err(
+                "Host control service identity did not remain ready after app-server restart"
+                    .into(),
+            );
+        }
+        proof.record(
+            "foregroundCliRestartScenarioPassed",
+            json!({
+                "kind":"nativeAppServerOnly",
+                "serviceId":service_id,
+                "generationBefore":previous_generation,
+                "generationAfter":proof.generation,
+            }),
+        )?;
+        Ok(())
+    }
+    .await;
+    config_guard.verify()?;
+    proof.client.close().await?;
+    result
+}
+
 #[tokio::test]
 #[ignore = "requires an isolated debug Host with the delivery-matrix provider fixture"]
 async fn push_delivery_matrix_covers_codex_and_claude_peer() -> ProofResult<()> {
