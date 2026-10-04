@@ -217,3 +217,11 @@ Applied the bounded split recorded in `docs/wip/2026-10-04-external-provider-sup
 Proof: `cargo test -p codex-router-host --test external_provider_supervisor` exit0 with12 passed/0 failed; package check exit0; all-target Clippy `-D warnings` exit0; fmt check exit0. Strict checker exits1 with11 remaining oversized files and no longer lists `external_provider_supervisor.rs`.
 
 This slice changes no external-provider operation/effect/reconciliation semantics, subprocess fixtures, persistence, auth behavior, CI, or production behavior. It is the next local checkpoint; staging and commit follow after this trace/map write. No push, merge, release, production restart, or final CI gate yet.
+
+## External provider runtime test cut applied and verified — 2026-10-04
+
+Applied the bounded test-module split recorded in `docs/wip/2026-10-04-external-provider-runtime-test-cut-map.md`: moved admission/lifecycle tests into `admission_lifecycle_tests.rs` and MCP/shutdown/cancellation/output tests into `mcp_shutdown_tests.rs`; the parent retains shared fixtures and early classification/session tests. Parent is589 lines and children571/566 lines. Prefix and MCP child comparisons are exact; the admission child only drops the pre-cut terminal blank line under formatting.
+
+Proof: `cargo test -p codex-router-host external_provider_runtime::tests:: --lib` exit0 with35 passed/0 failed/2 ignored; package check exit0; all-target Clippy `-D warnings` exit0; fmt check exit0. Strict checker exits1 with10 remaining oversized files and no longer lists `external_provider_runtime/tests.rs`.
+
+This slice changes no external-provider runtime/API/ACP/subprocess semantics, persistence, auth behavior, CI, or production behavior. It is the next local checkpoint; staging and commit follow after this trace/map write. No push, merge, release, production restart, or final CI gate yet.
