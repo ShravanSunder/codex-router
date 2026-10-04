@@ -91,3 +91,11 @@ Signing remains a recoverable workflow blocker but cannot be bypassed: owner bou
 ## A-class signing recovery resolved
 
 Per liaison correction, repo-local instructions permitted `git commit --no-gpg-sign` after two blocked signer attempts and no stricter repository prohibition exists. Committed the staged validated cut as `96f57779` using that scoped fallback; hooks remained enabled, no trust/config/auth change, push or merge. Working tree was clean immediately after commit. The prior signing blocker is resolved as an authorized workflow fallback; whole-goal hold and remaining27-file plan/CI/review work remain unchanged.
+
+## Control connection cut applied and verified — 2026-10-04
+
+Applied second bounded slice from `docs/wip/2026-10-04-control-connection-cut-map.md`: moved the three inline admission tests into private `crates/collaboration-service/src/control_connection/admission_error_tests.rs`; kept `wake_creation_crash_tests.rs` and production handler unchanged. Production prefix byte-identical; parent902 lines/child129 formatted lines.
+
+Final validation: `cargo fmt --all -- --check` exit0; test list exit0/3 discovered; focused `cargo test -p collaboration-service control_connection::admission_error_tests::` exit0/3 passed/0 failed/214 filtered (integration binaries had no matching tests); `cargo check -p collaboration-service --locked` exit0/5.04s; package Clippy all-targets -D warnings exit0/11.62s. Size checker exit1 with26 remaining oversized files; control_connection removed.
+
+No API/Control JSON/schema/dispatch/wake/SQLx/migration/CI/production changes. This slice is uncommitted; next signed local checkpoint may use authorized unsigned fallback only after blocked signer attempts. Whole refactor/canonical plan/review/PR remains incomplete.
