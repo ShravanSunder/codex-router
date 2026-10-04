@@ -23,7 +23,7 @@ use automation_storage::AutomationStore;
 use chrono::{Duration as ChronoDuration, Utc};
 use collaboration_protocol::{
     FireReceipt, PushHeaderFacts, PushId, PushKind, PushOrigin, PushRecordDraft,
-    PushRecordListParams, PushRecordShowParams, RouterOriginRef, SessionRef,
+    PushRecordListParams, PushRecordShowParams, RouterOriginRef,
 };
 #[path = "delivery_matrix/push_matrix_driver.rs"]
 mod push_matrix_driver;
@@ -55,31 +55,6 @@ fn assert_long_preview_literal(observed: &str, body: &str) -> ProofResult<()> {
             "observed output omitted the source-derived preview literal {expected_preview:?}: {observed:?}"
         )
         .into());
-    }
-    Ok(())
-}
-
-async fn assert_inbox_notice_has_literal_long_preview(
-    proof: &mut ProofContext,
-    recipient: &SessionRef,
-    push_id: &str,
-    body: &str,
-) -> ProofResult<()> {
-    let inbox = proof
-        .client
-        .message_inbox(PushRecordListParams {
-            caller: recipient.clone(),
-            limit: 100,
-        })
-        .await?;
-    let notice = inbox
-        .records
-        .iter()
-        .find(|notice| notice.push_id.as_str() == push_id)
-        .ok_or_else(|| format!("push {push_id} missing from recipient inbox"))?;
-    assert_long_preview_literal(&notice.line, body)?;
-    if !notice.line.ends_with(&notice.link) {
-        return Err("recipient inbox notice did not retain its complete link".into());
     }
     Ok(())
 }
@@ -129,8 +104,8 @@ async fn exercise_push_delivery_matrix(
     assert_eq!(s1_body.chars().count(), 1_340);
     let s1_receipt = cli_send(&proof, Some(&sender), &codex_recipient, &s1_body, false).await?;
     let s1_push_id = receipt_push_id(&s1_receipt)?;
-    let (s1_show, s1_expected) =
-        dm_notice_and_show(&mut proof, &codex_recipient, &s1_push_id).await?;
+    let (s1_show, s1_notice) =
+        dm_history_notice_and_show(&mut proof, &sender, &codex_recipient, &s1_push_id).await?;
     let s1_item = wait_for_codex_input(
         &mut proof,
         &codex_recipient,
@@ -139,15 +114,9 @@ async fn exercise_push_delivery_matrix(
     )
     .await?;
     let s1_observed = user_message_text(&s1_item)?;
-    assert_exact_notice_line(&s1_observed, &s1_expected)?;
+    assert_exact_notice_line(&s1_observed, &s1_notice)?;
+    assert_long_preview_literal(&s1_notice, &s1_body)?;
     assert_long_preview_literal(&s1_observed, &s1_body)?;
-    assert_inbox_notice_has_literal_long_preview(
-        &mut proof,
-        &codex_recipient,
-        &s1_push_id,
-        &s1_body,
-    )
-    .await?;
     let s1_fetched = cli_show(&proof, &codex_recipient, &s1_show.link).await?;
     assert_eq!(
         s1_fetched.pointer("/result/record/body"),
@@ -166,14 +135,13 @@ async fn exercise_push_delivery_matrix(
     assert_eq!(s2_body.chars().count(), 1_340);
     let s2_receipt = cli_send(&proof, Some(&sender), &peer.target, &s2_body, false).await?;
     let s2_push_id = receipt_push_id(&s2_receipt)?;
-    let (s2_show, s2_expected) = dm_notice_and_show(&mut proof, &peer.target, &s2_push_id).await?;
+    let (s2_show, s2_notice) = dm_notice_and_show(&mut proof, &peer.target, &s2_push_id).await?;
     let s2_observed = peer
         .expect_text_with_timeout(&s2_prefix, OBSERVATION_TIMEOUT)
         .await?;
-    assert_exact_notice_line(&s2_observed, &s2_expected)?;
+    assert_exact_notice_line(&s2_observed, &s2_notice)?;
+    assert_long_preview_literal(&s2_notice, &s2_body)?;
     assert_long_preview_literal(&s2_observed, &s2_body)?;
-    assert_inbox_notice_has_literal_long_preview(&mut proof, &peer.target, &s2_push_id, &s2_body)
-        .await?;
     let s2_fetched = cli_show(&proof, &peer.target, &s2_show.link).await?;
     assert_eq!(
         s2_fetched.pointer("/result/record/body"),
