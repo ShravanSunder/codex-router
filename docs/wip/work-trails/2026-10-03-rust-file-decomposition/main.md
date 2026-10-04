@@ -185,3 +185,11 @@ Applied the bounded integration-test split recorded in `docs/wip/2026-10-04-conv
 Proof: `cargo test -p agent-collaboration --test conversation_fault_entry_paths` exit0 with9 passed/0 failed; package check exit0; all-target Clippy `-D warnings` exit0; fmt exit0. Strict checker exits1 with15 remaining oversized files and no longer lists `conversation_fault_entry_paths.rs`.
 
 This slice changes no CLI/SessionRef/ACP/control semantics, persistence, auth/security, CI, or production behavior. It is the next local checkpoint; staging and commit follow after this trace/map write. No push, merge, release, production restart, or final CI gate yet.
+
+## Provider conversation common-operation test cut applied and verified — 2026-10-04
+
+Applied the bounded integration-test split recorded in `docs/wip/2026-10-04-provider-conversation-common-cut-map.md`: moved the first six provider common-operation tests into private `common_operation_tests.rs`; the parent retains shared constants/helpers and the remaining Codex/provider/unavailable/ignored-Cursor scenarios. Parent is857 lines and child465 lines. Source comparison against the pre-cut file is exact apart from module wiring and formatter removal of the old terminal blank line.
+
+Proof: `cargo test -p agent-collaboration --test provider_conversation_cli` exit0 with11 passed/0 failed/1 ignored (the pre-existing authenticated Cursor test); package check exit0; all-target Clippy `-D warnings` exit0; fmt check exit0. Strict checker exits1 with14 remaining oversized files and no longer lists `provider_conversation_cli.rs`.
+
+This slice changes no provider CLI/operation identity/fixture transport semantics, persistence, auth/security, CI, or production behavior. It is the next local checkpoint; staging and commit follow after this trace/map write. No push, merge, release, production restart, or final CI gate yet.
