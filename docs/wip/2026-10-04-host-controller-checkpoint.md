@@ -4,6 +4,9 @@ This checkpoint records the existing host-controller design work on
 `host-controller-impl`. Implementation admission remains held. It does not authorize
 implementation, a push, merge, release or production process replacement.
 
+The later independent foundation frontier is recorded below; the initial
+checkpoint boundary in this document is historical.
+
 ## Deliverables and source of truth
 
 | Artifact | Role |
@@ -129,3 +132,27 @@ traces remain unstaged, including the implementation contributor's untouched
 trace. The old plan remains historical, the ProviderLink revision still needs
 its RSP contract check, and the lifetime decision remains pending. No push,
 merge, product implementation, runtime or production action occurred.
+
+## Independent foundation continuation
+
+The replacement immutable plan is
+`tmp/plan-workflows/2026-10-04-host-controller-independent-foundations.md` in the
+local worktree. It admits native-owned recorded executable identity and schema
+digest completion, then low-level framed byte/descriptor transport. Independent
+executor admission confirmed the current source, complete governing-artifact and
+review reading, and relocated workspace. Native implementation is now assigned;
+development and proof of the new behavior are pending.
+
+The complete ListenerKind/ListenerRegistry contract remains outside that
+frontier: its dynamic facade endpoint identifier currently belongs to a
+collaboration crate, while the written keeper graph excludes that dependency.
+The plan does not duplicate its identifier or choose a new owner. E4 lifetime,
+ProviderLink, role/store changes, GenerationController wiring, final fingerprint
+closures, CLI cutover and exec also remain excluded. All V1–V12 gates remain
+open for the full feature; admission is not independent implementation review
+or feature readiness.
+
+Current pre-edit characterization passed: native executable identity tests 2/2,
+native schema bundle tests 4/4, narrow package compilation and workspace
+formatting, all exit 0 in debug/test profiles. No live Codex/provider or
+production process behavior was tested.
