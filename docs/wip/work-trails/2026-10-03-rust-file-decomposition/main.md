@@ -149,3 +149,9 @@ Owner delivery criterion authorizes this lane toward its own draft PR; stop-revi
 Current committed slices: maintenance actor `96f57779`; control connection `df21ac52`; supervisor failure projection `db75738a`; approval permission outcomes `01aa1bae`; quota helper `936772fc`; quota HTTP Claude `dbffedf1`; selector projection `bd3bd4d5`; credential renewal retry `32b969b1`; checker `958bf6c5`. Working tree clean before this trace update. Size checker reports20 remaining oversized files.
 
 Required whole gates in plan: checker exit0, all-target workspace Clippy -D warnings with keychain feature, nextest workspace/quota harness, SQLx metadata, deny/audit, CLI builds/install, focused slice proofs, source/test inventory, independent review, then own draft PR CI/head verification. CI remains unedited; final integration last. No merge/release/production restart.
+
+## Interaction broker test cut applied and verified — 2026-10-04
+
+Applied the interaction broker split from `docs/wip/2026-10-04-interaction-broker-cut-map.md`: shared parent fixtures remain; decision/history tests moved to one private child and question lifecycle tests to another. Parent902 lines; children616/564. Existing turn-cancellation sibling retains `session`/`fixture_broker` visibility.
+
+Proof: fmt exit0; collaboration-service lib tests exit0/27 passed/0 failed/190 filtered; package check exit0; Clippy all-targets -D warnings exit0/9.61s; size checker exit1 with19 remaining oversized files; parent broker test file removed. No interaction semantics/API/storage/CI/production changes.
