@@ -29,3 +29,5 @@ No ACP/API/JSON/schema/auth/security/CI/Cargo/SQLx/migration/production process 
 ## Applied result
 
 Parent is 889 lines and child 261 formatted lines. The parent fixture prefix and moved test-name inventory remain unchanged; the child uses only existing private parent helpers. Focused tests passed 3/3; package check and Clippy passed; strict size checker now reports 24 remaining oversized files and no longer lists approval_dispatch_tests.rs.
+
+The parent is 889 lines and the child 261 lines after formatting. The focused freshness proof passed; quota package check and Clippy passed with the repository's required `keychain-test-support` feature. The full size checker now reports 23 remaining oversized files; this quota file is no longer listed.

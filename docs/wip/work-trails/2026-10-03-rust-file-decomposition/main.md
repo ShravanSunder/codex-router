@@ -113,3 +113,11 @@ This third cut is not yet committed; commit it as the next local checkpoint usin
 Owner completion criterion now targets a draft PR or genuine blocker; continued mechanics-only work is authorized by coordination01a108ea and the retained stop-review instruction. Applied next cut from `docs/wip/2026-10-04-approval-dispatch-cut-map.md`: moved three permission-outcome tests from `approval_dispatch_tests.rs` into private `permission_outcome_tests.rs`. Parent fixtures/scripts remain; no ACP/API/JSON/auth/CI changes.
 
 Focused proof: three child tests passed/0 failed/141 filtered; integration binaries had no matching tests. Test discovery compile exit0. Formatting and package quality checks are next for this cut. Whole canonical plan, final CI, independent review and draft PR remain incomplete.
+
+## Quota refresh helper cut applied and verified — 2026-10-04
+
+Applied third continuing mechanics cut from `docs/wip/2026-10-04-quota-refresh-cut-map.md`: moved trailing quota-floor notification/generation/diagnostic/error helpers and freshness test into private `quota_refresh_helpers.rs`, with demonstrated `pub(super)` access only for parent-used type/functions. Parent is913 lines/child182 lines.
+
+Validation: fmt exit0; exact freshness test with required `keychain-test-support` exit0/1 passed; `cargo check -p codex-router-cli --locked` exit0/16.04s; all-target Clippy with feature exit0/29.88s. Initial focused invocation without the required feature failed at the repository's existing compiled CLI acceptance guard; no source issue, corrected by established CI feature. Size checker exit1 with23 remaining oversized files; quota service removed.
+
+No public API/quota persistence/error/concurrency/auth/CI changes. Slice is not yet checkpoint-committed; next action is exact preservation review, stage and local checkpoint. Whole PR/review/CI still incomplete.
