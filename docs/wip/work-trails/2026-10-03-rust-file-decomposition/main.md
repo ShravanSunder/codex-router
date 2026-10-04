@@ -201,3 +201,11 @@ Applied the bounded integration-test split recorded in `docs/wip/2026-10-04-prov
 Proof: `cargo test -p codex-router-host --test provider_acp_delivery_route` exit0 with8 passed/0 failed; package check exit0; all-target Clippy `-D warnings` exit0; fmt exit0. Strict checker exits1 with13 remaining oversized files and no longer lists `provider_acp_delivery_route.rs`.
 
 This slice changes no provider ACP route/delivery effect/operation-store semantics, subprocess fixtures, persistence, auth/security, CI, or production behavior. It is the next local checkpoint; staging and commit follow after this trace/map write. No push, merge, release, production restart, or final CI gate yet.
+
+## Codex app-server generation test cut applied and verified — 2026-10-04
+
+Applied the bounded integration-test split recorded in `docs/wip/2026-10-04-codex-app-server-generation-cut-map.md`: moved the first three generation/retirement scenarios into private `generation_tests.rs`; the parent retains held-empty-thread and scheduled-run scenarios plus shared fixtures. Parent is617 lines and child571 lines. Prefix/suffix comparison against the pre-cut source is exact; the child body preserves all moved tests with only formatter removal of the old terminal blank line.
+
+Proof: `cargo test -p collaboration-service --test codex_app_server_delivery_route` exit0 with9 passed/0 failed; package check exit0; all-target Clippy `-D warnings` exit0; fmt check exit0. Strict checker exits1 with12 remaining oversized files and no longer lists `codex_app_server_delivery_route.rs`.
+
+This slice changes no Codex app-server route/generation/evidence/reconciliation semantics, WebSocket fixtures, persistence, auth/security, CI, or production behavior. It is the next local checkpoint; staging and commit follow after this trace/map write. No push, merge, release, production restart, or final CI gate yet.
