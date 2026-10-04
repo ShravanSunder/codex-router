@@ -233,3 +233,11 @@ Applied the bounded listener-test split recorded in `docs/wip/2026-10-04-mcp-htt
 The first extraction attempt exposed that `protocol_response_json` and `initialize_mcp_session` were also used by parent and initialization tests. They were returned to the parent shared harness, preserving ownership and avoiding visibility widening. Final proof: listener subtree tests exit0 with17 passed/0 failed; package check exit0; all-target Clippy `-D warnings` exit0; fmt check exit0. Strict checker exits1 with9 remaining oversized files and no longer lists `mcp_http_listener_tests.rs`.
 
 This slice changes no MCP HTTP/API/cancellation/session/response-loss semantics, persistence, auth behavior, CI, or production behavior. It is the next local checkpoint; staging and commit follow after this trace/map write. No push, merge, release, production restart, or final CI gate yet.
+
+## Collaboration runtime lifecycle cut applied and verified — 2026-10-04
+
+Applied the bounded same-crate split recorded in `docs/wip/2026-10-04-collaboration-runtime-lifecycle-cut-map.md`: moved `listener_failure` and `shutdown` into private sibling `collaboration_runtime/lifecycle.rs` as an inherent `impl CollaborationRuntime`; the parent retains startup/composition, readiness/publication, and shared helpers. Parent is962 lines and child146 lines.
+
+The first validation caught an orphaned lifecycle doc comment left at the old location; it was moved with `listener_failure`. Final proof: fmt exit0; host package check exit0; all-target Clippy `-D warnings` exit0; module-filtered host test compile/run exit0 (0 matched tests, 144 filtered). Strict checker exits1 with8 remaining oversized files and no longer lists `collaboration_runtime.rs`.
+
+This slice changes no runtime API/lifecycle ordering/storage/network/auth/concurrency behavior, CI, or production process. It is the next local checkpoint; staging and commit follow after this trace/map write. No push, merge, release, production restart, or final CI gate yet.
