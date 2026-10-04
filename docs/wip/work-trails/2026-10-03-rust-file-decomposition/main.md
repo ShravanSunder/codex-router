@@ -99,3 +99,11 @@ Applied second bounded slice from `docs/wip/2026-10-04-control-connection-cut-ma
 Final validation: `cargo fmt --all -- --check` exit0; test list exit0/3 discovered; focused `cargo test -p collaboration-service control_connection::admission_error_tests::` exit0/3 passed/0 failed/214 filtered (integration binaries had no matching tests); `cargo check -p collaboration-service --locked` exit0/5.04s; package Clippy all-targets -D warnings exit0/11.62s. Size checker exit1 with26 remaining oversized files; control_connection removed.
 
 No API/Control JSON/schema/dispatch/wake/SQLx/migration/CI/production changes. This slice is uncommitted; next signed local checkpoint may use authorized unsigned fallback only after blocked signer attempts. Whole refactor/canonical plan/review/PR remains incomplete.
+
+## Supervisor test cut applied and verified — 2026-10-04
+
+Owner coordination01a108ea supersedes the prior corroboration pause and directs same-Lead proactive continuation of the original pure decomposition scope. Applied next admitted mechanics-only cut: moved four typed-failure tests from `external_provider_supervisor/tests.rs` into private `failure_projection_tests.rs`; parent fixtures and provider supervisor production code remain unchanged. Exact map: `docs/wip/2026-10-04-supervisor-tests-cut-map.md`.
+
+Proof: fmt exit0; four child tests discovered and passed (0 failed, 140 filtered; integration binaries had no matching filters); host package check exit0/22.21s; host all-target Clippy -D warnings exit0; source diff check exit0. Strict size inventory now has25 remaining oversized files. No API/provider semantics/fixture/CI/Cargo/SQLx/migration/auth/security/production changes.
+
+This third cut is not yet committed; commit it as the next local checkpoint using the already authorized post-two-signer fallback. Whole canonical plan/final CI/review/PR still incomplete.
