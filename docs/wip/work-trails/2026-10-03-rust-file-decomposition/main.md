@@ -273,3 +273,11 @@ Applied the bounded same-crate split recorded in `docs/wip/2026-10-04-external-p
 One initial test attempt omitted `/usr/bin` from PATH and produced an invalid linker `cc not found` result; the required Apple-clang discovery PATH rerun passed the full host library suite with139 passed/0 failed/5 ignored. Final package check, Clippy and fmt passed. Strict checker exits1 with4 remaining oversized files and no longer lists `external_provider_supervisor.rs`.
 
 This slice changes no provider API/admission/effect/reconciliation/persistence/auth behavior, CI, or production process. It is the next local checkpoint; staging and commit follow after this trace/map write. No push, merge, release, production restart, or final CI gate yet.
+
+## DB write actor cut applied and verified — 2026-10-04
+
+Applied the bounded decomposition recorded in `docs/wip/2026-10-04-db-write-actor-cut-map.md`: moved session-affinity scheduler helpers to a private production sibling, shared test fixtures to `test_support.rs`, and split queue/degraded-health and session-affinity tests into two private children. Parent is998 lines; children are192/348/758/540 lines.
+
+The first compile exposed fixture privacy and copied inline imports; these were corrected with `pub(super)` fixture seams, minimal imports, and no behavior changes. Final proof: focused actor tests exit0 with28 passed/0 failed; package check exit0; all-target Clippy `-D warnings` exit0; fmt check exit0. Strict checker exits1 with3 remaining oversized files and no longer lists `db_write_actor.rs`.
+
+This slice changes no DB schema/persistence/queue/telemetry/auth behavior, CI, or production process. It is the next local checkpoint; staging and commit follow after this trace/map write. No push, merge, release, production restart, or final CI gate yet.
