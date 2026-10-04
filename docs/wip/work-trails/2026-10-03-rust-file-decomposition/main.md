@@ -161,3 +161,9 @@ Proof: fmt exit0; collaboration-service lib tests exit0/27 passed/0 failed/190 f
 Applied next test-only cut from `docs/wip/2026-10-04-thread-participants-cut-map.md`: split subscription/handoff tests and corruption/archived/unread tests into two private child modules while retaining the shared BoardStore fixture parent. Parent647 lines; children420/383.
 
 Proof: fmt exit0; full thread_participants integration target exit0/13 passed/0 failed/0 filtered/0.76s; package check exit0/5.01s; package Clippy all-targets -D warnings exit0/8.81s. Size checker exit1 with18 remaining oversized files; thread_participants removed. No BoardStore API/SQLite/schema/participant semantics/CI/production changes.
+
+## Permission entry path cut applied and verified — 2026-10-04
+
+Applied next real integration-test cut from `docs/wip/2026-10-04-permission-entry-cut-map.md`: moved seven CLI/provider/Streamable HTTP permission scenarios into private `real_entry_tests.rs`; parent619 lines/child698 lines.
+
+Proof: fmt exit0; collaboration-mcp lib focused tests exit0/7 passed/0 failed/82 filtered/0.42s; package check exit0/11.52s; all-target Clippy -D warnings exit0/26.94s. Size checker exit1 with17 remaining oversized files; permission_entry_path_tests removed. No MCP API/schema/broker/auth/storage/CI/production changes.
