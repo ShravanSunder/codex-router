@@ -1,3 +1,6 @@
+#[path = "support/global_claude_fixture.rs"]
+mod global_claude_fixture;
+
 use codex_router_host::{
     CollaborationRuntime, CollaborationRuntimeInputs, ExternalProviderLaunchBinding,
     ExternalProviderStartup,
@@ -11,6 +14,7 @@ use collaboration_protocol::{
     PositiveSeconds, ProviderRequestedPolicy, ProviderWorkingDirectory, RouterAccess, SessionId,
     SessionRef,
 };
+use global_claude_fixture::with_global_claude_fixture;
 use std::os::unix::fs::PermissionsExt as _;
 
 #[tokio::test]
@@ -56,7 +60,12 @@ sys.stdin.read()
             owner_human_id: None,
         },
         vec![ExternalProviderStartup::Launch(
-            ExternalProviderLaunchBinding::claude(provider, Vec::new()).expect("provider binding"),
+            with_global_claude_fixture(
+                root.path(),
+                ExternalProviderLaunchBinding::claude(provider, Vec::new())
+                    .expect("provider binding"),
+            )
+            .expect("global Claude fixture"),
         )],
     )
     .await
@@ -207,11 +216,15 @@ print(json.dumps({'jsonrpc':'2.0','id':request['id'],'result':{'protocolVersion'
             owner_human_id: None,
         },
         vec![ExternalProviderStartup::Launch(
-            ExternalProviderLaunchBinding::claude(
-                provider,
-                vec![barrier_path.display().to_string()],
+            with_global_claude_fixture(
+                root.path(),
+                ExternalProviderLaunchBinding::claude(
+                    provider,
+                    vec![barrier_path.display().to_string()],
+                )
+                .expect("binding"),
             )
-            .expect("binding"),
+            .expect("global Claude fixture"),
         )],
     );
     tokio::pin!(start);

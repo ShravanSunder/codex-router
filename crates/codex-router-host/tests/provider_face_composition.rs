@@ -1,9 +1,12 @@
 //! Real Host composition of provider-facing ACP and app-server sockets.
+#[path = "support/global_claude_fixture.rs"]
+mod global_claude_fixture;
 use codex_router_host::{
     CollaborationRuntime, CollaborationRuntimeInputs, ExternalProviderLaunchBinding,
     ExternalProviderStartup,
 };
 use collaboration_protocol::{EndpointId, EndpointRef, SessionId, SessionRef};
+use global_claude_fixture::with_global_claude_fixture;
 use std::os::unix::fs::PermissionsExt as _;
 
 #[allow(clippy::expect_used)]
@@ -69,7 +72,12 @@ sys.stdin.read()
             remote_control_server_name: None,
         },
         vec![ExternalProviderStartup::Launch(
-            ExternalProviderLaunchBinding::claude(provider, Vec::new()).expect("provider binding"),
+            with_global_claude_fixture(
+                root.path(),
+                ExternalProviderLaunchBinding::claude(provider, Vec::new())
+                    .expect("provider binding"),
+            )
+            .expect("global Claude fixture"),
         )],
     )
     .await
@@ -210,7 +218,12 @@ sys.stdin.read()
             remote_control_server_name: None,
         },
         vec![ExternalProviderStartup::Launch(
-            ExternalProviderLaunchBinding::claude(provider, Vec::new()).expect("provider binding"),
+            with_global_claude_fixture(
+                root.path(),
+                ExternalProviderLaunchBinding::claude(provider, Vec::new())
+                    .expect("provider binding"),
+            )
+            .expect("global Claude fixture"),
         )],
     )
     .await
