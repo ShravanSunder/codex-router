@@ -241,9 +241,7 @@ async fn verify_restart_target(root: &Path) -> ProofResult<VerifiedRestartTarget
         }
         Some("debugHostPrepared") => {
             let command = inspect_process_command(process_id).await?;
-            if !command.contains("automation-debug-host")
-                || !command.contains(&format!("--run-directory {}", canonical_root.display()))
-            {
+            if !automation_debug_host_argv_matches(&command, run_directory, &canonical_root) {
                 return Err(
                     "PID does not identify the existing automation-debug-host caller".into(),
                 );
@@ -498,6 +496,35 @@ fn matrix_cli_argv_matches(command: &str, executable: &Path, root: &Path, port: 
     command
         .split_whitespace()
         .eq(expected.iter().map(String::as_str))
+}
+
+fn automation_debug_host_argv_matches(
+    command: &str,
+    marker_run_directory: &str,
+    canonical_root: &Path,
+) -> bool {
+    if !command.contains("automation-debug-host") {
+        return false;
+    }
+    let marker_argument = format!("--run-directory {marker_run_directory}");
+    let canonical_argument = format!("--run-directory {}", canonical_root.display());
+    let has_bounded_argument = |argument: &str| {
+        command.match_indices(argument).any(|(start, _)| {
+            let end = start + argument.len();
+            let starts_at_boundary = start == 0
+                || command
+                    .as_bytes()
+                    .get(start - 1)
+                    .is_some_and(u8::is_ascii_whitespace);
+            let ends_at_boundary = end == command.len()
+                || command
+                    .as_bytes()
+                    .get(end)
+                    .is_some_and(u8::is_ascii_whitespace);
+            starts_at_boundary && ends_at_boundary
+        })
+    };
+    has_bounded_argument(&marker_argument) || has_bounded_argument(&canonical_argument)
 }
 
 async fn inspect_process_command(process_id: u32) -> ProofResult<String> {

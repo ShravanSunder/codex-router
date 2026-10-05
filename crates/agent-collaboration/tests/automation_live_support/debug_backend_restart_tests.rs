@@ -1,7 +1,7 @@
 use super::{
-    effective_uid, inspect_process_command, matrix_cli_argv_matches,
-    shared_daemon_socket_directory, socket_hash_for_raw_path, upstream_protected_socket_path,
-    validate_codex_socket_alias,
+    automation_debug_host_argv_matches, effective_uid, inspect_process_command,
+    matrix_cli_argv_matches, shared_daemon_socket_directory, socket_hash_for_raw_path,
+    upstream_protected_socket_path, validate_codex_socket_alias,
 };
 use std::{
     os::unix::{
@@ -41,6 +41,71 @@ fn foreground_cli_guard_requires_exact_executable_root_port_and_isolation() {
         Path::new("/tmp/other/codex-router"),
         root,
         43127
+    ));
+}
+
+#[test]
+fn automation_debug_host_guard_accepts_canonical_run_directory() {
+    let marker_run_directory = "/tmp/u6-automation-host";
+    let canonical_root = Path::new("/private/tmp/u6-automation-host");
+    let command = format!(
+        "/tmp/target/debug/examples/automation-debug-host --run-directory {}",
+        canonical_root.display()
+    );
+
+    assert!(automation_debug_host_argv_matches(
+        &command,
+        marker_run_directory,
+        canonical_root
+    ));
+}
+
+#[test]
+fn automation_debug_host_guard_rejects_a_foreign_run_directory() {
+    let marker_run_directory = "/tmp/u6-automation-host";
+    let canonical_root = Path::new("/private/tmp/u6-automation-host");
+    let command =
+        "/tmp/target/debug/examples/automation-debug-host --run-directory /private/tmp/foreign";
+
+    assert!(!automation_debug_host_argv_matches(
+        command,
+        marker_run_directory,
+        canonical_root
+    ));
+}
+
+#[test]
+fn automation_debug_host_guard_accepts_original_run_directory_spelling() {
+    let marker_run_directory = "/tmp/u6-automation-host";
+    let canonical_root = Path::new("/private/tmp/u6-automation-host");
+    let command = format!(
+        "/tmp/target/debug/examples/automation-debug-host --run-directory {marker_run_directory}"
+    );
+
+    assert!(automation_debug_host_argv_matches(
+        &command,
+        marker_run_directory,
+        canonical_root
+    ));
+}
+
+#[test]
+fn automation_debug_host_guard_rejects_suffix_and_argument_prefix_collisions() {
+    let marker_run_directory = "/tmp/u6-automation-host";
+    let canonical_root = Path::new("/private/tmp/u6-automation-host");
+    let suffix_collision = "/tmp/target/debug/examples/automation-debug-host --run-directory /tmp/u6-automation-host-foreign";
+    let prefix_collision =
+        "x--run-directory /tmp/u6-automation-host /tmp/target/debug/examples/automation-debug-host";
+
+    assert!(!automation_debug_host_argv_matches(
+        suffix_collision,
+        marker_run_directory,
+        canonical_root
+    ));
+    assert!(!automation_debug_host_argv_matches(
+        prefix_collision,
+        marker_run_directory,
+        canonical_root
     ));
 }
 
