@@ -1,5 +1,7 @@
 use super::*;
 
+/// An explicit JSON-RPC rejection is definite: the old setting remains
+/// effective and a later prompt may proceed.
 #[tokio::test]
 async fn explicit_setting_rejection_does_not_gate_session() {
     let root = tempfile::tempdir().expect("fixture root");

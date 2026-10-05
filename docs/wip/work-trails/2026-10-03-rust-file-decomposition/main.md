@@ -315,3 +315,7 @@ This is the final source/CI integration checkpoint before whole-work repository 
 ## Checker unit suite added to CI lint gate — 2026-10-04
 
 Aligned `.github/workflows/ci.yml` with the admitted final validation plan: the lint job now runs the strict checker and its 16-case `scripts.tests.test_rust_file_size` suite before workspace Clippy, then SQLx metadata validation. Local proof: all16 checker tests passed, checker exit0 across1706 files, and workspace formatting exit0.
+
+## Review correction — ACP scenario documentation restored — 2026-10-04
+
+Independent review found one P2 preservation issue: the explicit JSON-RPC rejection scenario's two-line doc comment was dropped during extraction. Restored the exact comment in `settings_tail_tests.rs` before the test. Focused ACP target remains12 passed/0 failed; fmt, checker and diff checks pass. Awaiting final independent review confirmation.
