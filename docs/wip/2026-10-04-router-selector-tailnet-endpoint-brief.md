@@ -6,10 +6,10 @@ Status: research/design proposal for owner approval. No Tailscale, SSH, Router, 
 
 ### Tailscale on Sunclaw
 
-- `tailscale version` reports client `1.102.5` and a server version warning for `1.102.3`.
-- `tailscale status` succeeds; BackendState is `Running` and the tailnet inventory reports Sunclaw `100.111.123.54` and Sunbook `100.109.23.106` online.
-- `tailscale serve status` reports **No serve config**.
-- The owner-reported `failed to connect to local Tailscaled process` error was not reproduced in this read-only check. The client/server version skew remains a local operational risk and was not repaired.
+- Read-only launchd evidence reports `system/homebrew.mxcl.tailscale` running (PID 652, no prior exit) and `/var/run/tailscaled.socket` present. The current CLI and launchd daemon are both Homebrew Tailscale `1.102.5` in that evidence.
+- In the managed shell, direct AF_UNIX access to the socket returns `PermissionError: [Errno 1] Operation not permitted`; `ps` is also denied. Both `tailscale status` and explicit `--socket=/var/run/tailscaled.socket status` then report failure to connect/enumerate.
+- This is an environment IPC/process-enumeration gap. It does not establish that Tailscaled is down, and no VPN restart or repair was attempted. An earlier shell observation succeeded, so status results are shell-context dependent.
+- `tailscale serve status` reports **No serve config** in the successful read-only CLI context.
 
 ### Router endpoint contracts
 
