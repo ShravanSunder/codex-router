@@ -1,4 +1,6 @@
-fn start_router_process(
+use super::*;
+
+pub(super) fn start_router_process(
     router_port: u16,
     state_path: PathBuf,
     secret_root: PathBuf,
@@ -19,19 +21,19 @@ fn start_router_process(
     })
 }
 
-struct RouterProcessStartOptions {
-    now_unix_seconds: Option<u64>,
-    router_port: u16,
-    state_path: PathBuf,
-    secret_root: PathBuf,
-    local_token: Option<String>,
-    upstream_base_url: String,
-    audit_path: PathBuf,
-    max_connections: usize,
-    websocket_registry_report_file: Option<PathBuf>,
+pub(super) struct RouterProcessStartOptions {
+    pub(super) now_unix_seconds: Option<u64>,
+    pub(super) router_port: u16,
+    pub(super) state_path: PathBuf,
+    pub(super) secret_root: PathBuf,
+    pub(super) local_token: Option<String>,
+    pub(super) upstream_base_url: String,
+    pub(super) audit_path: PathBuf,
+    pub(super) max_connections: usize,
+    pub(super) websocket_registry_report_file: Option<PathBuf>,
 }
 
-fn start_router_process_with_options(
+pub(super) fn start_router_process_with_options(
     options: RouterProcessStartOptions,
 ) -> Result<RouterProcessGuard, String> {
     let binary_path = codex_router_binary_path()?;
@@ -122,7 +124,7 @@ fn start_router_process_with_options(
     })
 }
 
-fn codex_router_binary_path() -> Result<PathBuf, String> {
+pub(super) fn codex_router_binary_path() -> Result<PathBuf, String> {
     if let Some(path) = std::env::var_os("CARGO_BIN_EXE_codex-router") {
         return Ok(PathBuf::from(path));
     }
@@ -138,7 +140,7 @@ fn codex_router_binary_path() -> Result<PathBuf, String> {
         .join(binary_name))
 }
 
-fn workspace_root() -> Result<PathBuf, String> {
+pub(super) fn workspace_root() -> Result<PathBuf, String> {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(Path::parent)
@@ -146,7 +148,7 @@ fn workspace_root() -> Result<PathBuf, String> {
         .ok_or_else(|| "failed to resolve workspace root".to_owned())
 }
 
-fn spawn_router_output_reader<R>(
+pub(super) fn spawn_router_output_reader<R>(
     name: &'static str,
     stream: R,
     line_sender: Option<mpsc::Sender<String>>,
@@ -180,7 +182,7 @@ where
         .map_err(|error| format!("failed to spawn {name} reader: {error}"))
 }
 
-fn wait_for_router_readiness(
+pub(super) fn wait_for_router_readiness(
     child: &mut Child,
     line_receiver: &mpsc::Receiver<String>,
     router_port: u16,
@@ -216,22 +218,22 @@ fn wait_for_router_readiness(
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum CodexTransportMode {
+pub(super) enum CodexTransportMode {
     HttpSse,
     WebSocket,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct CodexChildEnvironment {
-    home: PathBuf,
-    xdg_config_home: PathBuf,
-    xdg_state_home: PathBuf,
-    xdg_cache_home: PathBuf,
-    path: Option<OsString>,
+pub(super) struct CodexChildEnvironment {
+    pub(super) home: PathBuf,
+    pub(super) xdg_config_home: PathBuf,
+    pub(super) xdg_state_home: PathBuf,
+    pub(super) xdg_cache_home: PathBuf,
+    pub(super) path: Option<OsString>,
 }
 
 impl CodexChildEnvironment {
-    fn new(
+    pub(super) fn new(
         home: &Path,
         xdg_config_home: &Path,
         xdg_state_home: &Path,
@@ -247,7 +249,7 @@ impl CodexChildEnvironment {
     }
 }
 
-fn run_codex_exec(
+pub(super) fn run_codex_exec(
     transport_mode: CodexTransportMode,
     codex_home: &Path,
     workdir: &Path,
@@ -265,7 +267,7 @@ fn run_codex_exec(
     )
 }
 
-fn run_codex_exec_with_timeout(
+pub(super) fn run_codex_exec_with_timeout(
     transport_mode: CodexTransportMode,
     codex_home: &Path,
     workdir: &Path,
@@ -286,7 +288,7 @@ fn run_codex_exec_with_timeout(
     .map(|run| run.output)
 }
 
-fn run_codex_exec_with_timeout_observed(
+pub(super) fn run_codex_exec_with_timeout_observed(
     request: CodexExecRequest<'_>,
 ) -> Result<CodexChildRun, String> {
     let CodexExecRequest {
@@ -352,11 +354,11 @@ fn run_codex_exec_with_timeout_observed(
 }
 
 #[cfg(test)]
-fn run_with_timeout(command: Command, timeout: Duration) -> Result<Output, String> {
+pub(super) fn run_with_timeout(command: Command, timeout: Duration) -> Result<Output, String> {
     run_with_timeout_observed(command, timeout).map(|run| run.output)
 }
 
-fn run_with_timeout_observed(
+pub(super) fn run_with_timeout_observed(
     mut command: Command,
     timeout: Duration,
 ) -> Result<CodexChildRun, String> {
@@ -408,7 +410,7 @@ fn run_with_timeout_observed(
     }
 }
 
-fn spawn_child_output_reader<R>(
+pub(super) fn spawn_child_output_reader<R>(
     stream_name: &'static str,
     mut stream: R,
 ) -> Result<thread::JoinHandle<Result<Vec<u8>, String>>, String>
@@ -427,7 +429,7 @@ where
         .map_err(|error| format!("failed to spawn installed codex {stream_name} reader: {error}"))
 }
 
-fn collect_child_output(
+pub(super) fn collect_child_output(
     status: ExitStatus,
     stdout_reader: Option<thread::JoinHandle<Result<Vec<u8>, String>>>,
     stderr_reader: Option<thread::JoinHandle<Result<Vec<u8>, String>>>,
@@ -441,7 +443,7 @@ fn collect_child_output(
     })
 }
 
-fn join_child_output_reader(
+pub(super) fn join_child_output_reader(
     reader: Option<thread::JoinHandle<Result<Vec<u8>, String>>>,
     stream_name: &str,
 ) -> Result<Vec<u8>, String> {
@@ -453,7 +455,7 @@ fn join_child_output_reader(
     }
 }
 
-fn assert_codex_visible_output(
+pub(super) fn assert_codex_visible_output(
     label: &str,
     output: &Output,
     last_message_path: &Path,
@@ -484,7 +486,7 @@ fn assert_codex_visible_output(
     Ok(())
 }
 
-fn redacted_process_output_preview(output: &str) -> String {
+pub(super) fn redacted_process_output_preview(output: &str) -> String {
     if output.trim().is_empty() {
         "<empty>".to_owned()
     } else {
@@ -492,7 +494,7 @@ fn redacted_process_output_preview(output: &str) -> String {
     }
 }
 
-fn process_output_markers(output: &str) -> String {
+pub(super) fn process_output_markers(output: &str) -> String {
     let markers = stderr_transport_error_markers(output);
     if markers.is_empty() {
         "<none>".to_owned()
@@ -501,7 +503,7 @@ fn process_output_markers(output: &str) -> String {
     }
 }
 
-fn codex_child_timeout_diagnostics(
+pub(super) fn codex_child_timeout_diagnostics(
     client_index: Option<usize>,
     last_message_path: &Path,
 ) -> String {
@@ -526,14 +528,14 @@ fn codex_child_timeout_diagnostics(
     }
 }
 
-struct SmokeContractAssertion<'a> {
-    mode: InstalledCodexSmokeMode,
-    http_sse_codex_status: Option<&'a ExitStatus>,
-    websocket_codex_status: Option<&'a ExitStatus>,
-    upstream: &'a MockWebSocketTranscript,
-    local_token: &'a str,
-    expected_account_label: &'a str,
-    expected_upstream_token: &'a str,
-    routable_upstream_tokens: &'a [String],
-    quota_status: &'a SmokeQuotaStatus,
+pub(super) struct SmokeContractAssertion<'a> {
+    pub(super) mode: InstalledCodexSmokeMode,
+    pub(super) http_sse_codex_status: Option<&'a ExitStatus>,
+    pub(super) websocket_codex_status: Option<&'a ExitStatus>,
+    pub(super) upstream: &'a MockWebSocketTranscript,
+    pub(super) local_token: &'a str,
+    pub(super) expected_account_label: &'a str,
+    pub(super) expected_upstream_token: &'a str,
+    pub(super) routable_upstream_tokens: &'a [String],
+    pub(super) quota_status: &'a SmokeQuotaStatus,
 }

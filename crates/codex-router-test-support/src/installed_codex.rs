@@ -99,16 +99,55 @@ const QUOTA_RECONNECT_SQLITE_PRESSURE_HOLD: Duration = Duration::from_secs(15);
 const QUOTA_RECONNECT_SQLITE_PRESSURE_READY_TIMEOUT: Duration = Duration::from_secs(5);
 const QUOTA_RECONNECT_ROUTER_MAX_CONNECTIONS: usize = 2;
 
-include!("installed_codex/smoke_modes.rs");
-include!("installed_codex/smoke_runtime.rs");
-include!("installed_codex/hostile_and_state.rs");
-include!("installed_codex/process_runtime.rs");
-include!("installed_codex/smoke_contracts.rs");
-include!("installed_codex/transcript_observation.rs");
-include!("installed_codex/s8_provenance.rs");
-include!("installed_codex/websocket_models.rs");
-include!("installed_codex/websocket_upstream.rs");
-include!("installed_codex/quota_reconnect_upstream.rs");
-include!("installed_codex/concurrent_websocket.rs");
-include!("installed_codex/http_probe.rs");
-include!("installed_codex/tests.rs");
+#[allow(dead_code)]
+#[path = "installed_codex/concurrent_websocket.rs"]
+mod concurrent_websocket;
+#[allow(dead_code)]
+#[path = "installed_codex/hostile_and_state.rs"]
+mod hostile_and_state;
+#[allow(dead_code)]
+#[path = "installed_codex/http_probe.rs"]
+mod http_probe;
+#[allow(dead_code)]
+#[path = "installed_codex/process_runtime.rs"]
+mod process_runtime;
+#[allow(dead_code)]
+#[path = "installed_codex/quota_reconnect_upstream.rs"]
+mod quota_reconnect_upstream;
+#[allow(dead_code)]
+#[path = "installed_codex/s8_provenance.rs"]
+mod s8_provenance;
+#[allow(dead_code)]
+#[path = "installed_codex/smoke_contracts.rs"]
+mod smoke_contracts;
+#[allow(dead_code)]
+#[path = "installed_codex/smoke_modes.rs"]
+mod smoke_modes;
+#[allow(dead_code)]
+#[path = "installed_codex/smoke_runtime.rs"]
+mod smoke_runtime;
+#[cfg(test)]
+#[path = "installed_codex/tests.rs"]
+mod tests;
+#[allow(dead_code)]
+#[path = "installed_codex/transcript_observation.rs"]
+mod transcript_observation;
+#[allow(dead_code)]
+#[path = "installed_codex/websocket_models.rs"]
+mod websocket_models;
+#[allow(dead_code)]
+#[path = "installed_codex/websocket_upstream.rs"]
+mod websocket_upstream;
+
+use concurrent_websocket::*;
+use hostile_and_state::*;
+use http_probe::*;
+use process_runtime::*;
+use quota_reconnect_upstream::*;
+use s8_provenance::*;
+use smoke_contracts::*;
+use smoke_modes::*;
+use smoke_runtime::*;
+use transcript_observation::*;
+use websocket_models::*;
+use websocket_upstream::*;

@@ -1,5 +1,7 @@
+use super::*;
+
 #[allow(clippy::result_large_err)]
-fn run_concurrent_mock_websocket_session(
+pub(super) fn run_concurrent_mock_websocket_session(
     stream: std::net::TcpStream,
     state: Arc<ConcurrentUpstreamSharedState>,
     shutdown: Arc<AtomicBool>,
@@ -130,7 +132,7 @@ fn run_concurrent_mock_websocket_session(
     Err("concurrent mock upstream did not receive non-prewarm request frame".to_owned())
 }
 
-fn complete_multi_step_interleave(
+pub(super) fn complete_multi_step_interleave(
     shared: &ConcurrentUpstreamSharedState,
     followup_frame_count: usize,
 ) -> Result<(), String> {
@@ -150,7 +152,7 @@ fn complete_multi_step_interleave(
     Ok(())
 }
 
-fn register_concurrent_non_prewarm_session(
+pub(super) fn register_concurrent_non_prewarm_session(
     shared: &ConcurrentUpstreamSharedState,
     client_index: Option<usize>,
     observed_model: Option<&str>,
@@ -194,7 +196,7 @@ fn register_concurrent_non_prewarm_session(
     Ok(upstream_session_id)
 }
 
-fn extract_harness_client_index(frame: &str) -> Option<usize> {
+pub(super) fn extract_harness_client_index(frame: &str) -> Option<usize> {
     let marker = "codex-router-client-";
     let marker_start = frame.find(marker)? + marker.len();
     let digits = frame
@@ -205,7 +207,7 @@ fn extract_harness_client_index(frame: &str) -> Option<usize> {
     digits.parse::<usize>().ok()
 }
 
-fn response_create_frame_model(frame: &str) -> Option<String> {
+pub(super) fn response_create_frame_model(frame: &str) -> Option<String> {
     serde_json::from_str::<Value>(frame).ok().and_then(|value| {
         is_non_prewarm_response_create_frame(&value)
             .then(|| {
@@ -218,7 +220,7 @@ fn response_create_frame_model(frame: &str) -> Option<String> {
     })
 }
 
-fn wait_for_concurrent_session_barrier(
+pub(super) fn wait_for_concurrent_session_barrier(
     shared: &ConcurrentUpstreamSharedState,
 ) -> Result<Instant, String> {
     let deadline = Instant::now() + Duration::from_secs(20);
@@ -248,7 +250,7 @@ fn wait_for_concurrent_session_barrier(
     }
 }
 
-fn finish_concurrent_non_prewarm_session(
+pub(super) fn finish_concurrent_non_prewarm_session(
     shared: &ConcurrentUpstreamSharedState,
     frame_count: usize,
     event_count: usize,
@@ -286,7 +288,7 @@ fn finish_concurrent_non_prewarm_session(
     Ok(())
 }
 
-fn wait_for_all_concurrent_overlap_proof_events(
+pub(super) fn wait_for_all_concurrent_overlap_proof_events(
     shared: &ConcurrentUpstreamSharedState,
     config: ConcurrentUpstreamConfig,
 ) -> Result<(), String> {
@@ -321,7 +323,9 @@ fn wait_for_all_concurrent_overlap_proof_events(
     }
 }
 
-fn claim_multi_step_interleave(shared: &ConcurrentUpstreamSharedState) -> Result<bool, String> {
+pub(super) fn claim_multi_step_interleave(
+    shared: &ConcurrentUpstreamSharedState,
+) -> Result<bool, String> {
     let mut state = shared
         .state
         .lock()
@@ -333,7 +337,7 @@ fn claim_multi_step_interleave(shared: &ConcurrentUpstreamSharedState) -> Result
     Ok(true)
 }
 
-fn claim_quota_reconnect_interleave(
+pub(super) fn claim_quota_reconnect_interleave(
     shared: &ConcurrentUpstreamSharedState,
     token: &str,
     frame: &str,
@@ -358,7 +362,7 @@ fn claim_quota_reconnect_interleave(
     Ok(true)
 }
 
-fn record_quota_reconnect_completion_if_needed(
+pub(super) fn record_quota_reconnect_completion_if_needed(
     shared: &ConcurrentUpstreamSharedState,
     token: &str,
 ) -> Result<bool, String> {
@@ -379,7 +383,7 @@ fn record_quota_reconnect_completion_if_needed(
     Ok(true)
 }
 
-fn send_s8_overlap_quota_error(
+pub(super) fn send_s8_overlap_quota_error(
     websocket: &mut WebSocket<std::net::TcpStream>,
     token: &str,
     context: S8OverlapQuotaErrorContext,
@@ -426,7 +430,7 @@ fn send_s8_overlap_quota_error(
     Ok(())
 }
 
-fn send_concurrent_response_events(
+pub(super) fn send_concurrent_response_events(
     websocket: &mut WebSocket<std::net::TcpStream>,
     request_index: usize,
     overlap_started_at: Instant,
@@ -462,7 +466,7 @@ fn send_concurrent_response_events(
     Ok((event_count, in_overlap_event_count))
 }
 
-fn send_concurrent_multi_step_response_events(
+pub(super) fn send_concurrent_multi_step_response_events(
     websocket: &mut WebSocket<std::net::TcpStream>,
     request_index: usize,
     overlap_started_at: Instant,
@@ -552,7 +556,9 @@ fn send_concurrent_multi_step_response_events(
     Ok((event_count, in_overlap_event_count))
 }
 
-fn is_concurrent_overlap_active(shared: &ConcurrentUpstreamSharedState) -> Result<bool, String> {
+pub(super) fn is_concurrent_overlap_active(
+    shared: &ConcurrentUpstreamSharedState,
+) -> Result<bool, String> {
     let state = shared
         .state
         .lock()
@@ -560,7 +566,7 @@ fn is_concurrent_overlap_active(shared: &ConcurrentUpstreamSharedState) -> Resul
     Ok(state.active_non_prewarm_sessions >= state.expected_sessions)
 }
 
-fn read_concurrent_text_frame(
+pub(super) fn read_concurrent_text_frame(
     websocket: &mut WebSocket<std::net::TcpStream>,
 ) -> Result<String, String> {
     loop {
@@ -584,7 +590,7 @@ fn read_concurrent_text_frame(
     }
 }
 
-fn frame_contains_function_call_output(frame: &str, call_id: &str) -> bool {
+pub(super) fn frame_contains_function_call_output(frame: &str, call_id: &str) -> bool {
     serde_json::from_str::<Value>(frame)
         .ok()
         .and_then(|value| value.get("input").and_then(Value::as_array).cloned())
@@ -596,7 +602,7 @@ fn frame_contains_function_call_output(frame: &str, call_id: &str) -> bool {
         })
 }
 
-fn send_concurrent_response_event(
+pub(super) fn send_concurrent_response_event(
     websocket: &mut WebSocket<std::net::TcpStream>,
     event: &str,
 ) -> Result<(), String> {
@@ -605,7 +611,7 @@ fn send_concurrent_response_event(
         .map_err(|error| format!("concurrent mock upstream failed to send response event: {error}"))
 }
 
-fn overlap_duration_ms(state: &ConcurrentUpstreamState) -> u128 {
+pub(super) fn overlap_duration_ms(state: &ConcurrentUpstreamState) -> u128 {
     match (
         state.overlap_started_unix_ms,
         state.overlap_completed_unix_ms,
@@ -615,7 +621,7 @@ fn overlap_duration_ms(state: &ConcurrentUpstreamState) -> u128 {
     }
 }
 
-fn real_overlap_duration_ms(state: &ConcurrentUpstreamState) -> u128 {
+pub(super) fn real_overlap_duration_ms(state: &ConcurrentUpstreamState) -> u128 {
     match (
         state.overlap_started_unix_ms,
         state.real_overlap_completed_unix_ms,
@@ -625,7 +631,7 @@ fn real_overlap_duration_ms(state: &ConcurrentUpstreamState) -> u128 {
     }
 }
 
-fn wake_mock_upstream_accept(address: &str) {
+pub(super) fn wake_mock_upstream_accept(address: &str) {
     if let Ok(stream) = std::net::TcpStream::connect(address) {
         let _ = stream.shutdown(Shutdown::Both);
     }

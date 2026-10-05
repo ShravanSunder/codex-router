@@ -1,4 +1,6 @@
-fn assert_smoke_contract(assertion: SmokeContractAssertion<'_>) -> Result<(), String> {
+use super::*;
+
+pub(super) fn assert_smoke_contract(assertion: SmokeContractAssertion<'_>) -> Result<(), String> {
     if let Some(status) = assertion.http_sse_codex_status
         && !status.success()
     {
@@ -76,7 +78,9 @@ fn assert_smoke_contract(assertion: SmokeContractAssertion<'_>) -> Result<(), St
     Ok(())
 }
 
-fn assert_http_sse_contract(assertion: &SmokeContractAssertion<'_>) -> Result<String, String> {
+pub(super) fn assert_http_sse_contract(
+    assertion: &SmokeContractAssertion<'_>,
+) -> Result<String, String> {
     let http_sse =
         assertion.upstream.http_sse.as_ref().ok_or_else(|| {
             "mock upstream did not capture HTTP/SSE /v1/responses traffic".to_owned()
@@ -131,7 +135,7 @@ fn assert_http_sse_contract(assertion: &SmokeContractAssertion<'_>) -> Result<St
     Ok(authorization)
 }
 
-fn http_sse_request_asks_streaming(request: &MockHttpSseTranscript) -> bool {
+pub(super) fn http_sse_request_asks_streaming(request: &MockHttpSseTranscript) -> bool {
     request.request_line.contains("stream=true")
         || request
             .header("accept")
@@ -140,14 +144,14 @@ fn http_sse_request_asks_streaming(request: &MockHttpSseTranscript) -> bool {
         || http_sse_body_requests_streaming(&request.body)
 }
 
-fn http_sse_body_requests_streaming(body: &str) -> bool {
+pub(super) fn http_sse_body_requests_streaming(body: &str) -> bool {
     serde_json::from_str::<Value>(body)
         .ok()
         .and_then(|value| value.get("stream").and_then(Value::as_bool))
         == Some(true)
 }
 
-fn http_sse_body_shape_summary(body: &str) -> String {
+pub(super) fn http_sse_body_shape_summary(body: &str) -> String {
     let value = match serde_json::from_str::<Value>(body) {
         Ok(value) => value,
         Err(error) => {
@@ -175,7 +179,9 @@ fn http_sse_body_shape_summary(body: &str) -> String {
     format!("keys={}", keys.join(","))
 }
 
-fn assert_websocket_contract(assertion: &SmokeContractAssertion<'_>) -> Result<String, String> {
+pub(super) fn assert_websocket_contract(
+    assertion: &SmokeContractAssertion<'_>,
+) -> Result<String, String> {
     let authorization = assertion
         .upstream
         .header("authorization")
@@ -228,18 +234,18 @@ fn assert_websocket_contract(assertion: &SmokeContractAssertion<'_>) -> Result<S
     Ok(authorization)
 }
 
-fn bearer_token_from_authorization_header(authorization: Option<&str>) -> Option<&str> {
+pub(super) fn bearer_token_from_authorization_header(authorization: Option<&str>) -> Option<&str> {
     authorization?.strip_prefix("Bearer ")
 }
 
-fn bearer_token_from_headers(headers: &[(String, String)]) -> Option<&str> {
+pub(super) fn bearer_token_from_headers(headers: &[(String, String)]) -> Option<&str> {
     headers
         .iter()
         .find(|(header, _)| header.eq_ignore_ascii_case("authorization"))
         .and_then(|(_, value)| bearer_token_from_authorization_header(Some(value)))
 }
 
-fn authorization_header_matches_expected(
+pub(super) fn authorization_header_matches_expected(
     authorization: Option<String>,
     expected_token: &str,
 ) -> Option<bool> {
@@ -247,14 +253,16 @@ fn authorization_header_matches_expected(
     Some(bearer_token_from_authorization_header(Some(&authorization))? == expected_token)
 }
 
-fn upstream_label_from_authorization_header(authorization: Option<String>) -> Option<&'static str> {
+pub(super) fn upstream_label_from_authorization_header(
+    authorization: Option<String>,
+) -> Option<&'static str> {
     let authorization = authorization?;
     smoke_account_label_from_upstream_token(bearer_token_from_authorization_header(Some(
         &authorization,
     ))?)
 }
 
-fn quota_reconnect_label_from_upstream_token(token: &str) -> Option<&'static str> {
+pub(super) fn quota_reconnect_label_from_upstream_token(token: &str) -> Option<&'static str> {
     [
         (
             QUOTA_RECONNECT_PRIMARY.upstream_token,
@@ -269,7 +277,7 @@ fn quota_reconnect_label_from_upstream_token(token: &str) -> Option<&'static str
     .find_map(|(candidate_token, label)| (candidate_token == token).then_some(label))
 }
 
-fn quota_reconnect_role_from_label(label: Option<&str>) -> &'static str {
+pub(super) fn quota_reconnect_role_from_label(label: Option<&str>) -> &'static str {
     match label {
         Some(candidate) if candidate == QUOTA_RECONNECT_PRIMARY.label => "primary",
         Some(candidate) if candidate == QUOTA_RECONNECT_FALLBACK.label => "fallback",
@@ -278,11 +286,11 @@ fn quota_reconnect_role_from_label(label: Option<&str>) -> &'static str {
     }
 }
 
-fn quota_reconnect_usage_limit_frame() -> &'static str {
+pub(super) fn quota_reconnect_usage_limit_frame() -> &'static str {
     r#"{"type":"error","status":429,"error":{"type":"usage_limit_reached","code":"usage_limit_reached"}}"#
 }
 
-fn assert_codex_quota_reconnect_output_is_safe(
+pub(super) fn assert_codex_quota_reconnect_output_is_safe(
     output: &Output,
     last_message_path: &Path,
 ) -> Result<(), String> {
@@ -313,7 +321,7 @@ fn assert_codex_quota_reconnect_output_is_safe(
     Ok(())
 }
 
-fn assert_quota_reconnect_contract(
+pub(super) fn assert_quota_reconnect_contract(
     transcript: &QuotaReconnectWebSocketTranscript,
 ) -> Result<(), String> {
     if transcript.websocket_handshake_count < 2 {

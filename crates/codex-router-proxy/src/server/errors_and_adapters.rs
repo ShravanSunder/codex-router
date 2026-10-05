@@ -1,3 +1,5 @@
+use super::*;
+
 /// Assembled router runtime failure.
 #[derive(Debug, thiserror::Error)]
 pub enum LoopbackRouterRuntimeError {
@@ -239,16 +241,16 @@ pub(crate) fn read_http_request(
 
 #[derive(Debug)]
 #[cfg(test)]
-struct ParsedHttpRequestHead {
-    method: Method,
-    path: String,
-    headers: Vec<Header>,
-    header_length: usize,
-    content_length: usize,
+pub(super) struct ParsedHttpRequestHead {
+    pub(super) method: Method,
+    pub(super) path: String,
+    pub(super) headers: Vec<Header>,
+    pub(super) header_length: usize,
+    pub(super) content_length: usize,
 }
 
 #[cfg(test)]
-fn parse_http_request_head(
+pub(super) fn parse_http_request_head(
     request_bytes: &[u8],
 ) -> Result<Option<ParsedHttpRequestHead>, ServerConnectionError> {
     let mut headers = [httparse::EMPTY_HEADER; 64];
@@ -290,7 +292,7 @@ fn parse_http_request_head(
 }
 
 #[cfg(test)]
-fn method_from_http(method: &str) -> Method {
+pub(super) fn method_from_http(method: &str) -> Method {
     match method {
         "GET" => Method::Get,
         "POST" => Method::Post,
@@ -299,7 +301,7 @@ fn method_from_http(method: &str) -> Method {
 }
 
 #[cfg(test)]
-fn write_http_response(
+pub(super) fn write_http_response(
     stream: &mut TcpStream,
     response: HttpProxyResponse,
 ) -> Result<(), ServerConnectionError> {
@@ -317,7 +319,7 @@ fn write_http_response(
 }
 
 #[cfg(test)]
-fn write_http_error_response(
+pub(super) fn write_http_error_response(
     stream: &mut TcpStream,
     status: u16,
     reason: &str,
@@ -330,7 +332,7 @@ fn write_http_error_response(
 }
 
 #[cfg(test)]
-fn write_streaming_http_response(
+pub(super) fn write_streaming_http_response(
     stream: &mut TcpStream,
     mut response: StreamingHttpProxyResponse,
 ) -> Result<(), ServerConnectionError> {

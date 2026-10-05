@@ -1,3 +1,5 @@
+use super::*;
+
 /// Runs a hostile local no-token smoke and verifies upstream remains untouched.
 pub fn run_hostile_no_token_smoke() -> Result<(), String> {
     let smoke_root = SmokeTempRoot::new("hostile-no-token")?;
@@ -37,36 +39,36 @@ pub fn run_hostile_no_token_smoke() -> Result<(), String> {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct SmokeQuotaStatus {
-    table: String,
-    plain: String,
-    json: String,
+pub(super) struct SmokeQuotaStatus {
+    pub(super) table: String,
+    pub(super) plain: String,
+    pub(super) json: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct SmokeSeed {
-    local_token_assignment: String,
-    local_token: String,
-    expected_account_label: String,
-    expected_account_tag: String,
-    expected_upstream_token: String,
-    routable_upstream_tokens: Vec<String>,
-    quota_status: SmokeQuotaStatus,
+pub(super) struct SmokeSeed {
+    pub(super) local_token_assignment: String,
+    pub(super) local_token: String,
+    pub(super) expected_account_label: String,
+    pub(super) expected_account_tag: String,
+    pub(super) expected_upstream_token: String,
+    pub(super) routable_upstream_tokens: Vec<String>,
+    pub(super) quota_status: SmokeQuotaStatus,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct SmokeAccountFixture {
-    account_id: &'static str,
-    label: &'static str,
-    upstream_token: &'static str,
-    short_remaining: u32,
-    short_reset: u64,
-    weekly_remaining: u32,
-    weekly_reset: u64,
-    weekly_status: SelectorQuotaWindowStatus,
+pub(super) struct SmokeAccountFixture {
+    pub(super) account_id: &'static str,
+    pub(super) label: &'static str,
+    pub(super) upstream_token: &'static str,
+    pub(super) short_remaining: u32,
+    pub(super) short_reset: u64,
+    pub(super) weekly_remaining: u32,
+    pub(super) weekly_reset: u64,
+    pub(super) weekly_status: SelectorQuotaWindowStatus,
 }
 
-const SMOKE_ACCOUNT_FIXTURES: &[SmokeAccountFixture] = &[
+pub(super) const SMOKE_ACCOUNT_FIXTURES: &[SmokeAccountFixture] = &[
     SmokeAccountFixture {
         account_id: "acct_askluna",
         label: "askluna",
@@ -99,7 +101,7 @@ const SMOKE_ACCOUNT_FIXTURES: &[SmokeAccountFixture] = &[
     },
 ];
 
-const QUOTA_RECONNECT_PRIMARY: SmokeAccountFixture = SmokeAccountFixture {
+pub(super) const QUOTA_RECONNECT_PRIMARY: SmokeAccountFixture = SmokeAccountFixture {
     account_id: "acct_quota_primary",
     label: "quota-primary",
     upstream_token: "installed-quota-primary-token",
@@ -110,7 +112,7 @@ const QUOTA_RECONNECT_PRIMARY: SmokeAccountFixture = SmokeAccountFixture {
     weekly_status: SelectorQuotaWindowStatus::Eligible,
 };
 
-const QUOTA_RECONNECT_FALLBACK: SmokeAccountFixture = SmokeAccountFixture {
+pub(super) const QUOTA_RECONNECT_FALLBACK: SmokeAccountFixture = SmokeAccountFixture {
     account_id: "acct_quota_fallback",
     label: "quota-fallback",
     upstream_token: "installed-quota-fallback-token",
@@ -123,14 +125,18 @@ const QUOTA_RECONNECT_FALLBACK: SmokeAccountFixture = SmokeAccountFixture {
 
 // Far-idle ordering selects the earliest reset before remaining headroom.
 // The single-client reconnect and floor journeys require primary first.
-const QUOTA_RECONNECT_PRIMARY_FOR_INITIAL_ADMISSION: SmokeAccountFixture = SmokeAccountFixture {
-    weekly_reset: 500_000,
-    ..QUOTA_RECONNECT_PRIMARY
-};
+pub(super) const QUOTA_RECONNECT_PRIMARY_FOR_INITIAL_ADMISSION: SmokeAccountFixture =
+    SmokeAccountFixture {
+        weekly_reset: 500_000,
+        ..QUOTA_RECONNECT_PRIMARY
+    };
 
-const SMOKE_SELECTOR_STALE_AFTER_SECONDS: u64 = 300;
+pub(super) const SMOKE_SELECTOR_STALE_AFTER_SECONDS: u64 = 300;
 
-fn seed_router_state(state_path: &Path, secret_root: &Path) -> Result<SmokeSeed, String> {
+pub(super) fn seed_router_state(
+    state_path: &Path,
+    secret_root: &Path,
+) -> Result<SmokeSeed, String> {
     let state = SqliteStateStore::open(state_path)
         .map_err(|error| format!("failed to open smoke SQLite state: {error}"))?;
     let secrets =
@@ -180,7 +186,7 @@ fn seed_router_state(state_path: &Path, secret_root: &Path) -> Result<SmokeSeed,
     })
 }
 
-fn seed_quota_reconnect_router_state(
+pub(super) fn seed_quota_reconnect_router_state(
     state_path: &Path,
     secret_root: &Path,
     primary_fixture: SmokeAccountFixture,
@@ -205,7 +211,7 @@ fn seed_quota_reconnect_router_state(
     Ok(())
 }
 
-fn seed_s8_overlap_quota_router_state(
+pub(super) fn seed_s8_overlap_quota_router_state(
     state_path: &Path,
     secret_root: &Path,
 ) -> Result<SmokeSeed, String> {
@@ -240,7 +246,7 @@ fn seed_s8_overlap_quota_router_state(
     })
 }
 
-fn reset_fixture_route_band_state(
+pub(super) fn reset_fixture_route_band_state(
     state_path: &Path,
     fixtures: &[SmokeAccountFixture],
     scenario_label: &str,
@@ -285,7 +291,7 @@ finally:
     Ok(())
 }
 
-fn disable_accounts_outside_fixtures(
+pub(super) fn disable_accounts_outside_fixtures(
     state: &SqliteStateStore,
     allowed_fixtures: &[SmokeAccountFixture],
     scenario_label: &str,
@@ -319,7 +325,7 @@ fn disable_accounts_outside_fixtures(
     Ok(())
 }
 
-fn seed_smoke_account(
+pub(super) fn seed_smoke_account(
     state: &SqliteStateStore,
     secrets: &EncryptedCredentialStore,
     fixture: SmokeAccountFixture,
@@ -404,7 +410,7 @@ fn seed_smoke_account(
     Ok(())
 }
 
-fn capture_quota_status(state_path: &Path) -> Result<SmokeQuotaStatus, String> {
+pub(super) fn capture_quota_status(state_path: &Path) -> Result<SmokeQuotaStatus, String> {
     let router_root = state_path
         .parent()
         .ok_or_else(|| "state path had no router root parent".to_owned())?;
@@ -419,7 +425,7 @@ fn capture_quota_status(state_path: &Path) -> Result<SmokeQuotaStatus, String> {
     })
 }
 
-fn run_quota_status(
+pub(super) fn run_quota_status(
     runtime: &tokio::runtime::Runtime,
     router_root: &Path,
     format: &str,
@@ -461,12 +467,14 @@ fn run_quota_status(
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct SelectedQuotaStatusAccount {
-    safe_label: String,
-    account_hash: String,
+pub(super) struct SelectedQuotaStatusAccount {
+    pub(super) safe_label: String,
+    pub(super) account_hash: String,
 }
 
-fn selected_account_from_status_json(payload: &str) -> Result<SelectedQuotaStatusAccount, String> {
+pub(super) fn selected_account_from_status_json(
+    payload: &str,
+) -> Result<SelectedQuotaStatusAccount, String> {
     let value: Value = serde_json::from_str(payload)
         .map_err(|error| format!("quota status json was invalid: {error}"))?;
     value
@@ -496,7 +504,7 @@ fn selected_account_from_status_json(payload: &str) -> Result<SelectedQuotaStatu
         .ok_or_else(|| "quota status json did not include preferred account label".to_owned())
 }
 
-fn smoke_account_label_from_upstream_token(token: &str) -> Option<&'static str> {
+pub(super) fn smoke_account_label_from_upstream_token(token: &str) -> Option<&'static str> {
     SMOKE_ACCOUNT_FIXTURES
         .iter()
         .find(|fixture| fixture.upstream_token == token)

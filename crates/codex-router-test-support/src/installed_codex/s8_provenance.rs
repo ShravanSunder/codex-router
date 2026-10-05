@@ -1,18 +1,20 @@
-fn s8_smoke_provenance(scenario: &str) -> serde_json::Value {
+use super::*;
+
+pub(super) fn s8_smoke_provenance(scenario: &str) -> serde_json::Value {
     serde_json::json!({
         "run_id": s8_smoke_run_id(),
         "scenario": scenario,
     })
 }
 
-fn s8_smoke_run_id() -> Option<String> {
+pub(super) fn s8_smoke_run_id() -> Option<String> {
     std::env::var(S8_RUN_ID_ENV)
         .ok()
         .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty())
 }
 
-fn runtime_correlations_for_three_websocket(
+pub(super) fn runtime_correlations_for_three_websocket(
     input: &ThreeWebSocketTranscriptInput<'_>,
 ) -> Vec<Value> {
     let upstream_session_by_client = upstream_session_by_client_index(input.upstream);
@@ -40,7 +42,9 @@ fn runtime_correlations_for_three_websocket(
         .collect()
 }
 
-fn session_continuity_for_three_websocket(input: &ThreeWebSocketTranscriptInput<'_>) -> Value {
+pub(super) fn session_continuity_for_three_websocket(
+    input: &ThreeWebSocketTranscriptInput<'_>,
+) -> Value {
     let upstream_session_by_client = upstream_session_by_client_index(input.upstream);
     let router_registry_observed = input.registry_report.is_some_and(|report| {
         report.high_water_sessions >= input.outputs.len()
@@ -80,7 +84,7 @@ fn session_continuity_for_three_websocket(input: &ThreeWebSocketTranscriptInput<
     })
 }
 
-fn upstream_session_by_client_index(
+pub(super) fn upstream_session_by_client_index(
     upstream: &ConcurrentWebSocketTranscript,
 ) -> BTreeMap<usize, u64> {
     upstream
@@ -90,11 +94,11 @@ fn upstream_session_by_client_index(
         .collect()
 }
 
-fn unique_u64_count(values: &[u64]) -> usize {
+pub(super) fn unique_u64_count(values: &[u64]) -> usize {
     values.iter().copied().collect::<BTreeSet<_>>().len()
 }
 
-fn stderr_transport_error_markers(stderr: &str) -> Vec<&'static str> {
+pub(super) fn stderr_transport_error_markers(stderr: &str) -> Vec<&'static str> {
     let stderr = stderr.to_ascii_lowercase();
     [
         ("fallback", "fallback"),
@@ -118,7 +122,7 @@ fn stderr_transport_error_markers(stderr: &str) -> Vec<&'static str> {
     .collect()
 }
 
-fn sanitized_artifact_path(path: &Path) -> Result<String, String> {
+pub(super) fn sanitized_artifact_path(path: &Path) -> Result<String, String> {
     let workspace = workspace_root()?;
     if let Ok(relative) = path.strip_prefix(&workspace) {
         return Ok(format!("<repo>/{}", relative.display()));
@@ -129,7 +133,7 @@ fn sanitized_artifact_path(path: &Path) -> Result<String, String> {
     ))
 }
 
-fn sanitized_router_argv(argv: &[String]) -> Vec<String> {
+pub(super) fn sanitized_router_argv(argv: &[String]) -> Vec<String> {
     let path_value_flags = [
         "--port",
         "--state-db",
@@ -153,7 +157,7 @@ fn sanitized_router_argv(argv: &[String]) -> Vec<String> {
     sanitized
 }
 
-fn sanitized_loopback_endpoint_text(value: &str) -> String {
+pub(super) fn sanitized_loopback_endpoint_text(value: &str) -> String {
     let mut sanitized = value.to_owned();
     for prefix in ["127.0.0.1:", "localhost:"] {
         sanitized = replace_port_after_prefix(&sanitized, prefix);
@@ -161,7 +165,7 @@ fn sanitized_loopback_endpoint_text(value: &str) -> String {
     sanitized
 }
 
-fn replace_port_after_prefix(value: &str, prefix: &str) -> String {
+pub(super) fn replace_port_after_prefix(value: &str, prefix: &str) -> String {
     let mut output = String::with_capacity(value.len());
     let mut remaining = value;
     while let Some(index) = remaining.find(prefix) {
@@ -184,7 +188,7 @@ fn replace_port_after_prefix(value: &str, prefix: &str) -> String {
     output
 }
 
-fn current_git_head() -> Result<String, String> {
+pub(super) fn current_git_head() -> Result<String, String> {
     let output = Command::new("git")
         .args(["rev-parse", "HEAD"])
         .current_dir(workspace_root()?)
@@ -199,7 +203,9 @@ fn current_git_head() -> Result<String, String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
 
-fn observe_router_socket_cleanup(pid: u32) -> Result<RouterSocketCleanupObservation, String> {
+pub(super) fn observe_router_socket_cleanup(
+    pid: u32,
+) -> Result<RouterSocketCleanupObservation, String> {
     let output = Command::new("lsof")
         .args(["-nP", "-a", "-p", &pid.to_string(), "-iTCP"])
         .output()
@@ -229,7 +235,7 @@ fn observe_router_socket_cleanup(pid: u32) -> Result<RouterSocketCleanupObservat
 }
 
 impl RouterSocketCleanupObservation {
-    fn assert_no_leaked_sessions(&self) -> Result<(), String> {
+    pub(super) fn assert_no_leaked_sessions(&self) -> Result<(), String> {
         if self.established_count != 0 || self.close_wait_count != 0 {
             return Err(format!(
                 "router socket cleanup found established_count={} close_wait_count={} state_counts={:?}",
@@ -240,7 +246,7 @@ impl RouterSocketCleanupObservation {
     }
 }
 
-fn assert_redacted_three_websocket_payload(
+pub(super) fn assert_redacted_three_websocket_payload(
     payload: &str,
     outputs: &[CodexChildRun],
     seed: &SmokeSeed,
@@ -310,13 +316,13 @@ fn assert_redacted_three_websocket_payload(
     Ok(())
 }
 
-fn contains_loopback_endpoint_with_numeric_port(payload: &str) -> bool {
+pub(super) fn contains_loopback_endpoint_with_numeric_port(payload: &str) -> bool {
     ["127.0.0.1:", "localhost:"]
         .into_iter()
         .any(|prefix| contains_prefix_followed_by_digit(payload, prefix))
 }
 
-fn contains_prefix_followed_by_digit(payload: &str, prefix: &str) -> bool {
+pub(super) fn contains_prefix_followed_by_digit(payload: &str, prefix: &str) -> bool {
     let mut remaining = payload;
     while let Some(index) = remaining.find(prefix) {
         let Some(after_prefix) = remaining.get(index + prefix.len()..) else {
@@ -334,7 +340,7 @@ fn contains_prefix_followed_by_digit(payload: &str, prefix: &str) -> bool {
     false
 }
 
-fn assert_redacted_quota_reconnect_payload(
+pub(super) fn assert_redacted_quota_reconnect_payload(
     payload: &str,
     input: &QuotaReconnectTranscriptInput<'_>,
 ) -> Result<(), String> {
@@ -364,14 +370,14 @@ fn assert_redacted_quota_reconnect_payload(
     Ok(())
 }
 
-fn first_frame_shape_summary(first_frame: &Value) -> Value {
+pub(super) fn first_frame_shape_summary(first_frame: &Value) -> Value {
     serde_json::json!({
         "json_object": first_frame.is_object(),
         "non_prewarm_response_create": is_non_prewarm_response_create_frame(first_frame),
     })
 }
 
-fn response_create_frame_shape_summary(upstream: &MockWebSocketTranscript) -> Value {
+pub(super) fn response_create_frame_shape_summary(upstream: &MockWebSocketTranscript) -> Value {
     let response_create = upstream
         .request_frames
         .iter()
@@ -384,7 +390,7 @@ fn response_create_frame_shape_summary(upstream: &MockWebSocketTranscript) -> Va
     })
 }
 
-fn assert_redacted_transcript_payload(
+pub(super) fn assert_redacted_transcript_payload(
     payload: &str,
     input: RedactedTranscriptInput<'_>,
 ) -> Result<(), String> {

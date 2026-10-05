@@ -1,20 +1,22 @@
+use super::*;
+
 /// Runtime configuration for the assembled loopback router.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LoopbackRouterRuntimeConfig {
-    bind_address: LoopbackBindAddress,
-    upstream_endpoint: UpstreamEndpoint,
+    pub(super) bind_address: LoopbackBindAddress,
+    pub(super) upstream_endpoint: UpstreamEndpoint,
     #[cfg(debug_assertions)]
-    debug_claude_upstream_endpoint: Option<ClaudeUpstreamEndpoint>,
-    state_database_path: PathBuf,
-    secret_store_root: PathBuf,
-    local_token: Option<LocalRouterTokenRecord>,
-    claude_edge_runtime_config: Option<ClaudeEdgeRuntimeConfig>,
-    fixed_now_unix_seconds: Option<u64>,
-    max_snapshot_age_seconds: u64,
-    session_pin_idle_ttl: Duration,
-    claude_five_hour_reserve_percent: ClaudeFiveHourReservePercent,
-    audit_file_path: Option<PathBuf>,
-    websocket_registry_report_file: Option<PathBuf>,
+    pub(super) debug_claude_upstream_endpoint: Option<ClaudeUpstreamEndpoint>,
+    pub(super) state_database_path: PathBuf,
+    pub(super) secret_store_root: PathBuf,
+    pub(super) local_token: Option<LocalRouterTokenRecord>,
+    pub(super) claude_edge_runtime_config: Option<ClaudeEdgeRuntimeConfig>,
+    pub(super) fixed_now_unix_seconds: Option<u64>,
+    pub(super) max_snapshot_age_seconds: u64,
+    pub(super) session_pin_idle_ttl: Duration,
+    pub(super) claude_five_hour_reserve_percent: ClaudeFiveHourReservePercent,
+    pub(super) audit_file_path: Option<PathBuf>,
+    pub(super) websocket_registry_report_file: Option<PathBuf>,
 }
 
 /// Receives diagnostics from detached loopback connection tasks.
@@ -24,13 +26,13 @@ pub trait LoopbackConnectionErrorReporter: Send + Sync {
 }
 
 #[derive(Clone, Debug)]
-struct RuntimeWritableStateStores {
-    credential_state_store: AsyncSqliteStateStore,
-    db_write_state_store: AsyncSqliteStateStore,
-    maintenance_state_store: AsyncSqliteStateStore,
+pub(super) struct RuntimeWritableStateStores {
+    pub(super) credential_state_store: AsyncSqliteStateStore,
+    pub(super) db_write_state_store: AsyncSqliteStateStore,
+    pub(super) maintenance_state_store: AsyncSqliteStateStore,
 }
 
-async fn open_runtime_writable_state_stores(
+pub(super) async fn open_runtime_writable_state_stores(
     state_database_path: &Path,
 ) -> Result<RuntimeWritableStateStores, StateStoreError> {
     let credential_state_store = AsyncSqliteStateStore::open(state_database_path).await?;
@@ -44,7 +46,7 @@ async fn open_runtime_writable_state_stores(
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct StderrLoopbackConnectionErrorReporter;
+pub(super) struct StderrLoopbackConnectionErrorReporter;
 
 impl LoopbackConnectionErrorReporter for StderrLoopbackConnectionErrorReporter {
     fn report_connection_error(&self, diagnostic: &str) {
@@ -171,7 +173,7 @@ impl LoopbackRouterRuntimeConfig {
         self
     }
 
-    fn session_account_affinity_cache(&self) -> SharedSessionAccountAffinityCache {
+    pub(super) fn session_account_affinity_cache(&self) -> SharedSessionAccountAffinityCache {
         SessionAccountAffinityCache::shared(self.session_pin_idle_ttl)
     }
 
@@ -192,38 +194,38 @@ impl LoopbackRouterRuntimeConfig {
 
 /// Assembled loopback router runtime for HTTP/SSE forwarding.
 pub struct LoopbackRouterRuntime {
-    runtime: Option<tokio::runtime::Runtime>,
-    caller_dispatcher: tracing::dispatcher::Dispatch,
-    server: AsyncLoopbackServerRuntime,
-    credential_state_store: AsyncSqliteStateStore,
-    provider_error_state_store: AsyncSqliteStateStore,
-    selection_state_store: AsyncSqliteStateStore,
-    credential_store_availability: CredentialStoreAvailability,
-    credential_factory: AsyncProxyCredentialResolverFactory,
-    affinity_secret_provider: RuntimeAffinitySecretProvider,
-    affinity_owner_recorder: Arc<dyn AsyncHttpAffinityOwnerRecorder>,
-    auth_gate: crate::local_auth::ProxyLocalAuthGate,
-    claude_edge_auth_gate: Option<crate::local_auth::ProxyLocalAuthGate>,
-    claude_edge_runtime_config: Option<ClaudeEdgeRuntimeConfig>,
-    local_model_authentication_required: bool,
-    upstream: HyperHttpUpstreamTransport,
-    upstream_endpoint: UpstreamEndpoint,
-    websocket_revocations: WebSocketRevocationRegistry,
-    audit_sink: Option<AuditFileSink>,
-    weighted_selectors: RouteBandWeightedSelectors,
-    account_holds: RouteBandAccountHolds,
-    active_reservations: RouteBandReservationBooks,
-    selection_reservation_lock: SelectionReservationLock,
-    session_affinity_cache: SharedSessionAccountAffinityCache,
-    claude_five_hour_reserve_percent: ClaudeFiveHourReservePercent,
-    runtime_exhaustions: RouteBandRuntimeExhaustions,
-    route_band_queue_health: RouteBandQueueHealth,
-    db_write_actor: DbWriteActor,
-    maintenance_actor: MaintenanceActor,
-    last_session_affinity_cleanup_utc_day: AtomicU64,
-    fixed_now_unix_seconds: Option<u64>,
-    connection_error_reporter: Arc<dyn LoopbackConnectionErrorReporter>,
-    credential_refresh_shutdown_drain: Duration,
+    pub(super) runtime: Option<tokio::runtime::Runtime>,
+    pub(super) caller_dispatcher: tracing::dispatcher::Dispatch,
+    pub(super) server: AsyncLoopbackServerRuntime,
+    pub(super) credential_state_store: AsyncSqliteStateStore,
+    pub(super) provider_error_state_store: AsyncSqliteStateStore,
+    pub(super) selection_state_store: AsyncSqliteStateStore,
+    pub(super) credential_store_availability: CredentialStoreAvailability,
+    pub(super) credential_factory: AsyncProxyCredentialResolverFactory,
+    pub(super) affinity_secret_provider: RuntimeAffinitySecretProvider,
+    pub(super) affinity_owner_recorder: Arc<dyn AsyncHttpAffinityOwnerRecorder>,
+    pub(super) auth_gate: crate::local_auth::ProxyLocalAuthGate,
+    pub(super) claude_edge_auth_gate: Option<crate::local_auth::ProxyLocalAuthGate>,
+    pub(super) claude_edge_runtime_config: Option<ClaudeEdgeRuntimeConfig>,
+    pub(super) local_model_authentication_required: bool,
+    pub(super) upstream: HyperHttpUpstreamTransport,
+    pub(super) upstream_endpoint: UpstreamEndpoint,
+    pub(super) websocket_revocations: WebSocketRevocationRegistry,
+    pub(super) audit_sink: Option<AuditFileSink>,
+    pub(super) weighted_selectors: RouteBandWeightedSelectors,
+    pub(super) account_holds: RouteBandAccountHolds,
+    pub(super) active_reservations: RouteBandReservationBooks,
+    pub(super) selection_reservation_lock: SelectionReservationLock,
+    pub(super) session_affinity_cache: SharedSessionAccountAffinityCache,
+    pub(super) claude_five_hour_reserve_percent: ClaudeFiveHourReservePercent,
+    pub(super) runtime_exhaustions: RouteBandRuntimeExhaustions,
+    pub(super) route_band_queue_health: RouteBandQueueHealth,
+    pub(super) db_write_actor: DbWriteActor,
+    pub(super) maintenance_actor: MaintenanceActor,
+    pub(super) last_session_affinity_cleanup_utc_day: AtomicU64,
+    pub(super) fixed_now_unix_seconds: Option<u64>,
+    pub(super) connection_error_reporter: Arc<dyn LoopbackConnectionErrorReporter>,
+    pub(super) credential_refresh_shutdown_drain: Duration,
 }
 
 impl Drop for LoopbackRouterRuntime {
@@ -281,7 +283,7 @@ impl LoopbackRouterRuntime {
         )
     }
 
-    fn start_with_test_maintenance_completion_sender(
+    pub(super) fn start_with_test_maintenance_completion_sender(
         config: LoopbackRouterRuntimeConfig,
         credential_store: EncryptedCredentialStore,
         #[cfg(test)] completion_sender: Option<
@@ -527,7 +529,7 @@ impl LoopbackRouterRuntime {
         self
     }
 
-    async fn serve_protocol_connections_async(
+    pub(super) async fn serve_protocol_connections_async(
         &self,
         max_connections: usize,
         shutdown: Option<CancellationToken>,
@@ -637,7 +639,7 @@ impl LoopbackRouterRuntime {
         }
     }
 
-    fn protocol_connection_handler(
+    pub(super) fn protocol_connection_handler(
         &self,
         session_shutdown: CancellationToken,
         affinity_record_tasks: TaskTracker,
@@ -673,7 +675,7 @@ impl LoopbackRouterRuntime {
         }
     }
 
-    fn enqueue_runtime_maintenance_hints(&self, now_unix_seconds: u64) {
+    pub(super) fn enqueue_runtime_maintenance_hints(&self, now_unix_seconds: u64) {
         const ROLLUP_BUCKET_SECONDS: u64 = 300;
         const ACTIVE_CLIENT_STALE_AFTER_SECONDS: u64 = 600;
         const ACTIVE_SESSION_RETENTION_SECONDS: u64 = 86_400;

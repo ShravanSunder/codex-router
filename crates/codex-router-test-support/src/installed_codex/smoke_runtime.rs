@@ -1,4 +1,6 @@
-fn run_installed_codex_three_websocket_mock_e2e_inner(
+use super::*;
+
+pub(super) fn run_installed_codex_three_websocket_mock_e2e_inner(
     config: ConcurrentWebSocketHarnessConfig,
 ) -> Result<InstalledCodexSmokeReport, String> {
     let smoke_root = SmokeTempRoot::new("installed-codex-three-websocket")?;
@@ -183,13 +185,13 @@ fn run_installed_codex_three_websocket_mock_e2e_inner(
     Ok(InstalledCodexSmokeReport { transcript_path })
 }
 
-fn installed_codex_runtime_roots_for_three_websocket(
+pub(super) fn installed_codex_runtime_roots_for_three_websocket(
     smoke_root: &SmokeTempRoot,
 ) -> Result<InstalledCodexRuntimeRoots, String> {
     installed_codex_runtime_roots(smoke_root)
 }
 
-fn installed_codex_runtime_roots(
+pub(super) fn installed_codex_runtime_roots(
     smoke_root: &SmokeTempRoot,
 ) -> Result<InstalledCodexRuntimeRoots, String> {
     let mode = std::env::var(INSTALLED_SMOKE_RUNTIME_ROOT_MODE_ENV)
@@ -226,14 +228,14 @@ fn installed_codex_runtime_roots(
     }
 }
 
-fn required_env_path(name: &str) -> Result<PathBuf, String> {
+pub(super) fn required_env_path(name: &str) -> Result<PathBuf, String> {
     std::env::var_os(name)
         .map(PathBuf::from)
         .filter(|path| !path.as_os_str().is_empty())
         .ok_or_else(|| format!("{name} is required for copied-dev-state installed Codex smoke"))
 }
 
-fn validate_copied_dev_state_roots(
+pub(super) fn validate_copied_dev_state_roots(
     router_root: &Path,
     codex_home: &Path,
     process_home: &Path,
@@ -265,7 +267,10 @@ fn validate_copied_dev_state_roots(
     Ok(())
 }
 
-fn resolve_copied_dev_state_policy_path(label: &str, path: &Path) -> Result<PathBuf, String> {
+pub(super) fn resolve_copied_dev_state_policy_path(
+    label: &str,
+    path: &Path,
+) -> Result<PathBuf, String> {
     if path_is_symlink(path)? {
         return Err(format!(
             "copied-dev-state {label} must not be a symlink; got {}",
@@ -283,7 +288,7 @@ fn resolve_copied_dev_state_policy_path(label: &str, path: &Path) -> Result<Path
     resolve_future_path_without_following_new_leaf(path)
 }
 
-fn path_is_symlink(path: &Path) -> Result<bool, String> {
+pub(super) fn path_is_symlink(path: &Path) -> Result<bool, String> {
     match fs::symlink_metadata(path) {
         Ok(metadata) => Ok(metadata.file_type().is_symlink()),
         Err(error) if error.kind() == ErrorKind::NotFound => Ok(false),
@@ -294,7 +299,9 @@ fn path_is_symlink(path: &Path) -> Result<bool, String> {
     }
 }
 
-fn resolve_future_path_without_following_new_leaf(path: &Path) -> Result<PathBuf, String> {
+pub(super) fn resolve_future_path_without_following_new_leaf(
+    path: &Path,
+) -> Result<PathBuf, String> {
     let absolute = if path.is_absolute() {
         path.to_path_buf()
     } else {
@@ -336,7 +343,7 @@ fn resolve_future_path_without_following_new_leaf(path: &Path) -> Result<PathBuf
     Ok(resolved)
 }
 
-fn assert_concurrent_websocket_contract(
+pub(super) fn assert_concurrent_websocket_contract(
     config: ConcurrentWebSocketHarnessConfig,
     upstream: &ConcurrentWebSocketTranscript,
     registry_report: Option<&RouterWebSocketRegistryReport>,

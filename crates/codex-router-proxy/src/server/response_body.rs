@@ -1,3 +1,5 @@
+use super::*;
+
 pub(crate) fn method_from_hyper(method: &HttpMethod) -> Method {
     match *method {
         HttpMethod::GET => Method::Get,
@@ -6,7 +8,7 @@ pub(crate) fn method_from_hyper(method: &HttpMethod) -> Method {
     }
 }
 
-fn async_streaming_http_response_to_hyper(
+pub(super) fn async_streaming_http_response_to_hyper(
     status: u16,
     headers: HeaderCollection,
     body: BoxBody<Bytes, AsyncHttpBodyError>,
@@ -30,7 +32,7 @@ fn async_streaming_http_response_to_hyper(
         .unwrap_or_else(|_error| empty_response(StatusCode::BAD_GATEWAY))
 }
 
-fn record_affinity_owner_from_async_body(
+pub(super) fn record_affinity_owner_from_async_body(
     body: BoxBody<Bytes, AsyncHttpBodyError>,
     completion: StreamingHttpProxyCompletion,
     affinity_owner_recorder: Arc<dyn AsyncHttpAffinityOwnerRecorder>,
@@ -107,7 +109,7 @@ fn record_affinity_owner_from_async_body(
     .boxed()
 }
 
-fn provider_error_body_from_http_buffer(buffered: &[u8]) -> Option<Vec<u8>> {
+pub(super) fn provider_error_body_from_http_buffer(buffered: &[u8]) -> Option<Vec<u8>> {
     if classify_provider_error_envelope(buffered) != ProviderErrorClassification::Unknown {
         return Some(buffered.to_vec());
     }
@@ -129,7 +131,7 @@ fn provider_error_body_from_http_buffer(buffered: &[u8]) -> Option<Vec<u8>> {
     None
 }
 
-fn trim_ascii_bytes(bytes: &[u8]) -> &[u8] {
+pub(super) fn trim_ascii_bytes(bytes: &[u8]) -> &[u8] {
     let start = bytes
         .iter()
         .position(|byte| !byte.is_ascii_whitespace())
@@ -159,7 +161,7 @@ pub(crate) fn hold_active_reservation_until_body_drop(
     .boxed()
 }
 
-fn spawn_async_affinity_owner_record(
+pub(super) fn spawn_async_affinity_owner_record(
     recorder: Arc<dyn AsyncHttpAffinityOwnerRecorder>,
     affinity_secret: codex_router_core::affinity::RouterAffinityHashSecret,
     account_id: codex_router_core::ids::AccountId,
@@ -184,7 +186,7 @@ fn spawn_async_affinity_owner_record(
     });
 }
 
-fn spawn_async_provider_error_observation(
+pub(super) fn spawn_async_provider_error_observation(
     observer: Arc<dyn AsyncProviderErrorObserver>,
     account_id: codex_router_core::ids::AccountId,
     route_band: RouteBand,
@@ -223,7 +225,7 @@ pub(crate) fn incoming_body_error(error: hyper::Error) -> AsyncHttpBodyError {
     Box::new(error)
 }
 
-fn sanitize_route_path_for_log(path: &str) -> &'static str {
+pub(super) fn sanitize_route_path_for_log(path: &str) -> &'static str {
     if path.ends_with("/responses") {
         "/v1/responses"
     } else if path.ends_with("/models") {
@@ -233,7 +235,7 @@ fn sanitize_route_path_for_log(path: &str) -> &'static str {
     }
 }
 
-fn websocket_runtime_error_kind(error: &LoopbackRouterRuntimeError) -> &'static str {
+pub(super) fn websocket_runtime_error_kind(error: &LoopbackRouterRuntimeError) -> &'static str {
     match error {
         LoopbackRouterRuntimeError::WebSocket(
             crate::websocket::WebSocketTunnelError::Transport(_),
@@ -254,7 +256,7 @@ fn websocket_runtime_error_kind(error: &LoopbackRouterRuntimeError) -> &'static 
     }
 }
 
-fn sanitize_error_for_log(error: &LoopbackRouterRuntimeError) -> String {
+pub(super) fn sanitize_error_for_log(error: &LoopbackRouterRuntimeError) -> String {
     let rendered_error = error.to_string();
     if rendered_error.contains("BadRecordMac") {
         "websocket transport failed: BadRecordMac".to_owned()
@@ -392,7 +394,10 @@ pub(crate) fn claude_selection_unavailable_response(
     }
 }
 
-fn claude_account_name(account_id: &AccountId, account_labels: &[(AccountId, String)]) -> String {
+pub(super) fn claude_account_name(
+    account_id: &AccountId,
+    account_labels: &[(AccountId, String)],
+) -> String {
     account_labels
         .iter()
         .find(|(candidate_id, _label)| candidate_id == account_id)
@@ -400,7 +405,7 @@ fn claude_account_name(account_id: &AccountId, account_labels: &[(AccountId, Str
         .unwrap_or_else(|| safe_account_label("account", account_id).to_string())
 }
 
-fn claude_api_error_response(
+pub(super) fn claude_api_error_response(
     status: StatusCode,
     error_type: &'static str,
     message: String,
@@ -437,7 +442,7 @@ fn claude_api_error_response(
         .unwrap_or_else(|_error| empty_response(StatusCode::BAD_GATEWAY))
 }
 
-fn captured_claude_provider_response(
+pub(super) fn captured_claude_provider_response(
     response: CapturedClaudeProviderErrorResponse,
 ) -> HttpResponse<BoxBody<Bytes, AsyncHttpBodyError>> {
     let mut builder = HttpResponse::builder()
@@ -467,7 +472,7 @@ pub(crate) fn empty_response(
         .unwrap_or_else(|_error| HttpResponse::new(empty_body()))
 }
 
-fn unsupported_claude_path_response(
+pub(super) fn unsupported_claude_path_response(
     path: &str,
 ) -> HttpResponse<BoxBody<Bytes, AsyncHttpBodyError>> {
     let body = format!("Path {path} is unsupported by Router");
@@ -478,7 +483,8 @@ fn unsupported_claude_path_response(
         .unwrap_or_else(|_error| HttpResponse::new(empty_body()))
 }
 
-fn all_accounts_exhausted_response() -> HttpResponse<BoxBody<Bytes, AsyncHttpBodyError>> {
+pub(super) fn all_accounts_exhausted_response() -> HttpResponse<BoxBody<Bytes, AsyncHttpBodyError>>
+{
     HttpResponse::builder()
         .status(StatusCode::SERVICE_UNAVAILABLE)
         .body(box_body_from_bytes(
@@ -489,7 +495,8 @@ fn all_accounts_exhausted_response() -> HttpResponse<BoxBody<Bytes, AsyncHttpBod
         .unwrap_or_else(|_error| HttpResponse::new(empty_body()))
 }
 
-fn quota_state_unavailable_response() -> HttpResponse<BoxBody<Bytes, AsyncHttpBodyError>> {
+pub(super) fn quota_state_unavailable_response() -> HttpResponse<BoxBody<Bytes, AsyncHttpBodyError>>
+{
     HttpResponse::builder()
         .status(StatusCode::SERVICE_UNAVAILABLE)
         .body(box_body_from_bytes(
@@ -500,7 +507,7 @@ fn quota_state_unavailable_response() -> HttpResponse<BoxBody<Bytes, AsyncHttpBo
         .unwrap_or_else(|_error| HttpResponse::new(empty_body()))
 }
 
-fn empty_body() -> BoxBody<Bytes, AsyncHttpBodyError> {
+pub(super) fn empty_body() -> BoxBody<Bytes, AsyncHttpBodyError> {
     Empty::<Bytes>::new()
         .map_err(|never: Infallible| -> AsyncHttpBodyError { match never {} })
         .boxed()

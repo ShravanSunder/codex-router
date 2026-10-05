@@ -1,49 +1,51 @@
+use super::*;
+
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct RouterAuditObservation {
-    http_sse_local_auth_validated: bool,
-    websocket_local_auth_validated: bool,
+pub(super) struct RouterAuditObservation {
+    pub(super) http_sse_local_auth_validated: bool,
+    pub(super) websocket_local_auth_validated: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct RouterProcessObservation {
-    binary_path: PathBuf,
-    pid: u32,
-    argv: Vec<String>,
-    listener: String,
-    readiness_line: String,
-    cleanup_result: String,
+pub(super) struct RouterProcessObservation {
+    pub(super) binary_path: PathBuf,
+    pub(super) pid: u32,
+    pub(super) argv: Vec<String>,
+    pub(super) listener: String,
+    pub(super) readiness_line: String,
+    pub(super) cleanup_result: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
-struct RouterWebSocketRegistryReport {
-    handled_connections: Option<usize>,
-    active_sessions: usize,
-    high_water_sessions: usize,
-    registered_sessions: usize,
-    closed_sessions: usize,
-    completed_response_sessions: usize,
-    forwarded_upstream_messages: usize,
-    registered_session_id_count: usize,
-    completed_session_id_count: usize,
-    closed_session_id_count: usize,
-    session_peer_addr_count: usize,
-    session_peer_join_observable: bool,
-    completed_session_forwarded_upstream_message_counts: Vec<usize>,
-    final_session_forwarded_upstream_message_counts: Vec<usize>,
+pub(super) struct RouterWebSocketRegistryReport {
+    pub(super) handled_connections: Option<usize>,
+    pub(super) active_sessions: usize,
+    pub(super) high_water_sessions: usize,
+    pub(super) registered_sessions: usize,
+    pub(super) closed_sessions: usize,
+    pub(super) completed_response_sessions: usize,
+    pub(super) forwarded_upstream_messages: usize,
+    pub(super) registered_session_id_count: usize,
+    pub(super) completed_session_id_count: usize,
+    pub(super) closed_session_id_count: usize,
+    pub(super) session_peer_addr_count: usize,
+    pub(super) session_peer_join_observable: bool,
+    pub(super) completed_session_forwarded_upstream_message_counts: Vec<usize>,
+    pub(super) final_session_forwarded_upstream_message_counts: Vec<usize>,
     #[serde(default)]
-    quota_reconnect_signal_count: usize,
-    quota_reconnect_signal_unix_ms: Option<u128>,
+    pub(super) quota_reconnect_signal_count: usize,
+    pub(super) quota_reconnect_signal_unix_ms: Option<u128>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize)]
-struct RouterWebSocketRegistryReportFile {
-    schema_version: usize,
-    handled_connections: Option<usize>,
-    websocket_registry: RouterWebSocketRegistryReport,
+pub(super) struct RouterWebSocketRegistryReportFile {
+    pub(super) schema_version: usize,
+    pub(super) handled_connections: Option<usize>,
+    pub(super) websocket_registry: RouterWebSocketRegistryReport,
 }
 
 impl RouterWebSocketRegistryReport {
-    fn from_file(path: &Path) -> Result<Self, String> {
+    pub(super) fn from_file(path: &Path) -> Result<Self, String> {
         let contents = fs::read_to_string(path).map_err(|error| {
             format!(
                 "failed to read router websocket registry report {}: {error}",
@@ -71,7 +73,7 @@ impl RouterWebSocketRegistryReport {
 }
 
 impl RouterAuditObservation {
-    fn from_file(path: &Path) -> Result<Self, String> {
+    pub(super) fn from_file(path: &Path) -> Result<Self, String> {
         let audit_contents = fs::read_to_string(path).map_err(|error| {
             format!(
                 "failed to read router audit file {}: {error}",
@@ -103,7 +105,7 @@ impl RouterAuditObservation {
         Ok(observation)
     }
 
-    fn require_mode(&self, mode: InstalledCodexSmokeMode) -> Result<(), String> {
+    pub(super) fn require_mode(&self, mode: InstalledCodexSmokeMode) -> Result<(), String> {
         if mode.requires_http_sse() && !self.http_sse_local_auth_validated {
             return Err("router audit did not record valid allowed HTTP/SSE local auth".to_owned());
         }
@@ -116,41 +118,43 @@ impl RouterAuditObservation {
     }
 }
 
-struct RedactedTranscriptInput<'a> {
-    mode: InstalledCodexSmokeMode,
-    codex_version: &'a str,
-    profile_path: &'a Path,
-    http_sse_codex_status: Option<&'a ExitStatus>,
-    http_sse_codex_stdout: Option<Cow<'a, str>>,
-    http_sse_codex_stderr: Option<Cow<'a, str>>,
-    http_sse_last_message_path: Option<&'a Path>,
-    websocket_codex_status: Option<&'a ExitStatus>,
-    websocket_codex_stdout: Option<Cow<'a, str>>,
-    websocket_codex_stderr: Option<Cow<'a, str>>,
-    websocket_last_message_path: Option<&'a Path>,
-    upstream: &'a MockWebSocketTranscript,
-    quota_status: &'a SmokeQuotaStatus,
-    expected_account_label: &'a str,
-    expected_upstream_token: &'a str,
-    router_process: &'a RouterProcessObservation,
-    router_audit: &'a RouterAuditObservation,
+pub(super) struct RedactedTranscriptInput<'a> {
+    pub(super) mode: InstalledCodexSmokeMode,
+    pub(super) codex_version: &'a str,
+    pub(super) profile_path: &'a Path,
+    pub(super) http_sse_codex_status: Option<&'a ExitStatus>,
+    pub(super) http_sse_codex_stdout: Option<Cow<'a, str>>,
+    pub(super) http_sse_codex_stderr: Option<Cow<'a, str>>,
+    pub(super) http_sse_last_message_path: Option<&'a Path>,
+    pub(super) websocket_codex_status: Option<&'a ExitStatus>,
+    pub(super) websocket_codex_stdout: Option<Cow<'a, str>>,
+    pub(super) websocket_codex_stderr: Option<Cow<'a, str>>,
+    pub(super) websocket_last_message_path: Option<&'a Path>,
+    pub(super) upstream: &'a MockWebSocketTranscript,
+    pub(super) quota_status: &'a SmokeQuotaStatus,
+    pub(super) expected_account_label: &'a str,
+    pub(super) expected_upstream_token: &'a str,
+    pub(super) router_process: &'a RouterProcessObservation,
+    pub(super) router_audit: &'a RouterAuditObservation,
 }
 
-struct QuotaReconnectTranscriptInput<'a> {
-    codex_version: &'a str,
-    profile_path: &'a Path,
-    codex_status: &'a ExitStatus,
-    codex_stdout: &'a str,
-    codex_stderr: &'a str,
-    last_message_path: &'a Path,
-    upstream: &'a QuotaReconnectWebSocketTranscript,
-    router_process: &'a RouterProcessObservation,
-    router_audit: &'a RouterAuditObservation,
-    registry_report: &'a RouterWebSocketRegistryReport,
-    runtime_roots: &'a InstalledCodexRuntimeRoots,
+pub(super) struct QuotaReconnectTranscriptInput<'a> {
+    pub(super) codex_version: &'a str,
+    pub(super) profile_path: &'a Path,
+    pub(super) codex_status: &'a ExitStatus,
+    pub(super) codex_stdout: &'a str,
+    pub(super) codex_stderr: &'a str,
+    pub(super) last_message_path: &'a Path,
+    pub(super) upstream: &'a QuotaReconnectWebSocketTranscript,
+    pub(super) router_process: &'a RouterProcessObservation,
+    pub(super) router_audit: &'a RouterAuditObservation,
+    pub(super) registry_report: &'a RouterWebSocketRegistryReport,
+    pub(super) runtime_roots: &'a InstalledCodexRuntimeRoots,
 }
 
-fn write_redacted_transcript(input: RedactedTranscriptInput<'_>) -> Result<PathBuf, String> {
+pub(super) fn write_redacted_transcript(
+    input: RedactedTranscriptInput<'_>,
+) -> Result<PathBuf, String> {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let artifact_dir = manifest_dir
         .parent()
@@ -254,7 +258,7 @@ fn write_redacted_transcript(input: RedactedTranscriptInput<'_>) -> Result<PathB
     Ok(transcript_path)
 }
 
-fn write_redacted_quota_reconnect_transcript(
+pub(super) fn write_redacted_quota_reconnect_transcript(
     input: &QuotaReconnectTranscriptInput<'_>,
 ) -> Result<PathBuf, String> {
     let artifact_dir = workspace_root()?.join("tmp").join("smoke");
@@ -399,19 +403,19 @@ fn write_redacted_quota_reconnect_transcript(
     Ok(transcript_path)
 }
 
-struct ThreeWebSocketTranscriptInput<'a> {
-    mode: &'a str,
-    codex_version: &'a str,
-    router_process: &'a RouterProcessObservation,
-    registry_report: Option<&'a RouterWebSocketRegistryReport>,
-    upstream: &'a ConcurrentWebSocketTranscript,
-    socket_cleanup: &'a RouterSocketCleanupObservation,
-    outputs: &'a [CodexChildRun],
-    seed: &'a SmokeSeed,
-    runtime_roots: &'a InstalledCodexRuntimeRoots,
+pub(super) struct ThreeWebSocketTranscriptInput<'a> {
+    pub(super) mode: &'a str,
+    pub(super) codex_version: &'a str,
+    pub(super) router_process: &'a RouterProcessObservation,
+    pub(super) registry_report: Option<&'a RouterWebSocketRegistryReport>,
+    pub(super) upstream: &'a ConcurrentWebSocketTranscript,
+    pub(super) socket_cleanup: &'a RouterSocketCleanupObservation,
+    pub(super) outputs: &'a [CodexChildRun],
+    pub(super) seed: &'a SmokeSeed,
+    pub(super) runtime_roots: &'a InstalledCodexRuntimeRoots,
 }
 
-fn write_redacted_three_websocket_transcript(
+pub(super) fn write_redacted_three_websocket_transcript(
     input: &ThreeWebSocketTranscriptInput<'_>,
 ) -> Result<PathBuf, String> {
     let artifact_dir = workspace_root()?.join("tmp").join("smoke");

@@ -160,20 +160,38 @@ use crate::websocket::router_websocket_config;
 const MAX_HTTP_HEADER_BYTES: usize = 64 * 1024;
 const ACTIVE_SESSION_EVENT_RETENTION_SECONDS: u64 = 7 * 86_400;
 
-include!("server/loopback_bind.rs");
-include!("server/runtime_config.rs");
-include!("server/runtime_lifecycle.rs");
-include!("server/connection_diagnostics.rs");
-include!("server/protocol_handler.rs");
-include!("server/auth_reloader.rs");
-include!("server/hyper_request.rs");
-include!("server/response_body.rs");
-include!("server/db_affinity.rs");
-#[cfg(test)]
-mod tests {
-    include!("server/tests_part1.rs");
-    include!("server/tests_part2.rs");
-    include!("server/tests_part3.rs");
-}
+#[path = "server/auth_reloader.rs"]
+mod auth_reloader;
+#[path = "server/connection_diagnostics.rs"]
+mod connection_diagnostics;
+#[path = "server/db_affinity.rs"]
+mod db_affinity;
+#[path = "server/errors_and_adapters.rs"]
+mod errors_and_adapters;
+#[path = "server/hyper_request.rs"]
+mod hyper_request;
+#[path = "server/loopback_bind.rs"]
+mod loopback_bind;
+#[path = "server/protocol_handler.rs"]
+mod protocol_handler;
+#[path = "server/response_body.rs"]
+mod response_body;
+#[path = "server/runtime_config.rs"]
+mod runtime_config;
+#[path = "server/runtime_lifecycle.rs"]
+mod runtime_lifecycle;
 
-include!("server/errors_and_adapters.rs");
+pub use auth_reloader::*;
+use connection_diagnostics::*;
+use db_affinity::*;
+pub use errors_and_adapters::*;
+pub(crate) use hyper_request::*;
+pub use loopback_bind::*;
+use protocol_handler::*;
+pub(crate) use response_body::*;
+pub use runtime_config::*;
+use runtime_lifecycle::*;
+
+#[cfg(test)]
+#[path = "server/tests.rs"]
+mod tests;

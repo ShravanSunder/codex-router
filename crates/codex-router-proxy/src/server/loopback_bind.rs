@@ -1,8 +1,10 @@
+use super::*;
+
 /// Address validated for the v1 loopback-only proxy server.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct LoopbackBindAddress {
-    host: IpAddr,
-    port: u16,
+    pub(super) host: IpAddr,
+    pub(super) port: u16,
 }
 
 impl LoopbackBindAddress {
@@ -30,7 +32,7 @@ impl LoopbackBindAddress {
     }
 }
 
-fn parse_loopback_candidate(host: &str) -> Result<IpAddr, ServerBindError> {
+pub(super) fn parse_loopback_candidate(host: &str) -> Result<IpAddr, ServerBindError> {
     if host.eq_ignore_ascii_case("localhost") {
         return Ok(IpAddr::V4(Ipv4Addr::LOCALHOST));
     }
@@ -46,8 +48,8 @@ fn parse_loopback_candidate(host: &str) -> Result<IpAddr, ServerBindError> {
 #[cfg(test)]
 #[derive(Debug)]
 pub struct LoopbackServerRuntime {
-    listener: TcpListener,
-    local_addr: SocketAddr,
+    pub(super) listener: TcpListener,
+    pub(super) local_addr: SocketAddr,
 }
 
 #[cfg(test)]
@@ -91,8 +93,8 @@ impl LoopbackServerRuntime {
 /// WebSocket upgrade handling, and pump behavior are cut over in later slices.
 #[derive(Debug)]
 pub struct AsyncLoopbackServerRuntime {
-    listener: TokioTcpListener,
-    local_addr: SocketAddr,
+    pub(super) listener: TokioTcpListener,
+    pub(super) local_addr: SocketAddr,
 }
 
 impl AsyncLoopbackServerRuntime {
@@ -175,7 +177,7 @@ impl HyperProtocolSwitchpoint {
     }
 }
 
-fn is_websocket_upgrade(headers: &HeaderMap) -> bool {
+pub(super) fn is_websocket_upgrade(headers: &HeaderMap) -> bool {
     let has_upgrade_header = headers
         .get(http::header::UPGRADE)
         .and_then(|value| value.to_str().ok())
@@ -193,7 +195,7 @@ fn is_websocket_upgrade(headers: &HeaderMap) -> bool {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct ClaudeEdgeRuntimeConfig {
-    local_token: LocalRouterTokenRecord,
-    quota_refresh_interval: Duration,
+pub(super) struct ClaudeEdgeRuntimeConfig {
+    pub(super) local_token: LocalRouterTokenRecord,
+    pub(super) quota_refresh_interval: Duration,
 }

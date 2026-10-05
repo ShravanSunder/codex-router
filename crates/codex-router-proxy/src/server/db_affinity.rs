@@ -1,10 +1,12 @@
+use super::*;
+
 #[derive(Clone, Debug)]
-struct DbWriteAffinityOwnerRecorder {
-    db_write_actor: DbWriteActor,
+pub(super) struct DbWriteAffinityOwnerRecorder {
+    pub(super) db_write_actor: DbWriteActor,
 }
 
 impl DbWriteAffinityOwnerRecorder {
-    const fn new(db_write_actor: DbWriteActor) -> Self {
+    pub(super) const fn new(db_write_actor: DbWriteActor) -> Self {
         Self { db_write_actor }
     }
 }
@@ -32,17 +34,17 @@ impl AsyncHttpAffinityOwnerRecorder for DbWriteAffinityOwnerRecorder {
 }
 
 #[derive(Clone, Debug)]
-struct AsyncSqliteProviderErrorObserver {
-    writable_state_store: AsyncSqliteStateStore,
-    selection_state_store: AsyncSqliteStateStore,
-    active_reservations: RouteBandReservationBooks,
-    runtime_exhaustions: RouteBandRuntimeExhaustions,
-    route_band_queue_health: RouteBandQueueHealth,
-    db_write_actor: DbWriteActor,
+pub(super) struct AsyncSqliteProviderErrorObserver {
+    pub(super) writable_state_store: AsyncSqliteStateStore,
+    pub(super) selection_state_store: AsyncSqliteStateStore,
+    pub(super) active_reservations: RouteBandReservationBooks,
+    pub(super) runtime_exhaustions: RouteBandRuntimeExhaustions,
+    pub(super) route_band_queue_health: RouteBandQueueHealth,
+    pub(super) db_write_actor: DbWriteActor,
 }
 
 impl AsyncSqliteProviderErrorObserver {
-    fn new(
+    pub(super) fn new(
         writable_state_store: AsyncSqliteStateStore,
         selection_state_store: AsyncSqliteStateStore,
         active_reservations: RouteBandReservationBooks,

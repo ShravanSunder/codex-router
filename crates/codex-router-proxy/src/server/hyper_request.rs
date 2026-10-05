@@ -1,4 +1,6 @@
-async fn hyper_request_to_streaming_proxy_request(
+use super::*;
+
+pub(super) async fn hyper_request_to_streaming_proxy_request(
     request: HttpRequest<Incoming>,
 ) -> Result<
     (
@@ -35,13 +37,13 @@ async fn hyper_request_to_streaming_proxy_request(
     ))
 }
 
-struct BufferedRequestBody {
-    routing_metadata_prefix: Vec<u8>,
-    full_replay_body: Option<Vec<u8>>,
-    streaming_body: PrefixFramesThenIncomingBody,
+pub(super) struct BufferedRequestBody {
+    pub(super) routing_metadata_prefix: Vec<u8>,
+    pub(super) full_replay_body: Option<Vec<u8>>,
+    pub(super) streaming_body: PrefixFramesThenIncomingBody,
 }
 
-async fn bounded_request_metadata_body(
+pub(super) async fn bounded_request_metadata_body(
     mut body: Incoming,
 ) -> Result<BufferedRequestBody, hyper::Error> {
     let mut routing_metadata_prefix = Vec::new();
@@ -86,7 +88,7 @@ async fn bounded_request_metadata_body(
     })
 }
 
-async fn finish_hyper_connection_after_serve_result(
+pub(super) async fn finish_hyper_connection_after_serve_result(
     serve_result: Result<(), LoopbackRouterRuntimeError>,
     upgrade_tasks: SharedUpgradeTasks,
 ) -> Result<(), LoopbackRouterRuntimeError> {
@@ -106,28 +108,28 @@ async fn finish_hyper_connection_after_serve_result(
     }
 }
 
-fn request_metadata_prefix_is_complete_json(metadata_prefix: &[u8]) -> bool {
+pub(super) fn request_metadata_prefix_is_complete_json(metadata_prefix: &[u8]) -> bool {
     serde_json::from_slice::<serde_json::Value>(metadata_prefix).is_ok()
 }
 
-struct PreparedHttpResponseForCommit {
-    response: AsyncStreamingHttpProxyResponse,
-    completion: StreamingHttpProxyCompletion,
+pub(super) struct PreparedHttpResponseForCommit {
+    pub(super) response: AsyncStreamingHttpProxyResponse,
+    pub(super) completion: StreamingHttpProxyCompletion,
 }
 
 #[derive(Debug)]
-enum PrecommitHttpQuotaResponse {
+pub(super) enum PrecommitHttpQuotaResponse {
     AccountQuotaExhausted,
     ObservationFailed,
     ProbeFailed(HttpProxyError),
 }
 
-enum PrecommitHttpResponseProbe {
+pub(super) enum PrecommitHttpResponseProbe {
     Forward(AsyncStreamingHttpProxyResponse),
     AccountQuotaExhausted { body: Vec<u8> },
 }
 
-fn observe_precommit_http_quota_exhaustion_for_retry(
+pub(super) fn observe_precommit_http_quota_exhaustion_for_retry(
     provider_error_observer: Option<Arc<dyn AsyncProviderErrorObserver>>,
     account_id: codex_router_core::ids::AccountId,
     route_band: RouteBand,
@@ -152,7 +154,7 @@ fn observe_precommit_http_quota_exhaustion_for_retry(
     }
 }
 
-async fn split_precommit_http_quota_response(
+pub(super) async fn split_precommit_http_quota_response(
     response: AsyncStreamingHttpProxyResponse,
 ) -> Result<PrecommitHttpResponseProbe, HttpProxyError> {
     let (status, headers, mut body) = response.into_parts();
@@ -203,7 +205,7 @@ async fn split_precommit_http_quota_response(
     ))
 }
 
-fn precommit_probe_should_continue_for_success_status(buffered: &[u8]) -> bool {
+pub(super) fn precommit_probe_should_continue_for_success_status(buffered: &[u8]) -> bool {
     let trimmed = trim_ascii_bytes(buffered);
     trimmed.starts_with(b"event: error") && !trimmed.windows(2).any(|window| window == b"\n\n")
 }
@@ -214,13 +216,13 @@ pub(crate) fn box_body_from_bytes(bytes: Vec<u8>) -> BoxBody<Bytes, AsyncHttpBod
         .boxed()
 }
 
-struct PrefixFramesThenBoxBody {
-    prefix_frames: VecDeque<Frame<Bytes>>,
-    inner: BoxBody<Bytes, AsyncHttpBodyError>,
+pub(super) struct PrefixFramesThenBoxBody {
+    pub(super) prefix_frames: VecDeque<Frame<Bytes>>,
+    pub(super) inner: BoxBody<Bytes, AsyncHttpBodyError>,
 }
 
 impl PrefixFramesThenBoxBody {
-    fn new(
+    pub(super) fn new(
         prefix_frames: VecDeque<Frame<Bytes>>,
         inner: BoxBody<Bytes, AsyncHttpBodyError>,
     ) -> Self {
@@ -255,13 +257,13 @@ impl HyperBody for PrefixFramesThenBoxBody {
     }
 }
 
-struct PrefixFramesThenIncomingBody {
-    prefix_frames: VecDeque<Frame<Bytes>>,
-    inner: Incoming,
+pub(super) struct PrefixFramesThenIncomingBody {
+    pub(super) prefix_frames: VecDeque<Frame<Bytes>>,
+    pub(super) inner: Incoming,
 }
 
 impl PrefixFramesThenIncomingBody {
-    fn new(prefix_frames: VecDeque<Frame<Bytes>>, inner: Incoming) -> Self {
+    pub(super) fn new(prefix_frames: VecDeque<Frame<Bytes>>, inner: Incoming) -> Self {
         Self {
             prefix_frames,
             inner,
@@ -293,7 +295,7 @@ impl HyperBody for PrefixFramesThenIncomingBody {
     }
 }
 
-fn prefix_frames_size_hint(
+pub(super) fn prefix_frames_size_hint(
     prefix_frames: &VecDeque<Frame<Bytes>>,
     inner_hint: SizeHint,
 ) -> SizeHint {

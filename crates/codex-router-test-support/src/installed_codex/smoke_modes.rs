@@ -1,22 +1,24 @@
+use super::*;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum InstalledCodexSmokeMode {
+pub(super) enum InstalledCodexSmokeMode {
     HttpSse,
     WebSocket,
     Combined,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct ConcurrentWebSocketHarnessConfig {
-    artifact_mode: &'static str,
-    upstream: ConcurrentUpstreamConfig,
-    codex_command_timeout: Duration,
-    router_max_connections: usize,
-    capture_registry_report: bool,
-    quota_reconnect: bool,
+pub(super) struct ConcurrentWebSocketHarnessConfig {
+    pub(super) artifact_mode: &'static str,
+    pub(super) upstream: ConcurrentUpstreamConfig,
+    pub(super) codex_command_timeout: Duration,
+    pub(super) router_max_connections: usize,
+    pub(super) capture_registry_report: bool,
+    pub(super) quota_reconnect: bool,
 }
 
 impl ConcurrentWebSocketHarnessConfig {
-    const fn quick() -> Self {
+    pub(super) const fn quick() -> Self {
         Self {
             artifact_mode: "three-websocket",
             upstream: ConcurrentUpstreamConfig::quick(3),
@@ -27,7 +29,7 @@ impl ConcurrentWebSocketHarnessConfig {
         }
     }
 
-    fn soak() -> Self {
+    pub(super) fn soak() -> Self {
         let hold_duration = soak_duration_from_env();
         Self {
             artifact_mode: "three-websocket-soak",
@@ -39,7 +41,7 @@ impl ConcurrentWebSocketHarnessConfig {
         }
     }
 
-    fn s8_overlap_quota() -> Self {
+    pub(super) fn s8_overlap_quota() -> Self {
         let hold_duration = soak_duration_from_env();
         Self {
             artifact_mode: "s8-overlap-quota",
@@ -53,15 +55,15 @@ impl ConcurrentWebSocketHarnessConfig {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct ConcurrentUpstreamConfig {
-    expected_sessions: usize,
-    expected_upstream_sessions: usize,
-    hold_duration: Duration,
-    heartbeat_interval: Duration,
+pub(super) struct ConcurrentUpstreamConfig {
+    pub(super) expected_sessions: usize,
+    pub(super) expected_upstream_sessions: usize,
+    pub(super) hold_duration: Duration,
+    pub(super) heartbeat_interval: Duration,
 }
 
 impl ConcurrentUpstreamConfig {
-    const fn quick(expected_sessions: usize) -> Self {
+    pub(super) const fn quick(expected_sessions: usize) -> Self {
         Self {
             expected_sessions,
             expected_upstream_sessions: expected_sessions,
@@ -70,7 +72,7 @@ impl ConcurrentUpstreamConfig {
         }
     }
 
-    fn soak(expected_sessions: usize, hold_duration: Duration) -> Self {
+    pub(super) fn soak(expected_sessions: usize, hold_duration: Duration) -> Self {
         let heartbeat_interval = hold_duration
             .checked_div(4)
             .filter(|duration| !duration.is_zero())
@@ -85,7 +87,7 @@ impl ConcurrentUpstreamConfig {
         }
     }
 
-    fn s8_overlap_quota(expected_sessions: usize, hold_duration: Duration) -> Self {
+    pub(super) fn s8_overlap_quota(expected_sessions: usize, hold_duration: Duration) -> Self {
         let heartbeat_interval = hold_duration
             .checked_div(4)
             .filter(|duration| !duration.is_zero())
@@ -101,7 +103,7 @@ impl ConcurrentUpstreamConfig {
     }
 }
 
-fn soak_duration_from_env() -> Duration {
+pub(super) fn soak_duration_from_env() -> Duration {
     std::env::var("CODEX_ROUTER_SOAK_SECONDS")
         .ok()
         .and_then(|value| value.parse::<u64>().ok())
@@ -110,15 +112,15 @@ fn soak_duration_from_env() -> Duration {
 }
 
 impl InstalledCodexSmokeMode {
-    const fn requires_http_sse(self) -> bool {
+    pub(super) const fn requires_http_sse(self) -> bool {
         matches!(self, Self::HttpSse | Self::Combined)
     }
 
-    const fn requires_websocket(self) -> bool {
+    pub(super) const fn requires_websocket(self) -> bool {
         matches!(self, Self::WebSocket | Self::Combined)
     }
 
-    const fn as_str(self) -> &'static str {
+    pub(super) const fn as_str(self) -> &'static str {
         match self {
             Self::HttpSse => "http-sse",
             Self::WebSocket => "websocket",
@@ -130,7 +132,7 @@ impl InstalledCodexSmokeMode {
 /// Redacted report produced by the installed Codex smoke harness.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct InstalledCodexSmokeReport {
-    transcript_path: PathBuf,
+    pub(super) transcript_path: PathBuf,
 }
 
 impl InstalledCodexSmokeReport {
@@ -142,36 +144,36 @@ impl InstalledCodexSmokeReport {
 }
 
 #[derive(Debug)]
-struct CodexChildRun {
-    pid: u32,
-    output: Output,
+pub(super) struct CodexChildRun {
+    pub(super) pid: u32,
+    pub(super) output: Output,
 }
 
-struct CodexExecRequest<'a> {
-    transport_mode: CodexTransportMode,
-    codex_home: &'a Path,
-    workdir: &'a Path,
-    last_message_path: &'a Path,
-    child_environment: CodexChildEnvironment,
-    timeout: Duration,
-    prompt: &'a str,
-    client_index: Option<usize>,
+pub(super) struct CodexExecRequest<'a> {
+    pub(super) transport_mode: CodexTransportMode,
+    pub(super) codex_home: &'a Path,
+    pub(super) workdir: &'a Path,
+    pub(super) last_message_path: &'a Path,
+    pub(super) child_environment: CodexChildEnvironment,
+    pub(super) timeout: Duration,
+    pub(super) prompt: &'a str,
+    pub(super) client_index: Option<usize>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct InstalledCodexRuntimeRoots {
-    mode: String,
-    router_root: PathBuf,
-    state_path: PathBuf,
-    secret_root: PathBuf,
-    codex_home: Option<PathBuf>,
-    process_home: Option<PathBuf>,
+pub(super) struct InstalledCodexRuntimeRoots {
+    pub(super) mode: String,
+    pub(super) router_root: PathBuf,
+    pub(super) state_path: PathBuf,
+    pub(super) secret_root: PathBuf,
+    pub(super) codex_home: Option<PathBuf>,
+    pub(super) process_home: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-struct UpstreamClientSessionObservation {
-    client_index: usize,
-    upstream_session_id: u64,
+pub(super) struct UpstreamClientSessionObservation {
+    pub(super) client_index: usize,
+    pub(super) upstream_session_id: u64,
 }
 
 /// Runs the installed Codex mock smoke.
@@ -326,7 +328,7 @@ pub fn run_installed_codex_quota_reconnect_websocket_mock_smoke()
     Ok(InstalledCodexSmokeReport { transcript_path })
 }
 
-fn run_installed_codex_mock_smoke_with_mode(
+pub(super) fn run_installed_codex_mock_smoke_with_mode(
     mode: InstalledCodexSmokeMode,
 ) -> Result<InstalledCodexSmokeReport, String> {
     let smoke_root = SmokeTempRoot::new("installed-codex")?;

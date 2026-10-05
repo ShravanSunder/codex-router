@@ -1,5 +1,7 @@
+use super::*;
+
 #[cfg(test)]
-fn test_credential_store_for_config(
+pub(super) fn test_credential_store_for_config(
     config: &LoopbackRouterRuntimeConfig,
 ) -> Result<EncryptedCredentialStore, LoopbackRouterRuntimeError> {
     codex_router_secret_store::test_support::open_encrypted_credential_store(
@@ -12,11 +14,11 @@ fn test_credential_store_for_config(
     })
 }
 
-fn active_session_event_compaction_before(now_unix_seconds: u64) -> u64 {
+pub(super) fn active_session_event_compaction_before(now_unix_seconds: u64) -> u64 {
     now_unix_seconds.saturating_sub(ACTIVE_SESSION_EVENT_RETENTION_SECONDS)
 }
 
-fn claim_session_affinity_cleanup_day(
+pub(super) fn claim_session_affinity_cleanup_day(
     last_attempted_utc_day: &AtomicU64,
     now_unix_seconds: u64,
 ) -> bool {
@@ -32,7 +34,7 @@ fn claim_session_affinity_cleanup_day(
         .is_ok()
 }
 
-fn handle_connection_join_result(
+pub(super) fn handle_connection_join_result(
     joined: Result<Result<(), LoopbackRouterRuntimeError>, JoinError>,
 ) -> Result<(), LoopbackRouterRuntimeError> {
     match joined {
@@ -45,7 +47,7 @@ fn handle_connection_join_result(
     }
 }
 
-fn store_connection_join_error(
+pub(super) fn store_connection_join_error(
     first_connection_error: &mut Option<LoopbackRouterRuntimeError>,
     joined: Result<Result<(), LoopbackRouterRuntimeError>, JoinError>,
 ) -> bool {
@@ -60,7 +62,7 @@ fn store_connection_join_error(
     }
 }
 
-fn store_optional_connection_join_error(
+pub(super) fn store_optional_connection_join_error(
     first_connection_error: &mut Option<LoopbackRouterRuntimeError>,
     joined: Option<Result<Result<(), LoopbackRouterRuntimeError>, JoinError>>,
 ) -> bool {
@@ -70,7 +72,7 @@ fn store_optional_connection_join_error(
     }
 }
 
-fn supervise_detached_connection_handler(
+pub(super) fn supervise_detached_connection_handler(
     handler: UpgradeTaskHandle,
     reporter: Arc<dyn LoopbackConnectionErrorReporter>,
 ) {

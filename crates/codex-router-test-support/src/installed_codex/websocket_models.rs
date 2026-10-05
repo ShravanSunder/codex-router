@@ -1,39 +1,41 @@
+use super::*;
+
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct MockWebSocketTranscript {
-    headers: Vec<(String, String)>,
-    first_frame: String,
-    request_frames: Vec<String>,
-    websocket_request_frame_count: usize,
-    http_probe_count: usize,
-    http_sse: Option<MockHttpSseTranscript>,
+pub(super) struct MockWebSocketTranscript {
+    pub(super) headers: Vec<(String, String)>,
+    pub(super) first_frame: String,
+    pub(super) request_frames: Vec<String>,
+    pub(super) websocket_request_frame_count: usize,
+    pub(super) http_probe_count: usize,
+    pub(super) http_sse: Option<MockHttpSseTranscript>,
 }
 
 impl MockWebSocketTranscript {
-    fn header(&self, name: &str) -> Option<String> {
+    pub(super) fn header(&self, name: &str) -> Option<String> {
         self.headers
             .iter()
             .find(|(header, _)| header.eq_ignore_ascii_case(name))
             .map(|(_, value)| value.clone())
     }
 
-    fn first_frame_json(&self) -> Option<Value> {
+    pub(super) fn first_frame_json(&self) -> Option<Value> {
         serde_json::from_str(&self.first_frame).ok()
     }
 
-    const fn websocket_handshake_count(&self) -> usize {
+    pub(super) const fn websocket_handshake_count(&self) -> usize {
         if self.headers.is_empty() { 0 } else { 1 }
     }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct MockHttpSseTranscript {
-    request_line: String,
-    headers: Vec<(String, String)>,
-    body: String,
+pub(super) struct MockHttpSseTranscript {
+    pub(super) request_line: String,
+    pub(super) headers: Vec<(String, String)>,
+    pub(super) body: String,
 }
 
 impl MockHttpSseTranscript {
-    fn header(&self, name: &str) -> Option<String> {
+    pub(super) fn header(&self, name: &str) -> Option<String> {
         self.headers
             .iter()
             .find(|(header, _)| header.eq_ignore_ascii_case(name))
@@ -41,80 +43,80 @@ impl MockHttpSseTranscript {
     }
 }
 
-struct MockWebSocketUpstream {
-    address: String,
-    transcript: Arc<Mutex<Option<MockWebSocketTranscript>>>,
-    shutdown: Arc<AtomicBool>,
-    handle: Option<thread::JoinHandle<Result<(), String>>>,
+pub(super) struct MockWebSocketUpstream {
+    pub(super) address: String,
+    pub(super) transcript: Arc<Mutex<Option<MockWebSocketTranscript>>>,
+    pub(super) shutdown: Arc<AtomicBool>,
+    pub(super) handle: Option<thread::JoinHandle<Result<(), String>>>,
 }
 
-struct MockConcurrentWebSocketUpstream {
-    address: String,
-    state: Arc<ConcurrentUpstreamSharedState>,
-    shutdown: Arc<AtomicBool>,
-    pressure_handles: PressureHandles,
-    handle: Option<thread::JoinHandle<Result<(), String>>>,
+pub(super) struct MockConcurrentWebSocketUpstream {
+    pub(super) address: String,
+    pub(super) state: Arc<ConcurrentUpstreamSharedState>,
+    pub(super) shutdown: Arc<AtomicBool>,
+    pub(super) pressure_handles: PressureHandles,
+    pub(super) handle: Option<thread::JoinHandle<Result<(), String>>>,
 }
 
-struct MockQuotaReconnectWebSocketUpstream {
-    address: String,
-    state: Arc<Mutex<QuotaReconnectUpstreamState>>,
-    shutdown: Arc<AtomicBool>,
-    pressure_handles: PressureHandles,
-    handle: Option<thread::JoinHandle<Result<(), String>>>,
+pub(super) struct MockQuotaReconnectWebSocketUpstream {
+    pub(super) address: String,
+    pub(super) state: Arc<Mutex<QuotaReconnectUpstreamState>>,
+    pub(super) shutdown: Arc<AtomicBool>,
+    pub(super) pressure_handles: PressureHandles,
+    pub(super) handle: Option<thread::JoinHandle<Result<(), String>>>,
 }
 
-struct S8OverlapQuotaErrorContext {
-    shared: Arc<ConcurrentUpstreamSharedState>,
-    overlap_started_at: Instant,
-    config: ConcurrentUpstreamConfig,
-    sqlite_pressure: Option<QuotaReconnectSqlitePressureConfig>,
-    pressure_handles: PressureHandles,
-    frame_count: usize,
-}
-
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-struct QuotaReconnectWebSocketTranscript {
-    http_probe_count: usize,
-    websocket_handshake_count: usize,
-    request_frame_count: usize,
-    prewarm_frame_count: usize,
-    non_prewarm_frame_count: usize,
-    quota_error_sent: bool,
-    completion_sent: bool,
-    quota_error_connection_label: Option<String>,
-    completion_connection_label: Option<String>,
-    quota_error_sent_unix_ms: Option<u128>,
-    signal_latency_ms: Option<u128>,
-    sqlite_pressure: Option<QuotaReconnectSqlitePressureTranscript>,
+pub(super) struct S8OverlapQuotaErrorContext {
+    pub(super) shared: Arc<ConcurrentUpstreamSharedState>,
+    pub(super) overlap_started_at: Instant,
+    pub(super) config: ConcurrentUpstreamConfig,
+    pub(super) sqlite_pressure: Option<QuotaReconnectSqlitePressureConfig>,
+    pub(super) pressure_handles: PressureHandles,
+    pub(super) frame_count: usize,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
-struct QuotaReconnectUpstreamState {
-    http_probe_count: usize,
-    websocket_handshake_count: usize,
-    request_frame_count: usize,
-    prewarm_frame_count: usize,
-    non_prewarm_frame_count: usize,
-    quota_error_sent: bool,
-    completion_sent: bool,
-    quota_error_connection_token: Option<String>,
-    completion_connection_token: Option<String>,
-    quota_error_sent_unix_ms: Option<u128>,
-    completion_sent_unix_ms: Option<u128>,
-    sqlite_pressure_requested: bool,
-    sqlite_pressure_acquired_unix_ms: Option<u128>,
-    sqlite_pressure_released_unix_ms: Option<u128>,
+pub(super) struct QuotaReconnectWebSocketTranscript {
+    pub(super) http_probe_count: usize,
+    pub(super) websocket_handshake_count: usize,
+    pub(super) request_frame_count: usize,
+    pub(super) prewarm_frame_count: usize,
+    pub(super) non_prewarm_frame_count: usize,
+    pub(super) quota_error_sent: bool,
+    pub(super) completion_sent: bool,
+    pub(super) quota_error_connection_label: Option<String>,
+    pub(super) completion_connection_label: Option<String>,
+    pub(super) quota_error_sent_unix_ms: Option<u128>,
+    pub(super) signal_latency_ms: Option<u128>,
+    pub(super) sqlite_pressure: Option<QuotaReconnectSqlitePressureTranscript>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(super) struct QuotaReconnectUpstreamState {
+    pub(super) http_probe_count: usize,
+    pub(super) websocket_handshake_count: usize,
+    pub(super) request_frame_count: usize,
+    pub(super) prewarm_frame_count: usize,
+    pub(super) non_prewarm_frame_count: usize,
+    pub(super) quota_error_sent: bool,
+    pub(super) completion_sent: bool,
+    pub(super) quota_error_connection_token: Option<String>,
+    pub(super) completion_connection_token: Option<String>,
+    pub(super) quota_error_sent_unix_ms: Option<u128>,
+    pub(super) completion_sent_unix_ms: Option<u128>,
+    pub(super) sqlite_pressure_requested: bool,
+    pub(super) sqlite_pressure_acquired_unix_ms: Option<u128>,
+    pub(super) sqlite_pressure_released_unix_ms: Option<u128>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct QuotaReconnectSqlitePressureConfig {
-    state_path: PathBuf,
-    hold_duration: Duration,
+pub(super) struct QuotaReconnectSqlitePressureConfig {
+    pub(super) state_path: PathBuf,
+    pub(super) hold_duration: Duration,
 }
 
 impl QuotaReconnectSqlitePressureConfig {
-    fn new(state_path: PathBuf) -> Self {
+    pub(super) fn new(state_path: PathBuf) -> Self {
         Self {
             state_path,
             hold_duration: QUOTA_RECONNECT_SQLITE_PRESSURE_HOLD,
@@ -123,133 +125,137 @@ impl QuotaReconnectSqlitePressureConfig {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct QuotaReconnectSqlitePressureTranscript {
-    mechanism: &'static str,
-    hold_duration_ms: u128,
-    acquired_before_quota_error: bool,
-    released_after_completion: bool,
-    acquired_unix_ms: Option<u128>,
-    released_unix_ms: Option<u128>,
+pub(super) struct QuotaReconnectSqlitePressureTranscript {
+    pub(super) mechanism: &'static str,
+    pub(super) hold_duration_ms: u128,
+    pub(super) acquired_before_quota_error: bool,
+    pub(super) released_after_completion: bool,
+    pub(super) acquired_unix_ms: Option<u128>,
+    pub(super) released_unix_ms: Option<u128>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct ConcurrentWebSocketTranscript {
-    expected_sessions: usize,
-    expected_upstream_sessions: usize,
-    completed_sessions: usize,
-    final_active_sessions: usize,
-    active_high_water: usize,
-    overlap_started_unix_ms: Option<u128>,
-    overlap_completed_unix_ms: Option<u128>,
-    real_overlap_completed_unix_ms: Option<u128>,
-    overlap_duration_ms: u128,
-    real_overlap_duration_ms: u128,
-    hold_duration: Duration,
-    http_probe_count: usize,
-    upstream_session_ids: Vec<u64>,
-    upstream_client_sessions: Vec<UpstreamClientSessionObservation>,
-    session_frame_counts: Vec<usize>,
-    session_event_counts: Vec<usize>,
-    in_overlap_session_event_counts: Vec<usize>,
-    non_prewarm_session_count: usize,
-    normal_close_sessions: usize,
-    abnormal_close_sessions: usize,
-    session_close_outcomes: Vec<String>,
-    target_model_session_count: usize,
-    unexpected_response_create_models: Vec<String>,
-    multi_step_interleave_completed: bool,
-    multi_step_followup_frame_count: usize,
-    multi_step_followup_active_session_count: usize,
-    multi_step_followup_unix_ms: Option<u128>,
-    multi_step_completed_before_overlap_end: bool,
-    quota_error_sent: bool,
-    completion_sent: bool,
-    quota_error_connection_label: Option<String>,
-    completion_connection_label: Option<String>,
-    quota_error_sent_unix_ms: Option<u128>,
-    signal_latency_ms: Option<u128>,
-    sqlite_pressure: Option<QuotaReconnectSqlitePressureTranscript>,
+pub(super) struct ConcurrentWebSocketTranscript {
+    pub(super) expected_sessions: usize,
+    pub(super) expected_upstream_sessions: usize,
+    pub(super) completed_sessions: usize,
+    pub(super) final_active_sessions: usize,
+    pub(super) active_high_water: usize,
+    pub(super) overlap_started_unix_ms: Option<u128>,
+    pub(super) overlap_completed_unix_ms: Option<u128>,
+    pub(super) real_overlap_completed_unix_ms: Option<u128>,
+    pub(super) overlap_duration_ms: u128,
+    pub(super) real_overlap_duration_ms: u128,
+    pub(super) hold_duration: Duration,
+    pub(super) http_probe_count: usize,
+    pub(super) upstream_session_ids: Vec<u64>,
+    pub(super) upstream_client_sessions: Vec<UpstreamClientSessionObservation>,
+    pub(super) session_frame_counts: Vec<usize>,
+    pub(super) session_event_counts: Vec<usize>,
+    pub(super) in_overlap_session_event_counts: Vec<usize>,
+    pub(super) non_prewarm_session_count: usize,
+    pub(super) normal_close_sessions: usize,
+    pub(super) abnormal_close_sessions: usize,
+    pub(super) session_close_outcomes: Vec<String>,
+    pub(super) target_model_session_count: usize,
+    pub(super) unexpected_response_create_models: Vec<String>,
+    pub(super) multi_step_interleave_completed: bool,
+    pub(super) multi_step_followup_frame_count: usize,
+    pub(super) multi_step_followup_active_session_count: usize,
+    pub(super) multi_step_followup_unix_ms: Option<u128>,
+    pub(super) multi_step_completed_before_overlap_end: bool,
+    pub(super) quota_error_sent: bool,
+    pub(super) completion_sent: bool,
+    pub(super) quota_error_connection_label: Option<String>,
+    pub(super) completion_connection_label: Option<String>,
+    pub(super) quota_error_sent_unix_ms: Option<u128>,
+    pub(super) signal_latency_ms: Option<u128>,
+    pub(super) sqlite_pressure: Option<QuotaReconnectSqlitePressureTranscript>,
 }
 
 #[derive(Debug)]
-struct ConcurrentUpstreamSharedState {
-    state: Mutex<ConcurrentUpstreamState>,
-    condition: Condvar,
+pub(super) struct ConcurrentUpstreamSharedState {
+    pub(super) state: Mutex<ConcurrentUpstreamState>,
+    pub(super) condition: Condvar,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct ConcurrentUpstreamState {
-    expected_sessions: usize,
-    expected_upstream_sessions: usize,
-    hold_duration: Duration,
-    active_non_prewarm_sessions: usize,
-    active_high_water: usize,
-    completed_sessions: usize,
-    final_active_sessions: usize,
-    overlap_started_at: Option<Instant>,
-    overlap_started_unix_ms: Option<u128>,
-    overlap_completed_unix_ms: Option<u128>,
-    real_overlap_completed_unix_ms: Option<u128>,
-    http_probe_count: usize,
-    upstream_session_ids: Vec<u64>,
-    upstream_client_sessions: Vec<UpstreamClientSessionObservation>,
-    session_frame_counts: Vec<usize>,
-    session_event_counts: Vec<usize>,
-    in_overlap_session_event_counts: Vec<usize>,
-    non_prewarm_session_count: usize,
-    normal_close_sessions: usize,
-    abnormal_close_sessions: usize,
-    session_close_outcomes: Vec<String>,
-    target_model_session_count: usize,
-    unexpected_response_create_models: Vec<String>,
-    multi_step_interleave_claimed: bool,
-    multi_step_interleave_completed: bool,
-    sessions_with_overlap_proof_events: usize,
-    multi_step_followup_frame_count: usize,
-    multi_step_followup_active_session_count: usize,
-    multi_step_followup_unix_ms: Option<u128>,
-    multi_step_completed_unix_ms: Option<u128>,
-    quota_reconnect_claimed: bool,
-    quota_error_sent: bool,
-    completion_sent: bool,
-    quota_error_connection_token: Option<String>,
-    completion_connection_token: Option<String>,
-    quota_error_sent_unix_ms: Option<u128>,
-    completion_sent_unix_ms: Option<u128>,
-    sqlite_pressure_requested: bool,
-    sqlite_pressure_acquired_unix_ms: Option<u128>,
-    sqlite_pressure_released_unix_ms: Option<u128>,
+pub(super) struct ConcurrentUpstreamState {
+    pub(super) expected_sessions: usize,
+    pub(super) expected_upstream_sessions: usize,
+    pub(super) hold_duration: Duration,
+    pub(super) active_non_prewarm_sessions: usize,
+    pub(super) active_high_water: usize,
+    pub(super) completed_sessions: usize,
+    pub(super) final_active_sessions: usize,
+    pub(super) overlap_started_at: Option<Instant>,
+    pub(super) overlap_started_unix_ms: Option<u128>,
+    pub(super) overlap_completed_unix_ms: Option<u128>,
+    pub(super) real_overlap_completed_unix_ms: Option<u128>,
+    pub(super) http_probe_count: usize,
+    pub(super) upstream_session_ids: Vec<u64>,
+    pub(super) upstream_client_sessions: Vec<UpstreamClientSessionObservation>,
+    pub(super) session_frame_counts: Vec<usize>,
+    pub(super) session_event_counts: Vec<usize>,
+    pub(super) in_overlap_session_event_counts: Vec<usize>,
+    pub(super) non_prewarm_session_count: usize,
+    pub(super) normal_close_sessions: usize,
+    pub(super) abnormal_close_sessions: usize,
+    pub(super) session_close_outcomes: Vec<String>,
+    pub(super) target_model_session_count: usize,
+    pub(super) unexpected_response_create_models: Vec<String>,
+    pub(super) multi_step_interleave_claimed: bool,
+    pub(super) multi_step_interleave_completed: bool,
+    pub(super) sessions_with_overlap_proof_events: usize,
+    pub(super) multi_step_followup_frame_count: usize,
+    pub(super) multi_step_followup_active_session_count: usize,
+    pub(super) multi_step_followup_unix_ms: Option<u128>,
+    pub(super) multi_step_completed_unix_ms: Option<u128>,
+    pub(super) quota_reconnect_claimed: bool,
+    pub(super) quota_error_sent: bool,
+    pub(super) completion_sent: bool,
+    pub(super) quota_error_connection_token: Option<String>,
+    pub(super) completion_connection_token: Option<String>,
+    pub(super) quota_error_sent_unix_ms: Option<u128>,
+    pub(super) completion_sent_unix_ms: Option<u128>,
+    pub(super) sqlite_pressure_requested: bool,
+    pub(super) sqlite_pressure_acquired_unix_ms: Option<u128>,
+    pub(super) sqlite_pressure_released_unix_ms: Option<u128>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct RouterSocketCleanupObservation {
-    lsof_exit_status: String,
-    tcp_line_count: usize,
-    established_count: usize,
-    close_wait_count: usize,
-    raw_state_counts: Vec<(String, usize)>,
+pub(super) struct RouterSocketCleanupObservation {
+    pub(super) lsof_exit_status: String,
+    pub(super) tcp_line_count: usize,
+    pub(super) established_count: usize,
+    pub(super) close_wait_count: usize,
+    pub(super) raw_state_counts: Vec<(String, usize)>,
 }
 
-struct MockNoConnectionUpstream {
-    address: String,
-    handle: Option<thread::JoinHandle<Result<usize, String>>>,
+pub(super) struct MockNoConnectionUpstream {
+    pub(super) address: String,
+    pub(super) handle: Option<thread::JoinHandle<Result<usize, String>>>,
 }
 
-struct RouterProcessGuard {
-    child: Option<Child>,
-    stdout_handle: Option<thread::JoinHandle<Vec<String>>>,
-    stderr_handle: Option<thread::JoinHandle<Vec<String>>>,
-    observation: RouterProcessObservation,
+pub(super) struct RouterProcessGuard {
+    pub(super) child: Option<Child>,
+    pub(super) stdout_handle: Option<thread::JoinHandle<Vec<String>>>,
+    pub(super) stderr_handle: Option<thread::JoinHandle<Vec<String>>>,
+    pub(super) observation: RouterProcessObservation,
 }
 
 impl RouterProcessGuard {
-    fn stop(mut self, label: &str) -> Result<RouterProcessObservation, String> {
+    pub(super) fn stop(mut self, label: &str) -> Result<RouterProcessObservation, String> {
         self.terminate_child(label, Duration::ZERO)?;
         self.join_output_readers(label)?;
         Ok(self.observation.clone())
     }
 
-    fn wait(mut self, label: &str, timeout: Duration) -> Result<RouterProcessObservation, String> {
+    pub(super) fn wait(
+        mut self,
+        label: &str,
+        timeout: Duration,
+    ) -> Result<RouterProcessObservation, String> {
         let Some(mut child) = self.child.take() else {
             self.join_output_readers(label)?;
             return Ok(self.observation.clone());
@@ -295,7 +301,7 @@ impl RouterProcessGuard {
         }
     }
 
-    fn terminate_child(&mut self, label: &str, grace: Duration) -> Result<(), String> {
+    pub(super) fn terminate_child(&mut self, label: &str, grace: Duration) -> Result<(), String> {
         let Some(mut child) = self.child.take() else {
             return Ok(());
         };
@@ -324,13 +330,13 @@ impl RouterProcessGuard {
         }
     }
 
-    fn join_output_readers(&mut self, label: &str) -> Result<(), String> {
+    pub(super) fn join_output_readers(&mut self, label: &str) -> Result<(), String> {
         let _stdout_lines = self.join_output_reader(label, "stdout")?;
         let _stderr_lines = self.join_output_reader(label, "stderr")?;
         Ok(())
     }
 
-    fn join_output_reader(
+    pub(super) fn join_output_reader(
         &mut self,
         label: &str,
         stream_name: &str,
@@ -354,7 +360,7 @@ impl Drop for RouterProcessGuard {
     }
 }
 
-fn join_router_output_reader(
+pub(super) fn join_router_output_reader(
     handle: thread::JoinHandle<Vec<String>>,
     label: &str,
     stream_name: &str,
@@ -365,7 +371,7 @@ fn join_router_output_reader(
 }
 
 impl MockNoConnectionUpstream {
-    fn start(timeout: Duration) -> Result<Self, String> {
+    pub(super) fn start(timeout: Duration) -> Result<Self, String> {
         let listener = TcpListener::bind("127.0.0.1:0")
             .map_err(|error| format!("failed to bind no-connection upstream: {error}"))?;
         listener.set_nonblocking(true).map_err(|error| {
@@ -386,11 +392,11 @@ impl MockNoConnectionUpstream {
         })
     }
 
-    fn address(&self) -> &str {
+    pub(super) fn address(&self) -> &str {
         &self.address
     }
 
-    fn join(mut self) -> Result<usize, String> {
+    pub(super) fn join(mut self) -> Result<usize, String> {
         let handle = self
             .handle
             .take()
@@ -408,7 +414,7 @@ impl Drop for MockNoConnectionUpstream {
 }
 
 impl MockWebSocketUpstream {
-    fn start(mode: InstalledCodexSmokeMode) -> Result<Self, String> {
+    pub(super) fn start(mode: InstalledCodexSmokeMode) -> Result<Self, String> {
         let listener = TcpListener::bind("127.0.0.1:0")
             .map_err(|error| format!("failed to bind mock websocket upstream: {error}"))?;
         listener
@@ -435,11 +441,11 @@ impl MockWebSocketUpstream {
         })
     }
 
-    fn address(&self) -> &str {
+    pub(super) fn address(&self) -> &str {
         &self.address
     }
 
-    fn join(mut self) -> Result<MockWebSocketTranscript, String> {
+    pub(super) fn join(mut self) -> Result<MockWebSocketTranscript, String> {
         self.shutdown.store(true, Ordering::SeqCst);
         wake_mock_upstream_accept(&self.address);
         let handle = self
@@ -468,7 +474,9 @@ impl Drop for MockWebSocketUpstream {
 }
 
 impl MockQuotaReconnectWebSocketUpstream {
-    fn start(sqlite_pressure: Option<QuotaReconnectSqlitePressureConfig>) -> Result<Self, String> {
+    pub(super) fn start(
+        sqlite_pressure: Option<QuotaReconnectSqlitePressureConfig>,
+    ) -> Result<Self, String> {
         let listener = TcpListener::bind("127.0.0.1:0")
             .map_err(|error| format!("failed to bind quota reconnect upstream: {error}"))?;
         listener.set_nonblocking(true).map_err(|error| {
@@ -506,11 +514,11 @@ impl MockQuotaReconnectWebSocketUpstream {
         })
     }
 
-    fn address(&self) -> &str {
+    pub(super) fn address(&self) -> &str {
         &self.address
     }
 
-    fn join(mut self) -> Result<QuotaReconnectWebSocketTranscript, String> {
+    pub(super) fn join(mut self) -> Result<QuotaReconnectWebSocketTranscript, String> {
         self.shutdown.store(true, Ordering::SeqCst);
         wake_mock_upstream_accept(&self.address);
         let handle = self
@@ -588,7 +596,7 @@ impl Drop for MockQuotaReconnectWebSocketUpstream {
 }
 
 impl MockConcurrentWebSocketUpstream {
-    fn start(
+    pub(super) fn start(
         config: ConcurrentUpstreamConfig,
         sqlite_pressure: Option<QuotaReconnectSqlitePressureConfig>,
     ) -> Result<Self, String> {
@@ -674,11 +682,11 @@ impl MockConcurrentWebSocketUpstream {
         })
     }
 
-    fn address(&self) -> &str {
+    pub(super) fn address(&self) -> &str {
         &self.address
     }
 
-    fn join(mut self) -> Result<ConcurrentWebSocketTranscript, String> {
+    pub(super) fn join(mut self) -> Result<ConcurrentWebSocketTranscript, String> {
         let handle = self
             .handle
             .take()

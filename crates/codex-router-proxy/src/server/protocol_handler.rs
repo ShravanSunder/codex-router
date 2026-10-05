@@ -1,40 +1,42 @@
+use super::*;
+
 #[derive(Clone)]
-struct LoopbackProtocolConnectionHandler {
-    credential_state_store: AsyncSqliteStateStore,
-    provider_error_state_store: AsyncSqliteStateStore,
-    selection_state_store: AsyncSqliteStateStore,
-    credential_store_availability: CredentialStoreAvailability,
-    credential_factory: AsyncProxyCredentialResolverFactory,
-    affinity_secret_provider: RuntimeAffinitySecretProvider,
-    affinity_owner_recorder: Arc<dyn AsyncHttpAffinityOwnerRecorder>,
-    affinity_record_tasks: TaskTracker,
-    auth_gate: crate::local_auth::ProxyLocalAuthGate,
-    claude_edge_auth_gate: Option<crate::local_auth::ProxyLocalAuthGate>,
-    claude_edge_runtime_config: Option<ClaudeEdgeRuntimeConfig>,
-    local_model_authentication_required: bool,
-    upstream: HyperHttpUpstreamTransport,
-    upstream_endpoint: UpstreamEndpoint,
-    websocket_revocations: WebSocketRevocationRegistry,
-    audit_sink: Option<AuditFileSink>,
-    weighted_selectors: RouteBandWeightedSelectors,
-    account_holds: RouteBandAccountHolds,
-    active_reservations: RouteBandReservationBooks,
-    selection_reservation_lock: SelectionReservationLock,
-    session_affinity_cache: SharedSessionAccountAffinityCache,
-    claude_five_hour_reserve_percent: ClaudeFiveHourReservePercent,
-    runtime_exhaustions: RouteBandRuntimeExhaustions,
-    route_band_queue_health: RouteBandQueueHealth,
-    db_write_actor: DbWriteActor,
-    fixed_now_unix_seconds: Option<u64>,
-    session_shutdown: CancellationToken,
+pub(super) struct LoopbackProtocolConnectionHandler {
+    pub(super) credential_state_store: AsyncSqliteStateStore,
+    pub(super) provider_error_state_store: AsyncSqliteStateStore,
+    pub(super) selection_state_store: AsyncSqliteStateStore,
+    pub(super) credential_store_availability: CredentialStoreAvailability,
+    pub(super) credential_factory: AsyncProxyCredentialResolverFactory,
+    pub(super) affinity_secret_provider: RuntimeAffinitySecretProvider,
+    pub(super) affinity_owner_recorder: Arc<dyn AsyncHttpAffinityOwnerRecorder>,
+    pub(super) affinity_record_tasks: TaskTracker,
+    pub(super) auth_gate: crate::local_auth::ProxyLocalAuthGate,
+    pub(super) claude_edge_auth_gate: Option<crate::local_auth::ProxyLocalAuthGate>,
+    pub(super) claude_edge_runtime_config: Option<ClaudeEdgeRuntimeConfig>,
+    pub(super) local_model_authentication_required: bool,
+    pub(super) upstream: HyperHttpUpstreamTransport,
+    pub(super) upstream_endpoint: UpstreamEndpoint,
+    pub(super) websocket_revocations: WebSocketRevocationRegistry,
+    pub(super) audit_sink: Option<AuditFileSink>,
+    pub(super) weighted_selectors: RouteBandWeightedSelectors,
+    pub(super) account_holds: RouteBandAccountHolds,
+    pub(super) active_reservations: RouteBandReservationBooks,
+    pub(super) selection_reservation_lock: SelectionReservationLock,
+    pub(super) session_affinity_cache: SharedSessionAccountAffinityCache,
+    pub(super) claude_five_hour_reserve_percent: ClaudeFiveHourReservePercent,
+    pub(super) runtime_exhaustions: RouteBandRuntimeExhaustions,
+    pub(super) route_band_queue_health: RouteBandQueueHealth,
+    pub(super) db_write_actor: DbWriteActor,
+    pub(super) fixed_now_unix_seconds: Option<u64>,
+    pub(super) session_shutdown: CancellationToken,
 }
 
-type UpgradeTaskResult = Result<(), LoopbackRouterRuntimeError>;
-type UpgradeTaskHandle = tokio::task::JoinHandle<UpgradeTaskResult>;
-type SharedUpgradeTasks = Arc<tokio::sync::Mutex<Vec<UpgradeTaskHandle>>>;
+pub(super) type UpgradeTaskResult = Result<(), LoopbackRouterRuntimeError>;
+pub(super) type UpgradeTaskHandle = tokio::task::JoinHandle<UpgradeTaskResult>;
+pub(super) type SharedUpgradeTasks = Arc<tokio::sync::Mutex<Vec<UpgradeTaskHandle>>>;
 
 impl LoopbackProtocolConnectionHandler {
-    async fn handle_hyper_connection(
+    pub(super) async fn handle_hyper_connection(
         self: Arc<Self>,
         stream: tokio::net::TcpStream,
     ) -> Result<(), LoopbackRouterRuntimeError> {
@@ -65,7 +67,7 @@ impl LoopbackProtocolConnectionHandler {
         finish_hyper_connection_after_serve_result(serve_result, upgrade_tasks).await
     }
 
-    async fn handle_hyper_request(
+    pub(super) async fn handle_hyper_request(
         self: Arc<Self>,
         request: HttpRequest<Incoming>,
         upgrade_tasks: SharedUpgradeTasks,
@@ -91,7 +93,7 @@ impl LoopbackProtocolConnectionHandler {
         }
     }
 
-    fn preflight_claude_edge_local_auth(
+    pub(super) fn preflight_claude_edge_local_auth(
         &self,
         request: &HttpRequest<Incoming>,
     ) -> Option<HttpResponse<BoxBody<Bytes, AsyncHttpBodyError>>> {
@@ -126,7 +128,7 @@ impl LoopbackProtocolConnectionHandler {
         }
     }
 
-    fn preflight_claude_edge_request(
+    pub(super) fn preflight_claude_edge_request(
         &self,
         request: &HttpRequest<Incoming>,
     ) -> Option<HttpResponse<BoxBody<Bytes, AsyncHttpBodyError>>> {
@@ -149,7 +151,7 @@ impl LoopbackProtocolConnectionHandler {
         }
     }
 
-    fn emit_claude_edge_local_auth_rejection(&self, reason: LocalAuthError) {
+    pub(super) fn emit_claude_edge_local_auth_rejection(&self, reason: LocalAuthError) {
         if let Some(audit_sink) = &self.audit_sink {
             let event = local_auth_rejection_audit_event(
                 TransportKind::Http,
@@ -160,7 +162,7 @@ impl LoopbackProtocolConnectionHandler {
         }
     }
 
-    async fn handle_hyper_websocket_request(
+    pub(super) async fn handle_hyper_websocket_request(
         self: Arc<Self>,
         mut request: HttpRequest<Incoming>,
         upgrade_tasks: SharedUpgradeTasks,
@@ -206,7 +208,7 @@ impl LoopbackProtocolConnectionHandler {
         })
     }
 
-    async fn handle_hyper_websocket_upgraded(
+    pub(super) async fn handle_hyper_websocket_upgraded(
         self: Arc<Self>,
         local_websocket: hyper_tungstenite::HyperWebsocketStream,
         handshake: WebSocketHandshakeRequest,
@@ -327,7 +329,7 @@ impl LoopbackProtocolConnectionHandler {
         result
     }
 
-    async fn handle_hyper_http_request(
+    pub(super) async fn handle_hyper_http_request(
         self: Arc<Self>,
         request: HttpRequest<Incoming>,
     ) -> HttpResponse<BoxBody<Bytes, AsyncHttpBodyError>> {
@@ -409,13 +411,13 @@ impl LoopbackProtocolConnectionHandler {
         all_accounts_exhausted_response()
     }
 
-    async fn enabled_account_attempt_limit(&self) -> Result<usize, StateStoreError> {
+    pub(super) async fn enabled_account_attempt_limit(&self) -> Result<usize, StateStoreError> {
         enabled_account_attempt_limit_from_accounts(
             self.selection_state_store.list_accounts().await,
         )
     }
 
-    async fn handle_claude_messages_request(
+    pub(super) async fn handle_claude_messages_request(
         &self,
         request: HttpRequest<Incoming>,
     ) -> HttpResponse<BoxBody<Bytes, AsyncHttpBodyError>> {
@@ -455,7 +457,7 @@ impl LoopbackProtocolConnectionHandler {
     }
 }
 
-fn router_compatibility_response(
+pub(super) fn router_compatibility_response(
     method: &HttpMethod,
     uri: &Uri,
     local_model_authentication_required: bool,
@@ -480,7 +482,7 @@ fn router_compatibility_response(
     Some(response)
 }
 
-fn enabled_account_attempt_limit_from_accounts(
+pub(super) fn enabled_account_attempt_limit_from_accounts(
     accounts: Result<Vec<AccountRecord>, StateStoreError>,
 ) -> Result<usize, StateStoreError> {
     Ok(accounts?
@@ -491,7 +493,7 @@ fn enabled_account_attempt_limit_from_accounts(
 }
 
 impl LoopbackProtocolConnectionHandler {
-    async fn prepare_async_streaming_http_request_async(
+    pub(super) async fn prepare_async_streaming_http_request_async(
         &self,
         request: HttpProxyRequest,
         body: BoxBody<Bytes, AsyncHttpBodyError>,
@@ -544,7 +546,7 @@ impl LoopbackProtocolConnectionHandler {
             .await
     }
 
-    fn async_streaming_http_response_to_hyper(
+    pub(super) fn async_streaming_http_response_to_hyper(
         &self,
         completion: crate::http_sse::StreamingHttpProxyCompletion,
         response: AsyncStreamingHttpProxyResponse,
@@ -567,7 +569,7 @@ impl LoopbackProtocolConnectionHandler {
         )
     }
 
-    async fn observe_precommit_http_quota_response(
+    pub(super) async fn observe_precommit_http_quota_response(
         &self,
         response: AsyncStreamingHttpProxyResponse,
         completion: StreamingHttpProxyCompletion,
@@ -596,7 +598,7 @@ impl LoopbackProtocolConnectionHandler {
         }
     }
 
-    fn preflight_hyper_websocket_request(
+    pub(super) fn preflight_hyper_websocket_request(
         &self,
         request: &HttpRequest<Incoming>,
         path: &str,
@@ -637,7 +639,7 @@ impl LoopbackProtocolConnectionHandler {
         }
     }
 
-    fn emit_websocket_local_auth_rejection(&self, reason: LocalAuthError) {
+    pub(super) fn emit_websocket_local_auth_rejection(&self, reason: LocalAuthError) {
         if let Some(audit_sink) = &self.audit_sink {
             let event = local_auth_rejection_audit_event(
                 TransportKind::WebSocket,
@@ -648,7 +650,7 @@ impl LoopbackProtocolConnectionHandler {
         }
     }
 
-    fn runtime_clock(&self) -> Arc<dyn Fn() -> u64 + Send + Sync> {
+    pub(super) fn runtime_clock(&self) -> Arc<dyn Fn() -> u64 + Send + Sync> {
         let fixed_now_unix_seconds = self.fixed_now_unix_seconds;
         Arc::new(move || {
             fixed_now_unix_seconds.unwrap_or_else(|| match current_unix_seconds() {
@@ -666,7 +668,7 @@ impl LoopbackProtocolConnectionHandler {
     }
 }
 
-fn current_unix_seconds() -> Result<u64, std::time::SystemTimeError> {
+pub(super) fn current_unix_seconds() -> Result<u64, std::time::SystemTimeError> {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs())

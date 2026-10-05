@@ -1,4 +1,6 @@
-fn record_http_sse_only_transcript(
+use super::*;
+
+pub(super) fn record_http_sse_only_transcript(
     transcript: &Arc<Mutex<Option<MockWebSocketTranscript>>>,
     http_probe_count: usize,
     http_sse: Option<MockHttpSseTranscript>,
@@ -17,7 +19,10 @@ fn record_http_sse_only_transcript(
     Ok(())
 }
 
-fn run_no_connection_upstream(listener: TcpListener, timeout: Duration) -> Result<usize, String> {
+pub(super) fn run_no_connection_upstream(
+    listener: TcpListener,
+    timeout: Duration,
+) -> Result<usize, String> {
     let deadline = Instant::now() + timeout;
     loop {
         match listener.accept() {
@@ -36,7 +41,7 @@ fn run_no_connection_upstream(listener: TcpListener, timeout: Duration) -> Resul
     }
 }
 
-fn accept_with_deadline(
+pub(super) fn accept_with_deadline(
     listener: &TcpListener,
     shutdown: &AtomicBool,
     deadline: Instant,
@@ -73,7 +78,7 @@ fn accept_with_deadline(
     }
 }
 
-fn redacted_command_text(bytes: &[u8], seed: &SmokeSeed) -> String {
+pub(super) fn redacted_command_text(bytes: &[u8], seed: &SmokeSeed) -> String {
     let text = String::from_utf8_lossy(bytes);
     text.replace(&seed.local_token, "<local-router-token>")
         .replace(&seed.expected_upstream_token, "<selected-upstream-token>")
@@ -83,20 +88,20 @@ fn redacted_command_text(bytes: &[u8], seed: &SmokeSeed) -> String {
         .join("\\n")
 }
 
-fn redacted_optional_command_text(bytes: Option<&Vec<u8>>, seed: &SmokeSeed) -> String {
+pub(super) fn redacted_optional_command_text(bytes: Option<&Vec<u8>>, seed: &SmokeSeed) -> String {
     bytes.map_or_else(
         || "<not-run>".to_owned(),
         |bytes| redacted_command_text(bytes, seed),
     )
 }
 
-fn output_status_text(output: Option<&Output>) -> String {
+pub(super) fn output_status_text(output: Option<&Output>) -> String {
     output
         .map(|output| output.status.to_string())
         .unwrap_or_else(|| "not-run".to_owned())
 }
 
-fn http_sse_transcript_summary(transcript: &MockWebSocketTranscript) -> String {
+pub(super) fn http_sse_transcript_summary(transcript: &MockWebSocketTranscript) -> String {
     let http_sse = transcript.http_sse.as_ref();
     let request_line = http_sse
         .map(|request| request.request_line.as_str())
@@ -109,7 +114,7 @@ fn http_sse_transcript_summary(transcript: &MockWebSocketTranscript) -> String {
     )
 }
 
-fn looks_like_websocket_upgrade(stream: &std::net::TcpStream) -> Result<bool, String> {
+pub(super) fn looks_like_websocket_upgrade(stream: &std::net::TcpStream) -> Result<bool, String> {
     let mut buffer = [0_u8; 1024];
     let byte_count = stream
         .peek(&mut buffer)
@@ -121,12 +126,12 @@ fn looks_like_websocket_upgrade(stream: &std::net::TcpStream) -> Result<bool, St
     Ok(request.to_ascii_lowercase().contains("upgrade: websocket"))
 }
 
-enum MockHttpRequestResult {
+pub(super) enum MockHttpRequestResult {
     Probe,
     Responses(MockHttpSseTranscript),
 }
 
-fn respond_to_http_request(
+pub(super) fn respond_to_http_request(
     mut stream: std::net::TcpStream,
 ) -> Result<MockHttpRequestResult, String> {
     stream
@@ -155,7 +160,9 @@ fn respond_to_http_request(
     Ok(MockHttpRequestResult::Probe)
 }
 
-fn read_http_request(stream: &mut std::net::TcpStream) -> Result<MockHttpSseTranscript, String> {
+pub(super) fn read_http_request(
+    stream: &mut std::net::TcpStream,
+) -> Result<MockHttpSseTranscript, String> {
     let mut bytes = Vec::new();
     let mut buffer = [0_u8; 4096];
     loop {
@@ -209,7 +216,7 @@ fn read_http_request(stream: &mut std::net::TcpStream) -> Result<MockHttpSseTran
     Err("mock upstream received incomplete HTTP request".to_owned())
 }
 
-fn header_uses_chunked_transfer(header_text: &str) -> bool {
+pub(super) fn header_uses_chunked_transfer(header_text: &str) -> bool {
     header_text.lines().any(|line| {
         let Some((name, value)) = line.split_once(':') else {
             return false;
@@ -221,7 +228,7 @@ fn header_uses_chunked_transfer(header_text: &str) -> bool {
     })
 }
 
-fn decode_complete_chunked_body(bytes: &[u8]) -> Result<Option<String>, String> {
+pub(super) fn decode_complete_chunked_body(bytes: &[u8]) -> Result<Option<String>, String> {
     let mut position = 0_usize;
     let mut body = Vec::new();
     loop {
@@ -274,15 +281,15 @@ fn decode_complete_chunked_body(bytes: &[u8]) -> Result<Option<String>, String> 
     }
 }
 
-fn find_crlf(bytes: &[u8]) -> Option<usize> {
+pub(super) fn find_crlf(bytes: &[u8]) -> Option<usize> {
     bytes.windows(2).position(|window| window == b"\r\n")
 }
 
-fn find_header_end(bytes: &[u8]) -> Option<usize> {
+pub(super) fn find_header_end(bytes: &[u8]) -> Option<usize> {
     bytes.windows(4).position(|window| window == b"\r\n\r\n")
 }
 
-fn parse_content_length(header_text: &str) -> usize {
+pub(super) fn parse_content_length(header_text: &str) -> usize {
     header_text
         .lines()
         .find_map(|line| {
@@ -296,7 +303,9 @@ fn parse_content_length(header_text: &str) -> usize {
         .unwrap_or(0)
 }
 
-fn parse_http_head(header_text: &str) -> Result<(String, Vec<(String, String)>), String> {
+pub(super) fn parse_http_head(
+    header_text: &str,
+) -> Result<(String, Vec<(String, String)>), String> {
     let mut lines = header_text.lines();
     let request_line = lines
         .next()
@@ -311,7 +320,7 @@ fn parse_http_head(header_text: &str) -> Result<(String, Vec<(String, String)>),
     Ok((request_line, headers))
 }
 
-fn smoke_sse_body() -> String {
+pub(super) fn smoke_sse_body() -> String {
     smoke_http_sse_events()
         .into_iter()
         .map(|event| {
@@ -324,7 +333,7 @@ fn smoke_sse_body() -> String {
         .collect::<String>()
 }
 
-fn smoke_http_sse_events() -> Vec<Value> {
+pub(super) fn smoke_http_sse_events() -> Vec<Value> {
     let response_id = "resp-smoke-http-sse";
     let message_id = "msg-smoke-http-sse";
     let text = "codex-router smoke ok";
@@ -402,7 +411,7 @@ fn smoke_http_sse_events() -> Vec<Value> {
 }
 
 #[allow(clippy::result_large_err)]
-fn run_mock_websocket(
+pub(super) fn run_mock_websocket(
     stream: std::net::TcpStream,
     transcript: Arc<Mutex<Option<MockWebSocketTranscript>>>,
     http_probe_count: usize,
@@ -500,7 +509,7 @@ fn run_mock_websocket(
     Ok(())
 }
 
-fn transcript_has_non_prewarm_request(transcript: &MockWebSocketTranscript) -> bool {
+pub(super) fn transcript_has_non_prewarm_request(transcript: &MockWebSocketTranscript) -> bool {
     transcript
         .request_frames
         .iter()
@@ -508,13 +517,13 @@ fn transcript_has_non_prewarm_request(transcript: &MockWebSocketTranscript) -> b
         .any(|value| is_non_prewarm_response_create_frame(&value))
 }
 
-fn is_prewarm_request_frame(frame: &str) -> bool {
+pub(super) fn is_prewarm_request_frame(frame: &str) -> bool {
     serde_json::from_str::<Value>(frame)
         .ok()
         .is_some_and(|value| value.get("generate").and_then(Value::as_bool) == Some(false))
 }
 
-fn is_non_prewarm_response_create_frame(value: &Value) -> bool {
+pub(super) fn is_non_prewarm_response_create_frame(value: &Value) -> bool {
     value.get("generate").and_then(Value::as_bool) != Some(false)
         && value
             .get("model")
@@ -527,7 +536,7 @@ fn is_non_prewarm_response_create_frame(value: &Value) -> bool {
         && value.get("stream").and_then(Value::as_bool) == Some(true)
 }
 
-fn smoke_prewarm_events(request_index: usize) -> Vec<String> {
+pub(super) fn smoke_prewarm_events(request_index: usize) -> Vec<String> {
     let response_id = format!("resp-smoke-prewarm-{request_index}");
     vec![
         serde_json::json!({
@@ -554,7 +563,7 @@ fn smoke_prewarm_events(request_index: usize) -> Vec<String> {
     ]
 }
 
-fn smoke_response_events(request_index: usize) -> Vec<String> {
+pub(super) fn smoke_response_events(request_index: usize) -> Vec<String> {
     let response_id = format!("resp-smoke-{request_index}");
     let message_id = format!("msg-smoke-{request_index}");
     vec![
@@ -590,7 +599,7 @@ fn smoke_response_events(request_index: usize) -> Vec<String> {
     ]
 }
 
-fn command_output_text(command: &mut Command) -> Result<String, String> {
+pub(super) fn command_output_text(command: &mut Command) -> Result<String, String> {
     let output = command
         .stdin(Stdio::null())
         .output()
@@ -607,14 +616,17 @@ fn command_output_text(command: &mut Command) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
-fn join_result<T>(handle: thread::JoinHandle<Result<T, String>>, label: &str) -> Result<T, String> {
+pub(super) fn join_result<T>(
+    handle: thread::JoinHandle<Result<T, String>>,
+    label: &str,
+) -> Result<T, String> {
     match handle.join() {
         Ok(result) => result,
         Err(error) => Err(format!("{label} thread panicked: {error:?}")),
     }
 }
 
-fn parse_posix_token_assignment(assignment: &str) -> Result<String, String> {
+pub(super) fn parse_posix_token_assignment(assignment: &str) -> Result<String, String> {
     let prefix = "export CODEX_ROUTER_TOKEN='";
     let suffix = "'\n";
     if !assignment.starts_with(prefix) || !assignment.ends_with(suffix) {
@@ -631,7 +643,7 @@ fn parse_posix_token_assignment(assignment: &str) -> Result<String, String> {
     Ok(token.to_owned())
 }
 
-fn reserve_loopback_port() -> Result<u16, String> {
+pub(super) fn reserve_loopback_port() -> Result<u16, String> {
     let listener = TcpListener::bind("127.0.0.1:0")
         .map_err(|error| format!("failed to reserve loopback port: {error}"))?;
     let port = listener
@@ -642,7 +654,7 @@ fn reserve_loopback_port() -> Result<u16, String> {
     Ok(port)
 }
 
-fn send_hostile_no_token_websocket(router_port: u16) -> Result<(), String> {
+pub(super) fn send_hostile_no_token_websocket(router_port: u16) -> Result<(), String> {
     let request = format!("ws://127.0.0.1:{router_port}/v1/responses")
         .into_client_request()
         .map_err(|error| format!("failed to build hostile local websocket request: {error}"))?;
@@ -664,7 +676,10 @@ fn send_hostile_no_token_websocket(router_port: u16) -> Result<(), String> {
     }
 }
 
-fn run_s8_overlap_quota_local_probe(router_port: u16, local_token: &str) -> Result<(), String> {
+pub(super) fn run_s8_overlap_quota_local_probe(
+    router_port: u16,
+    local_token: &str,
+) -> Result<(), String> {
     let request_payload = serde_json::json!({
         "model": SMOKE_TARGET_MODEL,
         "input": [{
@@ -696,7 +711,7 @@ fn run_s8_overlap_quota_local_probe(router_port: u16, local_token: &str) -> Resu
     Err("S8 overlap quota local probe exited without an attempt".to_owned())
 }
 
-fn run_s8_overlap_quota_local_probe_attempt(
+pub(super) fn run_s8_overlap_quota_local_probe_attempt(
     router_port: u16,
     local_token: &str,
     request_payload: &str,
@@ -759,35 +774,35 @@ fn run_s8_overlap_quota_local_probe_attempt(
     }
 }
 
-fn account_id(value: &str) -> Result<AccountId, String> {
+pub(super) fn account_id(value: &str) -> Result<AccountId, String> {
     AccountId::new(value.to_owned()).map_err(|_| format!("invalid smoke account id: {value}"))
 }
 
 #[cfg(test)]
-fn upstream_account_token() -> &'static str {
+pub(super) fn upstream_account_token() -> &'static str {
     "installed-smoke-upstream-token"
 }
 
-fn timestamp_millis() -> u128 {
+pub(super) fn timestamp_millis() -> u128 {
     match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
         Ok(duration) => duration.as_millis(),
         Err(_) => 0,
     }
 }
 
-fn timestamp_seconds() -> u64 {
+pub(super) fn timestamp_seconds() -> u64 {
     match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
         Ok(duration) => duration.as_secs(),
         Err(_) => 0,
     }
 }
 
-struct SmokeTempRoot {
-    path: PathBuf,
+pub(super) struct SmokeTempRoot {
+    pub(super) path: PathBuf,
 }
 
 impl SmokeTempRoot {
-    fn new(name: &str) -> Result<Self, String> {
+    pub(super) fn new(name: &str) -> Result<Self, String> {
         let path = std::env::temp_dir().join(format!(
             "codex-router-{name}-{}-{}",
             std::process::id(),
@@ -807,7 +822,7 @@ impl SmokeTempRoot {
         Ok(Self { path })
     }
 
-    fn path(&self) -> &Path {
+    pub(super) fn path(&self) -> &Path {
         &self.path
     }
 }

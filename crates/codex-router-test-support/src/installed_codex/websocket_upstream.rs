@@ -1,4 +1,6 @@
-fn run_mock_upstream(
+use super::*;
+
+pub(super) fn run_mock_upstream(
     listener: TcpListener,
     transcript: Arc<Mutex<Option<MockWebSocketTranscript>>>,
     shutdown: Arc<AtomicBool>,
@@ -63,7 +65,7 @@ fn run_mock_upstream(
     }
 }
 
-fn run_quota_reconnect_mock_upstream(
+pub(super) fn run_quota_reconnect_mock_upstream(
     listener: TcpListener,
     state: Arc<Mutex<QuotaReconnectUpstreamState>>,
     shutdown: Arc<AtomicBool>,
@@ -110,7 +112,7 @@ fn run_quota_reconnect_mock_upstream(
 }
 
 #[allow(clippy::result_large_err)]
-fn run_quota_reconnect_mock_websocket_session(
+pub(super) fn run_quota_reconnect_mock_websocket_session(
     stream: std::net::TcpStream,
     state: Arc<Mutex<QuotaReconnectUpstreamState>>,
     sqlite_pressure: Option<QuotaReconnectSqlitePressureConfig>,
@@ -253,7 +255,7 @@ fn run_quota_reconnect_mock_websocket_session(
     Ok(())
 }
 
-fn start_quota_reconnect_sqlite_pressure(
+pub(super) fn start_quota_reconnect_sqlite_pressure(
     config: QuotaReconnectSqlitePressureConfig,
     state: Arc<Mutex<QuotaReconnectUpstreamState>>,
 ) -> Result<thread::JoinHandle<Result<(), String>>, String> {
@@ -360,7 +362,7 @@ finally:
     }
 }
 
-fn start_s8_overlap_quota_sqlite_pressure(
+pub(super) fn start_s8_overlap_quota_sqlite_pressure(
     config: QuotaReconnectSqlitePressureConfig,
     shared: Arc<ConcurrentUpstreamSharedState>,
 ) -> Result<thread::JoinHandle<Result<(), String>>, String> {
@@ -466,7 +468,7 @@ finally:
     }
 }
 
-fn quota_reconnect_completion_sent(
+pub(super) fn quota_reconnect_completion_sent(
     state: &Arc<Mutex<QuotaReconnectUpstreamState>>,
 ) -> Result<bool, String> {
     state

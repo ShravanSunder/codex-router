@@ -1,4 +1,6 @@
-fn run_concurrent_mock_upstream(
+use super::*;
+
+pub(super) fn run_concurrent_mock_upstream(
     listener: TcpListener,
     state: Arc<ConcurrentUpstreamSharedState>,
     shutdown: Arc<AtomicBool>,
