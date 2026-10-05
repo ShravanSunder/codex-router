@@ -367,14 +367,14 @@ impl AsyncSqliteStateStore {
         for window in windows {
             insert_selector_window_in_async_transaction(&mut transaction, window).await?;
         }
-        sqlx::query(super::quota_refresh_status::REFRESH_SUCCESS_STATUS_UPSERT)
-            .bind(account_id.as_str())
-            .bind(route_band)
-            .bind(last_success)
-            .bind(stale_after)
-            .execute(&mut *transaction)
-            .await
-            .map_err(sqlx_error)?;
+        super::quota_refresh_status::record_refresh_success_status_in_transaction(
+            &mut transaction,
+            account_id,
+            route_band,
+            last_success,
+            stale_after,
+        )
+        .await?;
         transaction.commit().await.map_err(sqlx_error)?;
 
         Ok(())

@@ -245,9 +245,9 @@ async fn actual_claude_refresh_success_clears_failure_and_records_observation_ti
         assert_eq!(row.freshness, expected_freshness);
         assert_eq!(row.credit_usage.freshness, CreditUsageFreshness::Unknown);
         assert_eq!(row.windows.len(), 2);
-        for (window_seconds, expected_headroom) in [
-            (V1_SHORT_WINDOW_SECONDS, 60),
-            (V1_WEEKLY_WINDOW_SECONDS, 70),
+        for (window_seconds, expected_headroom, expected_reset) in [
+            (V1_SHORT_WINDOW_SECONDS, 60, 19_000),
+            (V1_WEEKLY_WINDOW_SECONDS, 70, 605_000),
         ] {
             let window = row
                 .windows
@@ -255,6 +255,64 @@ async fn actual_claude_refresh_success_clears_failure_and_records_observation_ti
                 .find(|window| window.window_seconds == window_seconds)
                 .expect("accepted window should appear");
             assert_eq!(window.remaining_headroom, expected_headroom);
+            assert_eq!(window.reset_unix_seconds, Some(expected_reset));
+            assert_eq!(window.observed_unix_seconds, observation_started_at);
+        }
+    }
+
+    let inside_failure_at = observation_started_at + 1;
+    assert!(inside_failure_at < fresh_until);
+    let (result, _) = fixture
+        .refresh(SyntheticClaudeQuotaResponse::ParseError, inside_failure_at)
+        .await;
+    assert!(result.is_err());
+    let (preserved_observations, failed_status) = fixture.read_observations_and_status().await;
+    assert_eq!(preserved_observations, accepted_observations);
+    let failed_status = failed_status.expect("failure within the observation deadline");
+    assert_eq!(
+        failed_status.last_success_unix_seconds(),
+        Some(observation_started_at)
+    );
+    assert_eq!(
+        failed_status.last_attempt_unix_seconds(),
+        Some(inside_failure_at)
+    );
+    assert_eq!(
+        failed_status.last_error_class(),
+        Some(QuotaRefreshErrorClass::ParseError)
+    );
+    assert_eq!(
+        failed_status.stale_after_unix_seconds(),
+        Some(inside_failure_at)
+    );
+
+    // The status deadline now differs from the still-fresh observation deadline.
+    for (now_unix_seconds, expected_freshness) in [
+        (inside_failure_at, QuotaEvidenceFreshness::Fresh),
+        (fresh_until, QuotaEvidenceFreshness::Fresh),
+        (fresh_until + 1, QuotaEvidenceFreshness::Stale),
+    ] {
+        let report = fixture.report(now_unix_seconds).await;
+        let row = report
+            .rows()
+            .iter()
+            .find(|row| row.account_id == fixture.account_id)
+            .expect("Claude row after a failure inside its observation deadline");
+        assert!(row.updated.starts_with("ok "), "{}", row.updated);
+        assert!(row.updated.contains("failed"), "{}", row.updated);
+        assert!(row.updated.contains(": parse"), "{}", row.updated);
+        assert_eq!(row.freshness, expected_freshness);
+        for (window_seconds, expected_headroom, expected_reset) in [
+            (V1_SHORT_WINDOW_SECONDS, 60, 19_000),
+            (V1_WEEKLY_WINDOW_SECONDS, 70, 605_000),
+        ] {
+            let window = row
+                .windows
+                .iter()
+                .find(|window| window.window_seconds == window_seconds)
+                .expect("last-good window after a failure");
+            assert_eq!(window.remaining_headroom, expected_headroom);
+            assert_eq!(window.reset_unix_seconds, Some(expected_reset));
             assert_eq!(window.observed_unix_seconds, observation_started_at);
         }
     }
@@ -326,6 +384,16 @@ async fn claude_refresh_without_accepted_observations_preserves_failure_status()
 #[tokio::test]
 async fn claude_refresh_metadata_write_failure_is_not_reported_as_success() {
     let fixture = ClaudeRefreshFixture::new().await;
+    let (result, _) = fixture
+        .refresh(SyntheticClaudeQuotaResponse::ParseError, 1_000)
+        .await;
+    assert!(result.is_err());
+    let (_, prior_status) = fixture.read_observations_and_status().await;
+    let prior_status = prior_status.expect("real failure row before success UPSERT conflict");
+    assert_eq!(
+        prior_status.last_error_class(),
+        Some(QuotaRefreshErrorClass::ParseError)
+    );
     let database_path = fixture.router_root.join("state.sqlite");
     let (result, stdout) = fixture
         .refresh(
@@ -346,5 +414,5 @@ async fn claude_refresh_metadata_write_failure_is_not_reported_as_success() {
     assert!(!stdout.contains("refreshed: 1"));
     let (observations, status) = fixture.read_observations_and_status().await;
     assert_eq!(observations.len(), 2);
-    assert!(status.is_none());
+    assert_eq!(status, Some(prior_status));
 }
