@@ -199,15 +199,15 @@ A malicious registry, mixed-service inventory, inline credential, conflicting ac
 
 F2 is proposed for **Browse machine** because it is unassigned in the inspected main handler; Enter/resume, Alt+Enter/fork, Ctrl+N/NEW and F1/help keep their meanings. The existing picker/controller owns one active `PickerSourceContext` and query snapshot. Choosing a configured source makes a read-only, identity-checked `sessions_list` request to that source's existing MCP surface; it does not mutate `SessionsLaunchTarget`, the default NEW choice or a stored preference. Explicit `--local` remains local-only. Unavailable source/exposure/provider results show the selected name and reason and leave the prior view intact.
 
-The proposed remote catalog uses existing `NativeSessionListParams` with exact `EndpointRef`, supported view, source filter, query, bounded page size and cursor. The result endpoint and each summary target must match the selected service/endpoint. **Stored pages have `generation: None`; their cursors must not carry a live generation** (`session_inventory_dispatch.rs:221–230,363–370,417`). Loaded/Active generation checks cannot simply be applied to Stored pages. Stored-view consistency across pages/source changes and exact selection of the native source endpoint remain open interface details; the current registry pins service identity but does not yet define that endpoint selector. This gap prevents calling source-view preparation complete.
+The proposed remote catalog uses existing `NativeSessionListParams` with exact `EndpointRef`, supported view, source filter, query, bounded page size and opaque continuation. The result endpoint and each summary target must match the selected service/endpoint. **Stored pages have `generation: None`; their cursors must not carry a live generation** (`session_inventory_dispatch.rs:221–230,363–370,417`). Loaded/Active generation checks cannot simply be applied to Stored pages. A2 below binds the source-aware request/result, endpoint selection, Stored/Runtime continuation and publication envelope; D1/D2 still gate its final source-view and provenance meaning.
 
 Scope inputs are source-owned: a configured/explicit source cwd can supply `Cwd { path }`; `Any` is an explicit available scope; local checkout/repo roots are never reused remotely. A source-root scope that cannot be established is unavailable with a reason. Provider inventories use only their existing supported contracts; no local transcript catalog fills remote provider rows. The source-view owner would commit source context and returned rows together and invalidate old query results/preview caches; all row/action keys retain full identity and source-view generation. There is no merged catalog. A proposed configured-source view uses explicit refresh/query actions rather than inheriting the current three-second automatic remote polling; default/local refresh behavior remains unchanged. This refresh contract is part of the unconfirmed source-view proposal.
 
-Alt+Enter captures a `CapturedForkSource { rowIdentity: SessionPickerIdentity, routingContext: PickerSourceContext, sourceMetadata }` before opening the popup. Hosted rows preserve their actual `SessionRef`; local stored rows retain local home/current-default routing context rather than claiming an unrecorded original Router. For default-hosted local catalog rows, positively qualify the session through the current default source's native inspection/inventory before using a hosted fork route. Do not reinterpret that bare ID on a named remote server. For explicit local Codex, use its existing local source home. The source displayed in the popup is immutable even when destination focus changes.
+Alt+Enter captures a `CapturedForkSource { rowIdentity: SessionSourceIdentity, routingContext: PickerSourceContext, actionMetadata }` before opening the popup. Hosted rows preserve their actual `SessionRef`; local stored rows retain local home/current-default routing context rather than claiming an unrecorded original Router. For default-hosted local catalog rows, the inventory projection owner must preserve a `DefaultAttributed` tag unless the D2-approved qualification rule establishes `ObservedHosted`; `with_hosted_codex` cannot erase that distinction. Do not reinterpret an attributed/bare ID on a named remote server. For explicit local Codex, use its existing local source home. The source displayed in the popup is immutable even when destination focus changes.
 
-**Unresolved provenance boundary:** the current `with_hosted_codex`/inventory refresh stamps stored local rows with a default endpoint using a bare ID (`picker_runtime_inventory.rs:326–345`, `session_catalog_records.rs:142–149`). Thus `HostedCodex(SessionRef)` alone is not evidence that the row was actually observed on that Router. The proposed capture needs an explicit distinction between observed source identity and default-catalog attribution; its type/construction rule is not settled in this pass. Adding mandatory inspection to default forks may introduce a failure point absent today, so default preservation versus that new qualification cannot be claimed resolved. Existing unhosted local provenance must not be rewritten. Configured-source rows must remove the current bare-ID local metadata join and `selected_model_choice` local fallback (`picker_runtime_inventory.rs:60–62`, `session_command_dispatch.rs:310–322`); no caller-local record may fill a remote row's model/source data.
+**Provenance boundary (D2-gated):** the current `with_hosted_codex`/inventory refresh stamps stored local rows with a default endpoint using a bare ID (`picker_runtime_inventory.rs:326–345`, `session_catalog_records.rs:142–149`). Thus `HostedCodex(SessionRef)` alone is not evidence that the row was actually observed on that Router. The A2 `SessionSourceIdentity` construction rule now preserves observed-hosted, local-home and default-attributed cases; D2 selects whether default attribution can qualify for default fork actions. Existing unhosted local provenance must not be rewritten. Configured-source rows must not use the current bare-ID local metadata join or `selected_model_choice` local fallback (`picker_runtime_inventory.rs:60–62`, `session_command_dispatch.rs:310–322`); no caller-local record may fill a remote row's model/source data.
 
-**Unresolved loader boundary:** `session_picker_record_loader` is currently owned by dispatch and captures one context/service directory (`session_command_dispatch.rs:324–358`). Source switching requires a source-parameterized dispatch-to-picker request/result contract; saying the picker is enhanced does not define it. The selected-source request, cursor/epoch consistency and source-scoped response/cancellation rules still need to be bound at that owning interface. F2 is a Lead-derived proposal to expose the source sessions needed for all-machine fork UX, not an owner-stated binding or an accepted extra browsing surface.
+**Loader boundary (A2 bound below, D1-gated):** `session_picker_record_loader` is currently owned by dispatch and captures one context/service directory (`session_command_dispatch.rs:324–358`). The A2 section below binds the source-parameterized request/result, cursor/epoch consistency and source-scoped response/cancellation rules at that owning interface. F2 remains the owner decision for how the source context is entered and returned; no global target write or merged catalog is introduced.
 
 ### A2 source-contract integration (D1/D2-gated)
 
@@ -215,10 +215,16 @@ The existing protocol already owns full routing identity: `EndpointRef { service
 
 ```text
 SessionActionSelection {
-  identity: SessionPickerIdentity,
+  sourceIdentity: SessionSourceIdentity,
   sourceContext: PickerSourceContext,
-  metadata: SourceActionMetadata,
+  actionMetadata: SourceActionMetadata,
 }
+
+SessionSourceIdentity =
+  ObservedHosted { identity: SessionPickerIdentity::HostedCodex(SessionRef), metadata }
+  | ObservedProvider { identity: SessionPickerIdentity::HostedProvider(SessionRef), metadata }
+  | LocalHome { identity: SessionPickerIdentity::LocalCodex(sessionId), codexHome, metadata }
+  | DefaultAttributed { identity: SessionPickerIdentity::LocalCodex(sessionId), endpointAttribution, metadata }
 
 SessionsPickerOutcome =
   ResumeSession(SessionActionSelection)
@@ -227,7 +233,9 @@ SessionsPickerOutcome =
   | TerminalTooNarrow
 ```
 
-`ObservedHosted` and `ObservedProvider` selections preserve the full returned `SessionRef`. `LocalHome` retains the local Codex home and session ID. `DefaultAttributed` remains a distinct default-catalog attribution until D2 selects whether it can qualify for a hosted fork. No configured source may reinterpret a bare or default-attributed ID on another service.
+`ObservedHosted` and `ObservedProvider` selections preserve the full returned `SessionRef`. `LocalHome` retains the local Codex home and session ID. `DefaultAttributed` remains a distinct default-catalog attribution until D2 selects whether it can qualify for a hosted fork. The inventory projection owner constructs these variants; it must not promote every `LocalCodex` row to `HostedCodex` merely because a default endpoint exists. No configured source may reinterpret a bare or default-attributed ID on another service.
+
+Source identity owns provenance/source metadata (the row's origin, endpoint and observed source facts). `SessionActionSelection.actionMetadata` owns action-time values such as stored model choice and effective cwd/policy inputs. The two are intentionally separate; neither duplicates or overrides the other's source of truth.
 
 The source-view owner and dispatch loader use this closed request/result boundary. It is a draft structural contract pending D1's source-view owner and D2's default identity rule:
 
@@ -251,14 +259,23 @@ SourceInventoryResult =
   | Canceled { sourceContext, requestGeneration }
 
 SourceInventoryRejection =
-  SourceUnavailable | InvalidInventory | WrongEndpoint
+  SourceUnavailable | InvalidInventory | WrongService | WrongEndpoint
   | UnsupportedViewOrScope | UnsupportedQuery
+  | EndpointUnavailable | EndpointUnqualified | AmbiguousEndpoint
   | InvalidContinuation | StaleSnapshot | TransportFailure
 ```
 
 `SourceViewGeneration` is picker-local and prevents a stale or canceled result from replacing the active source/query. It cannot change the default NEW target or publish an action outcome. Cancellation is best effort; the generation check is authoritative. A configured source does not inherit the default three-second refresh loop without an explicit source-view refresh policy.
 
-The endpoint selector must bind one qualified configured service to exactly one available native endpoint for this inventory consumer. Zero endpoints rejects with `EndpointUnavailable`/`EndpointUnqualified`; multiple eligible endpoints reject with `AmbiguousEndpoint`; the first endpoint is never chosen by ordering. This is inventory routing, not proof that a later native `thread/start` or `thread/fork` attaches to the same Router; that attachment binding remains an external prerequisite.
+The endpoint selector must bind one qualified configured service to exactly one available native endpoint for this inventory consumer. Its closed result is:
+
+```text
+EndpointBinding =
+  Bound { serviceIdentity, endpoint, generationOrStoredContext }
+  | Rejected { reason: WrongService | EndpointUnavailable | EndpointUnqualified | AmbiguousEndpoint | StaleSnapshot }
+```
+
+Zero endpoints rejects with `EndpointUnavailable`/`EndpointUnqualified`; multiple eligible endpoints reject with `AmbiguousEndpoint`; the first endpoint is never chosen by ordering. This is inventory routing, not proof that a later native `thread/start` or `thread/fork` attaches to the same Router; that attachment binding remains an external prerequisite.
 
 Stored and runtime continuations remain view-specific while the wire cursor stays opaque:
 
@@ -358,4 +375,4 @@ Upstream source is `openai/codex` tag `rust-v0.160.0`, commit `a956835d020762cb2
 
 The selected route cannot be called executable-ready until the supplied MCP exposure/auth/tool-visibility contract, attachment-time service/native binding, permitted remote NEW policy/profile projection, and required provider launcher contracts are established. Current source/evidence would reject every named remote NEW under the proposed eligibility contract, so V4 and remote V7 cannot run yet. The proposed screen illustration does not supply that evidence. These are named feasibility gaps, not alternative meanings of the owner's resolved placement intent. Arbitrary local registry profiles and security/policy adaptations have been excluded from this design.
 
-The fork/source-view extension is likewise a partial proposal: provenance handling/default compatibility, exact endpoint/Stored-page consistency, the loader contract, effective fork cwd, provider-popup behavior and registry/back/fallback-key details remain open. Source-machine browsing is a derived option for review, not a merged catalog or an accepted global target change. No cross-machine state portability is proved; every other-machine fork remains unsupported. Rendered Mermaid/document placement and independent design acceptance have not been established.
+The fork/source-view extension remains partial only where owner meaning or external proof is still open: D2 provenance/default qualification, D3 effective fork cwd/policy, provider-popup behavior, registry/back/fallback-key details, and remote exposure/attachment/policy proof. A2 source/loader/endpoint/Stored/provenance contracts are structurally bound above; their final acceptance is D1/D2-gated and requires focused review. Source-machine browsing remains a derived option, not a merged catalog or global target write. No cross-machine state portability is proved; every other-machine fork remains unsupported. Rendered Mermaid/document placement and independent design acceptance remain unestablished.
