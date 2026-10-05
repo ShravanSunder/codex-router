@@ -364,6 +364,11 @@ async fn ready_cancelled_turn_update_is_not_a_successor_turn_item() {
         SessionEvent::ItemStarted { item } | SessionEvent::ItemUpdated { item }
             if item.item_id == late_item.item_id || item.text.as_deref() != Some("CURRENT_OUTPUT"))),
         "late item identity or prefix crossed successor admission: {successor_items:?}");
+    assert!(
+        !successor_items.iter().any(|event| matches!(event,
+        SessionEvent::ItemCompleted { item_id } if item_id == &late_item.item_id)),
+        "late item completion crossed successor admission: {successor_items:?}"
+    );
 }
 
 fn text_block(text: &str) -> ContentBlock {
