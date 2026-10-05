@@ -1,0 +1,10 @@
+    Checking turso-replication-spike v0.1.0 (/Users/shravansunder/code/projects/codex-router.spike-turso-replication/spikes/turso-replication)
+error: error returned from database: Parse error: no such column: missing_column
+ --> src/bin/driver_negative_query.rs:2:13
+  |
+2 |     let _ = sqlx_turso::query!("SELECT missing_column FROM records");
+  |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: this error originates in the macro `sqlx_turso::query` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: could not compile `turso-replication-spike` (bin "driver-negative-query") due to 1 previous error

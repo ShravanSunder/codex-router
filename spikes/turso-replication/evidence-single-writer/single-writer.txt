@@ -1,0 +1,61 @@
+SINGLE_WRITER root=tmp/turso-single-writer/1791196256207-95812 scenario=all
+SERVER tmp/tools/turso_cli-aarch64-apple-darwin/tursodb tmp/turso-single-writer/1791196256207-95812/steady/primary.db --sync-server 127.0.0.1:61016
+GATEWAY http://127.0.0.1:61534 central lease=tmp/turso-single-writer/1791196256207-95812/steady/fleet-control.db backend=http://127.0.0.1:61016
+STEADY batch=0 committed_local=5 reader_before_push=[]
+STEADY push_us=18003 reader_before_pull=[]
+STEADY pull=true pull_us=19749 rows=[(1, "A-1"), (2, "A-2"), (3, "A-3"), (4, "A-4"), (5, "A-5")]
+STEADY batch=1 committed_local=10 reader_before_push=[(1, "A-1"), (2, "A-2"), (3, "A-3"), (4, "A-4"), (5, "A-5")]
+STEADY push_us=13470 reader_before_pull=[(1, "A-1"), (2, "A-2"), (3, "A-3"), (4, "A-4"), (5, "A-5")]
+STEADY pull=true pull_us=18804 rows=[(1, "A-1"), (2, "A-2"), (3, "A-3"), (4, "A-4"), (5, "A-5"), (6, "A-6"), (7, "A-7"), (8, "A-8"), (9, "A-9"), (10, "A-10")]
+STEADY batch=2 committed_local=15 reader_before_push=[(1, "A-1"), (2, "A-2"), (3, "A-3"), (4, "A-4"), (5, "A-5"), (6, "A-6"), (7, "A-7"), (8, "A-8"), (9, "A-9"), (10, "A-10")]
+STEADY push_us=15873 reader_before_pull=[(1, "A-1"), (2, "A-2"), (3, "A-3"), (4, "A-4"), (5, "A-5"), (6, "A-6"), (7, "A-7"), (8, "A-8"), (9, "A-9"), (10, "A-10")]
+STEADY pull=true pull_us=18926 rows=[(1, "A-1"), (2, "A-2"), (3, "A-3"), (4, "A-4"), (5, "A-5"), (6, "A-6"), (7, "A-7"), (8, "A-8"), (9, "A-9"), (10, "A-10"), (11, "A-11"), (12, "A-12"), (13, "A-13"), (14, "A-14"), (15, "A-15")]
+SERVER stopped owned pid=95814 status=signal: 9 (SIGKILL)
+SINGLE_WRITER steady PASS
+SERVER tmp/tools/turso_cli-aarch64-apple-darwin/tursodb tmp/turso-single-writer/1791196256207-95812/clean/primary.db --sync-server 127.0.0.1:61550
+GATEWAY http://127.0.0.1:61575 central lease=tmp/turso-single-writer/1791196256207-95812/clean/fleet-control.db backend=http://127.0.0.1:61550
+CLEAN drained pending=0
+LEASE drained release transfer A/1 -> B/2 persisted
+CLEAN old holder local admission=Err(stale lease holder=A/1 current=B/2)
+CLEAN B catch_up=true
+CLEAN final old_reader=[(1, "A-1"), (2, "A-2"), (3, "A-3"), (4, "A-4"), (5, "A-5"), (6, "A-6"), (7, "A-7"), (8, "A-8"), (9, "A-9"), (10, "A-10"), (11, "B-11"), (12, "B-12"), (13, "B-13"), (14, "B-14"), (15, "B-15")] new_writer=[(1, "A-1"), (2, "A-2"), (3, "A-3"), (4, "A-4"), (5, "A-5"), (6, "A-6"), (7, "A-7"), (8, "A-8"), (9, "A-9"), (10, "A-10"), (11, "B-11"), (12, "B-12"), (13, "B-13"), (14, "B-14"), (15, "B-15")]; exact sequence 1..15, no loss/duplicates
+SERVER stopped owned pid=95827 status=signal: 9 (SIGKILL)
+SINGLE_WRITER clean PASS
+SERVER tmp/tools/turso_cli-aarch64-apple-darwin/tursodb tmp/turso-single-writer/1791196256207-95812/unclean/primary.db --sync-server 127.0.0.1:61595
+GATEWAY http://127.0.0.1:61622 central lease=tmp/turso-single-writer/1791196256207-95812/unclean/fleet-control.db backend=http://127.0.0.1:61595
+UNCLEAN child before kill TAIL_DURABLE pending=3 local_sequences=1..8
+UNCLEAN holder killed pid=Some(95841) status=signal: 9 (SIGKILL)
+LEASE test clock advanced to 101 (expiry=100)
+LEASE expired transfer A/1 -> B/2 persisted
+UNCLEAN new holder hydrated=[(1, "A-1"), (2, "A-2"), (3, "A-3"), (4, "A-4"), (5, "A-5")]
+UNCLEAN old return before push rows=[(1, "A-1"), (2, "A-2"), (3, "A-3"), (4, "A-4"), (5, "A-5"), (6, "A-6"), (7, "A-7"), (8, "A-8")] pending=3
+GATEWAY REFUSED whole pipeline bytes=363 reason=stale lease holder=A/1 current=B/2
+UNCLEAN stale push=Err(Error("sync engine operation failed: database sync engine error: sql_execute_http: unexpected http response: status=409, body=stale lease holder=A/1 current=B/2")) gateway_before=(6, 0) after=(6, 1)
+UNCLEAN after refusal old rows=[(1, "A-1"), (2, "A-2"), (3, "A-3"), (4, "A-4"), (5, "A-5"), (6, "A-6"), (7, "A-7"), (8, "A-8")] pending=3
+UNCLEAN retained rejected DB readable=[(1, "A-1"), (2, "A-2"), (3, "A-3"), (4, "A-4"), (5, "A-5"), (6, "A-6"), (7, "A-7"), (8, "A-8")] rejected_receipt={"current_epoch":2,"database":"tmp/turso-single-writer/1791196256207-95812/unclean/A.db","epoch":1,"holder":"A","last_replicated_sequence":5,"status":"rejected_stale_epoch","tail":[{"body":"A-6","sequence":6},{"body":"A-7","sequence":7},{"body":"A-8","sequence":8}]}
+UNCLEAN machine active read-copy pointer=tmp/turso-single-writer/1791196256207-95812/unclean/A-active.json
+UNCLEAN reset new read copy=[(1, "A-1"), (2, "A-2"), (3, "A-3"), (4, "A-4"), (5, "A-5"), (6, "B-6"), (7, "B-7")]; retained rejected A.db still=[(1, "A-1"), (2, "A-2"), (3, "A-3"), (4, "A-4"), (5, "A-5"), (6, "A-6"), (7, "A-7"), (8, "A-8")]
+SERVER stopped owned pid=95840 status=signal: 9 (SIGKILL)
+SINGLE_WRITER unclean PASS
+SERVER tmp/tools/turso_cli-aarch64-apple-darwin/tursodb tmp/turso-single-writer/1791196256207-95812/schema-switch/primary.db --sync-server 127.0.0.1:61639
+GATEWAY http://127.0.0.1:61670 central lease=tmp/turso-single-writer/1791196256207-95812/schema-switch/fleet-control.db backend=http://127.0.0.1:61639
+SCHEMA add replicated version=2
+LEASE drained release transfer A/1 -> B/2 persisted
+SCHEMA switched old Router supported=1 admission=Err(schema version 2 incompatible with Router version 1)
+SERVER tmp/tools/turso_cli-aarch64-apple-darwin/tursodb tmp/turso-single-writer/1791196256207-95812/schema-rename/primary.db --sync-server 127.0.0.1:61682
+GATEWAY http://127.0.0.1:61709 central lease=tmp/turso-single-writer/1791196256207-95812/schema-rename/fleet-control.db backend=http://127.0.0.1:61682
+SCHEMA rename push=Err(Error("sync engine operation failed: database sync engine error: failed to execute sql: Error { message: \"Parse error: no such column: records.\\\"content\\\"\", code: \"BATCH_STEP_ERROR\" }"))
+SCHEMA rename writer_schema="CREATE TABLE records (sequence INTEGER PRIMARY KEY, content TEXT NOT NULL)" reader_schema="CREATE TABLE records (sequence INTEGER PRIMARY KEY, body TEXT NOT NULL)"
+SCHEMA rename peer version=3; no lease release after failed migration
+SERVER tmp/tools/turso_cli-aarch64-apple-darwin/tursodb tmp/turso-single-writer/1791196256207-95812/schema-rebuild/primary.db --sync-server 127.0.0.1:61721
+GATEWAY http://127.0.0.1:61743 central lease=tmp/turso-single-writer/1791196256207-95812/schema-rebuild/fleet-control.db backend=http://127.0.0.1:61721
+SCHEMA_REBUILD DROP/CREATE same-name push=Ok(())
+SCHEMA_REBUILD reader pull=Ok(true)
+SCHEMA_REBUILD writer_schema="CREATE TABLE records (sequence INTEGER PRIMARY KEY, content TEXT NOT NULL)" reader_schema="CREATE TABLE records (sequence INTEGER PRIMARY KEY, content TEXT NOT NULL)"
+SCHEMA_REBUILD peer content=[(1, "A-1"), (2, "A-2"), (3, "A-3")]
+LEASE drained release transfer A/1 -> B/2 persisted
+SCHEMA_REBUILD old Router admission=Err(schema version 3 incompatible with Router version 1)
+SERVER stopped owned pid=95906 status=signal: 9 (SIGKILL)
+SERVER stopped owned pid=95898 status=signal: 9 (SIGKILL)
+SERVER stopped owned pid=95897 status=signal: 9 (SIGKILL)
+SINGLE_WRITER schema PASS

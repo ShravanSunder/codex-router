@@ -1,0 +1,6 @@
+Command: cargo tree --locked --manifest-path spikes/turso-replication/Cargo.toml --no-default-features --features driver
+sqlx-turso v0.1.0-alpha.1: present
+turso v0.7.0-pre.3: present
+libsqlite3-sys: absent
+libsql-ffi: absent
+libsql-sys: absent

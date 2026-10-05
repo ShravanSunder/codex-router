@@ -1,0 +1,7 @@
+RUNTIME lower SDK 0.8.1 application runtime only; current Tokio available=true
+SERVER tmp/tools/turso_cli-aarch64-apple-darwin/tursodb tmp/turso-runtime/1791196263555-96053/hub/primary.db --sync-server 127.0.0.1:61806
+RUNTIME bootstrapped reader=[["Numeric(Integer(1))", "Text(Text { value: \"first\", subtype: Text })"]]
+RUNTIME before pull=[["Numeric(Integer(1))", "Text(Text { value: \"first\", subtype: Text })"]]
+RUNTIME pull=true reader=[["Numeric(Integer(1))", "Text(Text { value: \"second\", subtype: Text })"]]
+RUNTIME PASS no turso::sync Builder / IoWorker / runtime constructor invoked; HTTP await and file IO owned by application
+SERVER stopped owned pid=96055 status=signal: 9 (SIGKILL)

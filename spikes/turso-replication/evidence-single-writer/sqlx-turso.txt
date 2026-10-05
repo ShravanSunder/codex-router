@@ -1,0 +1,17 @@
+DRIVER pin=b7e5fab909f5403f67f69d69d621f8f72e472a1f turso=0.7.0-pre.3 root=tmp/turso-driver/1791196261717-95999
+DRIVER query! typed sequence=1 body=local
+DRIVER query_as! [RecordRow { sequence: 1, body: "local" }]
+DRIVER extra bind compiled runtime_result=Err(Database(TursoDatabaseError { code: "SQLITE_MISUSE", message: "bind index 2 is out of bounds" }))
+DRIVER read_only open=Err(Configuration(TursoAdapterError { message: "read-only Turso connections is not supported by sqlx-turso yet" }))
+SERVER tmp/tools/turso_cli-aarch64-apple-darwin/tursodb tmp/turso-driver/1791196261717-95999/sync/primary.db --sync-server 127.0.0.1:61760
+DRIVER native_sync first=[RecordRow { sequence: 1, body: "first" }]
+DRIVER native_sync before pull sequence=2 rows=[RecordRow { sequence: 1, body: "first" }]
+DRIVER native_sync same_connection pull=true rows=[RecordRow { sequence: 1, body: "first" }, RecordRow { sequence: 2, body: "item-2" }]
+DRIVER native_sync before pull sequence=3 rows=[RecordRow { sequence: 1, body: "first" }, RecordRow { sequence: 2, body: "item-2" }]
+DRIVER native_sync same_connection pull=true rows=[RecordRow { sequence: 1, body: "first" }, RecordRow { sequence: 2, body: "item-2" }, RecordRow { sequence: 3, body: "item-3" }]
+DRIVER native_sync before pull sequence=4 rows=[RecordRow { sequence: 1, body: "first" }, RecordRow { sequence: 2, body: "item-2" }, RecordRow { sequence: 3, body: "item-3" }]
+DRIVER native_sync same_connection pull=true rows=[RecordRow { sequence: 1, body: "first" }, RecordRow { sequence: 2, body: "item-2" }, RecordRow { sequence: 3, body: "item-3" }, RecordRow { sequence: 4, body: "item-4" }]
+DRIVER same_connection update query! body=updated
+DRIVER stats=SyncEngineStats { cdc_operations: 0, main_wal_size: 259584, revert_wal_size: 0, last_pull_unix_time: Some(1791196261), last_push_unix_time: None, revision: Some("12"), network_sent_bytes: 13, network_received_bytes: 49286 }
+DRIVER PASS checked macros, native Sync persistent read connection
+SERVER stopped owned pid=96001 status=signal: 9 (SIGKILL)
