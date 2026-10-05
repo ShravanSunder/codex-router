@@ -342,3 +342,11 @@ Final local and remote evidence: local branch is clean and tracks origin; strict
 The owner-requested independent review admitted the meaningful whole-diff review against the ready mechanics plan and found one accepted API-preservation defect: converting `installed_codex.rs` to private child modules left the nine pre-existing root-visible smoke report/entrypoint exports reachable only through private `use` bindings. This contradicted the plan's explicit requirement to keep public smoke report/entrypoint exports and existing API paths. The bounded correction adds explicit root `pub use` reexports for `InstalledCodexSmokeReport`, the seven `run_installed_codex_*` smoke functions, and `run_hostile_no_token_smoke`; no wrapper or behavior change is introduced.
 
 The correction is staged with this trace for the next unsigned-fallback checkpoint. Focused package compile/tests, Clippy, formatting, strict checker, and a fresh independent review follow after the commit; prior review coverage for the affected module is invalidated until then.
+
+## Independent review closure — 2026-10-05
+
+Fresh whole-diff implementation review at `10f9737b58be1a19ba133b3ee80acfb81901ca4b` re-read the complete 32-file diff and governing plan. Spec compliance, whole-diff chunk review, dispel, and finding reduction are complete. The accepted F1 API finding from the prior review is closed: explicit root reexports restore `run_hostile_no_token_smoke`, `InstalledCodexSmokeReport`, and all seven `run_installed_codex_*` smoke entrypoints; server root public inventory also has no missing exports. Normal/failure paths, cfg/test attributes, literals, private seams, and normalized child bodies have no new semantic findings. Review result: **READY**.
+
+Proof challenge remains inspect-only because no execution grant was supplied to the reviewer. The supplied external rustc root-path probe, 17/17 non-ignored installed-Codex tests, 1,707-file checker, formatting, workspace Clippy, and diff checks are implementation receipts rather than independently rerun review commands. Full local nextest and local audit remain unverified; GitHub CI audit/workspace tests are the authoritative remote gates once the corrected head runs.
+
+Final source checkpoint is `10f9737b`; the trace-only follow-up checkpoint records this review closure. PR remains draft and unmerged by owner direction.
