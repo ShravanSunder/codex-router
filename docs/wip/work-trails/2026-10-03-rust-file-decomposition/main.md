@@ -335,3 +335,10 @@ Evidence: all existing function names compare equal against `HEAD`; existing str
 Delivery state: correction checkpoint `9719590a` is committed with the authorized `--no-gpg-sign` fallback and pushed to `origin/rust-file-decomposition`. Draft PR #127 is at the same head, has a head-matched body, all five GitHub checks passing, clean mergeability, and zero comments, reviews, or unresolved threads. The PR remains draft by owner direction; no merge, release, version bump, production restart, or tag.
 
 Final local and remote evidence: local branch is clean and tracks origin; strict checker covers 1,707 Rust files; formatting and workspace all-target Clippy pass; focused proxy and installed-Codex tests pass 24/24 and 17/17 non-ignored respectively. Full nextest and local audit remain unverified as documented above; GitHub CI audit and workspace tests passed.
+
+
+## Final independent review correction — 2026-10-05
+
+The owner-requested independent review admitted the meaningful whole-diff review against the ready mechanics plan and found one accepted API-preservation defect: converting `installed_codex.rs` to private child modules left the nine pre-existing root-visible smoke report/entrypoint exports reachable only through private `use` bindings. This contradicted the plan's explicit requirement to keep public smoke report/entrypoint exports and existing API paths. The bounded correction adds explicit root `pub use` reexports for `InstalledCodexSmokeReport`, the seven `run_installed_codex_*` smoke functions, and `run_hostile_no_token_smoke`; no wrapper or behavior change is introduced.
+
+The correction is staged with this trace for the next unsigned-fallback checkpoint. Focused package compile/tests, Clippy, formatting, strict checker, and a fresh independent review follow after the commit; prior review coverage for the affected module is invalidated until then.
