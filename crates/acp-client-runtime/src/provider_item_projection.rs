@@ -148,8 +148,10 @@ impl ProviderItemProjection {
         }
     }
 
-    pub(crate) fn retire_failed_turn_text(&mut self) {
+    pub(crate) fn discard_turn_local_cursors(&mut self) {
         self.active_text = None;
+        self.tool_order.clear();
+        self.plan_item = None;
     }
 
     pub(crate) fn finish_text(&mut self) -> Result<(), ItemProjectionError> {

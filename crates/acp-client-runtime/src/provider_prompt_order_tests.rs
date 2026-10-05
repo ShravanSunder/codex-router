@@ -18,14 +18,33 @@ use std::{
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_util::sync::CancellationToken;
 
+#[path = "provider_turn_cursor_tests.rs"]
+mod provider_turn_cursor_tests;
+
 const CANCELLED_PROMPT_ORDER_FIXTURE: &str = r#"
-import json,socket,sys
-def read(): return json.loads(sys.stdin.readline())
+import json,pathlib,queue,socket,sys,threading
+requests=queue.Queue()
+prompt_texts=[]
+stdin_closed=threading.Event()
+receipt_path=pathlib.Path(sys.argv[2])
+def receive_wire():
+    try:
+        for line in sys.stdin:
+            message=json.loads(line)
+            if message.get('method')=='session/prompt':
+                prompt_texts.append(message['params']['prompt'][0]['text'])
+                receipt_path.write_text(json.dumps({'promptCount':len(prompt_texts),'promptTexts':prompt_texts}))
+            requests.put(message)
+    finally:
+        stdin_closed.set()
+threading.Thread(target=receive_wire,daemon=True).start()
+def read(): return requests.get(timeout=5)
 def send(value): print(json.dumps(value),flush=True)
 def update(text):
     send({'jsonrpc':'2.0','method':'session/update','params':{'sessionId':'fixture-session',
         'update':{'sessionUpdate':'agent_message_chunk','content':{'type':'text','text':text}}}})
 control=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM)
+control.settimeout(15)
 control.connect(sys.argv[1])
 request=read()
 send({'jsonrpc':'2.0','id':request['id'],'result':{'protocolVersion':1,
@@ -49,7 +68,7 @@ second=read()
 assert second['method']=='session/prompt'
 update('CURRENT_OUTPUT')
 send({'jsonrpc':'2.0','id':second['id'],'result':{'stopReason':'end_turn'}})
-sys.stdin.read()
+assert stdin_closed.wait(timeout=15),'owner did not close fixture stdin'
 "#;
 
 const FAILED_PROMPT_ORDER_FIXTURE: &str = r#"
@@ -191,9 +210,16 @@ impl SessionEventSink for GatedEventSink {
             && !self.gate.blocked_once.swap(true, Ordering::SeqCst)
         {
             self.gate.entered.notify_one();
-            let mut released = self.gate.released.lock().expect("gate lock");
-            while !*released {
-                released = self.gate.release_cv.wait(released).expect("gate lock");
+            let released = self.gate.released.lock().expect("gate lock");
+            let (released, _) = self
+                .gate
+                .release_cv
+                .wait_timeout_while(released, std::time::Duration::from_secs(15), |released| {
+                    !*released
+                })
+                .expect("gate lock");
+            if !*released {
+                return Err(EventSinkClosed);
             }
         }
         self.events.send(event).map_err(|_| EventSinkClosed)
@@ -205,8 +231,9 @@ impl SessionEventSink for GatedEventSink {
 /// next Prompt is admitted remain outside this guarantee.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn ready_cancelled_turn_update_is_not_a_successor_turn_item() {
-    let root = tempfile::tempdir().expect("fixture root");
+    let root = tempfile::tempdir_in("/tmp").expect("fixture root");
     let control_path = root.path().join("control.sock");
+    let receipt_path = root.path().join("wire-prompts.json");
     let control_listener = tokio::net::UnixListener::bind(&control_path).expect("control socket");
     let (event_sender, mut events) = tokio::sync::mpsc::unbounded_channel();
     let gate = Arc::new(TurnEndGate::new());
@@ -219,6 +246,7 @@ async fn ready_cancelled_turn_update_is_not_a_successor_turn_item() {
                     "-c".into(),
                     CANCELLED_PROMPT_ORDER_FIXTURE.into(),
                     control_path.to_string_lossy().into_owned(),
+                    receipt_path.to_string_lossy().into_owned(),
                 ],
                 environment: Vec::new(),
                 persistence_target: crate::ProviderPersistenceTarget::Unspecified,
@@ -278,17 +306,12 @@ async fn ready_cancelled_turn_update_is_not_a_successor_turn_item() {
     .await
     .expect("fixture sent late update")
     .expect("control reply");
-    assert_eq!(acknowledged, *b"r");
     gate.release();
-    assert!(matches!(
-        first.await.expect("first task"),
-        Err(ExternalProviderRuntimeError::PromptOutputLimitExceeded)
-    ));
+    let first_result = first.await.expect("first task");
     let next = second
         .await
         .expect("second reply")
         .expect("successor prompt settles");
-    assert_eq!(next.output, "CURRENT_OUTPUT");
     let observed = tokio::time::timeout(std::time::Duration::from_secs(2), async {
         let mut collected = Vec::new();
         while collected
@@ -303,17 +326,44 @@ async fn ready_cancelled_turn_update_is_not_a_successor_turn_item() {
     })
     .await
     .expect("both Turns settle");
+    tokio::time::timeout(std::time::Duration::from_secs(5), client.shutdown())
+        .await
+        .expect("owned cancellation fixture shutdown");
+    let wire: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(receipt_path).expect("wire prompt receipt"))
+            .expect("wire receipt JSON");
+    assert_eq!(acknowledged, *b"r");
+    assert!(matches!(
+        first_result,
+        Err(ExternalProviderRuntimeError::PromptOutputLimitExceeded)
+    ));
+    assert_eq!(next.output, "CURRENT_OUTPUT");
+    assert_eq!(
+        wire,
+        serde_json::json!({"promptCount":2,"promptTexts":["overflow","next"]})
+    );
     let second_start = observed
         .iter()
         .rposition(|event| matches!(event, SessionEvent::TurnStarted { .. }))
         .expect("successor Turn started");
-    assert!(
-        !observed[second_start..].iter().any(|event| matches!(event,
+    let late_item = observed[..second_start]
+        .iter()
+        .find_map(|event| match event {
+            SessionEvent::ItemStarted { item } if item.text.as_deref() == Some("LATE_OUTPUT") => {
+                Some(item)
+            }
+            _ => None,
+        })
+        .expect("actual late item projected before successor admission");
+    let successor_items = &observed[second_start..];
+    assert!(successor_items.iter().any(|event| matches!(event,
+        SessionEvent::ItemStarted { item }
+            if item.text.as_deref() == Some("CURRENT_OUTPUT") && item.item_id != late_item.item_id)),
+        "successor must start a new CURRENT_OUTPUT item; actual events: {successor_items:?}");
+    assert!(!successor_items.iter().any(|event| matches!(event,
         SessionEvent::ItemStarted { item } | SessionEvent::ItemUpdated { item }
-            if item.text.as_deref() == Some("LATE_OUTPUT"))),
-        "prior Turn output became a successor Turn item"
-    );
-    client.shutdown().await;
+            if item.item_id == late_item.item_id || item.text.as_deref() != Some("CURRENT_OUTPUT"))),
+        "late item identity or prefix crossed successor admission: {successor_items:?}");
 }
 
 fn text_block(text: &str) -> ContentBlock {

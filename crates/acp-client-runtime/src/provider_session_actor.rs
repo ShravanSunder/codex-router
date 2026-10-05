@@ -193,6 +193,7 @@ pub(crate) async fn run_provider_session<P: InteractionPort>(
                             let _result = reply.send(Err(acp_operation_error(error)));
                             continue;
                         }
+                        item_projection.discard_turn_local_cursors();
                         let turn_id = uuid::Uuid::now_v7().to_string();
                         runtime_handles.tool_registry.turn_started(session.session_id().0.as_ref(), &turn_id);
                         if runtime_handles.event_sink.publish(
@@ -265,7 +266,7 @@ pub(crate) async fn run_provider_session<P: InteractionPort>(
                                 result = &mut prompt_result => {
                                     drop(prompt_result);
                                     if result.is_err() {
-                                        item_projection.retire_failed_turn_text();
+                                        item_projection.discard_turn_local_cursors();
                                     }
                                     if matches!(&result, Err(ExternalProviderRuntimeError::SinkClosed)) {
                                         runtime_handles.sink_closed.cancel();
