@@ -29,18 +29,16 @@ The current contract still leaves three gaps: persistent Serve configuration is 
 
 ### SSH forwarding
 
-An operator-supplied SSH local forward can carry the existing loopback MCP surface without persistent Tailscale Serve state, for example a local ephemeral port forwarding to Sunbook's `127.0.0.1:8788`. Tailscale SSH's wrapper resolves MagicDNS and supplies a ProxyCommand, but it does not add Router service identity, MCP auth, or native session binding. SSH server availability, authorization policy, host-key binding and the remote MCP credential contract are not verified here.
-
-Plain SSH local forwarding does not carry the current native Unix WebSocket directly. Native NEW/fork would still require a remote TCP/WebSocket app-server exposure or an additional proxy, which is outside this authorized research and would need its own identity/auth contract.
+An operator-supplied conventional OpenSSH local forward can carry the existing loopback MCP surface without persistent Tailscale Serve state, for example a local ephemeral port forwarding to Sunbook's `127.0.0.1:8788`. OpenSSH also documents local-to-remote Unix-domain socket forwarding (`-L local_socket:remote_socket`), so it is technically capable of carrying the native Unix WebSocket socket when the remote `sshd` permits `StreamLocalForwarding`. Tailscale's SSH wrapper resolves MagicDNS and supplies a ProxyCommand, but wrapper support for these forwarding channels is not established; the candidate is conventional OpenSSH over the tailnet. SSH server availability, authorization policy, host-key binding and the remote MCP credential contract are not verified here.
 
 ## Recommendation
 
-For a future owner-approved, read-only machine-inventory path, prefer **operator-supplied SSH forwarding to the loopback MCP listener** over Tailscale Serve. It avoids a persistent Serve configuration and keeps the path tailnet-only, while making the SSH/auth/binding responsibility explicit. The registry would reference an already-qualified MCP URL/credential mechanism; it would not configure SSH, read credentials, or infer service identity.
+For a future owner-approved, read-only machine-inventory and native-socket transport path, prefer **operator-supplied conventional OpenSSH forwarding over the tailnet** over Tailscale Serve. It can carry both loopback MCP TCP and, where authorized by remote `sshd`, the native Unix socket without persistent Serve configuration. The registry would reference an already-qualified endpoint/credential mechanism; it would not configure SSH, read credentials, or infer service identity. Tailscale Serve remains a technically transport-capable alternative with higher persistent-exposure and host/origin/auth costs.
 
-Do **not** enable remote native NEW or fork through either path yet. Keep those actions rejected until an existing Router-owned `ws://`/`wss://` exposure proves service/endpoint identity, attachment-time binding, credential presentation and permitted policy projection. Do not add a relay, proxy, Funnel exposure, wildcard bind, or all-endpoint publication to close the gap.
+Do **not** enable remote native NEW or fork through either path yet. Keep those actions rejected until the forwarded control/native surfaces prove service/endpoint identity, attachment-time binding, credential presentation and permitted policy projection. Do not add a relay, proxy, Funnel exposure, wildcard bind, or all-endpoint publication to close the gap.
 
 ## Owner approval question
 
-After the existing F2 source-view decision is answered, approve SSH forwarding as an operator-supplied MCP-only discovery path, with native remote NEW/fork remaining disabled until a bound Router-native `ws://`/`wss://` contract exists?
+After the existing F2 source-view decision is answered, approve conventional OpenSSH forwarding as an operator-supplied MCP/native-socket transport candidate, with native remote NEW/fork remaining disabled until forwarded identity, auth and policy binding are proved?
 
 This proposal does not change the JSONC schema, run SSH, configure Serve, alter Tailscale, or authorize credentials. The fixes Lead's UUID restore work remains separate.
