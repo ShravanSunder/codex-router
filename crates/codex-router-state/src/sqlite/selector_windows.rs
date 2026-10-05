@@ -367,26 +367,14 @@ impl AsyncSqliteStateStore {
         for window in windows {
             insert_selector_window_in_async_transaction(&mut transaction, window).await?;
         }
-        sqlx::query(
-            "INSERT INTO quota_refresh_status (
-               account_id, route_band, last_success_unix_seconds,
-               last_attempt_unix_seconds, last_error_class,
-               stale_after_unix_seconds
-             )
-             VALUES (?1, ?2, ?3, ?3, NULL, ?4)
-             ON CONFLICT(account_id, route_band) DO UPDATE SET
-               last_success_unix_seconds = excluded.last_success_unix_seconds,
-               last_attempt_unix_seconds = excluded.last_attempt_unix_seconds,
-               last_error_class = excluded.last_error_class,
-               stale_after_unix_seconds = excluded.stale_after_unix_seconds",
-        )
-        .bind(account_id.as_str())
-        .bind(route_band)
-        .bind(last_success)
-        .bind(stale_after)
-        .execute(&mut *transaction)
-        .await
-        .map_err(sqlx_error)?;
+        sqlx::query(super::quota_refresh_status::REFRESH_SUCCESS_STATUS_UPSERT)
+            .bind(account_id.as_str())
+            .bind(route_band)
+            .bind(last_success)
+            .bind(stale_after)
+            .execute(&mut *transaction)
+            .await
+            .map_err(sqlx_error)?;
         transaction.commit().await.map_err(sqlx_error)?;
 
         Ok(())

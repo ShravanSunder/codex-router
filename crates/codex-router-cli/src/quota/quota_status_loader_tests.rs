@@ -17,6 +17,9 @@ use crate::quota_reset::FixedOriginInteractiveResetSessionFactory;
 use crate::quota_reset::InteractiveResetSessionFactory;
 use codex_router_secret_store::encrypted_credential_store::EncryptedCredentialStoreStatus;
 
+#[path = "quota_status_recovery_tests.rs"]
+mod recovery_tests;
+
 #[tokio::test]
 async fn quota_status_report_uses_provider_refresh_status_and_preserves_claude_windows() {
     use codex_router_core::route_profile::WindowKind;
@@ -71,13 +74,7 @@ async fn quota_status_report_uses_provider_refresh_status_and_preserves_claude_w
         (&openai_account_id, RouteBand::Responses, 900),
     ] {
         state
-            .record_refresh_success_and_replace_selector_windows(
-                account_id,
-                route_band.as_str(),
-                &[],
-                last_success,
-                2_000,
-            )
+            .record_refresh_success_status(account_id, route_band.as_str(), last_success, 2_000)
             .await
             .expect("provider refresh success should persist");
     }
