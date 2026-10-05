@@ -1,0 +1,127 @@
+RUN root=tmp/turso-runs/1791167091638-9807 case=all; application Tokio runtime
+SERVER tmp/tools/turso_cli-aarch64-apple-darwin/tursodb tmp/turso-runs/1791167091638-9807/last-push/primary.db --sync-server 127.0.0.1:49906
+SERVER stopped owned pid=9809 status=signal: 9 (SIGKILL)
+LAST_PUSH offline A=[["Integer(1)", "Text(\"offline-A\")"]] B=[["Integer(1)", "Text(\"offline-B\")"]]
+LAST_PUSH down push=Err(Error("sync engine operation failed: database sync engine error: http request failed: client error (Connect)"))
+SERVER tmp/tools/turso_cli-aarch64-apple-darwin/tursodb tmp/turso-runs/1791167091638-9807/last-push/primary.db --sync-server 127.0.0.1:49906
+LAST_PUSH after A push A=[["Integer(1)", "Text(\"offline-A\")"]] B=[["Integer(1)", "Text(\"offline-B\")"]] primary=[[{"type":"integer","value":"1"},{"type":"text","value":"offline-A"}]]
+LAST_PUSH B pull pending=Ok(true)
+LAST_PUSH after B pull pending A=[["Integer(1)", "Text(\"offline-A\")"]] B=[["Integer(1)", "Text(\"offline-B\")"]] primary=[[{"type":"integer","value":"1"},{"type":"text","value":"offline-A"}]]
+LAST_PUSH final A=[["Integer(1)", "Text(\"offline-B\")"]] B=[["Integer(1)", "Text(\"offline-B\")"]] primary=[[{"type":"integer","value":"1"},{"type":"text","value":"offline-B"}]]
+SERVER stopped owned pid=9812 status=signal: 9 (SIGKILL)
+SYNC_SCENARIO last-push: Ok(())
+SERVER tmp/tools/turso_cli-aarch64-apple-darwin/tursodb tmp/turso-runs/1791167091638-9807/unique/primary.db --sync-server 127.0.0.1:49962
+SERVER stopped owned pid=9881 status=signal: 9 (SIGKILL)
+SERVER tmp/tools/turso_cli-aarch64-apple-darwin/tursodb tmp/turso-runs/1791167091638-9807/unique/primary.db --sync-server 127.0.0.1:49962
+UNIQUE A push=Ok(())
+UNIQUE B pending before push=SyncEngineStats { cdc_operations: 1, main_wal_size: 37104, revert_wal_size: 0, last_pull_unix_time: Some(1791167092), last_push_unix_time: None, revision: Some("5"), network_sent_bytes: 0, network_received_bytes: 20523 }
+UNIQUE B push=Err(Error("sync engine operation failed: database sync engine error: failed to execute sql: Error { message: \"UNIQUE constraint failed: accounts.handle\", code: \"BATCH_STEP_ERROR\" }"))
+UNIQUE B pending after failed push=SyncEngineStats { cdc_operations: 1, main_wal_size: 37104, revert_wal_size: 0, last_pull_unix_time: Some(1791167092), last_push_unix_time: None, revision: Some("5"), network_sent_bytes: 1959, network_received_bytes: 21773 }
+UNIQUE before pull A=[["Integer(10)", "Text(\"same\")", "Text(\"A\")"]] B=[["Integer(20)", "Text(\"same\")", "Text(\"B\")"]] primary=[[{"type":"integer","value":"10"},{"type":"text","value":"same"},{"type":"text","value":"A"}]]
+UNIQUE A pull=Ok(true)
+UNIQUE B pull=Ok(true)
+UNIQUE final A=[["Integer(10)", "Text(\"same\")", "Text(\"A\")"]] B=[["Integer(10)", "Text(\"same\")", "Text(\"A\")"]] primary=[[{"type":"integer","value":"10"},{"type":"text","value":"same"},{"type":"text","value":"A"}]]
+UNIQUE B stats=SyncEngineStats { cdc_operations: 0, main_wal_size: 98904, revert_wal_size: 0, last_pull_unix_time: Some(1791167092), last_push_unix_time: None, revision: Some("10"), network_sent_bytes: 1962, network_received_bytes: 38196 }
+SERVER stopped owned pid=9882 status=signal: 9 (SIGKILL)
+SYNC_SCENARIO uniqueness: Ok(())
+SERVER tmp/tools/turso_cli-aarch64-apple-darwin/tursodb tmp/turso-runs/1791167091638-9807/edit-last/primary.db --sync-server 127.0.0.1:50025
+SERVER stopped owned pid=9928 status=signal: 9 (SIGKILL)
+SERVER tmp/tools/turso_cli-aarch64-apple-darwin/tursodb tmp/turso-runs/1791167091638-9807/edit-last/primary.db --sync-server 127.0.0.1:50025
+DELETE_EDIT edit-last A pull=Ok(true) B pull=Ok(true)
+DELETE_EDIT edit-last final A=[] B=[] primary=[]
+SERVER stopped owned pid=9929 status=signal: 9 (SIGKILL)
+SYNC_SCENARIO edit-last: Ok(())
+SERVER tmp/tools/turso_cli-aarch64-apple-darwin/tursodb tmp/turso-runs/1791167091638-9807/delete-last/primary.db --sync-server 127.0.0.1:50086
+SERVER stopped owned pid=9952 status=signal: 9 (SIGKILL)
+SERVER tmp/tools/turso_cli-aarch64-apple-darwin/tursodb tmp/turso-runs/1791167091638-9807/delete-last/primary.db --sync-server 127.0.0.1:50086
+DELETE_EDIT delete-last A pull=Ok(true) B pull=Ok(true)
+DELETE_EDIT delete-last final A=[] B=[] primary=[]
+SERVER stopped owned pid=9960 status=signal: 9 (SIGKILL)
+SYNC_SCENARIO delete-last: Ok(())
+SERVER tmp/tools/turso_cli-aarch64-apple-darwin/tursodb tmp/turso-runs/1791167091638-9807/fencing/primary.db --sync-server 127.0.0.1:50153
+FENCE create triggers=Ok(())
+FENCE push trigger=Ok(())
+FENCE B pull trigger=Ok(false)
+FENCE stale push=Ok(())
+FENCE trigger definitions A=[["Text(\"fence_insert\")", "Text(\"CREATE TRIGGER fence_insert BEFORE INSERT ON project WHEN NEW.epoch != (SELECT epoch FROM lease WHERE id = 1) BEGIN SELECT RAISE (ABORT, 'stale epoch'); END\")"], ["Text(\"fence_update\")", "Text(\"CREATE TRIGGER fence_update BEFORE UPDATE ON project WHEN NEW.epoch != (SELECT epoch FROM lease WHERE id = 1) BEGIN SELECT RAISE (ABORT, 'stale epoch'); END\")"]] B=[] primary=[]
+FENCE after stale push A=[["Integer(1)", "Integer(1)", "Text(\"stale-holder\")"]] B=[["Integer(1)", "Integer(2)", "Text(\"successor\")"]] primary=[[{"type":"integer","value":"1"},{"type":"integer","value":"2"},{"type":"text","value":"stale-holder"}]]
+FENCE stale retry=Ok(())
+FENCE stale pull=Ok(true)
+FENCE after retry/pull A=[["Integer(1)", "Integer(2)", "Text(\"stale-holder\")"]] B=[["Integer(1)", "Integer(2)", "Text(\"successor\")"]] primary=[[{"type":"integer","value":"1"},{"type":"integer","value":"2"},{"type":"text","value":"stale-holder"}]]
+FENCE stats=SyncEngineStats { cdc_operations: 0, main_wal_size: 140104, revert_wal_size: 0, last_pull_unix_time: Some(1791167093), last_push_unix_time: Some(1791167093), revision: Some("11"), network_sent_bytes: 6680, network_received_bytes: 25700 }
+FENCE lease rollback local=Ok(1)
+FENCE lease rollback push=Ok(())
+FENCE lease after rollback push A=[["Integer(1)", "Integer(1)"]] B=[["Integer(1)", "Integer(2)"]] primary=[[{"type":"integer","value":"1"},{"type":"integer","value":"1"}]]
+FENCE files=tmp/turso-runs/1791167091638-9807/fencing
+SERVER stopped owned pid=9981 status=signal: 9 (SIGKILL)
+SYNC_SCENARIO fencing: Ok(())
+SERVER tmp/tools/turso_cli-aarch64-apple-darwin/tursodb tmp/turso-runs/1791167091638-9807/fence-abort/primary.db --sync-server 127.0.0.1:50209
+fence-abort installed server trigger A=[["Text(\"fence_event\")"]] B=[["Text(\"fence_event\")"]] primary=[[{"type":"text","value":"fence_event"}]]
+fence-abort pending before push=SyncEngineStats { cdc_operations: 1, main_wal_size: 123624, revert_wal_size: 0, last_pull_unix_time: Some(1791167094), last_push_unix_time: Some(1791167094), revision: Some("6"), network_sent_bytes: 2368, network_received_bytes: 22021 }
+fence-abort stale push=Err(Error("sync engine operation failed: database sync engine error: failed to execute sql: Error { message: \"stale epoch\", code: \"BATCH_STEP_ERROR\" }"))
+fence-abort pending after push=SyncEngineStats { cdc_operations: 1, main_wal_size: 123624, revert_wal_size: 0, last_pull_unix_time: Some(1791167094), last_push_unix_time: Some(1791167094), revision: Some("6"), network_sent_bytes: 4332, network_received_bytes: 23304 }
+fence-abort after push A=[["Integer(1)", "Integer(1)", "Text(\"stale-append\")"]] B=[["Integer(2)", "Integer(2)", "Text(\"successor\")"]] primary=[[{"type":"integer","value":"2"},{"type":"integer","value":"2"},{"type":"text","value":"successor"}]]
+fence-abort stale retry=Ok(())
+fence-abort stale pull=Ok(true)
+fence-abort pending after pull=SyncEngineStats { cdc_operations: 0, main_wal_size: 197784, revert_wal_size: 0, last_pull_unix_time: Some(1791167094), last_push_unix_time: Some(1791167094), revision: Some("11"), network_sent_bytes: 5370, network_received_bytes: 40798 }
+fence-abort after pull A=[["Integer(2)", "Integer(2)", "Text(\"successor\")"]] B=[["Integer(2)", "Integer(2)", "Text(\"successor\")"]] primary=[[{"type":"integer","value":"2"},{"type":"integer","value":"2"},{"type":"text","value":"successor"}]]
+fence-abort current holder push=Ok(())
+fence-abort current holder final A=[["Integer(2)", "Integer(2)", "Text(\"successor\")"]] B=[["Integer(2)", "Integer(2)", "Text(\"successor\")"], ["Integer(3)", "Integer(2)", "Text(\"fresh-after-reject\")"]] primary=[[{"type":"integer","value":"2"},{"type":"integer","value":"2"},{"type":"text","value":"successor"}],[{"type":"integer","value":"3"},{"type":"integer","value":"2"},{"type":"text","value":"fresh-after-reject"}]]
+SERVER stopped owned pid=10064 status=signal: 9 (SIGKILL)
+SYNC_SCENARIO fence-abort: Ok(())
+SERVER tmp/tools/turso_cli-aarch64-apple-darwin/tursodb tmp/turso-runs/1791167091638-9807/fence-rollback/primary.db --sync-server 127.0.0.1:50264
+fence-rollback installed server trigger A=[["Text(\"fence_event\")"]] B=[["Text(\"fence_event\")"]] primary=[[{"type":"text","value":"fence_event"}]]
+fence-rollback pending before push=SyncEngineStats { cdc_operations: 1, main_wal_size: 123624, revert_wal_size: 0, last_pull_unix_time: Some(1791167094), last_push_unix_time: Some(1791167094), revision: Some("6"), network_sent_bytes: 2368, network_received_bytes: 22021 }
+fence-rollback stale push=Err(Error("sync engine operation failed: database sync engine error: failed to execute sql: Error { message: \"stale epoch\", code: \"BATCH_STEP_ERROR\" }"))
+fence-rollback pending after push=SyncEngineStats { cdc_operations: 1, main_wal_size: 123624, revert_wal_size: 0, last_pull_unix_time: Some(1791167094), last_push_unix_time: Some(1791167094), revision: Some("6"), network_sent_bytes: 4332, network_received_bytes: 23014 }
+fence-rollback after push A=[["Integer(1)", "Integer(1)", "Text(\"stale-append\")"]] B=[["Integer(2)", "Integer(2)", "Text(\"successor\")"]] primary=[[{"type":"integer","value":"2"},{"type":"integer","value":"2"},{"type":"text","value":"successor"}]]
+fence-rollback stale retry=Err(Error("sync engine operation failed: database sync engine error: failed to execute sql: Error { message: \"stale epoch\", code: \"BATCH_STEP_ERROR\" }"))
+fence-rollback stale pull=Err(Error("sync engine operation failed: database sync engine error: failed to replay local change after remote apply: database error: stale epoch"))
+fence-rollback pending after pull=SyncEngineStats { cdc_operations: 1, main_wal_size: 123624, revert_wal_size: 0, last_pull_unix_time: Some(1791167094), last_push_unix_time: Some(1791167094), revision: Some("6"), network_sent_bytes: 6299, network_received_bytes: 40430 }
+fence-rollback after pull A=[["Integer(1)", "Integer(1)", "Text(\"stale-append\")"]] B=[["Integer(2)", "Integer(2)", "Text(\"successor\")"]] primary=[[{"type":"integer","value":"2"},{"type":"integer","value":"2"},{"type":"text","value":"successor"}]]
+fence-rollback current holder push=Ok(())
+fence-rollback current holder final A=[["Integer(1)", "Integer(1)", "Text(\"stale-append\")"]] B=[["Integer(2)", "Integer(2)", "Text(\"successor\")"], ["Integer(3)", "Integer(2)", "Text(\"fresh-after-reject\")"]] primary=[[{"type":"integer","value":"2"},{"type":"integer","value":"2"},{"type":"text","value":"successor"}],[{"type":"integer","value":"3"},{"type":"integer","value":"2"},{"type":"text","value":"fresh-after-reject"}]]
+SERVER stopped owned pid=10194 status=signal: 9 (SIGKILL)
+SYNC_SCENARIO fence-rollback: Ok(())
+SERVER tmp/tools/turso_cli-aarch64-apple-darwin/tursodb tmp/turso-runs/1791167091638-9807/schema/primary.db --sync-server 127.0.0.1:50315
+SCHEMA add push=Ok(())
+SCHEMA add pull=Ok(true)
+SCHEMA add A=[["Integer(1)", "Text(\"seed\")", "Text(\"added\")"]] B=[["Integer(1)", "Text(\"seed\")", "Text(\"added\")"]] primary=[[{"type":"integer","value":"1"},{"type":"text","value":"seed"},{"type":"text","value":"added"}]]
+SCHEMA rename push=Err(Error("sync engine operation failed: database sync engine error: failed to execute sql: Error { message: \"Parse error: no such column: notes.\\\"content\\\"\", code: \"BATCH_STEP_ERROR\" }"))
+SCHEMA rename pull=Ok(true)
+SCHEMA rename A=[["Integer(1)", "Text(\"renamed\")", "Text(\"added\")"]] B=[["Integer(1)", "Text(\"seed\")", "Text(\"added\")"]] primary=[[{"type":"integer","value":"1"},{"type":"text","value":"seed"},{"type":"text","value":"added"}]]
+SCHEMA migrations A=[["Integer(1)"], ["Integer(2)"], ["Integer(3)"]] B=[["Integer(1)"], ["Integer(2)"], ["Integer(3)"]] primary=[[{"type":"integer","value":"1"}],[{"type":"integer","value":"2"}],[{"type":"integer","value":"3"}]]
+SCHEMA definitions A=[["Text(\"notes\")", "Text(\"CREATE TABLE notes (id INTEGER PRIMARY KEY, content TEXT, label TEXT)\")"]] B=[["Text(\"notes\")", "Text(\"CREATE TABLE notes (id INTEGER PRIMARY KEY, body TEXT, label TEXT)\")"]] primary=[[{"type":"text","value":"notes"},{"type":"text","value":"CREATE TABLE notes (id INTEGER PRIMARY KEY, body TEXT, label TEXT)"}]]
+SCHEMA A stats=SyncEngineStats { cdc_operations: 2, main_wal_size: 98904, revert_wal_size: 0, last_pull_unix_time: Some(1791167095), last_push_unix_time: Some(1791167095), revision: Some("0"), network_sent_bytes: 7083, network_received_bytes: 4818 }
+SERVER stopped owned pid=10298 status=signal: 9 (SIGKILL)
+SYNC_SCENARIO schema: Ok(())
+SERVER tmp/tools/turso_cli-aarch64-apple-darwin/tursodb tmp/turso-runs/1791167091638-9807/schema-swap/primary.db --sync-server 127.0.0.1:50351
+SCHEMA_SWAP push=Ok(())
+SCHEMA_SWAP pull=Ok(false)
+SCHEMA_SWAP final A=[["Integer(1)", "Text(\"B1\")", "Text(\"A1\")"]] B=[["Integer(1)", "Text(\"A1\")", "Text(\"B1\")"]] primary=[[{"type":"integer","value":"1"},{"type":"text","value":"A1"},{"type":"text","value":"B1"}]]
+SCHEMA_SWAP definitions A=[["Text(\"notes\")", "Text(\"CREATE TABLE notes (id INTEGER PRIMARY KEY, b TEXT, a TEXT)\")"]] B=[["Text(\"notes\")", "Text(\"CREATE TABLE notes (id INTEGER PRIMARY KEY, a TEXT, b TEXT)\")"]] primary=[[{"type":"text","value":"notes"},{"type":"text","value":"CREATE TABLE notes (id INTEGER PRIMARY KEY, a TEXT, b TEXT)"}]]
+SERVER stopped owned pid=10387 status=signal: 9 (SIGKILL)
+SYNC_SCENARIO schema-swap: Ok(())
+CASE sync COMPLETE
+SERVER tmp/tools/turso_cli-aarch64-apple-darwin/tursodb tmp/turso-runs/1791167091638-9807/compatibility/primary.db --sync-server 127.0.0.1:50384
+TURSO journal_mode=[["Text(\"wal\")"]]
+TURSO set DELETE=Ok([["Text(\"wal\")"]])
+TURSO mode after DELETE=[["Text(\"wal\")"]]
+TURSO admission local=[["Integer(1)", "Text(\"admitted\")"]]
+TURSO admission invalid=Err(body must be nonempty)
+TURSO admission push=Ok
+TURSO admission peer read=admitted
+SQLX turso live read_only=Ok([(1, "admitted")])
+SQLX remote primary after update={"base_url":null,"baton":null,"results":[{"response":{"result":{"affected_row_count":0,"cols":[{"decltype":"TEXT","name":"body"}],"last_insert_rowid":null,"query_duration_ms":0.0,"replication_index":null,"rows":[[{"type":"text","value":"remote-update"}]],"rows_read":0,"rows_written":0},"type":"execute"},"type":"ok"}]}
+SQLX local pull=true
+SQLX Turso connection after pull=[["Integer(1)", "Text(\"remote-update\")"]]
+SQLX turso same live connection after pull=[(1, "admitted")]
+SQLX reopened live after pull=[(1, "remote-update")]
+SQLX explicit checkpoint=Ok(())
+SQLX live after explicit checkpoint=[(1, "remote-update")]
+TURSO checkpoint=Ok(())
+SQLX turso closed/checkpointed read_only=Ok([(1, "remote-update")])
+TURSO Tokio runtime=true crate spawns second Tokio runtime on dedicated IO thread (source verified)
+SERVER stopped owned pid=10432 status=signal: 9 (SIGKILL)
+CASE compatibility COMPLETE
+HARNESS failures=0

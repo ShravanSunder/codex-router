@@ -1,0 +1,4 @@
+release digest verified: turso_cli-aarch64-apple-darwin.tar.xz
+release digest verified: libsql-server-aarch64-apple-darwin.tar.xz
+Turso 0.8.1
+sqld sqld 0.24.32 (40c272de 2025-02-14)

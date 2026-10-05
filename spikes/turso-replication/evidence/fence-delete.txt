@@ -1,0 +1,9 @@
+RUN root=tmp/turso-runs/1791167233370-28522 case=fence-delete; application Tokio runtime
+SERVER tmp/tools/turso_cli-aarch64-apple-darwin/tursodb tmp/turso-runs/1791167233370-28522/fence-delete/primary.db --sync-server 127.0.0.1:51207
+FENCE_DELETE installed trigger A=[["Text(\"fence_project_delete\")"]] B=[["Text(\"fence_project_delete\")"]] primary=[[{"type":"text","value":"fence_project_delete"}]]
+FENCE_DELETE stale push=Ok(())
+FENCE_DELETE final A=[] B=[["Integer(1)", "Integer(2)", "Text(\"successor\")"]] primary=[]
+SERVER stopped owned pid=28523 status=signal: 9 (SIGKILL)
+SYNC_SCENARIO fence-delete: Ok(())
+CASE sync COMPLETE
+HARNESS failures=0

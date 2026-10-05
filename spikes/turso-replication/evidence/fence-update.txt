@@ -1,0 +1,9 @@
+RUN root=tmp/turso-runs/1791167179761-25381 case=fence-update; application Tokio runtime
+SERVER tmp/tools/turso_cli-aarch64-apple-darwin/tursodb tmp/turso-runs/1791167179761-25381/fence-update/primary.db --sync-server 127.0.0.1:50606
+FENCE_UPDATE installed trigger A=[["Text(\"fence_project\")"]] B=[["Text(\"fence_project\")"]] primary=[[{"type":"text","value":"fence_project"}]]
+FENCE_UPDATE stale push=Err(Error("sync engine operation failed: database sync engine error: failed to execute sql: Error { message: \"stale epoch\", code: \"BATCH_STEP_ERROR\" }"))
+FENCE_UPDATE final A=[["Integer(1)", "Integer(1)", "Text(\"stale-holder\")"]] B=[["Integer(1)", "Integer(2)", "Text(\"successor\")"]] primary=[[{"type":"integer","value":"1"},{"type":"integer","value":"2"},{"type":"text","value":"successor"}]]
+SERVER stopped owned pid=25382 status=signal: 9 (SIGKILL)
+SYNC_SCENARIO fence-update: Ok(())
+CASE sync COMPLETE
+HARNESS failures=0

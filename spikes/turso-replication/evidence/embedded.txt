@@ -1,0 +1,23 @@
+RUN root=tmp/turso-runs/1791167087536-9755 case=embedded; one Tokio runtime
+SERVER tmp/tools/libsql-server-aarch64-apple-darwin/sqld --db-path tmp/turso-runs/1791167087536-9755/embedded/primary.sqld --http-listen-addr 127.0.0.1:49842 --no-welcome --disable-metrics
+EMBEDDED first write elapsed_us=1794 first=from-first second=initial primary=from-first
+EMBEDDED second.sync=Replicated { frame_no: Some(3), frames_synced: 1 }
+EMBEDDED pull elapsed_us=1019 second=from-first
+SERVER stopped owned pid=9757 status=signal: 9 (SIGKILL)
+EMBEDDED down reads first=from-first second=from-first
+EMBEDDED down write=Err(WriteDelegation(status: Unavailable, message: "error trying to connect: tcp connect error: Connection refused (os error 61)", details: [], metadata: MetadataMap { headers: {} }
+
+Caused by:
+    0: error trying to connect: tcp connect error: Connection refused (os error 61)
+    1: tcp connect error: Connection refused (os error 61)
+    2: Connection refused (os error 61)))
+EMBEDDED down sync=Err(Replication(PrimaryHandshakeTimeout))
+SERVER tmp/tools/libsql-server-aarch64-apple-darwin/sqld --db-path tmp/turso-runs/1791167087536-9755/embedded/primary.sqld --http-listen-addr 127.0.0.1:49842 --no-welcome --disable-metrics
+EMBEDDED reconnect first=from-first second=from-first
+EMBEDDED old remote connection after restart=Err(Hrana: `api error: `status=400 Bad Request, body=Received an invalid baton``)
+ADMISSION accepted=admitted stale=Err(stale expected body)
+ADMISSION invalid=Err(body must be nonempty)
+EMBEDDED journal_mode=wal
+SQLX_PROBE embedded file=tmp/turso-runs/1791167087536-9755/embedded/first.db
+EMBEDDED set DELETE=Err(Sqlite3UnsupportedStatement)
+SERVER stopped owned pid=9798 status=signal: 9 (SIGKILL)

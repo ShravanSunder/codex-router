@@ -1,0 +1,9 @@
+RUN root=tmp/turso-runs/1791167232743-28458 case=fence-update-body; application Tokio runtime
+SERVER tmp/tools/turso_cli-aarch64-apple-darwin/tursodb tmp/turso-runs/1791167232743-28458/fence-update-body/primary.db --sync-server 127.0.0.1:51021
+FENCE_UPDATE installed trigger A=[["Text(\"fence_project\")"]] B=[["Text(\"fence_project\")"]] primary=[[{"type":"text","value":"fence_project"}]]
+FENCE_UPDATE fence-update-body stale push=Ok(())
+FENCE_UPDATE final A=[["Integer(1)", "Integer(1)", "Text(\"stale-holder\")"]] B=[["Integer(1)", "Integer(2)", "Text(\"successor\")"]] primary=[[{"type":"integer","value":"1"},{"type":"integer","value":"2"},{"type":"text","value":"stale-holder"}]]
+SERVER stopped owned pid=28459 status=signal: 9 (SIGKILL)
+SYNC_SCENARIO fence-update-body: Ok(())
+CASE sync COMPLETE
+HARNESS failures=0
