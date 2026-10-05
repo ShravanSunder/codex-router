@@ -1,6 +1,28 @@
-# Router selector D1/D2 decision packet
+# Router selector admission and decision packet
 
-Status: owner decision packet; no implementation or final Program Design binding.
+Status as of 2026-10-05: design-only, `needs-revision`. This existing packet is the single status and decision entry point; the retained briefs below supply detail. No implementation or final Program Design binding is authorized.
+
+## Current readiness
+
+The same Selector Lead owns the lane in `codex-router.router-selector-design`, branch `router-selector-design`. At consolidation entry, HEAD was `fe20c63cb2ebc9a1e4a9ba1afbaf82736359d2b1` and the worktree was clean. The diff from source baseline `7a8cbd8943e6fb2dac23bcde7069203925003918` contains only selector documents and images: no product/configuration implementation, admitted canonical implementation plan, or Selector PR.
+
+Tailnet communication and multiple-app-server configuration behavior are **unimplemented and untested in this lane**. Read-only CLI/source observations and document validation do not prove those behaviors. No live forwarding/exposure, native creation/fork, multiple-config isolation, reconnect/cancel/failure, remote auth/policy projection, or local/default implementation regression proof has run. The tailnet transport comparison is a proposal awaiting approval and qualification, not runtime readiness.
+
+The [formal review disposition](2026-10-04-router-selector-formal-review-result.md) remains `needs-revision`. The retained distinct-lineage Claude reviewer reported model `claude-opus-5-5[1m]`; reasoning effort was unavailable. Its design/source inspection and focused verification closed A1, A3 and A4. A2 remains open. That coverage does not establish runtime proof, implementation review, or acceptance of the later tailnet proposal.
+
+The latest source audit confirms that full routing identity already exists in `EndpointRef`, `SessionRef`, and `SessionPickerIdentity::{HostedCodex,HostedProvider}`. The unresolved A2 seam is the picker outcome/dispatch conversion to bare `String` IDs; final Program Design should carry the existing identity through actions rather than invent a second identity type.
+
+## Admission map and retained evidence
+
+| Gate | Current state and recommendation | Retained detail |
+| --- | --- | --- |
+| D1 source-view entry/return | **Next owner decision, already pending.** Recommend the existing F2 in-picker flow with explicit source header, visible Esc ladder and unchanged default NEW. Do not infer an answer or create a duplicate request. | [Source-view brief](2026-10-04-router-selector-source-view-decision-brief.md) |
+| D2 default provenance | Queued owner choice. Recommend preserving default behavior while separating attribution from observation; configured-source actions retain observed source identity. | [Provenance brief](2026-10-04-router-selector-provenance-decision-brief.md) |
+| D3 fork cwd/policy | Queued owner choice. Recommend preserving default cwd behavior, showing effective directory/origin, and qualifying configured-source cwd/policy before fork. | [Fork cwd/policy brief](2026-10-04-router-selector-fork-cwd-policy-decision-brief.md) |
+| D4 delivery tolerance | Queued owner choice. The local/default and rejection-only slice is a proposed planning boundary; remote success remains obligatory and cannot be counted complete through rejection or stand-ins. | [Rejection-only planning brief](2026-10-04-router-selector-rejection-only-planning-decision-brief.md) |
+| A2 structural contracts | Source-only preparation refined and focused-verified on 2026-10-05: opaque Stored/Runtime continuations, valid sparse pages, budget suspension, view-specific checks and full publication guard. Final Program Design bindings and their affected review remain open. These are Lead-owned design work, not additional blanket owner blockers. | [A2 preparation](2026-10-04-router-selector-a2-contract-preparation.md) |
+| External transport qualification | Conventional OpenSSH and Serve are transport-capable candidates. Neither has been enabled or proved here. Identity binding, authorization/tool scope and native policy projection remain unverified; no new endpoint exposure is authorized. | [Tailnet proposal](2026-10-04-router-selector-tailnet-endpoint-brief.md) |
+| Final design/review admission | Consume actual owner choices, bind A2, and have the retained reviewer verify affected contracts before planning admission. No new reviewer is commissioned by this packet. | [Integration preparation](2026-10-04-router-selector-program-design-integration-prep.md) |
 
 Resolve these in order. D1 fixes the source-view owner and navigation boundary. D2 then fixes whether default-attributed rows may qualify for source-affine actions. A2's final source/loader/provenance binding depends on both.
 
