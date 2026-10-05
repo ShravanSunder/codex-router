@@ -319,3 +319,9 @@ Aligned `.github/workflows/ci.yml` with the admitted final validation plan: the 
 ## Review correction — ACP scenario documentation restored — 2026-10-04
 
 Independent review found one P2 preservation issue: the explicit JSON-RPC rejection scenario's two-line doc comment was dropped during extraction. Restored the exact comment in `settings_tail_tests.rs` before the test. Focused ACP target remains12 passed/0 failed; fmt, checker and diff checks pass. Awaiting final independent review confirmation.
+
+## Draft PR delivered — 2026-10-05
+
+Opened and pushed draft PR [#127](https://github.com/ShravanSunder/codex-router/pull/127) at head `1312dcdfe68a00119f8260250a3c46a7bcdb7d89`, base `main`. The verified public-safe body uses file-tree and call-flow views. Fresh GitHub state reports all five validation jobs passed: checks, lint/SQLx, build, workspace tests, and the aggregate validated gate; mergeability is `CLEAN`; no comments, reviews, or inline threads exist. The PR remains draft and unmerged as authorized.
+
+Local evidence includes strict checker exit0 across1706 Rust files, checker unit tests16/16, workspace Clippy with keychain feature, SQLx metadata check, deny pass, CLI/all-features/quota-harness builds, and workspace fallback tests with421 passes plus2 existing macOS sandbox-exec `Operation not permitted` failures. Full nextest installation remains blocked by macOS dtrace/USDT; local cargo audit advisory fetch remains network-blocked, while GitHub CI audit passed.
