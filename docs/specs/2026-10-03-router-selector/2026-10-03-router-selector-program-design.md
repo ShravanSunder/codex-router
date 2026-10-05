@@ -29,13 +29,13 @@ Rust enums, validated newtypes and Serde camelCase shapes follow existing protoc
 | Entity | Semantic owner | Home / schema convention | Shape and lifetime |
 | --- | --- | --- | --- |
 | E1 Named Router connection | Registry reader | `agent-collaboration` connection-selection module, new; JSONC DTO plus validated `RouterConnectionName`/`RouterConnectionProfile` | Registry `version`, ordered `routers` list; name and expected service identity; remote locators; credential references; optional destination cwd. Persisted client preference; never persisted health/capability truth. |
-| E2 Router service | Router service; client owns comparison to expected identity | Existing `UuidIdentity`, `ControlInitializationResult` and `EndpointInventory` in `collaboration-protocol`; new client `VerifiedRouterConnection` | Stable `serviceId`; live `serviceEpoch`; validated endpoint inventory. Derived per creation invocation. Epoch is never a registry pin. |
-| E3 Provider endpoint | Selected Router's endpoint catalog | Existing `EndpointRef`, `EndpointDescription`, `ChannelDescription`, `ProviderCapabilities`; launcher eligibility in client module, new | Exact service/endpoint plus current availability, channel and capability evidence. Discovery truth stays remote; no local capability list overrides it. |
+| E2 Router service | Router service; client owns comparison to expected identity | Existing `UuidIdentity`, `ControlInitializationResult` and `EndpointInventory` in `collaboration-protocol`; new client `VerifiedRouterConnection`/`EndpointBinding` | Stable `serviceId`; live `serviceEpoch`; validated endpoint inventory. Derived per creation/source-view invocation; attachment identity remains an external prerequisite. Epoch is never a registry pin. |
+| E3 Provider endpoint | Selected Router's endpoint catalog | Existing `EndpointRef`, `EndpointDescription`, `ChannelDescription`, `ProviderCapabilities`; launcher eligibility in client module, new | Exact service/endpoint plus current availability, channel and capability evidence. A configured native inventory consumer requires exactly one qualified endpoint; ambiguity rejects. Discovery truth stays remote; no local capability list overrides it. |
 | E4 New-session placement | New-session selection; launcher owns handoff | `agent-collaboration` new-session action module, new; `NewSessionDestination`/`PreparedNewSessionLaunch` enums and process-local `NewAttemptGeneration` | One current `Default` or `Named { profile, destinationCwd }`; chooser/preparation result carries attempt generation; placement immutable after handoff. Derived/transient, absent from existing-session runner state; no persisted attempt ID. |
-| E5 Session | Source provider/app-server or local Codex home | Existing `SessionRef`, `SessionPickerIdentity::{LocalCodex,HostedCodex,HostedProvider}` and native thread identity | Hosted rows carry actual service/endpoint/session reference; legacy local rows retain local source-home context. No local affinity store or history copy. Known refs never collapse to bare IDs across machine contexts. |
+| E5 Session | Source provider/app-server or local Codex home | Existing `SessionRef`, `SessionPickerIdentity::{LocalCodex,HostedCodex,HostedProvider}` and native thread identity; new `SessionActionSelection` wrapper | Hosted rows carry actual service/endpoint/session reference through resume/fork actions; legacy local rows retain local source-home context. No local affinity store or history copy. Known refs never collapse to bare IDs across machine contexts. |
 | E6 Credential reference | Existing credential owner; launcher only consumes reference | New registry `CredentialReference::Environment { variable }`, referencing existing env sources | Name only in config/argv; resolved value only in process memory/environment for the selected surface. Optional when the pre-existing exposure requires none. No guessed identity or credential source. |
 | E7 Fork placement | Fork selection; source launcher owns effect | New fork-action module in `agent-collaboration`; `CapturedForkSource`, `PreparedForkLaunch`, process-local `ForkAttemptGeneration` | Frozen source row identity plus routing context and source metadata; same-source destination or rejected other-machine choice. `PreparedForkLaunch::{SameHostedSource,SameLocalSource}` only; no cross-machine variant. Derived for one action, never stored. |
-| E8 Machine session view | Existing picker/controller's source-view owner | Existing picker module enhanced; `PickerSourceContext::{DefaultHosted,LocalCodex,ConfiguredHosted}`; existing `NativeSessionListParams/Result/Summary`, exact row identities | One active source/query snapshot with an invocation-local generation; local query only on default/local source, remote rows only from that source's returned inventory. Cache lifetime scoped to source/query; no merged catalog or global default preference. |
+| E8 Machine session view | Existing picker/controller's source-view owner | Existing picker module enhanced; `PickerSourceContext::{DefaultHosted,LocalCodex,ConfiguredHosted}`; `SourceInventoryRequest/Result`, `SourceViewGeneration`, view-tagged `SourceContinuation`; existing `NativeSessionListParams/Result/Summary`, exact row identities | One active source/query snapshot with an invocation-local generation; local query only on default/local source, remote rows only from that source's returned inventory. Publication requires source/endpoint/view/scope/sourceFilter/query/includeEmptySessions/generation match. Cache/continuation lifetime is scoped to source/query; no merged catalog or global default preference. |
 
 ### Registry shape
 
@@ -209,7 +209,75 @@ Alt+Enter captures a `CapturedForkSource { rowIdentity: SessionPickerIdentity, r
 
 **Unresolved loader boundary:** `session_picker_record_loader` is currently owned by dispatch and captures one context/service directory (`session_command_dispatch.rs:324–358`). Source switching requires a source-parameterized dispatch-to-picker request/result contract; saying the picker is enhanced does not define it. The selected-source request, cursor/epoch consistency and source-scoped response/cancellation rules still need to be bound at that owning interface. F2 is a Lead-derived proposal to expose the source sessions needed for all-machine fork UX, not an owner-stated binding or an accepted extra browsing surface.
 
-The internal picker/action interface cuts over to source-carrying values: `ResumeSession(SessionActionSelection { identity, sourceContext, metadata })`, `ForkSession(CapturedForkSource)` and `StartNewSession(PreparedNewSessionLaunch)`. Do not retain a second bare-ID path for remote rows. Default/local branches interpret those same values through their established context; configured-source branches use the returned hosted reference. Capturing full identity changes no stored session format and does not manufacture historical Router provenance for legacy local records.
+### A2 source-contract integration (D1/D2-gated)
+
+The existing protocol already owns full routing identity: `EndpointRef { service_id, endpoint_id }`, `SessionRef { endpoint, session_id }`, and picker identities `SessionPickerIdentity::{LocalCodex, HostedCodex(SessionRef), HostedProvider(SessionRef)}`. The current defect is at the picker action boundary: `SessionsPickerOutcome::{ResumeSession, ForkSession}` carry bare `String` IDs (`picker_actions.rs:21–26`), and dispatch consumes those strings (`session_command_dispatch.rs:291–322`). The target action boundary reuses the existing identity types and carries source context; it does not define a second SessionRef or persisted identity schema:
+
+```text
+SessionActionSelection {
+  identity: SessionPickerIdentity,
+  sourceContext: PickerSourceContext,
+  metadata: SourceActionMetadata,
+}
+
+SessionsPickerOutcome =
+  ResumeSession(SessionActionSelection)
+  | ForkSession(CapturedForkSource)
+  | StartNewSession(PreparedNewSessionLaunch)
+  | TerminalTooNarrow
+```
+
+`ObservedHosted` and `ObservedProvider` selections preserve the full returned `SessionRef`. `LocalHome` retains the local Codex home and session ID. `DefaultAttributed` remains a distinct default-catalog attribution until D2 selects whether it can qualify for a hosted fork. No configured source may reinterpret a bare or default-attributed ID on another service.
+
+The source-view owner and dispatch loader use this closed request/result boundary. It is a draft structural contract pending D1's source-view owner and D2's default identity rule:
+
+```text
+SourceInventoryRequest {
+  sourceContext: PickerSourceContext,
+  endpointSelector: ConfiguredOrDefaultEndpointSelector,
+  view: Stored | Loaded | Active,
+  scope: SourceOwnedScope,
+  sourceFilter: Interactive | Subagents | All,
+  includeEmptySessions: bool,
+  query: SourceSupportedQuery,
+  continuation: SourceContinuation | None,
+  requestGeneration: SourceViewGeneration,
+  cancellation: ReadOnlyRequestCancellation,
+}
+
+SourceInventoryResult =
+  Ready { sourceContext, endpoint, page, progress, requestGeneration }
+  | Rejected { sourceContext, requestGeneration, reason }
+  | Canceled { sourceContext, requestGeneration }
+
+SourceInventoryRejection =
+  SourceUnavailable | InvalidInventory | WrongEndpoint
+  | UnsupportedViewOrScope | UnsupportedQuery
+  | InvalidContinuation | StaleSnapshot | TransportFailure
+```
+
+`SourceViewGeneration` is picker-local and prevents a stale or canceled result from replacing the active source/query. It cannot change the default NEW target or publish an action outcome. Cancellation is best effort; the generation check is authoritative. A configured source does not inherit the default three-second refresh loop without an explicit source-view refresh policy.
+
+The endpoint selector must bind one qualified configured service to exactly one available native endpoint for this inventory consumer. Zero endpoints rejects with `EndpointUnavailable`/`EndpointUnqualified`; multiple eligible endpoints reject with `AmbiguousEndpoint`; the first endpoint is never chosen by ordering. This is inventory routing, not proof that a later native `thread/start` or `thread/fork` attaches to the same Router; that attachment binding remains an external prerequisite.
+
+Stored and runtime continuations remain view-specific while the wire cursor stays opaque:
+
+```text
+SourceContinuation =
+  Stored { opaqueServerCursor, endpoint, source, scope, query, includeEmptySessions, requestGeneration }
+  | Runtime { opaqueServerCursor, endpoint, view, observedGeneration, source, scope, query, includeEmptySessions, requestGeneration }
+
+InventoryPageProgress =
+  Complete
+  | MoreAvailable { continuation: SourceContinuation }
+  | SuspendedWithContinuation { continuation: SourceContinuation }
+```
+
+Stored continuations carry no live generation, native runtime cursor or invented snapshot guarantee. Loaded/Active continuations retain the observed generation and rely on the server's existing expiry/generation validation. The client preserves opaque cursors; a changed full request tuple `(sourceContext, endpoint, view, scope, sourceFilter, query, includeEmptySessions, requestGeneration)` invalidates publication. Sparse Stored pages can legitimately return a continuation after filtering; page count is not exhaustion. Keyset updates may omit rows until a fresh query. Stored search uses the existing SQL name/title `NOCASE` contract; runtime search has its existing Unicode matching behavior, so cross-view equality is not promised.
+
+These shapes make the A2 owners and proof seams concrete while leaving D1/D2 open. Final integration still requires the owner-approved source-view transition, default-attribution rule, D3 cwd/policy choice and D4 planning tolerance, followed by focused review of the affected Program Design anchors.
+
+The internal picker/action interface therefore cuts over to source-carrying values: `ResumeSession(SessionActionSelection)`, `ForkSession(CapturedForkSource)` and `StartNewSession(PreparedNewSessionLaunch)`. Default/local branches interpret those values through their established context; configured-source branches use the returned hosted reference. Capturing full identity changes no stored session format and does not manufacture historical Router provenance for legacy local records.
 
 The default destination is the source Router/endpoint, or same local source home for local Codex. Destination comparison is identity-based, not a machine-label comparison: another service/endpoint on the same physical computer is not automatically the same source. Configured names for other machines are visible but disabled with `CrossMachineForkUnproved`; focus can reveal the reason, Enter creates nothing. No native state portability/export/import/transport is demonstrated, so there is no cross-machine prepared-launch variant, no rollout copy and no migration. A label or matching session UUID on another machine is never positive portability evidence.
 
@@ -275,10 +343,10 @@ Revisit the native choice if the supplied endpoint uses a non-root native path, 
 | U4,U6 | R6 references | E1,E6 | Registry reader and selected client boundary | consume reference | CredentialReference, registry; native env-name argument | reference resolved for one action | missing/auth-transport conflict rejected | captured argv/config/output + memory-bound client use |
 | U2,U3 | R7 uncertainty/affinity | E2,E3,E4,E5 | Native launcher; provider owns session | classify handoff outcome | closed LaunchOutcome, client; existing session identities | handoff → unknown/finished | no replay/fallback/delete | gap: post-handoff remote failure proof cannot run until exposure/binding/policy prerequisites are qualified |
 | U6 | R8 scope | E1–E8 | Selector design boundary | consume supplied exposure | existing external surfaces; document-only delivery | no runtime mutation | no auth/network repair path | source/write-set review and live deployment proof explicitly separate |
-| U3,U5,U7 | R9 source-affine fork popup | E2,E3,E5,E7 | Fork selection and source launcher | gap: source provenance/qualification and effective cwd choices unsettled | CapturedForkSource/PreparedForkLaunch proposal; existing SessionRef/native fork | choosing → verifying → Prepared → source fork | cross-machine/provider/source failure disabled/rejected; stale results dropped | gap: provenance/default compatibility, effective cwd UI and remote exposure/binding/permitted fork projection |
-| U3,U4,U5,U7 | R10 proposed one-machine source view | E1,E2,E3,E5,E8 | Existing picker source-view owner plus dispatch loader owner | gap: source-parameterized loader, endpoint/Stored consistency not fixed | existing NativeSessionListParams/Result/Summary; proposed PickerSourceContext | proposed source → source/rows snapshot | mixed identity/stale query rejected; prior view retained | gap: source-view acceptance/interface and remote MCP exposure/metadata visibility contract |
+| U3,U5,U7 | R9 source-affine fork popup | E2,E3,E5,E7 | Fork selection and source launcher | `SessionActionSelection`/`CapturedForkSource` with existing `SessionPickerIdentity`, source context, `EndpointBinding` and `ForkAttemptGeneration` | Existing `SessionRef` plus source-carrying action shape; `PreparedForkLaunch` remains transient | choosing → verifying → Prepared → source fork | wrong source, unqualified provenance, cross-machine/provider failure, stale result rejected; effect unknown after handoff | source identity/cancel/stale-result seam specified; effective cwd/policy and remote binding/projection remain external/owner gaps |
+| U3,U4,U5,U7 | R10 proposed one-machine source view | E1,E2,E3,E5,E8 | Existing picker source-view owner plus dispatch loader owner | `SourceInventoryRequest`/`SourceInventoryResult`, `EndpointBinding`, `SourceViewGeneration`, opaque `SourceContinuation` | Existing `NativeSessionListParams`/`Result` wire shapes; picker-local source request/result envelope; no persisted cursor/schema | source selection → loading → displaying/return; publication requires full source/query generation tuple | source switch/cancel/stale/mixed endpoint/invalid continuation rejected; failed switch retains prior view | source-aware loader, endpoint/Stored/runtime cursor consistency, query projection and stale-result seams specified; remote exposure/auth/attachment proof remains external |
 
-U1–U7 and E1–E8 each remain represented in these rows and the binding table. R1–R3, R6 and R8 have a specified structural realization; their runtime proof has not been run. R4, R5, R7, R9 and R10 retain the required remote outcomes with explicit integration/proof gaps; rejection alone does not fulfill them. V1–V10 map to the respective R rows; no missing remote evidence is promoted to success.
+U1–U7 and E1–E8 each remain represented in these rows and the binding table. R1–R3, R6 and R8 have a specified structural realization; their runtime proof has not been run. R4, R5, R7, R9 and R10 retain required remote outcomes with explicit integration/proof gaps; rejection alone does not fulfill them. A2 source/loader/cursor/provenance seams are now structurally named but remain gated by D1/D2 and the external attachment/policy contracts. V1–V10 map to the respective R rows; no missing remote evidence is promoted to success.
 
 Use real registry parsing and real command/picker dispatch at the cheap seam. A substituted discovery response can prove rejection/classification; it cannot prove remote identity binding or execution placement. Real two-machine proof must include selected service/endpoint evidence, a fresh remote session and first execution reporting remote cwd/machine, remote session-state observation, unchanged existing-session behavior and no duplicate create after a forced post-handoff failure. No exact test commands/files or implementation sequence belong in this design.
 
