@@ -68,3 +68,9 @@ The owner supplied these after #123 merged to main as `7a8cbd89`. They were expl
 The owner resumed delivery on 2026-10-04 under existing reviewed plans, with U3 still held for its lifetime choice. Locked dependency fetch now passes after the actual cache-write grant; adapter build readiness is being verified. Locked fetch and exact adapter check now pass exit0. Opus implementation launch failed before work on revoked OAuth; login restoration blocks that lane. No product writes, runtime acceptance, PR, version bump or release has yet occurred in this track. Owner separately authorized release after required proof/review/CI; next unused version is at least 0.1.64. All runtime proof must use debug profile/state/socket/port isolation, Remote Control disabled by default, and pre-launch coordination with host-controller Lead. No production endpoint, credentials/Keychain, Desktop or process replacement tests.
 
 Trace: `docs/wip/work-trails/2026-10-03-router-fixes/main.md` (**unshared**, no repo-associated local board project). Shared Opus 5.5 Advisor is coordinated serially by the host-controller Lead; advice is not either Lead's artifact authorship or acceptance.
+
+## Claude streaming interruption follow-up
+
+| Item | Current evidence | Remaining work |
+| --- | --- | --- |
+| U39 Claude streaming disconnect/retry | Owner-authorized investigation. Real ACP-wire/actor reproduction confirmed failed-turn partial text and item identity leaking into a separate explicit successor. Bounded cursor cleanup is implemented with intended red then seven focused regression passes and scoped quality gates. No automatic Router turn replay was observed. | Match the original sanitized error/surface; compare direct/global native CLI and ACP retry ownership without inference from an error string. Vendor retry and post-loss frontend retention remain unverified. Fresh independent review and exact-head CI precede readiness. |

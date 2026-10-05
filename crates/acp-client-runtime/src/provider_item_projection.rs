@@ -148,6 +148,10 @@ impl ProviderItemProjection {
         }
     }
 
+    pub(crate) fn retire_failed_turn_text(&mut self) {
+        self.active_text = None;
+    }
+
     pub(crate) fn finish_text(&mut self) -> Result<(), ItemProjectionError> {
         if let Some(active) = self.active_text.take() {
             self.emit(SessionEvent::ItemCompleted {

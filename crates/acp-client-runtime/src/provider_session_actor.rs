@@ -263,6 +263,10 @@ pub(crate) async fn run_provider_session<P: InteractionPort>(
                                     }
                                 }
                                 result = &mut prompt_result => {
+                                    drop(prompt_result);
+                                    if result.is_err() {
+                                        item_projection.retire_failed_turn_text();
+                                    }
                                     if matches!(&result, Err(ExternalProviderRuntimeError::SinkClosed)) {
                                         runtime_handles.sink_closed.cancel();
                                         shutdown.cancel();
