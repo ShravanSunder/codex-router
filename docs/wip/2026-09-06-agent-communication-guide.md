@@ -146,6 +146,8 @@ The harness uses port18787, a fresh private backend socket, the debug Router roo
 
 If the existing debug profile uses another loopback port, set `CODEX_ROUTER_ACCEPTANCE_PORT` for the harness invocation. The harness uses that port for profile validation, occupied-port refusal, Host launch, routing verification and cleanup; it retains 18787 when the variable is absent. Invalid values and the production port are rejected before launch. This does not edit the profile or provision its account store.
 
+Fresh owned native threads and marker turns explicitly select `gpt-6-luna` with `medium` effort. Creation and fork replies must retain that model/effort as well as the debug provider and read-only policy. This is an invocation-local test setting; it does not change saved profiles or establish model entitlement. Correlated turn-error receipts retain only recognized native classifications, valid numeric HTTP status when supplied, and the retry boolean. Backend messages and additional details are omitted; missing status leaves the failure cause unresolved.
+
 The independent ACP proof uses the pinned official SDK against the published ACP channel and verifies a Luna-owned thread before prompting. The replacement proof observes the old connection closing, explicitly reconnects and reloads the same persisted thread, then submits a distinct follow-up prompt. No request is replayed. A separate blank ACP session is created without prompting it. Native TUI persisted-thread recovery and continued Luna work have been demonstrated with the same native process after a bounded debug restart. Native attempt limits still apply to longer outages; Host readiness or successful cleanup alone is not a recovery receipt.
 
 ## Acceptance hook isolation

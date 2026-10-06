@@ -19,6 +19,8 @@ mod native_delivery_proof;
 mod native_fork_proof;
 #[path = "debug_host_acceptance/owned_thread_registry.rs"]
 mod owned_thread_registry;
+#[path = "debug_host_acceptance/owned_turn_error_diagnostic.rs"]
+mod owned_turn_error_diagnostic;
 #[path = "debug_host_acceptance/process_identity_guard.rs"]
 mod process_identity_guard;
 #[path = "debug_host_acceptance/proof_environment_settings.rs"]
@@ -485,7 +487,7 @@ async fn probe(
         }
         println!(
             "{}",
-            json!({"kind":"recoveryHoldReady","threadId":first,"serviceDirectory":directory,"nativeSocket":socket,"model":"gpt-5.6-luna"})
+            json!({"kind":"recoveryHoldReady","threadId":first,"serviceDirectory":directory,"nativeSocket":socket,"model":owned_thread_registry::PROOF_MODEL})
         );
         recovery_observation::hold(&directory, &socket, &first).await?;
         println!(
