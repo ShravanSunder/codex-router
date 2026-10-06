@@ -16,6 +16,10 @@ use std::{
 
 const MAX_RUNTIME_ROWS: usize = 4096;
 
+#[path = "native_inventory_pager.rs"]
+mod native_inventory_pager;
+use native_inventory_pager::NativeInventoryPager;
+
 pub(super) async fn load_runtime_records(
     client: &mut ControlClient,
     metadata: &[SessionPickerRecord],
@@ -27,33 +31,23 @@ pub(super) async fn load_runtime_records(
         .map(|row| (row.session_id.as_str(), row))
         .collect();
     let mut rows = Vec::new();
-    let mut cursor = None;
-    let mut seen_cursors = BTreeSet::new();
-    let mut seen_ids = BTreeSet::new();
-    loop {
-        let page = client
-            .list_sessions(NativeSessionListParams {
-                endpoint: endpoint.clone(),
-                view: NativeSessionView::Loaded,
-                scope: collaboration_client::protocol::NativeSessionScope::Any,
-                source: collaboration_client::protocol::NativeSessionSource::All,
-                include_empty_sessions,
-                query: None,
-                page_size: 100,
-                cursor,
-            })
-            .await?;
-        if page.generation.as_ref() != Some(&generation) {
-            return Err(ClientError::Protocol(
-                "runtime inventory generation changed",
-            ));
-        }
+    let mut pager = NativeInventoryPager::new(
+        NativeSessionListParams {
+            endpoint: endpoint.clone(),
+            view: NativeSessionView::Loaded,
+            scope: collaboration_client::protocol::NativeSessionScope::Any,
+            source: collaboration_client::protocol::NativeSessionSource::All,
+            include_empty_sessions,
+            query: None,
+            page_size: 100,
+            cursor: None,
+        },
+        Some(generation.clone()),
+    )?;
+    while let Some(page) = pager.next_page(client).await? {
         for summary in page.sessions {
             let target = summary.target.clone();
             let id = String::from(summary.target.session_id.clone());
-            if !seen_ids.insert(id.clone()) || rows.len() >= MAX_RUNTIME_ROWS {
-                return Err(ClientError::Protocol("runtime inventory exceeded bounds"));
-            }
             let NativeSessionObservation::Runtime { status, .. } = summary.observation else {
                 return Err(ClientError::Protocol("expected runtime observation"));
             };
@@ -72,20 +66,15 @@ pub(super) async fn load_runtime_records(
                 )
             };
             row.identity = SessionPickerIdentity::HostedCodex(target);
+            if row.model.is_none() {
+                row.model = summary.model;
+            }
+            if row.reasoning_effort.is_none() {
+                row.reasoning_effort = summary.reasoning_effort;
+            }
             row.provenance = super::SessionRowProvenance::ObservedHosted;
             row.runtime_status = PickerRuntimeStatus::from_native(&status);
             rows.push(row);
-        }
-        match page.next_cursor {
-            Some(next) if seen_cursors.insert(next.clone()) && seen_cursors.len() <= 64 => {
-                cursor = Some(next)
-            }
-            Some(_) => {
-                return Err(ClientError::Protocol(
-                    "runtime inventory cursor did not converge",
-                ));
-            }
-            None => break,
         }
     }
     let (current_endpoint, current_generation) =

@@ -8,35 +8,44 @@ async fn session_record_reload_worker_runs_single_flight_and_keeps_only_latest_p
         sources: vec![crate::presentation::session_picker::PickerSourceContext::DefaultHosted],
     };
     let (sender, receiver) = tokio::sync::watch::channel(initial_request);
-    let (release_first_sender, release_first_receiver) = mpsc::channel::<()>();
-    let release_first_receiver = Arc::new(Mutex::new(release_first_receiver));
     let (started_sender, mut started_receiver) = tokio::sync::mpsc::unbounded_channel();
     let active_loads = Arc::new(AtomicUsize::new(0));
     let maximum_active_loads = Arc::new(AtomicUsize::new(0));
-    let loader: SessionsPickerRecordLoader = fixture_record_loader({
+    struct ActiveSourceRead(Arc<AtomicUsize>);
+    impl Drop for ActiveSourceRead {
+        fn drop(&mut self) {
+            self.0.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+    let loader: SessionsPickerRecordLoader = Arc::new({
         let active_loads = Arc::clone(&active_loads);
         let maximum_active_loads = Arc::clone(&maximum_active_loads);
-        let release_first_receiver = Arc::clone(&release_first_receiver);
-        move |query| {
-            let active = active_loads.fetch_add(1, Ordering::SeqCst) + 1;
-            maximum_active_loads.fetch_max(active, Ordering::SeqCst);
-            let search = query.search;
-            let _ = started_sender.send(search.clone());
-            if search == "a" {
-                release_first_receiver
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .recv_timeout(std::time::Duration::from_secs(2))
-                    .unwrap_or_else(|error| panic!("first load release should arrive: {error}"));
-            }
-            active_loads.fetch_sub(1, Ordering::SeqCst);
-            Ok(observed_records(vec![picker_record(
-                &format!("thread-{search}"),
-                &format!("result {search}"),
-                "/repo/project-a",
-                "codex-router",
-                "cli",
-            )]))
+        move |request| {
+            let active_loads = Arc::clone(&active_loads);
+            let maximum_active_loads = Arc::clone(&maximum_active_loads);
+            let started_sender = started_sender.clone();
+            Box::pin(async move {
+                let active = active_loads.fetch_add(1, Ordering::SeqCst) + 1;
+                let _active_read = ActiveSourceRead(active_loads);
+                maximum_active_loads.fetch_max(active, Ordering::SeqCst);
+                let search = request.query.search.clone();
+                let _ = started_sender.send(search.clone());
+                if search == "a" {
+                    // Supersession must drop this owned read; a blocking external procedure
+                    // would remain alive after its join future was dropped.
+                    futures_util::future::pending::<()>().await;
+                }
+                crate::presentation::session_picker::SourceInventoryResult::Ready {
+                    request,
+                    snapshot: observed_records(vec![picker_record(
+                        &format!("thread-{search}"),
+                        &format!("result {search}"),
+                        "/repo/project-a",
+                        "codex-router",
+                        "cli",
+                    )]),
+                }
+            })
         }
     });
     let current_generation = Arc::new(AtomicU64::new(0));
@@ -59,7 +68,13 @@ async fn session_record_reload_worker_runs_single_flight_and_keeps_only_latest_p
         query: reload_query("a"),
         sources: vec![crate::presentation::session_picker::PickerSourceContext::DefaultHosted],
     });
-    assert_eq!(started_receiver.recv().await.as_deref(), Some("a"));
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(2), started_receiver.recv())
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("a")
+    );
 
     current_generation.store(2, Ordering::SeqCst);
     sender.send_replace(SessionRecordsReloadRequest {
@@ -73,19 +88,36 @@ async fn session_record_reload_worker_runs_single_flight_and_keeps_only_latest_p
         query: reload_query("c"),
         sources: vec![crate::presentation::session_picker::PickerSourceContext::DefaultHosted],
     });
-    release_first_sender
-        .send(())
-        .unwrap_or_else(|error| panic!("first load should release: {error}"));
-
-    assert_eq!(started_receiver.recv().await.as_deref(), Some("c"));
-    assert_eq!(accepted_receiver.recv().await.as_deref(), Some("c"));
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(2), started_receiver.recv())
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("c")
+    );
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(2), accepted_receiver.recv())
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("c")
+    );
     assert_eq!(maximum_active_loads.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        active_loads.load(Ordering::SeqCst),
+        0,
+        "the superseded pending read and completed current read must both drop"
+    );
     assert!(
         started_receiver.try_recv().is_err(),
         "obsolete B must not run"
     );
 
-    worker.abort();
+    drop(sender);
+    tokio::time::timeout(Duration::from_secs(2), worker)
+        .await
+        .unwrap()
+        .unwrap();
 }
 
 #[tokio::test]

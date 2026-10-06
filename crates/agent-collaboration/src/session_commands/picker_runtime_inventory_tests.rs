@@ -1,6 +1,9 @@
 //! Real public-client boundary: inventory reads never resume or submit work.
 use super::*;
 
+#[path = "native_inventory_pager_tests.rs"]
+mod native_inventory_pager_tests;
+
 #[test]
 fn runtime_picker_empty_native_names_preserve_fallback_titles_and_search() {
     for (name, fallback, expected) in [
@@ -70,6 +73,27 @@ fn page(id: &str, status: Value, cursor: Value) -> Value {
         "sessions":[{"target":{"endpoint":endpoint(),"sessionId":id},"name":null,"title":id,"source":"interactive","gitBranch":null,"workingDirectory":"/repo",
             "observation":{"kind":"runtime","status":status,"turnId":null},"model":"gpt-5.6-sol","reasoningEffort":"medium","idleSeconds":0}],"nextCursor":cursor
     })
+}
+
+#[tokio::test]
+async fn malformed_runtime_continuation_is_rejected_before_another_read() {
+    let mut malformed = page("first", json!({"type":"idle"}), json!(""));
+    malformed["sessions"] = json!([]);
+    let (mut client, peer) = connect_fixture(vec![
+        ("endpoint/list", inventory()),
+        ("codex/sessionList", malformed),
+    ])
+    .await;
+    let result = load_runtime_records(&mut client, &[], false).await;
+    client.close().await.unwrap();
+    assert!(
+        matches!(
+            result,
+            Err(ClientError::Protocol("invalid inventory continuation"))
+        ),
+        "malformed continuation cannot issue a second read: {result:?}"
+    );
+    assert_eq!(peer.await.unwrap().len(), 2);
 }
 fn inspected(id: &str) -> Value {
     json!({"target":{"endpoint":endpoint(),"sessionId":id},"generation":generation(),
@@ -164,6 +188,8 @@ async fn paged_runtime_only_threads_include_metadata_and_blocked_status_without_
     assert_eq!(rows.len(), 2);
     assert_eq!(rows[0].title, "Live first");
     assert_eq!(rows[0].branch, "feature/live");
+    assert_eq!(rows[0].model.as_deref(), Some("gpt-5.6-sol"));
+    assert_eq!(rows[0].reasoning_effort.as_deref(), Some("medium"));
     assert_eq!(
         rows[0].runtime_status,
         crate::picker_runtime_status::PickerRuntimeStatus::Idle
@@ -241,7 +267,7 @@ async fn stored_metadata_is_preserved_while_runtime_status_is_refreshed() {
         "first",
         "Stored title",
         "/repo",
-        &json!({"name":"Stored title"}),
+        &json!({"name":"Stored title","model":"gpt-6.1-sol","reasoningEffort":"low"}),
     );
     stored.conversation.snippets = vec!["Retained preview".into()];
     let (mut client, peer) = connect_fixture(vec![
@@ -265,6 +291,8 @@ async fn stored_metadata_is_preserved_while_runtime_status_is_refreshed() {
     peer.await.unwrap();
     // Assert
     assert_eq!(rows[0].title, "Stored title");
+    assert_eq!(rows[0].model.as_deref(), Some("gpt-6.1-sol"));
+    assert_eq!(rows[0].reasoning_effort.as_deref(), Some("low"));
     assert_eq!(rows[0].conversation.snippets, vec!["Retained preview"]);
     assert_eq!(rows[0].runtime_status, PickerRuntimeStatus::Active);
 }
