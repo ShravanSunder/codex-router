@@ -55,6 +55,7 @@ pub(super) fn render_session_list(
                 element! {
                     InteractiveSessionChoiceRow(
                         focus_handler: move |_| {
+                            model_state.write().machine_controls.control_focused = false;
                             let should_update_focus = {
                                 let model_value = model_state.read();
                                 model_value.focused_session_id().is_some()
@@ -65,7 +66,7 @@ pub(super) fn render_session_list(
                             }
                         },
                         activation_handler: move |_| {
-                            selected_outcome.set(Some(SessionsPickerOutcome::StartNewSession));
+                            selected_outcome.set(model_state.write().start_new_action());
                         },
                         activates_on_click: true,
                     ) {
@@ -81,6 +82,7 @@ pub(super) fn render_session_list(
                 element! {
                     InteractiveSessionChoiceRow(
                         focus_handler: move |_| {
+                            model_state.write().machine_controls.control_focused = false;
                             let should_update_focus = {
                                 let model_value = model_state.read();
                                 model_value.focused_identity() != Some(&identity)

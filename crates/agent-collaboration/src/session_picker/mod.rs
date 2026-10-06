@@ -2,11 +2,16 @@ mod interactive_row;
 mod picker_actions;
 mod picker_component;
 mod picker_filters;
+mod picker_machine_controls;
+mod picker_machine_view;
 mod picker_model;
+pub(crate) use picker_machine_controls::PickerMachineSourceMode;
 #[cfg(test)]
 mod picker_model_tests;
 mod picker_rendering;
 mod picker_request;
+#[cfg(test)]
+mod picker_source_identity_tests;
 #[cfg(any(test, feature = "quota-reset-test-harness"))]
 mod test_support;
 

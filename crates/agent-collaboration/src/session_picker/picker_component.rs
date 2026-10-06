@@ -1,9 +1,9 @@
-use std::collections::BTreeMap;
 use std::io;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
 
+use super::picker_machine_controls::{PickerMachineFilter, PickerMachineStage};
 use iocraft::prelude::*;
 
 use crate::presentation::session_picker::interactive_row::InteractiveSessionChoiceRow;
@@ -17,6 +17,7 @@ use crate::presentation::session_picker::picker_request::SessionsPickerRecordLoa
 use crate::presentation::session_picker::picker_request::SessionsPickerRequest;
 use crate::presentation::session_picker::picker_request::SessionsPickerRoot;
 use crate::sessions::SessionConversationPreview;
+#[cfg(test)]
 use crate::sessions::SessionConversationSource;
 use crate::sessions::SessionPickerRecord;
 use crate::sessions::SessionsSort;
@@ -52,23 +53,11 @@ const COMPACT_PICKER_WIDTH: usize = 56;
 const MIN_STACKED_DETAILS_HEIGHT: usize = 6;
 const START_NEW_DETAILS_HEIGHT: usize = 6;
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct ConversationPreviewLoadRequest {
-    session_id: String,
-    source: SessionConversationSource,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-enum ConversationPreviewLoadState {
-    Loading,
-    Loaded(SessionConversationPreview),
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct SelectedConversationPreview {
-    preview: SessionConversationPreview,
-    load_request: Option<ConversationPreviewLoadRequest>,
-}
+#[path = "conversation_preview_state.rs"]
+mod conversation_preview_state;
+use conversation_preview_state::{ConversationPreviewCache, ConversationPreviewLoadRequest};
+#[cfg(test)]
+use conversation_preview_state::{ConversationPreviewKey, SelectedConversationPreview};
 
 #[derive(Default, Props)]
 pub(crate) struct SessionsPickerComponentProps<'a> {
@@ -152,8 +141,7 @@ pub(crate) fn SessionsPickerComponent<'a>(
     if model.read().width != width {
         model.write().set_width(width);
     }
-    let mut conversation_cache =
-        hooks.use_state(BTreeMap::<String, ConversationPreviewLoadState>::new);
+    let mut conversation_cache = hooks.use_state(ConversationPreviewCache::default);
     let reload_generation = hooks.use_state(|| 0_u64);
     let reload_port = hooks.use_memo(
         || SessionRecordsReloadPort::new(model.read().data_query()),
@@ -194,6 +182,14 @@ pub(crate) fn SessionsPickerComponent<'a>(
             refresh_interval.tick().await;
             loop {
                 refresh_interval.tick().await;
+                if model.read().machine_controls.filter != PickerMachineFilter::Default
+                    || !matches!(
+                        model.read().machine_controls.stage,
+                        PickerMachineStage::Browsing
+                    )
+                {
+                    continue;
+                }
                 reload_port.send(SessionRecordsReloadRequest {
                     generation: reload_generation.get(),
                     query: model.read().data_query(),
@@ -204,8 +200,7 @@ pub(crate) fn SessionsPickerComponent<'a>(
     let load_conversation = hooks.use_async_handler({
         let mut conversation_cache = conversation_cache;
         move |request: ConversationPreviewLoadRequest| async move {
-            let session_id = request.session_id;
-            let source = request.source;
+            let source = request.key.source.clone();
             let preview = match tokio::task::spawn_blocking(move || {
                 SessionConversationPreview::from_rollout_source(Some(&source))
             })
@@ -214,9 +209,7 @@ pub(crate) fn SessionsPickerComponent<'a>(
                 Ok(preview) => preview,
                 Err(_) => SessionConversationPreview::unavailable("history unavailable"),
             };
-            conversation_cache
-                .write()
-                .insert(session_id, ConversationPreviewLoadState::Loaded(preview));
+            conversation_cache.write().complete_load(&request, preview);
         }
     });
     let mut selected_outcome = hooks.use_state(|| Option::<SessionsPickerOutcome>::None);
@@ -252,6 +245,68 @@ pub(crate) fn SessionsPickerComponent<'a>(
             }
 
             let mut model_value = model.write();
+            if modifiers.contains(KeyModifiers::CONTROL) && matches!(code, KeyCode::Char('c' | 'd'))
+                || matches!(code, KeyCode::Char('\u{3}' | '\u{4}'))
+            {
+                should_cancel.set(true);
+                selected_outcome.set(None);
+                return;
+            }
+            if matches!(
+                model_value.machine_controls.stage,
+                PickerMachineStage::Choosing { .. }
+            ) {
+                let registry = model_value.request.router_registry.clone();
+                let mode = model_value.request.machine_mode;
+                let choice_count = model_value.machine_controls.choices(&registry, mode).len();
+                match code {
+                    KeyCode::Up => model_value.machine_controls.move_choice(-1, choice_count),
+                    KeyCode::Down => model_value.machine_controls.move_choice(1, choice_count),
+                    KeyCode::Esc => model_value.machine_controls.cancel_choice(),
+                    KeyCode::Enter
+                        if !modifiers.intersects(
+                            KeyModifiers::ALT | KeyModifiers::CONTROL | KeyModifiers::SUPER,
+                        ) =>
+                    {
+                        if model_value.machine_controls.select_choice(&registry, mode) {
+                            selected_outcome.set(Some(SessionsPickerOutcome::StartNewSession));
+                        }
+                        conversation_cache.write().invalidate();
+                    }
+                    _ => {}
+                }
+                return;
+            }
+            if matches!(code, KeyCode::F(2))
+                || code == KeyCode::Char('g') && modifiers.contains(KeyModifiers::CONTROL)
+            {
+                let registry = model_value.request.router_registry.clone();
+                model_value.machine_controls.open_browse(&registry);
+                return;
+            }
+            if matches!(code, KeyCode::Tab | KeyCode::BackTab) {
+                model_value.machine_controls.control_focused =
+                    !model_value.machine_controls.control_focused;
+                return;
+            }
+            if model_value.machine_controls.control_focused {
+                match code {
+                    KeyCode::Enter => {
+                        if !modifiers.intersects(
+                            KeyModifiers::ALT | KeyModifiers::CONTROL | KeyModifiers::SUPER,
+                        ) {
+                            let registry = model_value.request.router_registry.clone();
+                            model_value.machine_controls.open_browse(&registry);
+                        }
+                        return;
+                    }
+                    KeyCode::Up | KeyCode::Down | KeyCode::Esc => {
+                        model_value.machine_controls.control_focused = false;
+                        return;
+                    }
+                    _ => {}
+                }
+            }
             let previous_query = model_value.data_query();
             match code {
                 KeyCode::Down => model_value.handle_key(SessionsPickerKey::MoveDown),
@@ -261,7 +316,7 @@ pub(crate) fn SessionsPickerComponent<'a>(
                 KeyCode::Home => model_value.handle_key(SessionsPickerKey::MoveFirst),
                 KeyCode::End => model_value.handle_key(SessionsPickerKey::MoveLast),
                 KeyCode::Char('n') if modifiers.contains(KeyModifiers::CONTROL) => {
-                    selected_outcome.set(Some(SessionsPickerOutcome::StartNewSession));
+                    selected_outcome.set(model_value.start_new_action());
                 }
                 KeyCode::Char('s') if modifiers.contains(KeyModifiers::CONTROL) => {
                     model_value.handle_key(SessionsPickerKey::CycleRoot);
@@ -273,6 +328,7 @@ pub(crate) fn SessionsPickerComponent<'a>(
                     model_value.handle_key(SessionsPickerKey::CycleSort);
                 }
                 KeyCode::Char('r') if modifiers.contains(KeyModifiers::CONTROL) => {
+                    conversation_cache.write().invalidate();
                     reload_port.send(SessionRecordsReloadRequest {
                         generation: reload_generation.get(),
                         query: model_value.data_query(),
@@ -304,10 +360,22 @@ pub(crate) fn SessionsPickerComponent<'a>(
                         selected_outcome.set(Some(outcome));
                     }
                 }
-                KeyCode::Enter => selected_outcome.set(model_value.activation_outcome_for_focus()),
+                KeyCode::Enter => {
+                    let outcome = if model_value.focused_identity().is_none() {
+                        model_value.start_new_action()
+                    } else {
+                        model_value.activation_outcome_for_focus()
+                    };
+                    selected_outcome.set(outcome);
+                }
                 KeyCode::Esc => {
                     if model_value.show_help {
                         model_value.handle_key(SessionsPickerKey::ToggleHelp);
+                    } else if model_value.search.is_empty()
+                        && model_value.machine_controls.filter != PickerMachineFilter::Default
+                    {
+                        model_value.machine_controls.filter = PickerMachineFilter::Default;
+                        conversation_cache.write().invalidate();
                     } else if model_value.search.is_empty() {
                         should_cancel.set(true);
                     } else {
@@ -320,6 +388,7 @@ pub(crate) fn SessionsPickerComponent<'a>(
             drop(model_value);
 
             if next_query != previous_query {
+                conversation_cache.write().invalidate();
                 let generation = reload_generation.get().saturating_add(1);
                 reload_generation.set(generation);
                 reload_port.send(SessionRecordsReloadRequest {
@@ -330,6 +399,9 @@ pub(crate) fn SessionsPickerComponent<'a>(
         }
     });
 
+    if should_cancel.get() {
+        selected_outcome.set(None);
+    }
     if let Some(selected_outcome) = selected_outcome.read().clone() {
         if let Some(out) = props.selected_outcome_out.as_mut() {
             **out = Some(selected_outcome);
@@ -354,18 +426,22 @@ pub(crate) fn SessionsPickerComponent<'a>(
         };
     }
 
+    if !matches!(
+        model.read().machine_controls.stage,
+        PickerMachineStage::Browsing
+    ) {
+        return super::picker_machine_view::render_machine_choices(&model.read(), height);
+    }
+
     let selected_conversation = {
         let model_value = model.read();
         model_value.focused_record().map(|record| {
             let selected_preview = {
                 let cache = conversation_cache.read();
-                selected_conversation_preview_for_record(record, &cache)
+                cache.select_record(record)
             };
             if let Some(load_request) = selected_preview.load_request.clone() {
-                conversation_cache.write().insert(
-                    load_request.session_id.clone(),
-                    ConversationPreviewLoadState::Loading,
-                );
+                conversation_cache.write().start_loading(&load_request);
                 load_conversation(load_request);
             }
             selected_preview.preview
@@ -405,36 +481,6 @@ async fn run_session_record_reload_worker(
             Ok(Err(_)) | Err(_) => Err(()),
         };
         accept_records(request, records);
-    }
-}
-
-fn selected_conversation_preview_for_record(
-    record: &SessionPickerRecord,
-    cache: &BTreeMap<String, ConversationPreviewLoadState>,
-) -> SelectedConversationPreview {
-    let Some(source) = record.conversation_source.as_ref() else {
-        return SelectedConversationPreview {
-            preview: record.conversation.clone(),
-            load_request: None,
-        };
-    };
-
-    match cache.get(&record.session_id) {
-        Some(ConversationPreviewLoadState::Loaded(preview)) => SelectedConversationPreview {
-            preview: preview.clone(),
-            load_request: None,
-        },
-        Some(ConversationPreviewLoadState::Loading) => SelectedConversationPreview {
-            preview: record.conversation.clone(),
-            load_request: None,
-        },
-        None => SelectedConversationPreview {
-            preview: record.conversation.clone(),
-            load_request: Some(ConversationPreviewLoadRequest {
-                session_id: record.session_id.clone(),
-                source: source.clone(),
-            }),
-        },
     }
 }
 
@@ -483,11 +529,11 @@ pub(crate) fn run_sessions_picker_test_harness() -> io::Result<()> {
 
     let outcome = run_sessions_picker(request, None)?;
     let marker = match outcome {
-        Some(SessionsPickerOutcome::ResumeSession(session_id)) => {
-            format!("SESSION_PICKER_OUTCOME resume:{session_id}")
+        Some(SessionsPickerOutcome::ResumeSession(selection)) => {
+            format!("SESSION_PICKER_OUTCOME resume:{}", selection.session_id())
         }
-        Some(SessionsPickerOutcome::ForkSession(session_id)) => {
-            format!("SESSION_PICKER_OUTCOME fork:{session_id}")
+        Some(SessionsPickerOutcome::ForkSession(selection)) => {
+            format!("SESSION_PICKER_OUTCOME fork:{}", selection.session_id())
         }
         Some(SessionsPickerOutcome::StartNewSession) => {
             "SESSION_PICKER_OUTCOME start-new".to_owned()

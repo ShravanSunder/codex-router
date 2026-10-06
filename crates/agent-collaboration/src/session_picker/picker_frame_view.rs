@@ -17,7 +17,18 @@ pub(super) fn render_picker_view(
     minimum_render_height: usize,
 ) -> Element<'static, View> {
     let content_width = model.width.saturating_sub(4).max(MIN_PICKER_WIDTH);
-    let mut filter_controls = render_filter_controls(model, content_width);
+    let mut filter_controls = vec![super::super::picker_machine_view::render_machine_control(
+        model,
+        model_state,
+        content_width,
+    )];
+    filter_controls.extend(render_filter_controls(model, content_width));
+    if let Some(notice) = model
+        .machine_controls
+        .all_notice(&model.request.router_registry)
+    {
+        filter_controls.push(element! { Text(content: fit_line(&notice, content_width), color: Color::Yellow, wrap: TextWrap::NoWrap) }.into_any());
+    }
     if let Some(notice) = model.runtime_coverage.notice() {
         filter_controls.push(element! {
             Text(content: fit_line(notice, content_width), color: Color::Yellow, wrap: TextWrap::NoWrap)

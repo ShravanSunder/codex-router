@@ -20,6 +20,8 @@ pub(crate) struct SessionsPickerRequest {
     pub(crate) new_session_args_display: String,
     pub(crate) include_empty_sessions: bool,
     pub(crate) records: Vec<SessionPickerRecord>,
+    pub(crate) router_registry: crate::sessions::RouterRegistryRead,
+    pub(crate) machine_mode: super::PickerMachineSourceMode,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -58,6 +60,8 @@ impl Default for SessionsPickerRequest {
             new_session_args_display: String::new(),
             include_empty_sessions: false,
             records: Vec::new(),
+            router_registry: crate::sessions::RouterRegistryRead::Missing,
+            machine_mode: super::PickerMachineSourceMode::HostedDefault,
         }
     }
 }

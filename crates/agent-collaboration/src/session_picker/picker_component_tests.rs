@@ -225,3 +225,6 @@ mod picker_background_tests;
 
 #[path = "picker_capture_tests.rs"]
 mod picker_capture_tests;
+
+#[path = "picker_machine_control_tests.rs"]
+mod picker_machine_control_tests;

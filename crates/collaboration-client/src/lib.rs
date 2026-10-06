@@ -117,7 +117,7 @@ mod service_discovery;
 pub use collaboration_protocol::JournalStatus;
 
 mod native_endpoint_selector;
-pub use native_endpoint_selector::resolve_public_native;
+pub use native_endpoint_selector::{resolve_public_native, resolve_public_native_for_endpoint};
 
 mod observation_session;
 mod provider_session_observation;

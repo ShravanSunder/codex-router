@@ -54,6 +54,7 @@ pub(super) enum SessionsPickerFocus {
 pub(crate) struct SessionsPickerModel {
     pub(super) request: SessionsPickerRequest,
     pub(super) width: usize,
+    pub(super) machine_controls: super::picker_machine_controls::PickerMachineControls,
     pub(super) root: SessionsPickerRoot,
     pub(super) provider: SessionsProvider,
     pub(super) source: SessionsSource,
@@ -78,6 +79,7 @@ impl SessionsPickerModel {
             sort: request.sort,
             request,
             width,
+            machine_controls: super::picker_machine_controls::PickerMachineControls::default(),
             search: String::new(),
             show_help: false,
             runtime_coverage: PickerRuntimeCoverage::Unobserved,
@@ -282,11 +284,22 @@ impl SessionsPickerModel {
         }
     }
 
+    pub(super) fn start_new_action(&mut self) -> Option<SessionsPickerOutcome> {
+        if self
+            .machine_controls
+            .open_new(&self.request.router_registry)
+        {
+            None
+        } else {
+            Some(SessionsPickerOutcome::StartNewSession)
+        }
+    }
+
     pub(crate) fn activation_outcome_for_focus(&self) -> Option<SessionsPickerOutcome> {
         match self.focused_record() {
             Some(record) if record.identity.is_provider() => None,
             Some(record) => Some(SessionsPickerOutcome::ResumeSession(
-                record.session_id.clone(),
+                crate::sessions::SessionActionSelection::from_picker_record(record),
             )),
             None => Some(SessionsPickerOutcome::StartNewSession),
         }
@@ -295,7 +308,11 @@ impl SessionsPickerModel {
     pub(crate) fn fork_outcome_for_focus(&self) -> Option<SessionsPickerOutcome> {
         self.focused_record()
             .filter(|record| !record.identity.is_provider())
-            .map(|record| SessionsPickerOutcome::ForkSession(record.session_id.clone()))
+            .map(|record| {
+                SessionsPickerOutcome::ForkSession(
+                    crate::sessions::SessionActionSelection::from_picker_record(record),
+                )
+            })
     }
 
     #[cfg(test)]

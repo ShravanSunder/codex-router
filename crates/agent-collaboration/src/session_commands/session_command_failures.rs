@@ -35,6 +35,9 @@ pub enum SessionsCommandError {
     /// Interactive picker cannot render inside the current terminal width.
     #[error("sessions interactive picker requires a wider terminal")]
     TerminalTooNarrow,
+    /// The selected source has no native route in this launch context.
+    #[error("selected session source is unavailable in this launch context")]
+    SessionSourceUnavailable,
     /// Codex failed to launch.
     #[error("failed to launch codex resume command: {0}")]
     CodexLaunch(std::io::Error),

@@ -34,7 +34,13 @@ fn hosted_resume_stops_before_launch_when_the_profile_sets_a_permission_key() {
 
     // Act
     let error = runner
-        .run_codex_resume(&[], SESSION_ID, &ResumeModelChoice::default())
+        .run_codex_resume(
+            &[],
+            &crate::sessions::SessionActionSelection::default_catalog(
+                SESSION_ID.to_owned(),
+                ResumeModelChoice::default(),
+            ),
+        )
         .unwrap_err();
 
     // Assert
@@ -52,7 +58,13 @@ fn hosted_fork_stops_before_launch_when_the_profile_sets_a_permission_key() {
 
     // Act
     let error = runner
-        .run_codex_fork(&[], SESSION_ID, &ResumeModelChoice::default())
+        .run_codex_fork(
+            &[],
+            &crate::sessions::SessionActionSelection::default_catalog(
+                SESSION_ID.to_owned(),
+                ResumeModelChoice::default(),
+            ),
+        )
         .unwrap_err();
 
     // Assert
@@ -60,4 +72,33 @@ fn hosted_fork_stops_before_launch_when_the_profile_sets_a_permission_key() {
         error,
         SessionsCommandError::ProfileBlocksRemoteResume { keys, .. } if keys == ["sandbox_mode"]
     ));
+}
+
+#[test]
+fn hosted_selection_cannot_fall_back_to_a_local_process_for_resume_or_fork() {
+    let selection = crate::sessions::SessionActionSelection {
+        identity: crate::sessions::SessionPickerIdentity::HostedCodex(
+            serde_json::from_value(serde_json::json!({
+                "endpoint": {"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"codex-local"},
+                "sessionId": SESSION_ID,
+            })).unwrap(),
+        ),
+        model_choice: ResumeModelChoice::default(),
+    };
+    let mut runner = ProcessSessionsCommandRunner {
+        launch_target: SessionsLaunchTarget::Local {
+            invoking_cwd: PathBuf::from("/unused"),
+            profile: codex_native_integration::SessionProfile::Router,
+        },
+    };
+
+    for error in [
+        runner.run_codex_resume(&[], &selection).unwrap_err(),
+        runner.run_codex_fork(&[], &selection).unwrap_err(),
+    ] {
+        assert!(matches!(
+            error,
+            SessionsCommandError::SessionSourceUnavailable
+        ));
+    }
 }

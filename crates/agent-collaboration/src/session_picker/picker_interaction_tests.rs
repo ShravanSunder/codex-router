@@ -1,4 +1,5 @@
 use super::*;
+use crate::presentation::session_picker::test_support::picker_action_selection;
 
 #[tokio::test]
 async fn provider_selection_shows_read_only_details_without_a_codex_outcome() {
@@ -72,7 +73,9 @@ async fn sessions_picker_iocraft_mock_terminal_handles_keys() {
     );
     assert_eq!(
         selected_outcome,
-        Some(SessionsPickerOutcome::ResumeSession("thread-b".to_owned()))
+        Some(SessionsPickerOutcome::ResumeSession(
+            picker_action_selection("thread-b")
+        ))
     );
 }
 
@@ -95,7 +98,9 @@ async fn sessions_picker_option_enter_forks_the_focused_existing_session() {
 
     assert_eq!(
         selected_outcome,
-        Some(SessionsPickerOutcome::ForkSession("thread-a".to_owned()))
+        Some(SessionsPickerOutcome::ForkSession(picker_action_selection(
+            "thread-a"
+        )))
     );
 }
 
@@ -115,12 +120,12 @@ async fn sessions_picker_existing_row_pointer_focus_updates_conversation_without
             TerminalEvent::FullscreenMouse(FullscreenMouseEvent::new(
                 MouseEventKind::Moved,
                 10,
-                14,
+                15,
             )),
             TerminalEvent::FullscreenMouse(FullscreenMouseEvent::new(
                 MouseEventKind::Down(MouseButton::Left),
                 10,
-                14,
+                15,
             )),
             TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Esc)),
         ],
@@ -186,7 +191,7 @@ async fn sessions_picker_enter_resumes_pointer_focused_existing_session() {
             TerminalEvent::FullscreenMouse(FullscreenMouseEvent::new(
                 MouseEventKind::Down(MouseButton::Left),
                 10,
-                14,
+                15,
             )),
             TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Enter)),
         ],
@@ -196,7 +201,9 @@ async fn sessions_picker_enter_resumes_pointer_focused_existing_session() {
 
     assert_eq!(
         selected_outcome,
-        Some(SessionsPickerOutcome::ResumeSession("thread-b".to_owned()))
+        Some(SessionsPickerOutcome::ResumeSession(
+            picker_action_selection("thread-b")
+        ))
     );
 }
 
@@ -258,7 +265,9 @@ async fn sessions_picker_non_left_row_events_do_not_focus_or_activate() {
 
     assert_eq!(
         selected_outcome,
-        Some(SessionsPickerOutcome::ResumeSession("thread-a".to_owned())),
+        Some(SessionsPickerOutcome::ResumeSession(
+            picker_action_selection("thread-a")
+        )),
         "ignored pointer events must leave the initial existing-session focus unchanged"
     );
 }
@@ -268,11 +277,11 @@ async fn sessions_picker_hover_keeps_scrolled_row_under_pointer_until_click_and_
     let mut selected_outcome = Option::<SessionsPickerOutcome>::None;
     let events = futures_util::stream::iter(vec![
         TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::End)),
-        TerminalEvent::FullscreenMouse(FullscreenMouseEvent::new(MouseEventKind::Moved, 10, 8)),
+        TerminalEvent::FullscreenMouse(FullscreenMouseEvent::new(MouseEventKind::Moved, 10, 9)),
         TerminalEvent::FullscreenMouse(FullscreenMouseEvent::new(
             MouseEventKind::Down(MouseButton::Left),
             10,
-            8,
+            9,
         )),
         TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Enter)),
     ])
@@ -302,7 +311,7 @@ async fn sessions_picker_hover_keeps_scrolled_row_under_pointer_until_click_and_
     assert_eq!(
         selected_outcome,
         Some(SessionsPickerOutcome::ResumeSession(
-            "thread-extra-4".to_owned()
+            picker_action_selection("thread-extra-4")
         )),
         "Enter must resume the stable session that remained under the pointer"
     );
@@ -494,5 +503,45 @@ async fn sessions_picker_iocraft_mock_terminal_search_keeps_plain_letters() {
             .iter()
             .any(|snapshot| snapshot.contains("[📂 cwd]    View: [All]")),
         "plain search input should leave filters unchanged: {actual:?}"
+    );
+}
+
+#[tokio::test]
+async fn picker_control_g_opens_a_visible_machine_selector_without_selecting_an_action() {
+    let mut selected_outcome = Option::<SessionsPickerOutcome>::None;
+    let (send_event, receive_event) = tokio::sync::mpsc::unbounded_channel();
+    send_event.send(ctrl_key('g')).unwrap();
+    let events = futures_util::stream::unfold(receive_event, |mut receiver| async {
+        receiver.recv().await.map(|event| (event, receiver))
+    });
+    let frames = tokio::time::timeout(Duration::from_secs(2), async {
+        let mut picker = element! {
+            SessionsPickerComponent(request: picker_request(), width: 100usize, height: 40usize,
+                selected_outcome_out: &mut selected_outcome)
+        };
+        let canvases = picker.mock_terminal_render_loop(MockTerminalConfig::with_events(events));
+        tokio::pin!(canvases);
+        let mut frames = Vec::new();
+        let mut opened = false;
+        while let Some(canvas) = canvases.next().await {
+            let text = canvas.to_string();
+            if !opened && text.contains("Choose machine") {
+                opened = true;
+                send_event.send(ctrl_key('c')).unwrap();
+            }
+            frames.push(text);
+        }
+        frames
+    })
+    .await
+    .expect("machine chooser must render and cancel within bounded event wait");
+
+    assert!(
+        frames.iter().any(|text| text.contains("Choose machine")),
+        "{frames:?}"
+    );
+    assert_eq!(
+        selected_outcome, None,
+        "opening/canceling the selector never launches"
     );
 }

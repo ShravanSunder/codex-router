@@ -34,6 +34,8 @@ pub(crate) fn picker_request() -> SessionsPickerRequest {
         current_provider: Some("codex-router".to_owned()),
         new_session_args_display: String::new(),
         include_empty_sessions: false,
+        router_registry: crate::sessions::RouterRegistryRead::Missing,
+        machine_mode: super::PickerMachineSourceMode::HostedDefault,
         records: vec![
             picker_record(
                 "thread-a",
@@ -102,4 +104,14 @@ pub(crate) fn picker_record(
         thread_source: Some(source.to_owned()),
         runtime_status: PickerRuntimeStatus::Unknown,
     }
+}
+
+pub(crate) fn picker_action_selection(session_id: &str) -> crate::sessions::SessionActionSelection {
+    crate::sessions::SessionActionSelection::from_picker_record(&picker_record(
+        session_id,
+        "Selected session",
+        "/repo/project-a",
+        "codex-router",
+        "cli",
+    ))
 }

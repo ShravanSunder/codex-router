@@ -305,19 +305,237 @@ fn selected_conversation_preview_requests_background_load_without_reading_jsonl(
         "/tmp/codex-router".into(),
     );
     record.conversation_source = Some(source.clone());
-    let cache = BTreeMap::new();
+    let cache = ConversationPreviewCache::default();
 
-    let preview = selected_conversation_preview_for_record(&record, &cache);
+    let preview = cache.select_record(&record);
 
     assert_eq!(
         preview,
         SelectedConversationPreview {
             preview: SessionConversationPreview::unavailable("history loading"),
             load_request: Some(ConversationPreviewLoadRequest {
-                session_id: "thread-a".to_owned(),
-                source,
+                key: ConversationPreviewKey {
+                    identity: record.identity,
+                    source,
+                    generation: 0,
+                },
             }),
         }
     );
     assert!(cache.is_empty(), "render decision should not mutate cache");
+}
+
+#[test]
+fn conversation_preview_does_not_reuse_equal_ids_from_another_router() {
+    // Arrange: two observed hosted sessions have equal native IDs but different sources.
+    let mut first = picker_request().records.remove(0);
+    let mut second = first.clone();
+    first.identity = crate::sessions::SessionPickerIdentity::HostedCodex(
+        serde_json::from_value(serde_json::json!({
+            "endpoint": {"serviceId": "00000000-0000-4000-8000-000000000001", "endpointId": "codex-local"},
+            "sessionId": first.session_id
+        })).expect("first source identity")
+    );
+    second.identity = crate::sessions::SessionPickerIdentity::HostedCodex(
+        serde_json::from_value(serde_json::json!({
+            "endpoint": {"serviceId": "00000000-0000-4000-8000-000000000002", "endpointId": "codex-local"},
+            "sessionId": second.session_id
+        })).expect("second source identity")
+    );
+    first.conversation_source = Some(SessionConversationSource::new(
+        "/tmp/source-one/sessions/history.jsonl",
+        "/tmp/source-one".into(),
+    ));
+    second.conversation_source = Some(SessionConversationSource::new(
+        "/tmp/source-two/sessions/history.jsonl",
+        "/tmp/source-two".into(),
+    ));
+    let private_preview = SessionConversationPreview {
+        snippets: vec!["ONLY_SOURCE_ONE".to_owned()],
+        unavailable_reason: None,
+    };
+    let mut cache = ConversationPreviewCache::default();
+    let load = cache
+        .select_record(&first)
+        .load_request
+        .expect("first load");
+    cache.start_loading(&load);
+    cache.complete_load(&load, private_preview.clone());
+
+    // Act: focus the same native ID from the other Router.
+    let selected = cache.select_record(&second);
+
+    // Assert: the first Router's text is never shown under the second source.
+    assert_ne!(selected.preview, private_preview);
+    assert!(selected.load_request.is_some());
+}
+
+#[test]
+fn conversation_preview_rejects_a_late_load_after_view_invalidation() {
+    let mut record = picker_request().records.remove(0);
+    record.conversation_source = Some(SessionConversationSource::new(
+        "/tmp/source/sessions/history.jsonl",
+        "/tmp/source".into(),
+    ));
+    let mut cache = ConversationPreviewCache::default();
+    let old_load = cache
+        .select_record(&record)
+        .load_request
+        .expect("first load");
+    cache.start_loading(&old_load);
+
+    cache.invalidate();
+    let current_load = cache
+        .select_record(&record)
+        .load_request
+        .expect("current load");
+    cache.start_loading(&current_load);
+    cache.complete_load(
+        &old_load,
+        SessionConversationPreview {
+            snippets: vec!["STALE_VIEW".to_owned()],
+            unavailable_reason: None,
+        },
+    );
+
+    assert_eq!(cache.select_record(&record).preview, record.conversation);
+    let current_preview = SessionConversationPreview {
+        snippets: vec!["CURRENT_VIEW".to_owned()],
+        unavailable_reason: None,
+    };
+    cache.complete_load(&current_load, current_preview.clone());
+    assert_eq!(cache.select_record(&record).preview, current_preview);
+}
+
+#[test]
+fn conversation_preview_rejects_equal_local_ids_from_a_different_home() {
+    let mut first = picker_request().records.remove(0);
+    first.conversation_source = Some(SessionConversationSource::new(
+        "/tmp/first-home/sessions/history.jsonl",
+        "/tmp/first-home".into(),
+    ));
+    let mut second = first.clone();
+    second.conversation_source = Some(SessionConversationSource::new(
+        "/tmp/second-home/sessions/history.jsonl",
+        "/tmp/second-home".into(),
+    ));
+    let mut cache = ConversationPreviewCache::default();
+    let first_load = cache
+        .select_record(&first)
+        .load_request
+        .expect("first home load");
+    cache.start_loading(&first_load);
+    let second_load = cache
+        .select_record(&second)
+        .load_request
+        .expect("second home load");
+    cache.start_loading(&second_load);
+    cache.complete_load(
+        &first_load,
+        SessionConversationPreview {
+            snippets: vec!["FIRST_HOME".to_owned()],
+            unavailable_reason: None,
+        },
+    );
+
+    assert_eq!(cache.select_record(&second).preview, second.conversation);
+    assert!(
+        cache.select_record(&second).load_request.is_none(),
+        "second home stays loading"
+    );
+    assert!(
+        cache.select_record(&first).load_request.is_some(),
+        "homes never share a load"
+    );
+}
+
+#[tokio::test]
+async fn picker_preview_loads_real_history_without_leaking_between_equal_hosted_ids() {
+    let home = tempfile::tempdir().unwrap();
+    let mut request = picker_request();
+    let template = request.records.remove(0);
+    request.root = SessionsRoot::Any;
+    request.records.clear();
+    for (index, title, canary, service) in [
+        (
+            0,
+            "First source",
+            "ONLY_FIRST_HISTORY",
+            "00000000-0000-4000-8000-000000000001",
+        ),
+        (
+            1,
+            "Second source",
+            "ONLY_SECOND_HISTORY",
+            "00000000-0000-4000-8000-000000000002",
+        ),
+    ] {
+        let source_home = home.path().join(format!("home-{index}"));
+        std::fs::create_dir_all(source_home.join("sessions")).unwrap();
+        let history_path = source_home.join("sessions/history.jsonl");
+        std::fs::write(
+            &history_path,
+            format!(
+                "{}\n",
+                serde_json::json!({
+                    "type":"response_item", "payload":{"type":"message", "role":"user",
+                    "content":[{"type":"input_text","text":canary}]}
+                })
+            ),
+        )
+        .unwrap();
+        let mut record = template.clone();
+        record.identity = crate::sessions::SessionPickerIdentity::HostedCodex(
+            serde_json::from_value(serde_json::json!({
+                "endpoint":{"serviceId":service,"endpointId":"codex-local"},
+                "sessionId":record.session_id,
+            }))
+            .unwrap(),
+        );
+        record.title = title.to_owned();
+        record.full_title = title.to_owned();
+        record.recency_at_ms = Some(2000 - index);
+        record.preview = None;
+        record.conversation = SessionConversationPreview::unavailable("history loading");
+        record.conversation_source = Some(SessionConversationSource::new(
+            history_path.display().to_string(),
+            source_home,
+        ));
+        request.records.push(record);
+    }
+    let (send_event, receive_event) = tokio::sync::mpsc::unbounded_channel();
+    let events = futures_util::stream::unfold(receive_event, |mut receiver| async {
+        receiver.recv().await.map(|event| (event, receiver))
+    });
+    let mut picker = element! {
+        SessionsPickerComponent(request, width: 160usize, height: 40usize)
+    };
+    let frames = picker.mock_terminal_render_loop(MockTerminalConfig::with_events(events));
+    tokio::pin!(frames);
+    tokio::time::timeout(Duration::from_secs(2), async {
+        let mut first_loaded = false;
+        while let Some(canvas) = frames.next().await {
+            let text = canvas.to_string();
+            if !first_loaded && text.contains("ONLY_FIRST_HISTORY") {
+                first_loaded = true;
+                send_event
+                    .send(TerminalEvent::Key(KeyEvent::new(
+                        KeyEventKind::Press,
+                        KeyCode::Down,
+                    )))
+                    .unwrap();
+            } else if first_loaded && text.contains("❯ Second source") {
+                assert!(
+                    !text.contains("ONLY_FIRST_HISTORY"),
+                    "foreign history leaked: {text}"
+                );
+                if text.contains("ONLY_SECOND_HISTORY") {
+                    return;
+                }
+            }
+        }
+        panic!("both actual history loads must reach their own rendered source");
+    })
+    .await
+    .expect("preview integration completes within bounded event wait");
 }
