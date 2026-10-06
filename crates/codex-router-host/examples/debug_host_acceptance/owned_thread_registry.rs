@@ -1,4 +1,4 @@
-//! Acceptance targets originate only from this run's successful native thread/start calls.
+//! Acceptance targets are fresh starts or children of this run's owned native parents.
 use codex_native_integration::NativeProtocolConnection;
 use serde_json::{Value, json};
 use std::{collections::BTreeSet, error::Error, path::Path};
@@ -15,6 +15,40 @@ pub struct OwnedThreadRegistry {
     threads: BTreeSet<String>,
 }
 impl OwnedThreadRegistry {
+    pub async fn fork_owned_thread(
+        &mut self,
+        client: &mut NativeProtocolConnection,
+        parent: &str,
+        cwd: &Path,
+    ) -> Result<String, Box<dyn Error>> {
+        self.require_owned(parent)?;
+        // No policy/config/model override: the native fork inherits its owned parent.
+        let response = client
+            .request(
+                "thread/fork",
+                json!({"threadId":parent,"cwd":cwd,"deferGoalContinuation":true}),
+            )
+            .await?;
+        let child = response
+            .pointer("/thread/id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+            .ok_or("native fork returned no child identity; effect is unknown")?
+            .to_owned();
+        if child == parent || !self.threads.insert(child.clone()) {
+            return Err("native fork did not return a distinct owned child".into());
+        }
+        if response.get("modelProvider").and_then(Value::as_str) != Some("codex-router-debug")
+            || response.get("model").and_then(Value::as_str) != Some(PROOF_MODEL)
+            || response.pointer("/sandbox/type").and_then(Value::as_str) != Some("readOnly")
+            || response.get("approvalPolicy").and_then(Value::as_str) != Some("never")
+            || response.get("approvalsReviewer").and_then(Value::as_str) != Some("user")
+            || response.get("cwd").and_then(Value::as_str) != cwd.to_str()
+        {
+            return Err("owned fork did not preserve source cwd/model/read-only policy".into());
+        }
+        Ok(child)
+    }
     pub async fn create(
         &mut self,
         client: &mut NativeProtocolConnection,
@@ -193,10 +227,17 @@ impl OwnedThreadRegistry {
         self.require_owned(&receipt.thread_id)?;
         let id = receipt.thread_id.as_str();
         let turn = receipt.turn_id;
+        let mut observed_methods = std::collections::BTreeMap::<String, u64>::new();
         let observed = tokio::time::timeout(std::time::Duration::from_secs(90), async {
             let mut output = String::new();
             loop {
                 let event = client.next_message().await?;
+                if let Some(method) = event.get("method").and_then(Value::as_str)
+                    && method.len() <= 96
+                    && (observed_methods.len() < 32 || observed_methods.contains_key(method))
+                {
+                    *observed_methods.entry(method.to_owned()).or_default() += 1;
+                }
                 let params = event
                     .get("params")
                     .ok_or("native event lacked parameters")?;
@@ -209,6 +250,19 @@ impl OwnedThreadRegistry {
                     );
                 }
                 match event.get("method").and_then(Value::as_str) {
+                    Some("error")
+                        if params.get("turnId").and_then(Value::as_str) == Some(turn.as_str()) =>
+                    {
+                        let classification = params.pointer("/error/codexErrorInfo");
+                        let kind = classification
+                            .and_then(Value::as_str)
+                            .or_else(|| classification.and_then(Value::as_object).and_then(|fields| fields.keys().next().map(String::as_str)))
+                            .filter(|value| value.len() <= 96);
+                        println!("{}", json!({"kind":"ownedTurnErrorObserved","classification":kind,"willRetry":params.get("willRetry")}));
+                        if params.get("willRetry").and_then(Value::as_bool) == Some(false) {
+                            return Err("owned native turn reported a terminal error".into());
+                        }
+                    }
                     Some("item/agentMessage/delta")
                         if params.get("turnId").and_then(Value::as_str) == Some(turn.as_str()) =>
                     {
@@ -251,8 +305,12 @@ impl OwnedThreadRegistry {
                 }
             }
         })
-        .await??;
-        Ok(observed)
+        .await;
+        println!(
+            "{}",
+            json!({"kind":"ownedTurnObservation","methods":observed_methods})
+        );
+        observed?
     }
 }
 
@@ -328,6 +386,108 @@ mod ownership_tests {
         assert!(registry.require_owned("created-here").is_ok());
         assert!(registry.require_owned("existing-user-thread").is_err());
         assert!(registry.require_owned("").is_err());
+    }
+
+    #[tokio::test]
+    async fn owned_fork_preserves_source_contract_and_rejects_wrong_child_policy() {
+        for (sandbox, succeeds) in [("readOnly", true), ("dangerFullAccess", false)] {
+            let (client, server) = tokio::net::UnixStream::pair().unwrap();
+            let wire = tokio_tungstenite::WebSocketStream::from_raw_socket(
+                client,
+                tokio_tungstenite::tungstenite::protocol::Role::Client,
+                None,
+            )
+            .await;
+            let backend = tokio::spawn(async move {
+                let mut server = tokio_tungstenite::WebSocketStream::from_raw_socket(
+                    server,
+                    tokio_tungstenite::tungstenite::protocol::Role::Server,
+                    None,
+                )
+                .await;
+                let request: Value =
+                    serde_json::from_str(server.next().await.unwrap().unwrap().to_text().unwrap())
+                        .unwrap();
+                assert_eq!(request["method"], "thread/fork");
+                assert_eq!(
+                    request["params"],
+                    json!({"threadId":"owned-parent","cwd":"/source/fixture","deferGoalContinuation":true})
+                );
+                server.send(tokio_tungstenite::tungstenite::Message::Text(json!({"id":request["id"],"result":{"thread":{"id":"owned-child"},"model":PROOF_MODEL,"modelProvider":"codex-router-debug","cwd":"/source/fixture","sandbox":{"type":sandbox},"approvalPolicy":"never","approvalsReviewer":"user"}}).to_string().into())).await.unwrap();
+            });
+            let mut client = NativeProtocolConnection::from_websocket(wire);
+            let mut registry = OwnedThreadRegistry {
+                threads: BTreeSet::from(["owned-parent".to_owned()]),
+            };
+            let result = registry
+                .fork_owned_thread(&mut client, "owned-parent", Path::new("/source/fixture"))
+                .await;
+            assert_eq!(result.is_ok(), succeeds);
+            assert!(registry.require_owned("owned-parent").is_ok());
+            assert!(
+                registry.require_owned("owned-child").is_ok(),
+                "a created child remains identified even if policy validation fails"
+            );
+            backend.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn unowned_fork_cannot_write_a_native_frame() {
+        let (client, server) = tokio::net::UnixStream::pair().unwrap();
+        let wire = tokio_tungstenite::WebSocketStream::from_raw_socket(
+            client,
+            tokio_tungstenite::tungstenite::protocol::Role::Client,
+            None,
+        )
+        .await;
+        let mut client = NativeProtocolConnection::from_websocket(wire);
+        let mut registry = OwnedThreadRegistry::default();
+        let result = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            registry.fork_owned_thread(&mut client, "existing-user-thread", Path::new("/tmp")),
+        )
+        .await
+        .unwrap();
+        assert!(result.is_err());
+        let mut bytes = [0_u8; 128];
+        assert!(
+            matches!(server.try_read(&mut bytes), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock)
+        );
+    }
+
+    #[tokio::test]
+    async fn terminal_error_for_the_owned_turn_does_not_wait_for_a_marker() {
+        let (client, server) = tokio::net::UnixStream::pair().unwrap();
+        let wire = tokio_tungstenite::WebSocketStream::from_raw_socket(
+            client,
+            tokio_tungstenite::tungstenite::protocol::Role::Client,
+            None,
+        )
+        .await;
+        let backend = tokio::spawn(async move {
+            let mut server = tokio_tungstenite::WebSocketStream::from_raw_socket(
+                server,
+                tokio_tungstenite::tungstenite::protocol::Role::Server,
+                None,
+            )
+            .await;
+            server.send(tokio_tungstenite::tungstenite::Message::Text(json!({"method":"error","params":{"threadId":"owned-parent","turnId":"owned-turn","willRetry":false,"error":{"codexErrorInfo":"responseStreamDisconnected","message":"private backend cause"}}}).to_string().into())).await.unwrap();
+            std::future::pending::<()>().await;
+        });
+        let mut client = NativeProtocolConnection::from_websocket(wire);
+        let registry = OwnedThreadRegistry {
+            threads: BTreeSet::from(["owned-parent".to_owned()]),
+        };
+        let result = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            registry.observe_turn(&mut client, "owned-parent", "owned-turn"),
+        )
+        .await
+        .unwrap();
+        assert!(result.is_err());
+        backend.abort();
+        let _joined = backend.await;
     }
 
     #[tokio::test]
