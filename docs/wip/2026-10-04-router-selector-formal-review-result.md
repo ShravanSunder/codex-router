@@ -1,6 +1,6 @@
 # Router selector formal design review result
 
-Status: `needs-revision`; planning admission and design acceptance are not established.
+Historical full-review result: `needs-revision`. Subsequent same-reviewer checks closed A1/A3/A4 and canonical A2 corrections with no residual at that check. The latest machine/All decision changes affected meaning and requires focused verification; this historical report is not current whole-design acceptance. See [the admission packet](2026-10-04-router-selector-d1-d2-decision-packet.md).
 
 This digest is a public-safe, source-backed handoff for the reopened selector lane. It summarizes the formal cross-lineage review and affected correction verification without reproducing private Router transcripts. No implementation, PR, auth, network, settings, or production action is authorized by this artifact.
 

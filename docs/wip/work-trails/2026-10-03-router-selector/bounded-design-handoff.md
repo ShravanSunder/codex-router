@@ -1,4 +1,6 @@
-# Bounded selector design handoff
+# Historical bounded selector design handoff
+
+**Superseded continuation:** the later owner delivery direction and machine/filter/shortcut decisions are recorded in [the current admission packet](../../2026-10-04-router-selector-d1-d2-decision-packet.md) and [trace](main.md). The scope stops, pending F2/D1–D4 choices, source head and document hashes below describe the earlier checkpoint only; they are not current holds or current readiness. Published decomposition is integrated at `41671e86`.
 
 Current source head: `7a8cbd8943e6fb2dac23bcde7069203925003918`, branch `router-selector-design`. All product sources remain untouched; the existing design artifacts are captured in signed local-only checkpoint `a0a94f2c24c77e0979e1268ed8108ceda7f01fc9`. A subsequent trail checkpoint records validation and delivery state. Use `git log -- docs/specs/2026-10-03-router-selector docs/wip/work-trails/2026-10-03-router-selector` for actual checkpoint commits; commit history records the actual local checkpoint boundary; no push or merge occurred. This is the requested **partial, reviewable design with explicit gaps**, not executable readiness, independent acceptance, a completed implementation plan or a proved tool loop. The owner-directed bound stops research and further Advisor/reviewer calls here.
 
