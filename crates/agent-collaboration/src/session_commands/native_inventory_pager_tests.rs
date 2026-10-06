@@ -28,6 +28,166 @@ fn stored_page(id: &str, cursor: Value) -> Value {
 }
 
 #[tokio::test]
+async fn source_filtered_pages_reject_contradictory_rows_without_a_retry() {
+    for view in [
+        NativeSessionView::Stored,
+        NativeSessionView::Loaded,
+        NativeSessionView::Active,
+    ] {
+        for (requested, returned) in [
+            (NativeSessionSource::Interactive, "subagents"),
+            (NativeSessionSource::Interactive, "all"),
+            (NativeSessionSource::Subagents, "interactive"),
+            (NativeSessionSource::Subagents, "all"),
+        ] {
+            let mut response = if matches!(view, NativeSessionView::Stored) {
+                stored_page("wrong-filter", json!("unused-next"))
+            } else {
+                page(
+                    "wrong-filter",
+                    json!({"type":"active","activeFlags":[]}),
+                    json!("unused-next"),
+                )
+            };
+            response["sessions"][0]["source"] = serde_json::to_value(returned).unwrap();
+            let (mut client, peer) = connect_fixture(vec![("codex/sessionList", response)]).await;
+            let mut request = paging_request(view);
+            request.source = requested;
+            let expected = (!matches!(view, NativeSessionView::Stored))
+                .then(|| serde_json::from_value(generation()).unwrap());
+            let mut pager = NativeInventoryPager::new(request, expected).unwrap();
+            let result = pager.next_page(&mut client).await;
+            assert!(
+                matches!(
+                    result,
+                    Err(ClientError::Protocol("inventory source filter mismatch"))
+                ),
+                "a source-filtered read must not publish another classification: {result:?}"
+            );
+            assert!(pager.next_page(&mut client).await.is_err());
+            client.close().await.unwrap();
+            assert_eq!(
+                peer.await.unwrap().len(),
+                1,
+                "reject before continuation or retry"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn active_pages_reject_non_active_runtime_rows_without_a_retry() {
+    for status in [
+        json!({"type":"idle"}),
+        json!({"type":"notLoaded"}),
+        json!({"type":"systemError"}),
+    ] {
+        let (mut client, peer) = connect_fixture(vec![(
+            "codex/sessionList",
+            page("not-active", status, json!("unused-next")),
+        )])
+        .await;
+        let mut pager = NativeInventoryPager::new(
+            paging_request(NativeSessionView::Active),
+            Some(serde_json::from_value(generation()).unwrap()),
+        )
+        .unwrap();
+        let result = pager.next_page(&mut client).await;
+        assert!(
+            matches!(
+                result,
+                Err(ClientError::Protocol("inventory active view mismatch"))
+            ),
+            "Active must not publish another runtime state: {result:?}"
+        );
+        assert!(pager.next_page(&mut client).await.is_err());
+        client.close().await.unwrap();
+        assert_eq!(peer.await.unwrap().len(), 1);
+    }
+}
+
+#[tokio::test]
+async fn continuation_cannot_escape_the_captured_source_filter() {
+    let mut wrong = stored_page("second-page-wrong-source", json!("never-read"));
+    wrong["sessions"][0]["source"] = json!("subagents");
+    let (mut client, peer) = connect_fixture(vec![
+        (
+            "codex/sessionList",
+            stored_page("first-page-correct-source", json!("after-valid-page")),
+        ),
+        ("codex/sessionList", wrong),
+    ])
+    .await;
+    let mut pager =
+        NativeInventoryPager::new(paging_request(NativeSessionView::Stored), None).unwrap();
+    assert_eq!(
+        pager
+            .next_page(&mut client)
+            .await
+            .unwrap()
+            .unwrap()
+            .sessions
+            .len(),
+        1
+    );
+    assert!(matches!(
+        pager.next_page(&mut client).await,
+        Err(ClientError::Protocol("inventory source filter mismatch"))
+    ));
+    assert!(pager.next_page(&mut client).await.is_err());
+    client.close().await.unwrap();
+    let requests = peer.await.unwrap();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[1]["params"]["cursor"], "after-valid-page");
+    assert!(
+        requests
+            .iter()
+            .all(|request| request["params"]["source"] == "interactive")
+    );
+}
+
+#[tokio::test]
+async fn matching_source_filters_wildcards_and_active_flags_remain_valid() {
+    for view in [
+        NativeSessionView::Stored,
+        NativeSessionView::Loaded,
+        NativeSessionView::Active,
+    ] {
+        for source in [
+            NativeSessionSource::Interactive,
+            NativeSessionSource::Subagents,
+            NativeSessionSource::All,
+        ] {
+            for requested in [source, NativeSessionSource::All] {
+                let mut response = if matches!(view, NativeSessionView::Stored) {
+                    stored_page("matching-filter", Value::Null)
+                } else {
+                    page(
+                        "matching-filter",
+                        json!({"type":"active","activeFlags":["waitingOnApproval"]}),
+                        Value::Null,
+                    )
+                };
+                response["sessions"][0]["source"] = serde_json::to_value(source).unwrap();
+                let (mut client, peer) =
+                    connect_fixture(vec![("codex/sessionList", response)]).await;
+                let mut request = paging_request(view);
+                request.source = requested;
+                let expected = (!matches!(view, NativeSessionView::Stored))
+                    .then(|| serde_json::from_value(generation()).unwrap());
+                let mut pager = NativeInventoryPager::new(request, expected).unwrap();
+                let page = pager.next_page(&mut client).await.unwrap().unwrap();
+                assert_eq!(page.sessions.len(), 1);
+                assert_eq!(page.sessions[0].source, source);
+                assert!(pager.next_page(&mut client).await.unwrap().is_none());
+                client.close().await.unwrap();
+                assert_eq!(peer.await.unwrap().len(), 1);
+            }
+        }
+    }
+}
+
+#[tokio::test]
 async fn sparse_stored_pages_preserve_the_entire_request_and_have_no_runtime_generation() {
     let mut sparse = stored_page("skipped", json!("opaque/first?unchanged"));
     sparse["sessions"] = json!([]);

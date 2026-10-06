@@ -99,6 +99,20 @@ impl StoredServiceFixture {
         )
     }
 
+    async fn seed_subagent_fixture(&mut self) {
+        use sqlx::Connection;
+        let mut connection = sqlx::SqliteConnection::connect_with(
+            &sqlx::sqlite::SqliteConnectOptions::new().filename(&self.database),
+        )
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO threads (id,cwd,model,reasoning_effort,name,title,first_user_message,source,thread_source,updated_at_ms,recency_at_ms,archived) VALUES ('source-subagent','/source/owned-project','subagent-model','high',NULL,'Source subagent','Source user message','cli','subagent',1000,1000,0)")
+            .execute(&mut connection).await.unwrap();
+        connection.close().await.unwrap();
+        // This is fixture arrangement before any session read, not part of the read proof.
+        self.original_database = std::fs::read(&self.database).unwrap();
+    }
+
     async fn finish(self) {
         assert_eq!(
             self.native_listener.accept().unwrap_err().kind(),
@@ -115,6 +129,40 @@ impl StoredServiceFixture {
         drop(self.publication);
         drop(self.root);
     }
+}
+
+#[tokio::test]
+async fn real_source_catalog_respects_interactive_subagent_and_all_page_filters() {
+    let (mut client, mut fixture) = StoredServiceFixture::open(SERVICE, "interactive-model").await;
+    fixture.seed_subagent_fixture().await;
+    for (source, expected_ids) in [
+        (NativeSessionSource::Interactive, vec!["shared-source-id"]),
+        (NativeSessionSource::Subagents, vec!["source-subagent"]),
+        (
+            NativeSessionSource::All,
+            vec!["shared-source-id", "source-subagent"],
+        ),
+    ] {
+        let mut request = paging_request(NativeSessionView::Stored);
+        request.scope = NativeSessionScope::Any;
+        request.query = None;
+        request.source = source;
+        request.page_size = 1;
+        let mut pager = NativeInventoryPager::new(request, None).unwrap();
+        let mut actual_ids = Vec::new();
+        while let Some(page) = pager.next_page(&mut client).await.unwrap() {
+            for summary in page.sessions {
+                assert!(source == NativeSessionSource::All || source == summary.source);
+                actual_ids.push(String::from(summary.target.session_id));
+            }
+        }
+        assert_eq!(
+            actual_ids, expected_ids,
+            "source-owned paging must keep its requested filter"
+        );
+    }
+    client.close().await.unwrap();
+    fixture.finish().await;
 }
 
 #[tokio::test]

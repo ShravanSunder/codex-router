@@ -1,7 +1,7 @@
 //! One source-owned request tuple and view-specific opaque continuation.
 use collaboration_client::protocol::{
     CodexGeneration, NativeSessionListParams, NativeSessionListResult, NativeSessionObservation,
-    NativeSessionView, SessionRef,
+    NativeSessionSource, NativeSessionView, NativeThreadStatus, SessionRef,
 };
 use collaboration_client::{ClientError, ControlClient};
 use std::collections::BTreeSet;
@@ -110,6 +110,22 @@ impl NativeInventoryPager {
             }
         }
         for summary in &page.sessions {
+            if self.request.source != NativeSessionSource::All
+                && summary.source != self.request.source
+            {
+                return Err(ClientError::Protocol("inventory source filter mismatch"));
+            }
+            if matches!(self.request.view, NativeSessionView::Active)
+                && !matches!(
+                    &summary.observation,
+                    NativeSessionObservation::Runtime {
+                        status: NativeThreadStatus::Active { .. },
+                        ..
+                    }
+                )
+            {
+                return Err(ClientError::Protocol("inventory active view mismatch"));
+            }
             if self.seen_targets.len() >= MAX_INVENTORY_ROWS
                 || !self.seen_targets.insert(summary.target.clone())
             {
