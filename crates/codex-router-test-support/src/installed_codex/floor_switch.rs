@@ -49,7 +49,7 @@ enum FloorJourney {
 }
 
 impl FloorJourney {
-    const fn name(self) -> &'static str {
+    pub(super) const fn name(self) -> &'static str {
         match self {
             Self::HealthyPeer => "healthy-peer",
             Self::NoPeer => "no-peer",
@@ -57,7 +57,7 @@ impl FloorJourney {
         }
     }
 
-    const fn new_remaining(self) -> u32 {
+    pub(super) const fn new_remaining(self) -> u32 {
         match self {
             Self::HealthyPeer | Self::NoPeer => 8,
             Self::HardFloor => 5,
@@ -66,14 +66,14 @@ impl FloorJourney {
 }
 
 struct FloorRouter {
-    notifier: WebSocketQuotaFloorNotifier,
-    shutdown: CancellationToken,
-    serve_thread: Option<thread::JoinHandle<Result<usize, String>>>,
-    port: u16,
+    pub(super) notifier: WebSocketQuotaFloorNotifier,
+    pub(super) shutdown: CancellationToken,
+    pub(super) serve_thread: Option<thread::JoinHandle<Result<usize, String>>>,
+    pub(super) port: u16,
 }
 
 impl FloorRouter {
-    fn start(
+    pub(super) fn start(
         state_path: &Path,
         secret_root: &Path,
         upstream_address: &str,
@@ -115,7 +115,7 @@ impl FloorRouter {
         })
     }
 
-    fn stop(mut self) -> Result<(), String> {
+    pub(super) fn stop(mut self) -> Result<(), String> {
         self.shutdown.cancel();
         let handle = self
             .serve_thread

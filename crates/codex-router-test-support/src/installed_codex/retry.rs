@@ -17,19 +17,19 @@ enum RetryScenario {
 
 #[derive(Clone, Debug, Default)]
 struct RetryUpstreamState {
-    handshakes: usize,
-    non_prewarm_requests: usize,
-    completion_sent: bool,
-    observed_tokens: Vec<String>,
-    observed_thread_ids: Vec<String>,
-    terminal_original_sent: bool,
+    pub(super) handshakes: usize,
+    pub(super) non_prewarm_requests: usize,
+    pub(super) completion_sent: bool,
+    pub(super) observed_tokens: Vec<String>,
+    pub(super) observed_thread_ids: Vec<String>,
+    pub(super) terminal_original_sent: bool,
 }
 
 struct RetryUpstream {
-    address: String,
-    state: Arc<Mutex<RetryUpstreamState>>,
-    shutdown: Arc<AtomicBool>,
-    handle: Option<thread::JoinHandle<Result<(), String>>>,
+    pub(super) address: String,
+    pub(super) state: Arc<Mutex<RetryUpstreamState>>,
+    pub(super) shutdown: Arc<AtomicBool>,
+    pub(super) handle: Option<thread::JoinHandle<Result<(), String>>>,
 }
 
 pub fn run_three_account_short_quota_reconnect() -> Result<(), String> {
@@ -211,7 +211,7 @@ fn seed_retry_accounts(
 }
 
 impl RetryUpstream {
-    fn start(scenario: RetryScenario) -> Result<Self, String> {
+    pub(super) fn start(scenario: RetryScenario) -> Result<Self, String> {
         let listener = TcpListener::bind("127.0.0.1:0")
             .map_err(|error| format!("failed to bind retry upstream: {error}"))?;
         listener
@@ -237,11 +237,11 @@ impl RetryUpstream {
         })
     }
 
-    fn address(&self) -> &str {
+    pub(super) fn address(&self) -> &str {
         &self.address
     }
 
-    fn join(mut self) -> Result<RetryUpstreamState, String> {
+    pub(super) fn join(mut self) -> Result<RetryUpstreamState, String> {
         self.shutdown.store(true, Ordering::SeqCst);
         wake_mock_upstream_accept(&self.address);
         let handle = self
