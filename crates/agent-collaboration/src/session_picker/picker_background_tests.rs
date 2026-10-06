@@ -53,8 +53,10 @@ async fn session_record_reload_worker_runs_single_flight_and_keeps_only_latest_p
     let worker = tokio::spawn({
         let current_generation = Arc::clone(&current_generation);
         async move {
-            run_session_record_reload_worker(receiver, loader, move |request, _records| {
-                if current_generation.load(Ordering::SeqCst) == request.generation {
+            run_session_record_reload_worker(receiver, loader, move |request, update| {
+                if update.into_snapshot().is_some()
+                    && current_generation.load(Ordering::SeqCst) == request.generation
+                {
                     let _ = accepted_sender.send(request.query.search);
                 }
             })
@@ -156,8 +158,12 @@ async fn periodic_same_generation_refresh_does_not_starve_a_slow_result() {
     });
     let (accepted_sender, mut accepted_receiver) = tokio::sync::mpsc::unbounded_channel();
     let worker = tokio::spawn(async move {
-        run_session_record_reload_worker(receiver, loader, move |request, records| {
-            if request.generation == 1 && records.is_ok() {
+        run_session_record_reload_worker(receiver, loader, move |request, update| {
+            if request.generation == 1
+                && update
+                    .into_snapshot()
+                    .is_some_and(|records| records.is_ok())
+            {
                 let _ = accepted_sender.send(request.query.search);
             }
         })

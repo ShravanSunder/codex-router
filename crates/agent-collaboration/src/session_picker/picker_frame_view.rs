@@ -23,6 +23,18 @@ pub(super) fn render_picker_view(
         content_width,
     )];
     filter_controls.extend(render_filter_controls(model, content_width));
+    if model.machine_controls.filter
+        == super::super::picker_machine_controls::PickerMachineFilter::All
+        && !model.source_progress.is_empty()
+    {
+        let status = model
+            .source_progress
+            .iter()
+            .map(|progress| progress.display_line())
+            .collect::<Vec<_>>()
+            .join(" | ");
+        filter_controls.push(element! { Text(content: fit_line(&status, content_width), color: Color::Grey, wrap: TextWrap::NoWrap) }.into_any());
+    }
     if let Some(notice) = model
         .machine_controls
         .all_notice(&model.request.router_registry)

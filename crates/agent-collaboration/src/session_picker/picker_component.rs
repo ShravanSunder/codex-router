@@ -155,7 +155,7 @@ pub(crate) fn SessionsPickerComponent<'a>(
             let (Some(receiver), Some(loader)) = (receiver, record_loader) else {
                 return;
             };
-            run_session_record_reload_worker(receiver, loader, move |request, records| {
+            run_session_record_reload_worker(receiver, loader, move |request, update| {
                 if reload_generation.get() != request.generation {
                     return;
                 }
@@ -163,9 +163,26 @@ pub(crate) fn SessionsPickerComponent<'a>(
                 if model_value.data_query() == request.query
                     && model_value.source_contexts() == request.sources
                 {
-                    match records {
-                        Ok(records) => model_value.replace_records(records),
-                        Err(_) => model_value.invalidate_runtime_statuses(),
+                    model_value.source_progress = update.source_progress;
+                    match update.records_update {
+                        super::source_reload_progress::SourceRecordsUpdate::Pending => {}
+                        super::source_reload_progress::SourceRecordsUpdate::Ready(records) => {
+                            model_value.replace_records(records)
+                        }
+                        super::source_reload_progress::SourceRecordsUpdate::Rejected(reason) => {
+                            for progress in &mut model_value.source_progress {
+                                if matches!(
+                                    progress.read_state,
+                                    super::source_reload_progress::SourceReadState::Loading
+                                ) {
+                                    progress.read_state =
+                                        super::source_reload_progress::SourceReadState::Rejected {
+                                            reason,
+                                        };
+                                }
+                            }
+                            model_value.invalidate_runtime_statuses();
+                        }
                     }
                 }
             })

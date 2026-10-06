@@ -81,6 +81,24 @@ pub(super) fn render_machine_choices(
         None
     };
     let explanation = notice.as_ref().map(|notice| notice.message());
+    let source_status = if matches!(purpose, MachineChoicePurpose::Browse) {
+        model
+            .source_progress
+            .iter()
+            .find(|progress| match &progress.source_context {
+                super::PickerSourceContext::DefaultHosted
+                | super::PickerSourceContext::LocalCodex => focus == 0,
+                super::PickerSourceContext::ConfiguredHosted(profile) => {
+                    focus > 1
+                        && choices
+                            .get(focus)
+                            .is_some_and(|choice| choice == profile.name.as_str())
+                }
+            })
+            .map(|progress| progress.display_line())
+    } else {
+        None
+    };
     element! {
         View(width: model.width as u32, height: height as u32, padding_left: 1, padding_right: 1,
             flex_direction: FlexDirection::Column, border_style: BorderStyle::Round,
@@ -91,6 +109,7 @@ pub(super) fn render_machine_choices(
                 #(rows)
             }
             #(detail.map(|detail| element! { Text(content: detail, color: Color::Grey) }))
+            #(source_status.map(|status| element! { Text(content: status, color: Color::Grey) }))
             #(explanation.map(|message| element! { Text(content: message, color: Color::Yellow) }))
             View(flex_grow: 1.0_f32) {}
             Text(content: "↑↓ Choose | Enter Select | Esc Back | Ctrl+C Exit", color: Color::Grey)

@@ -31,6 +31,56 @@ fn configured_request() -> Result<SessionsPickerRequest, crate::sessions::Router
     Ok(request)
 }
 
+#[tokio::test]
+async fn all_view_reports_each_loading_and_rejected_source_without_empty_success() {
+    let loader: SessionsPickerRecordLoader = Arc::new(|request| {
+        Box::pin(async move {
+            if matches!(
+                request.source_context,
+                crate::presentation::session_picker::PickerSourceContext::DefaultHosted
+            ) {
+                futures_util::future::pending::<()>().await;
+            }
+            crate::presentation::session_picker::SourceInventoryResult::Rejected {
+            request, reason: crate::presentation::session_picker::SourceInventoryRejection::EndpointUnqualified,
+        }
+        })
+    });
+    let mut outcome = Option::<SessionsPickerOutcome>::None;
+    let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+    sender.send(key(KeyCode::F(2))).unwrap();
+    let input = futures_util::stream::unfold(receiver, |mut receiver| async {
+        receiver.recv().await.map(|event| (event, receiver))
+    });
+    let frames = tokio::time::timeout(Duration::from_secs(2), async {
+        let mut picker = element! { SessionsPickerComponent(request: configured_request().unwrap(), record_loader: Some(loader), width: 130usize, height: 40usize, selected_outcome_out: &mut outcome) };
+        let canvases = picker.mock_terminal_render_loop(MockTerminalConfig::with_events(input));
+        tokio::pin!(canvases);
+        let mut opened = false;
+        let mut frames = Vec::new();
+        while let Some(canvas) = canvases.next().await {
+            let text = canvas.to_string();
+            if !opened && text.contains("Choose machine") {
+                opened = true;
+                sender.send(key(KeyCode::Down)).unwrap();
+                sender.send(key(KeyCode::Enter)).unwrap();
+            }
+            if text.contains("This machine: Loading") && text.contains("Sunbook: Unavailable") {
+                sender.send(control_key('c')).unwrap();
+            }
+            frames.push(text);
+        }
+        frames
+    }).await.expect("each source must expose loading or unavailable status within bounded render wait");
+    assert!(
+        frames
+            .iter()
+            .any(|frame| frame.contains("This machine: Loading")
+                && frame.contains("Sunbook: Unavailable"))
+    );
+    assert_eq!(outcome, None);
+}
+
 async fn render_events(
     request: SessionsPickerRequest,
     events: Vec<TerminalEvent>,

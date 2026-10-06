@@ -38,6 +38,96 @@ fn query(search: &str) -> SessionsPickerDataQuery {
 }
 
 #[tokio::test]
+async fn rejected_source_progress_keeps_rows_from_the_successful_source() {
+    let configured = sources(1).unwrap().remove(0);
+    let requested_sources = vec![PickerSourceContext::DefaultHosted, configured.clone()];
+    let (sender, receiver) = tokio::sync::watch::channel(SessionRecordsReloadRequest {
+        generation: 0,
+        query: query("initial"),
+        sources: vec![],
+    });
+    let permit = Arc::new(tokio::sync::Semaphore::new(0));
+    let loader: SessionsPickerRecordLoader = Arc::new({
+        let permit = Arc::clone(&permit);
+        move |request| {
+            let permit = Arc::clone(&permit);
+            Box::pin(async move {
+                if matches!(
+                    request.source_context,
+                    PickerSourceContext::ConfiguredHosted(_)
+                ) {
+                    permit.acquire().await.unwrap().forget();
+                    SourceInventoryResult::Rejected {
+                        request,
+                        reason: SourceInventoryRejection::SourceUnavailable,
+                    }
+                } else {
+                    SourceInventoryResult::Ready {
+                        request,
+                        snapshot: observed_records(vec![picker_record(
+                            "usable-default",
+                            "Usable source",
+                            "/owned/project",
+                            "codex-router",
+                            "cli",
+                        )]),
+                    }
+                }
+            })
+        }
+    });
+    let (published_sender, mut published) = tokio::sync::mpsc::unbounded_channel();
+    let worker = tokio::spawn(async move {
+        run_session_record_reload_worker(receiver, loader, move |request, update| {
+            let _ = published_sender.send((request, update));
+        })
+        .await;
+    });
+    sender.send_replace(SessionRecordsReloadRequest {
+        generation: 9,
+        query: query("all"),
+        sources: requested_sources.clone(),
+    });
+    tokio::time::timeout(Duration::from_secs(2), async {
+        let mut retained_rows = Vec::new();
+        loop {
+            let (request, update) = published.recv().await.unwrap();
+            assert_eq!(request.generation, 9);
+            assert_eq!(request.sources, requested_sources);
+            let failed = update.source_progress.iter().any(|progress| {
+                progress.source_context == configured
+                    && matches!(
+                        progress.read_state,
+                        SourceReadState::Rejected {
+                            reason: SourceInventoryRejection::SourceUnavailable
+                        }
+                    )
+            });
+            if let SourceRecordsUpdate::Ready(snapshot) = update.records_update {
+                retained_rows = snapshot.records;
+                assert!(update.source_progress.iter().any(|progress| matches!(
+                    progress.read_state,
+                    SourceReadState::Ready { record_count: 1 }
+                )));
+                permit.add_permits(1);
+            }
+            if failed {
+                assert_eq!(retained_rows.len(), 1);
+                assert_eq!(retained_rows[0].session_id, "usable-default");
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    drop(sender);
+    tokio::time::timeout(Duration::from_secs(2), worker)
+        .await
+        .unwrap()
+        .unwrap();
+}
+
+#[tokio::test]
 async fn all_source_reads_do_not_overwrite_each_other_and_run_at_most_four_at_once() {
     let requested_sources = sources(6).unwrap();
     let (sender, receiver) = tokio::sync::watch::channel(SessionRecordsReloadRequest {
@@ -88,7 +178,9 @@ async fn all_source_reads_do_not_overwrite_each_other_and_run_at_most_four_at_on
     let (accepted_sender, mut accepted) = tokio::sync::mpsc::unbounded_channel();
     let worker = tokio::spawn(async move {
         run_session_record_reload_worker(receiver, loader, move |_request, snapshot| {
-            let _ = accepted_sender.send(snapshot);
+            if let Some(snapshot) = snapshot.into_snapshot() {
+                let _ = accepted_sender.send(snapshot);
+            }
         })
         .await;
     });
@@ -172,7 +264,9 @@ async fn stale_request_and_foreign_service_rows_are_rejected_before_publication(
         let (accepted_sender, mut accepted) = tokio::sync::mpsc::unbounded_channel();
         let worker = tokio::spawn(async move {
             run_session_record_reload_worker(receiver, loader, move |_request, result| {
-                let _ = accepted_sender.send(result);
+                if let Some(result) = result.into_snapshot() {
+                    let _ = accepted_sender.send(result);
+                }
             })
             .await;
         });
@@ -237,7 +331,9 @@ async fn default_attribution_is_not_remote_observation_even_when_service_and_id_
     let (accepted_sender, mut accepted) = tokio::sync::mpsc::unbounded_channel();
     let worker = tokio::spawn(async move {
         run_session_record_reload_worker(receiver, loader, move |_request, result| {
-            let _ = accepted_sender.send(result);
+            if let Some(result) = result.into_snapshot() {
+                let _ = accepted_sender.send(result);
+            }
         })
         .await;
     });
@@ -294,7 +390,9 @@ async fn superseded_view_cancels_owned_reads_and_publishes_only_the_new_generati
     let (accepted_sender, mut accepted) = tokio::sync::mpsc::unbounded_channel();
     let worker = tokio::spawn(async move {
         run_session_record_reload_worker(receiver, loader, move |request, result| {
-            let _ = accepted_sender.send((request, result));
+            if let Some(result) = result.into_snapshot() {
+                let _ = accepted_sender.send((request, result));
+            }
         })
         .await;
     });

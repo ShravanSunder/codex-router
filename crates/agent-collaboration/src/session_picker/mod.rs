@@ -13,6 +13,7 @@ mod picker_model_tests;
 mod picker_rendering;
 mod picker_request;
 mod source_inventory_request;
+mod source_reload_progress;
 mod source_reload_worker;
 pub(crate) use source_inventory_request::{
     PickerSourceContext, SourceInventoryRejection, SourceInventoryRequest, SourceInventoryResult,
