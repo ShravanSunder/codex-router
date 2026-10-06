@@ -104,7 +104,11 @@ async fn load_provider_records(
         NativeSessionView::Stored,
     ) {
         Ok(binding) => Some(binding.endpoint),
-        Err(NativeBindingRejection::EndpointUnavailable) => None,
+        // Native attribution is optional for this independent provider read. Ambiguity must
+        // not choose an arbitrary native source, or hide otherwise valid provider sessions.
+        Err(
+            NativeBindingRejection::EndpointUnavailable | NativeBindingRejection::AmbiguousEndpoint,
+        ) => None,
         Err(_) => return Err(ClientError::Protocol("invalid native inventory binding")),
     };
     let providers = inventory
