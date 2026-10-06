@@ -68,7 +68,7 @@ fn prepare_fixture(mode: ProviderFixtureMode) -> ProofResult<()> {
         managed_executable,
         root.join("codex-home/packages/standalone/current/codex"),
     )?;
-    let profile = "model = \"gpt-5.6-luna\"\nmodel_reasoning_effort = \"high\"\nmodel_provider = \"codex-router-debug\"\n\n[model_providers.codex-router-debug]\nname = \"isolated matrix router\"\nbase_url = \"http://127.0.0.1:43127/v1\"\nwire_api = \"responses\"\nrequires_openai_auth = false\nsupports_websockets = true\n";
+    let profile = "model = \"gpt-6-luna\"\nmodel_reasoning_effort = \"high\"\nmodel_provider = \"codex-router-debug\"\n\n[model_providers.codex-router-debug]\nname = \"isolated matrix router\"\nbase_url = \"http://127.0.0.1:43127/v1\"\nwire_api = \"responses\"\nrequires_openai_auth = false\nsupports_websockets = true\n";
     write_private_file(
         &root.join("codex-home/codex-router-debug.config.toml"),
         profile.as_bytes(),
@@ -78,7 +78,7 @@ fn prepare_fixture(mode: ProviderFixtureMode) -> ProofResult<()> {
         serde_json::to_string(&json!({
             "kind":"isolatedDeliveryMatrix",
             "profile":"codex-router-debug",
-            "model":"gpt-5.6-luna",
+            "model":"gpt-6-luna",
             "port":43127,
             "ownerHome":owner_home,
             "cliExecutable":foreground_cli_executable()?.canonicalize()?,

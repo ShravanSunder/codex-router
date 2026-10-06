@@ -506,7 +506,7 @@ pub(super) async fn create_existing_session_schedule(
                 enabled: false,
                 destination: ExecutionDestination::Unprepared,
                 execution_timeout_seconds: Some(120.try_into()?),
-                model: Some("gpt-5.6-luna".to_owned()),
+                model: Some("gpt-6-luna".to_owned()),
                 effort: Some("low".to_owned()),
             },
         })

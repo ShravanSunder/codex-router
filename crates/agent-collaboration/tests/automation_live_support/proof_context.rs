@@ -51,7 +51,7 @@ impl ProofContext {
         }
         let marker: Value =
             serde_json::from_slice(&std::fs::read(root.join("debug-host-context.json"))?)?;
-        if marker.get("model").and_then(Value::as_str) != Some("gpt-5.6-luna")
+        if marker.get("model").and_then(Value::as_str) != Some("gpt-6-luna")
             || marker.get("profile").and_then(Value::as_str) != Some("codex-router-debug")
             || marker
                 .get("port")
@@ -106,7 +106,7 @@ impl ProofContext {
                 .create_new(true)
                 .mode(0o600)
                 .open(root.join("proof-started.json"))?
-                .write_all(b"{\"model\":\"gpt-5.6-luna\"}\n")?;
+                .write_all(b"{\"model\":\"gpt-6-luna\"}\n")?;
         }
         let service_directory = root.join("agent-communication");
         let mut client =
@@ -240,7 +240,7 @@ impl ProofContext {
         });
         drop(reservation);
         let response = self.native.request_validated(&self.schemas, NativeOperation::StartThread, json!({
-            "model":"gpt-5.6-luna","allowProviderModelFallback":false,"cwd":working_directory,
+            "model":"gpt-6-luna","allowProviderModelFallback":false,"cwd":working_directory,
             "permissions":"automation-proof","approvalPolicy":"never","config":configuration,
             "developerInstructions":developer_instructions
         })).await;
@@ -255,11 +255,11 @@ impl ProofContext {
                 return Err(error.into());
             }
         };
-        if response.get("model").and_then(Value::as_str) != Some("gpt-5.6-luna")
+        if response.get("model").and_then(Value::as_str) != Some("gpt-6-luna")
             || response.get("modelProvider").and_then(Value::as_str) != Some("codex-router-debug")
         {
             return Err(
-                "Native thread did not confirm Luna on the debug provider; no turn was submitted"
+                "Native thread did not confirm gpt-6-luna on the debug provider; no turn was submitted"
                     .into(),
             );
         }
@@ -274,7 +274,12 @@ impl ProofContext {
         };
         self.record(
             "freshThread",
-            json!({"role":role,"target":target,"model":"gpt-5.6-luna"}),
+            json!({
+                "role":role,
+                "target":target,
+                "model":"gpt-6-luna",
+                "reasoningEffort":response.get("reasoningEffort")
+            }),
         )?;
         Ok(target)
     }

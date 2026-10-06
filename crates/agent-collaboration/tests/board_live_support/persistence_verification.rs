@@ -163,7 +163,7 @@ async fn validate_restarted_host(
         .get("runDirectory")
         .and_then(Value::as_str)
         .ok_or("resumed Host marker omitted its run directory")?;
-    if marker.get("model").and_then(Value::as_str) != Some("gpt-5.6-luna")
+    if marker.get("model").and_then(Value::as_str) != Some("gpt-6-luna")
         || marker.get("profile").and_then(Value::as_str) != Some("codex-router-debug")
         || marker
             .get("port")

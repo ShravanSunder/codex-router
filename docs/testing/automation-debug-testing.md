@@ -1,6 +1,6 @@
 # Testing scheduled automation locally
 
-Use the existing `codex-router-debug` profile and fresh test threads. The opt-in acceptance Host selects `gpt-5.6-luna` in memory, keeps normal Codex home, and puts its sockets, automation database and workspace in a new private directory under `/tmp`. It disables home hooks only in its owned test app-server so they cannot inject extra work. It uses the existing debug router credentials. It never edits the home profile or replaces the production router.
+Use the existing `codex-router-debug` profile and fresh test threads. The opt-in acceptance Host selects `gpt-6-luna` in memory, keeps normal Codex home, and puts its sockets, automation database and workspace in a new private directory under `/tmp`. It disables home hooks only in its owned test app-server so they cannot inject extra work. It uses the existing debug router credentials. It never edits the home profile or replaces the production router.
 
 ## Build once
 
@@ -201,11 +201,11 @@ the same binary with the explicit resume option:
 ```
 
 Resume accepts only an existing owner-private direct child of `/tmp` whose
-context marker still identifies the same `codex-router-debug` profile, Luna
-model, port, service directory and workspace. It refuses symlinks, a live old
-Host PID, a still-published service, or a mismatched marker. It preserves the
-service databases and replaces the context marker atomically with the new Host
-PID. Wait for `host status` and endpoint discovery to report readiness again,
+context marker still identifies the same `codex-router-debug` profile,
+`gpt-6-luna` model, port, service directory and workspace. It refuses symlinks,
+a live old Host PID, a still-published service, or a mismatched marker. It
+preserves the service databases and replaces the context marker atomically
+with the new Host PID. Wait for `host status` and endpoint discovery to report readiness again,
 then verify the new PID differs from the recorded PID before reading the board.
 Do not use resume after an indeterminate stop or with a directory from another
 test run.
