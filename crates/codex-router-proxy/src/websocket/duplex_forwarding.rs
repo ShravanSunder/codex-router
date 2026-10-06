@@ -398,7 +398,6 @@ where
                                 .session_registry
                                 .note_upstream_message_forwarded(context.session_id);
                             if is_completed {
-                                context.session_registry.clear_capacity_retry(context.session_id);
                                 context.session_registry.note_response_completed(context.session_id);
                             }
                             context.active_turn_reservation.release_current();

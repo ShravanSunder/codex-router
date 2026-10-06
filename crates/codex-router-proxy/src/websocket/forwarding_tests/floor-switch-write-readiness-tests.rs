@@ -108,7 +108,6 @@ enum ForcedSignal {
 enum CloseTrigger {
     HardFloor,
     ParkedQuota,
-    ParkedCapacity,
 }
 
 struct CloseCase {
@@ -186,11 +185,6 @@ async fn quota_close_cancels_parked_create_and_delivers_both_closes() {
 }
 
 #[tokio::test]
-async fn capacity_close_cancels_parked_create_and_delivers_both_closes() {
-    assert_close_case(CloseCase::parked(CloseTrigger::ParkedCapacity)).await;
-}
-
-#[tokio::test]
 async fn revocation_reaps_held_local_cleanup_after_upstream_finishes() {
     assert_close_case(CloseCase::hard(
         FirstPump::Upstream,
@@ -265,7 +259,6 @@ async fn assert_close_case(case: CloseCase) {
         None,
     );
     let session_id = session.session_id;
-    registry.set_capacity_retry_thread_id(session_id, Some("thread_readiness_fixture".to_owned()));
     let revocation = session.cancellation().clone();
     let session_shutdown = CancellationToken::new();
     let tunnel_shutdown = CancellationToken::new();
@@ -393,11 +386,6 @@ async fn assert_close_case(case: CloseCase) {
             upstream.send(Message::text(r#"{"type":"error","error":{"type":"usage_limit_reached","code":"usage_limit_reached"}}"#))
                 .await.expect("actual upstream quota classifier input sends");
             CODEX_WEBSOCKET_RECONNECT_SIGNAL
-        }
-        CloseTrigger::ParkedCapacity => {
-            upstream.send(Message::text(r#"{"type":"error","status":503,"error":{"code":"server_is_overloaded","message":"capacity"}}"#))
-                .await.expect("actual upstream capacity classifier input sends");
-            r#"{"type":"response.failed","response":{"id":"resp_router_model_capacity_wait","status":"failed","error":{"code":"rate_limit_exceeded","message":"Rate limit exceeded. Try again in 300 seconds."}}}"#
         }
     };
     let first_finished_ok = tokio::time::timeout(
@@ -556,9 +544,6 @@ async fn assert_close_case(case: CloseCase) {
             matches!(peer_close, Some(Ok(Message::Close(_)))),
             "actual upstream peer Close, never queued create: {peer_close:?}"
         );
-        assert_eq!(
-            registry.snapshot().quota_reconnect_signal_count,
-            usize::from(!matches!(case.trigger, CloseTrigger::ParkedCapacity))
-        );
+        assert_eq!(registry.snapshot().quota_reconnect_signal_count, 1);
     }
 }

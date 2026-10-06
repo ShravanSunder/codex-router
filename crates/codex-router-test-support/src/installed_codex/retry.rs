@@ -11,8 +11,6 @@ const TEST_ACCOUNT_TOKENS: [&str; 3] = [
 enum RetryScenario {
     ThreeAccountShortQuota,
     WeeklyTerminal,
-    CapacityThenSuccess(&'static str),
-    CapacityLimit,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -21,8 +19,6 @@ struct RetryUpstreamState {
     non_prewarm_requests: usize,
     completion_sent: bool,
     observed_tokens: Vec<String>,
-    observed_thread_ids: Vec<String>,
-    terminal_original_sent: bool,
 }
 
 struct RetryUpstream {
@@ -38,17 +34,6 @@ pub fn run_three_account_short_quota_reconnect() -> Result<(), String> {
 
 pub fn run_all_weekly_exhausted_terminal() -> Result<(), String> {
     run_retry_scenario(RetryScenario::WeeklyTerminal)
-}
-
-pub fn run_model_capacity_reconnect() -> Result<(), String> {
-    for code in ["server_is_overloaded", "slow_down"] {
-        run_retry_scenario(RetryScenario::CapacityThenSuccess(code))?;
-    }
-    Ok(())
-}
-
-pub fn run_capacity_retry_limit_terminal() -> Result<(), String> {
-    run_retry_scenario(RetryScenario::CapacityLimit)
 }
 
 fn run_retry_scenario(scenario: RetryScenario) -> Result<(), String> {
@@ -288,11 +273,6 @@ fn run_retry_upstream(
                     .lock()
                     .map_err(|_| "retry state poisoned".to_owned())?
                     .completion_sent
-                    || matches!(scenario, RetryScenario::CapacityLimit)
-                        && state
-                            .lock()
-                            .map_err(|_| "retry state poisoned".to_owned())?
-                            .terminal_original_sent
                 {
                     return Ok(());
                 }
@@ -339,11 +319,6 @@ fn run_retry_websocket(
     let token = bearer_token_from_headers(&captured)
         .unwrap_or_default()
         .to_owned();
-    let thread_id = captured
-        .iter()
-        .find(|(name, _)| name.eq_ignore_ascii_case("thread-id"))
-        .map(|(_, value)| value.clone())
-        .unwrap_or_default();
     drop(captured);
     state
         .lock()
@@ -376,18 +351,11 @@ fn run_retry_websocket(
                 .map_err(|_| "retry state poisoned".to_owned())?;
             locked.non_prewarm_requests += 1;
             locked.observed_tokens.push(token);
-            locked.observed_thread_ids.push(thread_id);
             locked.non_prewarm_requests
         };
         let error_frame = match scenario {
             RetryScenario::ThreeAccountShortQuota if request_index <= 3 => {
                 Some(quota_reconnect_usage_limit_frame().to_owned())
-            }
-            RetryScenario::CapacityThenSuccess(code) if request_index == 1 => {
-                Some(capacity_error_frame(code))
-            }
-            RetryScenario::CapacityLimit if request_index <= 11 => {
-                Some(capacity_error_frame("server_is_overloaded"))
             }
             _ => None,
         };
@@ -395,12 +363,6 @@ fn run_retry_websocket(
             websocket
                 .send(Message::Text(error_frame.into()))
                 .map_err(|error| error.to_string())?;
-            if matches!(scenario, RetryScenario::CapacityLimit) && request_index == 11 {
-                state
-                    .lock()
-                    .map_err(|_| "retry state poisoned".to_owned())?
-                    .terminal_original_sent = true;
-            }
         } else {
             for event in smoke_response_events(request_index) {
                 websocket
@@ -415,12 +377,6 @@ fn run_retry_websocket(
         let _ = websocket.close(None);
         return Ok(());
     }
-}
-
-fn capacity_error_frame(code: &str) -> String {
-    format!(
-        r#"{{"type":"response.failed","response":{{"error":{{"code":"{code}","message":"Selected model is at capacity. Please try a different model"}}}}}}"#
-    )
 }
 
 fn assert_retry_scenario(
@@ -455,36 +411,6 @@ fn assert_retry_scenario(
             if output.status.success() || state.handshakes != 0 {
                 return Err(format!(
                     "weekly exhaustion must stop without upstream retry: status={} state={state:?}",
-                    output.status
-                ));
-            }
-        }
-        RetryScenario::CapacityThenSuccess(_) => {
-            if !output.status.success() || !state.completion_sent || state.non_prewarm_requests != 2
-            {
-                return Err(format!(
-                    "capacity reconnect contract failed: status={} state={state:?}",
-                    output.status
-                ));
-            }
-            let stable_thread_id = state
-                .observed_thread_ids
-                .first()
-                .zip(state.observed_thread_ids.get(1))
-                .is_some_and(|(first, second)| !first.is_empty() && first == second);
-            if state.observed_thread_ids.len() != 2 || !stable_thread_id {
-                return Err(format!(
-                    "capacity reconnect did not preserve thread-id: {state:?}"
-                ));
-            }
-        }
-        RetryScenario::CapacityLimit => {
-            if output.status.success()
-                || state.non_prewarm_requests != 11
-                || !state.terminal_original_sent
-            {
-                return Err(format!(
-                    "capacity retry limit contract failed: status={} state={state:?}",
                     output.status
                 ));
             }

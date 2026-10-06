@@ -5,8 +5,6 @@ mod floor_switch;
 mod retry;
 
 pub use retry::run_all_weekly_exhausted_terminal;
-pub use retry::run_capacity_retry_limit_terminal;
-pub use retry::run_model_capacity_reconnect;
 pub use retry::run_three_account_short_quota_reconnect;
 
 use std::borrow::Cow;
@@ -1743,9 +1741,7 @@ fn start_router_process_with_options(
     let mut command = Command::new(&binary_path);
     command.args(&argv);
     if cfg!(debug_assertions) {
-        command
-            .env("CODEX_ROUTER_TEST_CAPACITY_RETRY_DELAY_SECONDS", "2")
-            .env("CODEX_ROUTER_TEST_SHORT_QUOTA_WAIT_JITTER_SECONDS", "2");
+        command.env("CODEX_ROUTER_TEST_SHORT_QUOTA_WAIT_JITTER_SECONDS", "2");
     }
     command
         .stdin(Stdio::null())

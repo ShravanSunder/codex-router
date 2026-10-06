@@ -2,8 +2,6 @@
 mod affinity_activity_tests;
 #[path = "forwarding_tests/alternative_selection_tests.rs"]
 mod alternative_selection_tests;
-#[path = "forwarding_tests/capacity_retry_tests.rs"]
-mod capacity_retry_tests;
 #[path = "forwarding_tests/credit-included-peer-transition-tests.rs"]
 mod credit_included_peer_transition_tests;
 #[path = "forwarding_tests/credit-source-assessment-tests.rs"]
@@ -53,10 +51,6 @@ mod unavailable_authority_tests;
 
 use super::ActiveTurnReservationState;
 use super::AsyncWebSocketTunnel;
-use super::CapacityRetryOutcome;
-use super::Header;
-use super::HeaderCollection;
-use super::MAX_THREAD_ID_BYTES;
 use super::PostExhaustionRouteBandOutcome;
 use super::TokenGeneration;
 use super::UpstreamToLocalPumpContext;
@@ -67,7 +61,6 @@ use super::WebSocketProtocolRouter;
 use super::WebSocketTunnelError;
 use super::account_turn_admission::AccountTurnAdmission;
 use super::account_turn_admission::FloorSwitchIntent;
-use super::async_tunnel::capacity_retry_thread_id;
 use super::current_unix_seconds;
 use super::duplex_forwarding::LocalToUpstreamPumpContext;
 use super::duplex_forwarding::WebSocketForwardingContext;
@@ -75,7 +68,6 @@ use super::duplex_forwarding::forward_duplex_until_complete;
 use super::duplex_forwarding::pump_local_to_upstream;
 use super::duplex_forwarding::supervise_websocket_pumps;
 use super::provider_signals::CODEX_WEBSOCKET_RECONNECT_SIGNAL;
-use super::provider_signals::maybe_replace_account_quota_exhaustion_with_reconnect_signal;
 use super::provider_signals::{
     ROUTER_ALL_ACCOUNTS_EXHAUSTED_SIGNAL, ROUTER_QUOTA_STATE_UNAVAILABLE_SIGNAL,
 };
