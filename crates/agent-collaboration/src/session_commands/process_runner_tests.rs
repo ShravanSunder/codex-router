@@ -83,6 +83,8 @@ fn hosted_selection_cannot_fall_back_to_a_local_process_for_resume_or_fork() {
                 "sessionId": SESSION_ID,
             })).unwrap(),
         ),
+        source_context: None,
+        provenance: crate::sessions::SessionRowProvenance::ObservedHosted,
         model_choice: ResumeModelChoice::default(),
     };
     let mut runner = ProcessSessionsCommandRunner {
@@ -101,4 +103,38 @@ fn hosted_selection_cannot_fall_back_to_a_local_process_for_resume_or_fork() {
             SessionsCommandError::SessionSourceUnavailable
         ));
     }
+}
+
+#[test]
+fn configured_source_context_cannot_be_reinterpreted_as_a_default_native_launch() {
+    let registry = crate::sessions::router_connection_registry::RouterConnectionRegistry::parse(
+        r#"{
+        "version":1,"routers":[{"name":"Configured machine", "connection":{"kind":"remote",
+        "serviceId":"00000000-0000-4000-8000-000000000001","mcpUrl":"http://127.0.0.1:18788/mcp"}}]
+    }"#,
+    )
+    .unwrap();
+    let mut selection = crate::sessions::SessionActionSelection::default_catalog(
+        SESSION_ID.to_owned(),
+        ResumeModelChoice::default(),
+    );
+    selection.source_context = Some(
+        crate::presentation::session_picker::PickerSourceContext::ConfiguredHosted(
+            registry.routers[0].clone(),
+        ),
+    );
+    let mut runner = ProcessSessionsCommandRunner {
+        launch_target: SessionsLaunchTarget::Local {
+            invoking_cwd: PathBuf::from("/unused"),
+            profile: codex_native_integration::SessionProfile::Router,
+        },
+    };
+    assert!(matches!(
+        runner.run_codex_resume(&[], &selection),
+        Err(SessionsCommandError::SessionSourceUnqualified)
+    ));
+    assert!(matches!(
+        runner.run_codex_fork(&[], &selection),
+        Err(SessionsCommandError::SessionSourceUnqualified)
+    ));
 }

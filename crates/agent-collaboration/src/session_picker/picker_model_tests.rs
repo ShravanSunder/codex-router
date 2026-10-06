@@ -30,6 +30,8 @@ fn hosted_picker_keeps_equal_codex_and_provider_ids_distinct_and_provider_read_o
     .expect("provider row");
     let mut codex = request.records.remove(0);
     codex.identity = SessionPickerIdentity::HostedCodex(codex_target.clone());
+    codex.source_context =
+        Some(crate::presentation::session_picker::PickerSourceContext::DefaultHosted);
     let codex_selection = crate::sessions::SessionActionSelection::from_picker_record(&codex);
     request.records = vec![
         codex,

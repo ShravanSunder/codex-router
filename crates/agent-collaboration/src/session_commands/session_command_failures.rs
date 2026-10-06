@@ -35,6 +35,9 @@ pub enum SessionsCommandError {
     /// Interactive picker cannot render inside the current terminal width.
     #[error("sessions interactive picker requires a wider terminal")]
     TerminalTooNarrow,
+    /// The selected configured source has no qualified native attachment/policy route.
+    #[error("selected machine execution route needs verification")]
+    SessionSourceUnqualified,
     /// The selected source has no native route in this launch context.
     #[error("selected session source is unavailable in this launch context")]
     SessionSourceUnavailable,

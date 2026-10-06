@@ -6,7 +6,9 @@ use std::path::PathBuf;
 use codex_native_integration::AppServerCommandSpec;
 use codex_native_integration::CodexPaths;
 use codex_native_integration::CodexRouterProfile;
+use codex_native_integration::NativeWorkingDirectoryMetadata;
 use codex_native_integration::SessionLaunch;
+use codex_native_integration::native_working_directory_metadata;
 use codex_native_integration::profile_remote_resume_permission_keys;
 
 #[test]
@@ -305,6 +307,114 @@ fn session_launch_preserves_every_explicit_cwd_spelling_without_injecting_a_dupl
             )
             .arguments(),
             expected_arguments,
+        );
+    }
+}
+
+#[test]
+fn native_working_directory_metadata_defaults_to_the_invoking_directory() {
+    let invoking_directory = PathBuf::from("/Users/owner/invoking-project");
+
+    assert_eq!(
+        native_working_directory_metadata(&invoking_directory, &[]),
+        NativeWorkingDirectoryMetadata::Invoking {
+            directory: invoking_directory,
+        },
+    );
+}
+
+#[test]
+fn native_working_directory_metadata_recognizes_explicit_spellings_without_changing_argv() {
+    let invoking_directory = PathBuf::from("/Users/owner/invoking-project");
+    let explicit_directory = OsString::from("/Users/owner/explicit-project");
+    let explicit_cwd_spellings = [
+        vec![OsString::from("--cd"), explicit_directory.clone()],
+        vec![OsString::from("--cd=/Users/owner/explicit-project")],
+        vec![OsString::from("-C"), explicit_directory.clone()],
+        vec![OsString::from("-C/Users/owner/explicit-project")],
+    ];
+
+    for user_arguments in explicit_cwd_spellings {
+        assert_eq!(
+            native_working_directory_metadata(&invoking_directory, &user_arguments),
+            NativeWorkingDirectoryMetadata::Explicit {
+                directory: explicit_directory.clone(),
+            },
+        );
+        let mut expected_arguments =
+            vec![OsString::from("--profile"), OsString::from("codex-router")];
+        expected_arguments.extend(user_arguments.iter().cloned());
+        assert_eq!(
+            SessionLaunch::local(&invoking_directory, &user_arguments).arguments(),
+            expected_arguments,
+        );
+    }
+}
+
+#[test]
+fn native_working_directory_metadata_rejects_missing_values_and_multiple_overrides() {
+    let invoking_directory = PathBuf::from("/Users/owner/invoking-project");
+    let unresolved_arguments = [
+        vec![OsString::from("--cd")],
+        vec![OsString::from("-C")],
+        vec![
+            OsString::from("--cd"),
+            OsString::from("/first"),
+            OsString::from("--cd=/second"),
+        ],
+        vec![
+            OsString::from("-C"),
+            OsString::from("/first"),
+            OsString::from("-C/second"),
+        ],
+    ];
+
+    for user_arguments in unresolved_arguments {
+        assert_eq!(
+            native_working_directory_metadata(&invoking_directory, &user_arguments),
+            NativeWorkingDirectoryMetadata::UnresolvedExplicit,
+        );
+    }
+}
+
+#[test]
+fn native_working_directory_metadata_preserves_an_empty_inline_value() {
+    let invoking_directory = PathBuf::from("/Users/owner/invoking-project");
+
+    assert_eq!(
+        native_working_directory_metadata(&invoking_directory, &[OsString::from("--cd=")]),
+        NativeWorkingDirectoryMetadata::Explicit {
+            directory: OsString::new(),
+        },
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn native_working_directory_metadata_preserves_non_utf8_explicit_values() {
+    use std::os::unix::ffi::OsStringExt;
+
+    let invoking_directory = PathBuf::from("/Users/owner/invoking-project");
+    let directory_bytes = b"/tmp/project-\xff".to_vec();
+    let explicit_directory = OsString::from_vec(directory_bytes.clone());
+    let separate_arguments = [OsString::from("--cd"), explicit_directory.clone()];
+    let inline_arguments = [OsString::from_vec(
+        [b"--cd=".as_slice(), directory_bytes.as_slice()].concat(),
+    )];
+    let short_arguments = [OsString::from_vec(
+        [b"-C".as_slice(), directory_bytes.as_slice()].concat(),
+    )];
+
+    for user_arguments in [
+        separate_arguments.as_slice(),
+        inline_arguments.as_slice(),
+        short_arguments.as_slice(),
+    ] {
+        assert_eq!(
+            native_working_directory_metadata(&invoking_directory, user_arguments),
+            NativeWorkingDirectoryMetadata::Explicit {
+                directory: explicit_directory.clone(),
+            },
         );
     }
 }

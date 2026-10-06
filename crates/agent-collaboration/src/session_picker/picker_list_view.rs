@@ -276,7 +276,11 @@ pub(super) fn render_record_row(
                 Text(content: " ")
                 View(width: age_width as u32, overflow: Overflow::Hidden, justify_content: JustifyContent::FlexEnd) { Text(content: compact_age(&record.created), color: foreground, weight: Weight::Bold, wrap: TextWrap::NoWrap) }
             }
-            Text(content: second_line, color: metadata, weight: Weight::Light, wrap: TextWrap::NoWrap)
+            View(width: 100pct, column_gap: 1, overflow: Overflow::Hidden) {
+                Text(content: record.machine_label(), color: metadata, weight: Weight::Light, wrap: TextWrap::NoWrap)
+                Text(content: "·", color: metadata)
+                Text(content: second_line, color: metadata, weight: Weight::Light, wrap: TextWrap::NoWrap)
+            }
         }
     }
     .into_any()

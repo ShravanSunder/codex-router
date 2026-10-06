@@ -19,6 +19,36 @@ use crate::sessions::SessionsProvider;
 use crate::sessions::SessionsSort;
 use crate::sessions::SessionsSource;
 
+#[path = "picker_fork_tests.rs"]
+mod picker_fork_tests;
+
+// Blocking external fixture procedures run off the executor; production loaders are async.
+fn fixture_record_loader<FixtureProcedure>(
+    procedure: FixtureProcedure,
+) -> SessionsPickerRecordLoader
+where
+    FixtureProcedure: Fn(
+            SessionsPickerDataQuery,
+        ) -> Result<crate::picker_runtime_status::PickerRecordsSnapshot, String>
+        + Send
+        + Sync
+        + 'static,
+{
+    let procedure = Arc::new(procedure);
+    Arc::new(move |request| {
+        let procedure = Arc::clone(&procedure);
+        Box::pin(async move {
+            let query = request.query.clone();
+            match tokio::task::spawn_blocking(move || procedure(query)).await {
+                Ok(Ok(snapshot)) => crate::presentation::session_picker::SourceInventoryResult::Ready { request, snapshot },
+                Ok(Err(_)) | Err(_) => crate::presentation::session_picker::SourceInventoryResult::Rejected {
+                    request, reason: crate::presentation::session_picker::SourceInventoryRejection::SourceUnavailable,
+                },
+            }
+        })
+    })
+}
+
 fn reload_query(search: &str) -> SessionsPickerDataQuery {
     SessionsPickerDataQuery {
         root: SessionsRoot::Any,
@@ -116,6 +146,8 @@ fn capture_record(
 ) -> SessionPickerRecord {
     SessionPickerRecord {
         identity: crate::sessions::SessionPickerIdentity::LocalCodex(session_id.to_owned()),
+        source_context: None,
+        provenance: crate::sessions::SessionRowProvenance::LocalHomeCatalog,
         endpoint_label: None,
         provider_state: None,
         session_id: session_id.to_owned(),

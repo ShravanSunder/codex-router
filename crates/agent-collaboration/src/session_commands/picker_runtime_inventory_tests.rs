@@ -531,3 +531,22 @@ fn ephemeral_system_runtime_record_preserves_system_classification() {
     assert_eq!(row.thread_source.as_deref(), Some("system"));
     assert_eq!(row.source.as_deref(), Some("vscode"));
 }
+
+#[test]
+fn hosted_display_attribution_is_separate_from_actual_runtime_observation() {
+    let local = runtime_record("legacy-id", "Local catalog", "/owned/project", &json!({}));
+    assert_eq!(
+        local.provenance,
+        super::super::SessionRowProvenance::LocalHomeCatalog
+    );
+    let endpoint: EndpointRef = serde_json::from_value(endpoint()).unwrap();
+    let attributed = local.with_hosted_codex(&endpoint);
+    assert_eq!(
+        attributed.provenance,
+        super::super::SessionRowProvenance::DefaultAttributed
+    );
+    assert!(matches!(
+        attributed.identity,
+        SessionPickerIdentity::HostedCodex(_)
+    ));
+}

@@ -346,7 +346,16 @@ impl crate::sessions::SessionsPicker for FakeSessionsPicker {
             .collect();
         if let Some(record_loader) = record_loader {
             for query in self.loader_queries.clone() {
-                let records = record_loader(query).map_err(|error| {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .map_err(crate::sessions::SessionsCommandError::Runtime)?;
+                let records = runtime.block_on(record_loader(crate::presentation::session_picker::SourceInventoryRequest {
+                    source_context: match request.machine_mode {
+                        crate::presentation::session_picker::PickerMachineSourceMode::HostedDefault => crate::presentation::session_picker::PickerSourceContext::DefaultHosted,
+                        crate::presentation::session_picker::PickerMachineSourceMode::LocalCodex => crate::presentation::session_picker::PickerSourceContext::LocalCodex,
+                    }, query, request_generation: 0,
+                })).into_snapshot().map_err(|error| {
                     crate::sessions::SessionsCommandError::Picker(std::io::Error::other(error))
                 })?;
                 self.capture_selected_record(&records.records);

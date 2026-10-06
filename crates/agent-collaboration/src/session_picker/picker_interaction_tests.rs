@@ -30,6 +30,7 @@ async fn provider_selection_shows_read_only_details_without_a_codex_outcome() {
             alt_enter_key(),
             TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Enter)),
             TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Esc)),
+            ctrl_key('c'),
         ],
     )))
     .map(|canvas| canvas.to_string())
@@ -90,7 +91,10 @@ async fn sessions_picker_option_enter_forks_the_focused_existing_session() {
         )
     }
     .mock_terminal_render_loop(MockTerminalConfig::with_events(futures_util::stream::iter(
-        vec![alt_enter_key()],
+        vec![
+            alt_enter_key(),
+            TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Enter)),
+        ],
     )))
     .map(|canvas| canvas.to_string())
     .collect::<Vec<_>>()
@@ -543,5 +547,37 @@ async fn picker_control_g_opens_a_visible_machine_selector_without_selecting_an_
     assert_eq!(
         selected_outcome, None,
         "opening/canceling the selector never launches"
+    );
+}
+
+#[tokio::test]
+async fn alt_enter_opens_fork_confirmation_before_any_action_is_selected() {
+    let mut outcome = Option::<SessionsPickerOutcome>::None;
+    let (send_event, receive_event) = tokio::sync::mpsc::unbounded_channel();
+    send_event.send(alt_enter_key()).unwrap();
+    let events = futures_util::stream::unfold(receive_event, |mut receiver| async {
+        receiver.recv().await.map(|event| (event, receiver))
+    });
+    let frames = tokio::time::timeout(Duration::from_secs(2), async {
+        let mut picker = element! { SessionsPickerComponent(request: picker_request(), width: 100usize,
+            height: 40usize, selected_outcome_out: &mut outcome) };
+        let canvases = picker.mock_terminal_render_loop(MockTerminalConfig::with_events(events));
+        tokio::pin!(canvases);
+        let mut frames = Vec::new();
+        let mut opened = false;
+        while let Some(canvas) = canvases.next().await {
+            let text = canvas.to_string();
+            if !opened && text.contains("Fork session") {
+                opened = true;
+                send_event.send(ctrl_key('c')).unwrap();
+            }
+            frames.push(text);
+        }
+        frames
+    }).await.unwrap();
+    assert!(frames.iter().any(|frame| frame.contains("Fork session")));
+    assert_eq!(
+        outcome, None,
+        "opening/canceling fork confirmation creates no fork"
     );
 }

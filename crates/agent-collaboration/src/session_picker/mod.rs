@@ -2,6 +2,8 @@ mod interactive_row;
 mod picker_actions;
 mod picker_component;
 mod picker_filters;
+mod picker_fork_confirmation;
+mod picker_fork_view;
 mod picker_machine_controls;
 mod picker_machine_view;
 mod picker_model;
@@ -10,6 +12,11 @@ pub(crate) use picker_machine_controls::PickerMachineSourceMode;
 mod picker_model_tests;
 mod picker_rendering;
 mod picker_request;
+mod source_inventory_request;
+mod source_reload_worker;
+pub(crate) use source_inventory_request::{
+    PickerSourceContext, SourceInventoryRejection, SourceInventoryRequest, SourceInventoryResult,
+};
 #[cfg(test)]
 mod picker_source_identity_tests;
 #[cfg(any(test, feature = "quota-reset-test-harness"))]

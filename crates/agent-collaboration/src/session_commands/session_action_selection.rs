@@ -5,6 +5,8 @@ use codex_native_integration::ResumeModelChoice;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct SessionActionSelection {
     pub(crate) identity: SessionPickerIdentity,
+    pub(crate) provenance: super::SessionRowProvenance,
+    pub(crate) source_context: Option<crate::presentation::session_picker::PickerSourceContext>,
     pub(crate) model_choice: ResumeModelChoice,
 }
 
@@ -20,6 +22,8 @@ impl SessionActionSelection {
         }
         Self {
             identity: record.identity.clone(),
+            provenance: record.provenance,
+            source_context: record.source_context.clone(),
             model_choice: ResumeModelChoice::from_stored_values(model, effort),
         }
     }
@@ -27,6 +31,8 @@ impl SessionActionSelection {
     pub(crate) fn default_catalog(session_id: String, model_choice: ResumeModelChoice) -> Self {
         Self {
             identity: SessionPickerIdentity::LocalCodex(session_id),
+            provenance: super::SessionRowProvenance::LocalHomeCatalog,
+            source_context: None,
             model_choice,
         }
     }

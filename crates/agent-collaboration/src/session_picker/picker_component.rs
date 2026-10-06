@@ -68,11 +68,7 @@ pub(crate) struct SessionsPickerComponentProps<'a> {
     selected_outcome_out: Option<&'a mut Option<SessionsPickerOutcome>>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct SessionRecordsReloadRequest {
-    generation: u64,
-    query: SessionsPickerDataQuery,
-}
+use super::source_reload_worker::{SessionRecordsReloadRequest, run_session_record_reload_worker};
 
 #[derive(Clone)]
 struct SessionRecordsReloadPort {
@@ -81,10 +77,14 @@ struct SessionRecordsReloadPort {
 }
 
 impl SessionRecordsReloadPort {
-    fn new(initial_query: SessionsPickerDataQuery) -> Self {
+    fn new(
+        initial_query: SessionsPickerDataQuery,
+        sources: Vec<super::PickerSourceContext>,
+    ) -> Self {
         let (sender, receiver) = tokio::sync::watch::channel(SessionRecordsReloadRequest {
             generation: 0,
             query: initial_query,
+            sources,
         });
         Self {
             sender,
@@ -144,7 +144,7 @@ pub(crate) fn SessionsPickerComponent<'a>(
     let mut conversation_cache = hooks.use_state(ConversationPreviewCache::default);
     let reload_generation = hooks.use_state(|| 0_u64);
     let reload_port = hooks.use_memo(
-        || SessionRecordsReloadPort::new(model.read().data_query()),
+        || SessionRecordsReloadPort::new(model.read().data_query(), model.read().source_contexts()),
         (),
     );
     hooks.use_future({
@@ -160,10 +160,12 @@ pub(crate) fn SessionsPickerComponent<'a>(
                     return;
                 }
                 let mut model_value = model.write();
-                if model_value.data_query() == request.query {
+                if model_value.data_query() == request.query
+                    && model_value.source_contexts() == request.sources
+                {
                     match records {
                         Ok(records) => model_value.replace_records(records),
-                        Err(()) => model_value.invalidate_runtime_statuses(),
+                        Err(_) => model_value.invalidate_runtime_statuses(),
                     }
                 }
             })
@@ -176,6 +178,7 @@ pub(crate) fn SessionsPickerComponent<'a>(
             reload_port.send(SessionRecordsReloadRequest {
                 generation: reload_generation.get(),
                 query: model.read().data_query(),
+                sources: model.read().source_contexts(),
             });
             let mut refresh_interval = tokio::time::interval(Duration::from_secs(3));
             refresh_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -183,6 +186,7 @@ pub(crate) fn SessionsPickerComponent<'a>(
             loop {
                 refresh_interval.tick().await;
                 if model.read().machine_controls.filter != PickerMachineFilter::Default
+                    || model.read().fork_confirmation.is_some()
                     || !matches!(
                         model.read().machine_controls.stage,
                         PickerMachineStage::Browsing
@@ -193,6 +197,7 @@ pub(crate) fn SessionsPickerComponent<'a>(
                 reload_port.send(SessionRecordsReloadRequest {
                     generation: reload_generation.get(),
                     query: model.read().data_query(),
+                    sources: model.read().source_contexts(),
                 });
             }
         }
@@ -252,6 +257,22 @@ pub(crate) fn SessionsPickerComponent<'a>(
                 selected_outcome.set(None);
                 return;
             }
+            if let Some(confirmation) = model_value.fork_confirmation.as_mut() {
+                match code {
+                    KeyCode::Up => confirmation.move_destination(-1),
+                    KeyCode::Down => confirmation.move_destination(1),
+                    KeyCode::Esc => model_value.fork_confirmation = None,
+                    KeyCode::Enter
+                        if !modifiers.intersects(
+                            KeyModifiers::ALT | KeyModifiers::CONTROL | KeyModifiers::SUPER,
+                        ) =>
+                    {
+                        selected_outcome.set(confirmation.confirm());
+                    }
+                    _ => {}
+                }
+                return;
+            }
             if matches!(
                 model_value.machine_controls.stage,
                 PickerMachineStage::Choosing { .. }
@@ -268,10 +289,20 @@ pub(crate) fn SessionsPickerComponent<'a>(
                             KeyModifiers::ALT | KeyModifiers::CONTROL | KeyModifiers::SUPER,
                         ) =>
                     {
+                        let previous_filter = model_value.machine_controls.filter;
                         if model_value.machine_controls.select_choice(&registry, mode) {
                             selected_outcome.set(Some(SessionsPickerOutcome::StartNewSession));
                         }
                         conversation_cache.write().invalidate();
+                        if model_value.machine_controls.filter != previous_filter {
+                            let generation = reload_generation.get().saturating_add(1);
+                            reload_generation.set(generation);
+                            reload_port.send(SessionRecordsReloadRequest {
+                                generation,
+                                query: model_value.data_query(),
+                                sources: model_value.source_contexts(),
+                            });
+                        }
                     }
                     _ => {}
                 }
@@ -332,6 +363,7 @@ pub(crate) fn SessionsPickerComponent<'a>(
                     reload_port.send(SessionRecordsReloadRequest {
                         generation: reload_generation.get(),
                         query: model_value.data_query(),
+                        sources: model_value.source_contexts(),
                     });
                 }
                 KeyCode::F(1) | KeyCode::Char('\u{1f}') => {
@@ -356,9 +388,7 @@ pub(crate) fn SessionsPickerComponent<'a>(
                     model_value.handle_key(SessionsPickerKey::SearchChar(character));
                 }
                 KeyCode::Enter if modifiers.contains(KeyModifiers::ALT) => {
-                    if let Some(outcome) = model_value.fork_outcome_for_focus() {
-                        selected_outcome.set(Some(outcome));
-                    }
+                    model_value.open_fork_confirmation();
                 }
                 KeyCode::Enter => {
                     let outcome = if model_value.focused_identity().is_none() {
@@ -376,6 +406,13 @@ pub(crate) fn SessionsPickerComponent<'a>(
                     {
                         model_value.machine_controls.filter = PickerMachineFilter::Default;
                         conversation_cache.write().invalidate();
+                        let generation = reload_generation.get().saturating_add(1);
+                        reload_generation.set(generation);
+                        reload_port.send(SessionRecordsReloadRequest {
+                            generation,
+                            query: model_value.data_query(),
+                            sources: model_value.source_contexts(),
+                        });
                     } else if model_value.search.is_empty() {
                         should_cancel.set(true);
                     } else {
@@ -394,6 +431,7 @@ pub(crate) fn SessionsPickerComponent<'a>(
                 reload_port.send(SessionRecordsReloadRequest {
                     generation,
                     query: next_query,
+                    sources: model.read().source_contexts(),
                 });
             }
         }
@@ -424,6 +462,10 @@ pub(crate) fn SessionsPickerComponent<'a>(
                 Text(content: "terminal too narrow\n")
             }
         };
+    }
+
+    if let Some(confirmation) = &model.read().fork_confirmation {
+        return super::picker_fork_view::render_fork_confirmation(confirmation, width, height);
     }
 
     if !matches!(
@@ -461,27 +503,6 @@ pub(crate) fn SessionsPickerComponent<'a>(
         height,
         minimum_render_height,
     )
-}
-
-async fn run_session_record_reload_worker(
-    mut receiver: tokio::sync::watch::Receiver<SessionRecordsReloadRequest>,
-    loader: SessionsPickerRecordLoader,
-    mut accept_records: impl FnMut(
-        SessionRecordsReloadRequest,
-        Result<crate::picker_runtime_status::PickerRecordsSnapshot, ()>,
-    ),
-) {
-    while receiver.changed().await.is_ok() {
-        let request = receiver.borrow_and_update().clone();
-        let query = request.query.clone();
-        let loader = loader.clone();
-        let loaded_records = tokio::task::spawn_blocking(move || loader(query)).await;
-        let records = match loaded_records {
-            Ok(Ok(records)) => Ok(records),
-            Ok(Err(_)) | Err(_) => Err(()),
-        };
-        accept_records(request, records);
-    }
 }
 
 pub(crate) fn run_sessions_picker(

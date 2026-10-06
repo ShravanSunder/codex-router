@@ -31,9 +31,19 @@ impl SessionPickerIdentity {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SessionRowProvenance {
+    LocalHomeCatalog,
+    DefaultAttributed,
+    ObservedHosted,
+    ObservedProvider,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct SessionPickerRecord {
     pub(crate) identity: SessionPickerIdentity,
+    pub(crate) provenance: SessionRowProvenance,
+    pub(crate) source_context: Option<crate::presentation::session_picker::PickerSourceContext>,
     pub(crate) endpoint_label: Option<String>,
     pub(crate) provider_state: Option<ProviderSessionState>,
     pub(crate) session_id: String,
@@ -69,6 +79,18 @@ pub(crate) struct SessionConversationPreview {
 }
 
 impl SessionPickerRecord {
+    pub(crate) fn machine_label(&self) -> &str {
+        match &self.source_context {
+            Some(crate::presentation::session_picker::PickerSourceContext::ConfiguredHosted(
+                profile,
+            )) => profile.name.as_str(),
+            Some(crate::presentation::session_picker::PickerSourceContext::LocalCodex) => {
+                "Local Codex"
+            }
+            Some(crate::presentation::session_picker::PickerSourceContext::DefaultHosted)
+            | None => "This machine",
+        }
+    }
     pub(crate) fn matches_search(
         &self,
         expression: &collaboration_client::session_catalog::SessionSearchExpression,
@@ -102,6 +124,8 @@ impl SessionPickerRecord {
         .unwrap_or_else(|| "Untitled session".to_owned());
         Self {
             identity: SessionPickerIdentity::LocalCodex(record.session_id.clone()),
+            source_context: None,
+            provenance: SessionRowProvenance::LocalHomeCatalog,
             endpoint_label: None,
             provider_state: None,
             session_id: record.session_id.clone(),
@@ -141,6 +165,7 @@ impl SessionPickerRecord {
 
     pub(crate) fn with_hosted_codex(mut self, endpoint: &EndpointRef) -> Self {
         if let Ok(session_id) = self.session_id.clone().try_into() {
+            self.provenance = SessionRowProvenance::DefaultAttributed;
             self.identity = SessionPickerIdentity::HostedCodex(SessionRef {
                 endpoint: endpoint.clone(),
                 session_id,
@@ -212,6 +237,8 @@ impl SessionPickerRecord {
         let context = session_context_from_cwd(&cwd);
         Self {
             identity: SessionPickerIdentity::HostedProvider(target.clone()),
+            source_context: None,
+            provenance: SessionRowProvenance::ObservedProvider,
             endpoint_label: Some(endpoint_label.to_owned()),
             provider_state,
             session_id,

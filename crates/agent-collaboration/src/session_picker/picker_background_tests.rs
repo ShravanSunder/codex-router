@@ -5,6 +5,7 @@ async fn session_record_reload_worker_runs_single_flight_and_keeps_only_latest_p
     let initial_request = SessionRecordsReloadRequest {
         generation: 0,
         query: reload_query("initial"),
+        sources: vec![crate::presentation::session_picker::PickerSourceContext::DefaultHosted],
     };
     let (sender, receiver) = tokio::sync::watch::channel(initial_request);
     let (release_first_sender, release_first_receiver) = mpsc::channel::<()>();
@@ -12,7 +13,7 @@ async fn session_record_reload_worker_runs_single_flight_and_keeps_only_latest_p
     let (started_sender, mut started_receiver) = tokio::sync::mpsc::unbounded_channel();
     let active_loads = Arc::new(AtomicUsize::new(0));
     let maximum_active_loads = Arc::new(AtomicUsize::new(0));
-    let loader: SessionsPickerRecordLoader = Arc::new({
+    let loader: SessionsPickerRecordLoader = fixture_record_loader({
         let active_loads = Arc::clone(&active_loads);
         let maximum_active_loads = Arc::clone(&maximum_active_loads);
         let release_first_receiver = Arc::clone(&release_first_receiver);
@@ -56,6 +57,7 @@ async fn session_record_reload_worker_runs_single_flight_and_keeps_only_latest_p
     sender.send_replace(SessionRecordsReloadRequest {
         generation: 1,
         query: reload_query("a"),
+        sources: vec![crate::presentation::session_picker::PickerSourceContext::DefaultHosted],
     });
     assert_eq!(started_receiver.recv().await.as_deref(), Some("a"));
 
@@ -63,11 +65,13 @@ async fn session_record_reload_worker_runs_single_flight_and_keeps_only_latest_p
     sender.send_replace(SessionRecordsReloadRequest {
         generation: 2,
         query: reload_query("b"),
+        sources: vec![crate::presentation::session_picker::PickerSourceContext::DefaultHosted],
     });
     current_generation.store(3, Ordering::SeqCst);
     sender.send_replace(SessionRecordsReloadRequest {
         generation: 3,
         query: reload_query("c"),
+        sources: vec![crate::presentation::session_picker::PickerSourceContext::DefaultHosted],
     });
     release_first_sender
         .send(())
@@ -89,6 +93,7 @@ async fn periodic_same_generation_refresh_does_not_starve_a_slow_result() {
     let (sender, receiver) = tokio::sync::watch::channel(SessionRecordsReloadRequest {
         generation: 0,
         query: reload_query("initial"),
+        sources: vec![crate::presentation::session_picker::PickerSourceContext::DefaultHosted],
     });
     let (release_slow_sender, release_slow_receiver) = mpsc::channel::<()>();
     let release_slow_receiver = Arc::new(Mutex::new(release_slow_receiver));
@@ -96,7 +101,7 @@ async fn periodic_same_generation_refresh_does_not_starve_a_slow_result() {
     let load_count = Arc::new(AtomicUsize::new(0));
     let active_loads = Arc::new(AtomicUsize::new(0));
     let maximum_active_loads = Arc::new(AtomicUsize::new(0));
-    let loader: SessionsPickerRecordLoader = Arc::new({
+    let loader: SessionsPickerRecordLoader = fixture_record_loader({
         let release_slow_receiver = Arc::clone(&release_slow_receiver);
         let load_count = Arc::clone(&load_count);
         let active_loads = Arc::clone(&active_loads);
@@ -129,6 +134,7 @@ async fn periodic_same_generation_refresh_does_not_starve_a_slow_result() {
     let refresh_request = SessionRecordsReloadRequest {
         generation: 1,
         query: reload_query("same-query"),
+        sources: vec![crate::presentation::session_picker::PickerSourceContext::DefaultHosted],
     };
 
     sender.send_replace(refresh_request.clone());
@@ -167,7 +173,7 @@ async fn periodic_same_generation_refresh_does_not_starve_a_slow_result() {
 async fn sessions_picker_view_shortcut_filters_the_latest_loaded_records() {
     let observed_queries = Arc::new(Mutex::new(Vec::<SessionsPickerDataQuery>::new()));
     let loader_queries = Arc::clone(&observed_queries);
-    let record_loader: SessionsPickerRecordLoader = Arc::new(move |query| {
+    let record_loader: SessionsPickerRecordLoader = fixture_record_loader(move |query| {
         loader_queries
             .lock()
             .unwrap_or_else(|error| error.into_inner())
@@ -238,7 +244,7 @@ async fn sessions_picker_view_shortcut_filters_the_latest_loaded_records() {
 async fn picker_explains_unavailable_live_status_and_clears_notice_after_recovery() {
     use crate::picker_runtime_status::{PickerRecordsSnapshot, PickerRuntimeCoverage};
     let attempts = Arc::new(AtomicUsize::new(0));
-    let record_loader: SessionsPickerRecordLoader = Arc::new(move |_| {
+    let record_loader: SessionsPickerRecordLoader = fixture_record_loader(move |_| {
         let available = attempts.fetch_add(1, Ordering::SeqCst) > 0;
         let mut record = picker_record(
             "saved",

@@ -72,6 +72,7 @@ pub(super) async fn load_runtime_records(
                 )
             };
             row.identity = SessionPickerIdentity::HostedCodex(target);
+            row.provenance = super::SessionRowProvenance::ObservedHosted;
             row.runtime_status = PickerRuntimeStatus::from_native(&status);
             rows.push(row);
         }

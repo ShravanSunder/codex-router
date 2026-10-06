@@ -15,9 +15,13 @@ Ctrl+M aliases Enter in legacy terminals: crossterm 0.29 `src/event/sys/unix/par
 
 ## Current evidence
 
-Published decomposition #127 is integrated at `41671e86ba9927b29cafc562ad98a0f0dea84e8f`, without conflicts or selector-document loss. Its size scan checked 1707 Rust files, none over 1000 lines; checker tests passed 16/16. Current selector edits remain documentation only. No Selector product implementation or PR exists.
+Published decomposition #127 is integrated at `41671e86ba9927b29cafc562ad98a0f0dea84e8f`, without conflicts or selector-document loss. Product checkpoint `6816ea56` preserves source identity and adds read-only JSONC registry/machine controls. Current owned continuation adds async source requests, bounded latest-view scheduling, explicit provenance and a source-affine fork confirmation with effective directory metadata. No Selector PR exists at this cutoff; no remote success or merge readiness is claimed.
 
-The existing full routing foundation is `EndpointRef`, `SessionRef`, and `SessionPickerIdentity`. The narrow code gap remains `SessionsPickerOutcome::{ResumeSession,ForkSession}(String)` and dispatch's bare-ID/local-metadata resolution. The Program Design carries the existing identity through source-aware actions, without a new persisted identity schema.
+The existing full routing foundation is `EndpointRef`, `SessionRef`, and `SessionPickerIdentity`. Picker outcomes and dispatch now carry `SessionActionSelection` with full identity, source context/provenance and selected model/effort. Native endpoint resolution rejects mismatched service/endpoint before selecting a socket. Preview requests/cache include source/home/generation. No new persisted identity schema was introduced.
+
+Current author proof: agent library239 tests,238 passed/0 failed/1 pre-existing ignored, exit0. Permanent renderer tests cover popup opening without effect, confirmation, source metadata frozen across refresh, directory/origin, disabled machine/provider/unqualified actions, exclusive input and back/cancel. Actual SQLite/caller-runtime loading and isolated LocalControlService endpoint-resolution evidence are separate from scheduler simulations. Native helper tests preserve the existing argv behavior. All affected-package tests passed serially (exit0); native63 passed and client library64 passed. All-target scoped lint, formatting, whitespace, Rust-size1724 files and checker16 tests passed. Actual local PTY navigation/cancellation was observed without native handoff; remote or fork creation is not inferred.
+
+Open stand-in: configured profiles reject before remote credentials/network/native effects until real discovery exposure, attachment binding and permitted policy projection are supplied. Machine controls, partial All, scheduler guards and source rejection do not establish configured-source inventory, remote NEW/resume/fork or real tailnet behavior. Stored/Runtime source-owned continuation and alias consolidation remain unfinished.
 
 Retained independent Claude review closed A1/A3/A4 and the focused A2/Program Design corrections, including final action-metadata ownership, with no residual at that check. Focused U8 verification found three substantive design gaps (Ctrl+M advertisement, bare-ID preview cache, and watch-channel fan-out) plus an alias-label ambiguity. The Lead inspected decisive sources and corrected them; the same reviewer verified K1–K4 closed, with one Ctrl+M diagram-label leftover; the Lead corrected that non-semantic label to Ctrl+G and verified no stale shortcut edge remains. Prior coverage is not silently extended. Reasoning effort remains unavailable.
 
@@ -26,9 +30,9 @@ Retained independent Claude review closed A1/A3/A4 and the focused A2/Program De
 | Item | Actual state | Owner of next work |
 | --- | --- | --- |
 | Changed machine/All contracts | Authored and scoped checks pass; K1–K4 independently verified closed, diagram typo corrected; whole-design readiness not claimed | Selector Lead and same retained reviewer |
-| Implementation plan/product path | No admitted ready plan or implementation yet; do not claim PR readiness | Selector Lead after affected contracts are checked |
+| Implementation plan/product path | Independent frontier plans execute under explicit owner stop-review continuation; source isolation, registry/controls and async/fork paths implemented with scoped author proof; whole-lane readiness not claimed | Selector Lead |
 | Remote exposure, attachment identity and policy projection | Existing source/transport comparison only; no concrete qualified route or remote runtime proof | Resolve from supplied exact exposure/authorization; do not invent a gateway or remote policy |
-| Real proof | Selector/multi-app-server/tailnet, auth/policy isolation, resume/fork/cancel/reconnect/failure and local regressions unrun | Implementation lane, personally verified by Lead |
+| Real proof | Local SQLite/history files, renderer behavior, isolated service resolution and default dry-run verified; actual selected tailnet machine/native creation/fork, multi-app-server, auth/policy, reconnect and post-handoff failure remain unverified | Implementation lane, personally verified by Lead |
 | Final delivery | Required Advisor after Lead proof assessment, distinct implementation review, full CI and exact PR state; merge only after gates | Existing delivery/review relationships |
 
 ## Retained references
