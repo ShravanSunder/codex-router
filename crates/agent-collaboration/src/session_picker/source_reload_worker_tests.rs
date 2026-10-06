@@ -38,6 +38,52 @@ fn query(search: &str) -> SessionsPickerDataQuery {
 }
 
 #[tokio::test]
+async fn configured_empty_inventory_requires_explicit_source_binding() {
+    let (sender, receiver) = tokio::sync::watch::channel(SessionRecordsReloadRequest {
+        generation: 0,
+        query: query("initial"),
+        sources: vec![],
+    });
+    let loader: SessionsPickerRecordLoader = Arc::new(|request| {
+        Box::pin(async move {
+            SourceInventoryResult::Ready {
+                bound_endpoint: None,
+                request,
+                snapshot: observed_records(vec![]),
+            }
+        })
+    });
+    let (published_sender, mut published) = tokio::sync::mpsc::unbounded_channel();
+    let worker = tokio::spawn(async move {
+        run_session_record_reload_worker(receiver, loader, move |request, update| {
+            if let Some(result) = update.into_snapshot() {
+                let _ = published_sender.send((request, result));
+            }
+        })
+        .await;
+    });
+    sender.send_replace(SessionRecordsReloadRequest {
+        generation: 19,
+        query: query(""),
+        sources: sources(1).unwrap(),
+    });
+    let (request, result) = tokio::time::timeout(Duration::from_secs(2), published.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(request.generation, 19);
+    assert!(
+        matches!(result, Err(SourceInventoryRejection::InvalidInventory)),
+        "empty rows do not prove a qualified source"
+    );
+    drop(sender);
+    tokio::time::timeout(Duration::from_secs(2), worker)
+        .await
+        .unwrap()
+        .unwrap();
+}
+
+#[tokio::test]
 async fn rejected_source_progress_keeps_rows_from_the_successful_source() {
     let configured = sources(1).unwrap().remove(0);
     let requested_sources = vec![PickerSourceContext::DefaultHosted, configured.clone()];
@@ -63,6 +109,7 @@ async fn rejected_source_progress_keeps_rows_from_the_successful_source() {
                     }
                 } else {
                     SourceInventoryResult::Ready {
+                        bound_endpoint: None,
                         request,
                         snapshot: observed_records(vec![picker_record(
                             "usable-default",
@@ -164,11 +211,16 @@ async fn all_source_reads_do_not_overwrite_each_other_and_run_at_most_four_at_on
                     "cli",
                 );
                 row.provenance = crate::sessions::SessionRowProvenance::ObservedHosted;
+                row.normalized_cwd = None;
                 row.identity = SessionPickerIdentity::HostedCodex(serde_json::from_value(serde_json::json!({
                     "endpoint":{"serviceId":String::from(profile.service_id.clone()),"endpointId":"codex-local"},
                     "sessionId":"same-native-id",
                 })).unwrap());
                 SourceInventoryResult::Ready {
+                    bound_endpoint: Some(match &row.identity {
+                        SessionPickerIdentity::HostedCodex(target) => target.endpoint.clone(),
+                        _ => panic!("hosted fixture"),
+                    }),
                     request,
                     snapshot: observed_records(vec![row]),
                 }
@@ -256,6 +308,10 @@ async fn stale_request_and_foreign_service_rows_are_rejected_before_publication(
                     request.request_generation += 1;
                 }
                 SourceInventoryResult::Ready {
+                    bound_endpoint: Some(match &row.identity {
+                        SessionPickerIdentity::HostedCodex(target) => target.endpoint.clone(),
+                        _ => panic!("hosted fixture"),
+                    }),
                     request,
                     snapshot: observed_records(vec![row]),
                 }
@@ -323,6 +379,7 @@ async fn default_attribution_is_not_remote_observation_even_when_service_and_id_
                 crate::sessions::SessionRowProvenance::DefaultAttributed
             );
             SourceInventoryResult::Ready {
+                bound_endpoint: Some(endpoint),
                 request,
                 snapshot: observed_records(vec![row]),
             }
@@ -381,6 +438,7 @@ async fn superseded_view_cancels_owned_reads_and_publishes_only_the_new_generati
                     futures_util::future::pending::<()>().await;
                 }
                 SourceInventoryResult::Ready {
+                    bound_endpoint: None,
                     request,
                     snapshot: observed_records(vec![]),
                 }

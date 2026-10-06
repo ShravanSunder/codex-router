@@ -36,6 +36,7 @@ async fn session_record_reload_worker_runs_single_flight_and_keeps_only_latest_p
                     futures_util::future::pending::<()>().await;
                 }
                 crate::presentation::session_picker::SourceInventoryResult::Ready {
+                    bound_endpoint: None,
                     request,
                     snapshot: observed_records(vec![picker_record(
                         &format!("thread-{search}"),

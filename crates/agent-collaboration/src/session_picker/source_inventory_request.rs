@@ -4,6 +4,7 @@ use crate::{
     picker_runtime_status::PickerRecordsSnapshot,
     sessions::router_connection_registry::RouterConnectionProfile,
 };
+use collaboration_client::protocol::EndpointRef;
 use futures_util::future::BoxFuture;
 use std::sync::Arc;
 
@@ -31,12 +32,17 @@ pub(crate) enum SourceInventoryRejection {
     InvalidInventory,
     #[error("session inventory reply does not match its request")]
     StaleSnapshot,
+    #[error("source scope or provider filter is unsupported; choose Any")]
+    UnsupportedViewOrScope,
+    #[error("source does not support this search expression")]
+    UnsupportedQuery,
 }
 
 #[derive(Clone, Debug)]
 pub(crate) enum SourceInventoryResult {
     Ready {
         request: SourceInventoryRequest,
+        bound_endpoint: Option<EndpointRef>,
         snapshot: PickerRecordsSnapshot,
     },
     Rejected {
@@ -46,6 +52,12 @@ pub(crate) enum SourceInventoryResult {
 }
 
 impl SourceInventoryResult {
+    pub(crate) fn bound_endpoint(&self) -> Option<&EndpointRef> {
+        match self {
+            Self::Ready { bound_endpoint, .. } => bound_endpoint.as_ref(),
+            Self::Rejected { .. } => None,
+        }
+    }
     pub(crate) fn request(&self) -> &SourceInventoryRequest {
         match self {
             Self::Ready { request, .. } | Self::Rejected { request, .. } => request,

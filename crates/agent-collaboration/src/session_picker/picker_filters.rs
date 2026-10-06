@@ -45,6 +45,18 @@ pub(super) fn provider_matches(
 }
 
 pub(super) fn source_matches(source: SessionsSource, record: &SessionPickerRecord) -> bool {
+    if let Some(native_source) = record.native_source {
+        use collaboration_client::protocol::NativeSessionSource;
+        return matches!(
+            (source, native_source),
+            (SessionsSource::All, _)
+                | (
+                    SessionsSource::Interactive,
+                    NativeSessionSource::Interactive
+                )
+                | (SessionsSource::Subagents, NativeSessionSource::Subagents)
+        );
+    }
     if record.identity.is_provider() {
         return true;
     }
@@ -124,5 +136,29 @@ mod tests {
         record.normalized_cwd = Some("/var/folders/session-work".to_owned());
 
         assert!(root_matches(SessionsPickerRoot::Cwd, &request, &record));
+    }
+}
+#[test]
+fn native_source_classification_does_not_invent_local_source_metadata() {
+    use collaboration_client::protocol::NativeSessionSource;
+    let request = crate::presentation::session_picker::test_support::picker_request();
+    for (observed, interactive, subagents) in [
+        (NativeSessionSource::Interactive, true, false),
+        (NativeSessionSource::Subagents, false, true),
+        (NativeSessionSource::All, false, false),
+    ] {
+        let mut record = request.records[0].clone();
+        record.native_source = Some(observed);
+        record.source = None;
+        record.thread_source = None;
+        assert!(source_matches(SessionsSource::All, &record));
+        assert_eq!(
+            source_matches(SessionsSource::Interactive, &record),
+            interactive
+        );
+        assert_eq!(
+            source_matches(SessionsSource::Subagents, &record),
+            subagents
+        );
     }
 }

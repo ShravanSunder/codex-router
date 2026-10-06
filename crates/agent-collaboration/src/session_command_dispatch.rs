@@ -80,6 +80,9 @@ pub(crate) use router_connection_registry::{RouterRegistryError, RouterRegistryR
 #[path = "session_commands/picker_runtime_inventory.rs"]
 mod picker_runtime_inventory;
 
+#[path = "session_commands/configured_inventory_query.rs"]
+mod configured_inventory_query;
+
 const SESSION_TITLE_MAX_CHARS: usize = 96;
 const SESSION_CONTEXT_MAX_CHARS: usize = 32;
 const SESSION_MODEL_CHOICE_MAX_CHARS: usize = 32;
@@ -358,8 +361,10 @@ fn session_picker_record_loader(
                 PickerSourceContext::ConfiguredHosted(_)
             ) {
                 return SourceInventoryResult::Rejected {
+                    reason: configured_inventory_query::qualify_configured_query(&request.query)
+                        .err()
+                        .unwrap_or(SourceInventoryRejection::EndpointUnqualified),
                     request,
-                    reason: SourceInventoryRejection::EndpointUnqualified,
                 };
             }
             if request.source_context != expected_source {
@@ -394,7 +399,11 @@ fn session_picker_record_loader(
             let snapshot = inventory
                 .refresh(service_directory.as_deref(), stored, include_empty_sessions)
                 .await;
-            SourceInventoryResult::Ready { request, snapshot }
+            SourceInventoryResult::Ready {
+                bound_endpoint: None,
+                request,
+                snapshot,
+            }
         })
     })
 }

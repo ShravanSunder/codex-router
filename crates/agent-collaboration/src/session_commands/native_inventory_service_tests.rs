@@ -1,5 +1,8 @@
 //! Actual Control service and source-local SQLite paging, without a live native backend.
 use super::*;
+use crate::sessions::picker_runtime_inventory::native_inventory_binding::{
+    NativeEndpointSelector, NativeInventoryContext, bind_native_inventory,
+};
 use collaboration_service::{
     LocalControlService, ManifestPublication, NativeControlBackend, NativeGenerationGate,
     ServiceIdentity,
@@ -122,10 +125,18 @@ async fn real_source_services_page_sparse_stored_catalogs_without_runtime_genera
         ("00000000-0000-4000-8000-000000000003", "gpt-6-luna"),
     ] {
         let (mut client, fixture) = StoredServiceFixture::open(service_id, model).await;
+        let inventory = client.list_endpoints().await.unwrap();
+        let binding = bind_native_inventory(
+            &inventory,
+            client.identity(),
+            &service_id.to_owned().try_into().unwrap(),
+            NativeEndpointSelector::UniqueNative,
+            NativeSessionView::Stored,
+        )
+        .unwrap();
+        assert_eq!(binding.context, NativeInventoryContext::Stored);
         let mut request = paging_request(NativeSessionView::Stored);
-        request.endpoint =
-            serde_json::from_value(json!({"serviceId":service_id,"endpointId":"codex-local"}))
-                .unwrap();
+        request.endpoint = binding.endpoint.clone();
         request.scope = NativeSessionScope::Any;
         request.query = Some("Source".to_owned());
         request.page_size = 1;
@@ -137,11 +148,32 @@ async fn real_source_services_page_sparse_stored_catalogs_without_runtime_genera
             "a filtered-out first row is not exhaustion"
         );
         assert!(sparse.generation.is_none());
+        assert_eq!(
+            sparse.endpoint, binding.endpoint,
+            "empty rows do not erase source binding"
+        );
         let second = pager.next_page(&mut client).await.unwrap().unwrap();
         assert!(second.generation.is_none());
         assert_eq!(second.sessions.len(), 1);
         assert_eq!(second.sessions[0].model.as_deref(), Some(model));
         assert_eq!(second.sessions[0].reasoning_effort.as_deref(), Some("high"));
+        let row = SessionPickerRecord::from_native_summary(&second.sessions[0]);
+        assert_eq!(
+            row.identity,
+            SessionPickerIdentity::HostedCodex(second.sessions[0].target.clone())
+        );
+        assert_eq!(
+            row.provenance,
+            crate::sessions::SessionRowProvenance::ObservedHosted
+        );
+        assert_eq!(row.model.as_deref(), Some(model));
+        assert_eq!(row.reasoning_effort.as_deref(), Some("high"));
+        assert_eq!(row.cwd.as_deref(), Some("/source/owned-project"));
+        assert_eq!(row.native_source, Some(NativeSessionSource::Interactive));
+        assert_eq!(row.recency_at_ms, Some(2000));
+        assert!(row.normalized_cwd.is_none() && row.provider.is_none());
+        assert!(row.created_at_ms.is_none() && row.conversation_source.is_none());
+        assert_eq!(row.runtime_status, PickerRuntimeStatus::Unknown);
         assert_eq!(
             String::from(second.sessions[0].working_directory.clone()),
             "/source/owned-project"

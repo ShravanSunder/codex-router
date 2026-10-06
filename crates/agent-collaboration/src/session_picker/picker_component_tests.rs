@@ -40,7 +40,7 @@ where
         Box::pin(async move {
             let query = request.query.clone();
             match tokio::task::spawn_blocking(move || procedure(query)).await {
-                Ok(Ok(snapshot)) => crate::presentation::session_picker::SourceInventoryResult::Ready { request, snapshot },
+                Ok(Ok(snapshot)) => crate::presentation::session_picker::SourceInventoryResult::Ready { bound_endpoint: None, request, snapshot },
                 Ok(Err(_)) | Err(_) => crate::presentation::session_picker::SourceInventoryResult::Rejected {
                     request, reason: crate::presentation::session_picker::SourceInventoryRejection::SourceUnavailable,
                 },
@@ -147,6 +147,7 @@ fn capture_record(
     SessionPickerRecord {
         identity: crate::sessions::SessionPickerIdentity::LocalCodex(session_id.to_owned()),
         source_context: None,
+        machine_display_label: None,
         provenance: crate::sessions::SessionRowProvenance::LocalHomeCatalog,
         endpoint_label: None,
         provider_state: None,
@@ -179,6 +180,7 @@ fn capture_record(
         conversation_source: None,
         source: Some(source.to_owned()),
         thread_source: Some(source.to_owned()),
+        native_source: None,
         runtime_status: PickerRuntimeStatus::Unknown,
     }
 }

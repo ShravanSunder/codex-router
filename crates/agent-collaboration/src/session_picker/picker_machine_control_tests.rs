@@ -81,6 +81,86 @@ async fn all_view_reports_each_loading_and_rejected_source_without_empty_success
     assert_eq!(outcome, None);
 }
 
+#[tokio::test]
+async fn all_view_renders_qualified_alias_labels_from_simulated_bound_source_replies() {
+    use crate::presentation::session_picker::{PickerSourceContext, SourceInventoryResult};
+    let mut request = configured_request().unwrap();
+    request.root = SessionsPickerRoot::Any;
+    let RouterRegistryRead::Ready(registry) = &mut request.router_registry else {
+        panic!("registry");
+    };
+    registry.routers[0].name = "Primary machine".to_owned().try_into().unwrap();
+    let mut alias = registry.routers[0].clone();
+    alias.name = "Second alias".to_owned().try_into().unwrap();
+    registry.routers.push(alias);
+    let loader: SessionsPickerRecordLoader = Arc::new(|request| {
+        Box::pin(async move {
+            let PickerSourceContext::ConfiguredHosted(profile) = &request.source_context else {
+                return SourceInventoryResult::Ready {
+                    bound_endpoint: None,
+                    request,
+                    snapshot: observed_records(vec![]),
+                };
+            };
+            let endpoint: collaboration_client::protocol::EndpointRef = serde_json::from_value(serde_json::json!({
+            "serviceId":String::from(profile.service_id.clone()),"endpointId":"source-native"
+        })).unwrap();
+            let records = if profile.name.as_str() == "Primary machine" {
+                vec![]
+            } else {
+                let mut row = picker_record(
+                    "shared-source-id",
+                    "Bound source row",
+                    "/source/project",
+                    "codex-router",
+                    "cli",
+                )
+                .with_hosted_codex(&endpoint);
+                row.provenance = crate::sessions::SessionRowProvenance::ObservedHosted;
+                row.normalized_cwd = None;
+                vec![row]
+            };
+            SourceInventoryResult::Ready {
+                bound_endpoint: Some(endpoint),
+                request,
+                snapshot: observed_records(records),
+            }
+        })
+    });
+    let mut outcome = Option::<SessionsPickerOutcome>::None;
+    let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+    sender.send(key(KeyCode::F(2))).unwrap();
+    let input = futures_util::stream::unfold(receiver, |mut receiver| async {
+        receiver.recv().await.map(|event| (event, receiver))
+    });
+    let frames = tokio::time::timeout(Duration::from_secs(2), async {
+        let mut picker = element! { SessionsPickerComponent(request, record_loader: Some(loader), width: 160usize, height: 40usize, selected_outcome_out: &mut outcome) };
+        let canvases = picker.mock_terminal_render_loop(MockTerminalConfig::with_events(input));
+        tokio::pin!(canvases);
+        let mut opened = false;
+        let mut frames = Vec::new();
+        while let Some(canvas) = canvases.next().await {
+            let text = canvas.to_string();
+            if !opened && text.contains("Choose machine") {
+                opened = true;
+                sender.send(key(KeyCode::Down)).unwrap();
+                sender.send(key(KeyCode::Enter)).unwrap();
+            }
+            if text.contains("Primary machine (also: Second alias)") && text.contains("Bound source row") {
+                sender.send(control_key('c')).unwrap();
+            }
+            frames.push(text);
+        }
+        frames
+    }).await.expect("bound alias row must be visible within bounded render wait");
+    assert!(
+        frames
+            .iter()
+            .any(|frame| frame.contains("Primary machine (also: Second alias)"))
+    );
+    assert_eq!(outcome, None);
+}
+
 async fn render_events(
     request: SessionsPickerRequest,
     events: Vec<TerminalEvent>,

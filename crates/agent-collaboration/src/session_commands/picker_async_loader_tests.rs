@@ -2,6 +2,93 @@
 use super::*;
 
 #[tokio::test]
+async fn configured_picker_loader_rejects_unsupported_source_queries_before_transport() {
+    use crate::presentation::session_picker::{
+        PickerSourceContext, SourceInventoryRejection, SourceInventoryRequest,
+        SourceInventoryResult,
+    };
+    let root = tempfile::tempdir().unwrap();
+    let context = CliContext::new(Vec::new()).with_current_dir(root.path().to_path_buf());
+    let registry = router_connection_registry::RouterConnectionRegistry::parse(
+        r#"{
+        "version":1,"routers":[{"name":"Source fixture","connection":{"kind":"remote",
+        "serviceId":"00000000-0000-4000-8000-000000000003","mcpUrl":"https://source.invalid/mcp"},
+        "defaultRemoteCwd":"/remote/new-only"}]}"#,
+    )
+    .unwrap();
+    let source_context = PickerSourceContext::ConfiguredHosted(registry.routers[0].clone());
+    let loader = session_picker_record_loader(
+        context,
+        discover_repository_identity(root.path()),
+        Some(root.path().join("missing-control-service")),
+    );
+    let base = SessionsPickerDataQuery {
+        root: SessionsPickerRoot::Any,
+        provider: SessionsProvider::Any,
+        source: SessionsSource::All,
+        sort: SessionsSort::Updated,
+        search: String::new(),
+        include_empty_sessions: false,
+    };
+    let mut cases = Vec::new();
+    for scope in [SessionsPickerRoot::Cwd, SessionsPickerRoot::Repo] {
+        let mut query = base.clone();
+        query.root = scope;
+        cases.push((query, SourceInventoryRejection::UnsupportedViewOrScope));
+    }
+    for provider in [
+        SessionsProvider::Current,
+        SessionsProvider::Id("source-provider".into()),
+        SessionsProvider::ClaudeCode,
+    ] {
+        let mut query = base.clone();
+        query.provider = provider;
+        cases.push((query, SourceInventoryRejection::UnsupportedViewOrScope));
+    }
+    for search in ["ordinary terms", "name:alpha", "id:shared", "cwd:/caller"] {
+        let mut query = base.clone();
+        query.search = search.to_owned();
+        cases.push((query, SourceInventoryRejection::UnsupportedQuery));
+    }
+    let mut whitespace_query = base.clone();
+    whitespace_query.search = " \t ".to_owned();
+    cases.push((
+        whitespace_query,
+        SourceInventoryRejection::EndpointUnqualified,
+    ));
+    for source in [
+        SessionsSource::All,
+        SessionsSource::Interactive,
+        SessionsSource::Subagents,
+    ] {
+        for include_empty_sessions in [false, true] {
+            let mut query = base.clone();
+            query.source = source;
+            query.include_empty_sessions = include_empty_sessions;
+            cases.push((query, SourceInventoryRejection::EndpointUnqualified));
+        }
+    }
+    for (query, expected) in cases {
+        let request = SourceInventoryRequest {
+            source_context: source_context.clone(),
+            query,
+            request_generation: 17,
+        };
+        let result = loader(request.clone()).await;
+        assert_eq!(
+            result.request(),
+            &request,
+            "qualification preserves the captured tuple"
+        );
+        let SourceInventoryResult::Rejected { reason, .. } = result else {
+            panic!("no configured transport is qualified");
+        };
+        assert_eq!(reason, expected);
+    }
+    assert!(!root.path().join("missing-control-service").exists());
+}
+
+#[tokio::test]
 async fn default_picker_loader_uses_the_existing_async_runtime() {
     let root = tempfile::tempdir().unwrap();
     let home = root.path().join("codex-home");

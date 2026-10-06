@@ -16,6 +16,7 @@ name = "agent-sessions"
 path = "src/bin/agent-sessions.rs"
 
 [dependencies]
+chrono.workspace = true
 tokio-util.workspace = true
 futures-util.workspace = true
 tokio-tungstenite.workspace = true
@@ -42,7 +43,6 @@ reqwest = { workspace = true, features = ["json"] }
 sha2.workspace = true
 sqlx.workspace = true
 uuid.workspace = true
-chrono.workspace = true
 agent-automation = { path = "../agent-automation", version = "0.1.16" }
 automation-storage = { path = "../automation-storage", version = "0.1.16" }
 codex-router-host.workspace = true

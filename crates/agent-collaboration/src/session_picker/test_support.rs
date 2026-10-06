@@ -73,6 +73,7 @@ pub(crate) fn picker_record(
     SessionPickerRecord {
         identity: crate::sessions::SessionPickerIdentity::LocalCodex(session_id.to_owned()),
         source_context: None,
+        machine_display_label: None,
         provenance: crate::sessions::SessionRowProvenance::LocalHomeCatalog,
         endpoint_label: None,
         provider_state: None,
@@ -105,6 +106,7 @@ pub(crate) fn picker_record(
         conversation_source: None,
         source: Some(source.to_owned()),
         thread_source: Some(source.to_owned()),
+        native_source: None,
         runtime_status: PickerRuntimeStatus::Unknown,
     }
 }

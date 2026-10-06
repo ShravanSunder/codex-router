@@ -8,6 +8,7 @@ use crate::{
     picker_runtime_status::{PickerRecordsSnapshot, PickerRuntimeCoverage},
     sessions::{SessionPickerIdentity, SessionRowProvenance},
 };
+use collaboration_client::protocol::EndpointRef;
 use futures_util::{StreamExt, stream::FuturesUnordered};
 use std::collections::{BTreeMap, VecDeque};
 
@@ -114,11 +115,12 @@ pub(super) async fn run_session_record_reload_worker(
                 completed = results.recv() => {
                     let Some((expected, result)) = completed else { return; };
                     unsettled_reads = unsettled_reads.saturating_sub(1);
+                    let bound_endpoint = result.bound_endpoint().cloned();
                     let validated = if result.request() != &expected {
                         Err(SourceInventoryRejection::StaleSnapshot)
                     } else {
                         result.into_snapshot().and_then(|snapshot| {
-                            if source_snapshot_matches(&expected.source_context, &snapshot) { Ok(snapshot) }
+                            if source_snapshot_matches(&expected.source_context, bound_endpoint.as_ref(), &snapshot) { Ok(snapshot) }
                             else { Err(SourceInventoryRejection::InvalidInventory) }
                         })
                     };
@@ -126,7 +128,7 @@ pub(super) async fn run_session_record_reload_worker(
                     match validated {
                         Ok(snapshot) => {
                             if let Some(progress) = progress { progress.read_state = SourceReadState::Ready { record_count: snapshot.records.len() }; }
-                            snapshots.push((expected.source_context, snapshot));
+                            snapshots.push((expected.source_context, bound_endpoint, snapshot));
                             accept_records(request.clone(), SourceReloadUpdate { source_progress: source_progress.clone(), records_update: SourceRecordsUpdate::Ready(merge_source_snapshots(&request.sources, &snapshots)) });
                         }
                         Err(reason) => {
@@ -146,23 +148,35 @@ pub(super) async fn run_session_record_reload_worker(
     }
 }
 
-fn source_snapshot_matches(source: &PickerSourceContext, snapshot: &PickerRecordsSnapshot) -> bool {
+fn source_snapshot_matches(
+    source: &PickerSourceContext,
+    bound_endpoint: Option<&EndpointRef>,
+    snapshot: &PickerRecordsSnapshot,
+) -> bool {
     let PickerSourceContext::ConfiguredHosted(profile) = source else {
         return true;
     };
+    let Some(bound_endpoint) = bound_endpoint else {
+        return false;
+    };
+    if bound_endpoint.service_id != profile.service_id {
+        return false;
+    }
     snapshot
         .records
         .iter()
         .all(|record| match &record.identity {
             SessionPickerIdentity::HostedCodex(target) => {
-                target.endpoint.service_id == profile.service_id
+                target.endpoint == *bound_endpoint
                     && record.provenance == SessionRowProvenance::ObservedHosted
                     && record.conversation_source.is_none()
+                    && record.normalized_cwd.is_none()
             }
             SessionPickerIdentity::HostedProvider(target) => {
-                target.endpoint.service_id == profile.service_id
+                target.endpoint == *bound_endpoint
                     && record.provenance == SessionRowProvenance::ObservedProvider
                     && record.conversation_source.is_none()
+                    && record.normalized_cwd.is_none()
             }
             SessionPickerIdentity::LocalCodex(_) => false,
         })
@@ -170,18 +184,31 @@ fn source_snapshot_matches(source: &PickerSourceContext, snapshot: &PickerRecord
 
 fn merge_source_snapshots(
     source_order: &[PickerSourceContext],
-    snapshots: &[(PickerSourceContext, PickerRecordsSnapshot)],
+    snapshots: &[(
+        PickerSourceContext,
+        Option<EndpointRef>,
+        PickerRecordsSnapshot,
+    )],
 ) -> PickerRecordsSnapshot {
     let mut records = BTreeMap::new();
     let mut coverage = PickerRuntimeCoverage::Unavailable;
+    let labels = qualified_alias_projection::qualified_alias_labels(source_order, snapshots);
     for source in source_order {
-        let Some((_, snapshot)) = snapshots.iter().find(|(context, _)| context == source) else {
+        let Some((_, _, snapshot)) = snapshots.iter().find(|(context, _, _)| context == source)
+        else {
             continue;
         };
         for record in &snapshot.records {
             records.entry(record.identity.clone()).or_insert_with(|| {
                 let mut record = record.clone();
                 record.source_context = Some(source.clone());
+                record.machine_display_label = match &record.identity {
+                    SessionPickerIdentity::HostedCodex(target)
+                    | SessionPickerIdentity::HostedProvider(target) => {
+                        labels.get(&target.endpoint).cloned()
+                    }
+                    SessionPickerIdentity::LocalCodex(_) => None,
+                };
                 record
             });
         }
@@ -196,6 +223,9 @@ fn merge_source_snapshots(
         runtime_coverage: coverage,
     }
 }
+
+#[path = "qualified_alias_projection.rs"]
+mod qualified_alias_projection;
 
 #[cfg(test)]
 #[path = "source_reload_worker_tests.rs"]

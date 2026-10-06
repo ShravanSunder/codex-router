@@ -102,6 +102,10 @@ fn inspected(id: &str) -> Value {
     "thread":{"id":id,"name":format!("Live {id}"),"cwd":"/repo","modelProvider":"debug-provider","createdAt":100,"updatedAt":200,
     "gitInfo":{"branch":"feature/live","originUrl":"https://example.invalid/repo.git"}}})
 }
+
+#[path = "native_inventory_binding_client_tests.rs"]
+mod native_inventory_binding_client_tests;
+
 async fn connect_fixture(
     steps: Vec<(&'static str, Value)>,
 ) -> (ControlClient, tokio::task::JoinHandle<Vec<Value>>) {
