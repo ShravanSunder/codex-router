@@ -15,7 +15,7 @@ Ctrl+M aliases Enter in legacy terminals: crossterm 0.29 `src/event/sys/unix/par
 
 ## Current evidence
 
-Published decomposition #127 is integrated at `41671e86ba9927b29cafc562ad98a0f0dea84e8f`, without conflicts or selector-document loss. Product checkpoint `6816ea56` preserves source identity and adds read-only JSONC registry/machine controls. Current owned continuation adds async source requests, bounded latest-view scheduling, explicit provenance and a source-affine fork confirmation with effective directory metadata. No Selector PR exists at this cutoff; no remote success or merge readiness is claimed.
+Published decomposition #127 is integrated at `41671e86ba9927b29cafc562ad98a0f0dea84e8f`, without conflicts or selector-document loss. Product checkpoint `6816ea56` preserves source identity and adds read-only JSONC registry/machine controls. Continuation `5bde8dae` adds async source requests, bounded latest-view scheduling, explicit provenance and a source-affine fork confirmation with effective directory metadata. [Draft Selector PR #128](https://github.com/ShravanSunder/codex-router/pull/128) now publishes this partial implementation. No remote success or merge readiness is claimed.
 
 The existing full routing foundation is `EndpointRef`, `SessionRef`, and `SessionPickerIdentity`. Picker outcomes and dispatch now carry `SessionActionSelection` with full identity, source context/provenance and selected model/effort. Native endpoint resolution rejects mismatched service/endpoint before selecting a socket. Preview requests/cache include source/home/generation. No new persisted identity schema was introduced.
 
