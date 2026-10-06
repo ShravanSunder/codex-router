@@ -132,6 +132,74 @@ impl StoredServiceFixture {
 }
 
 #[tokio::test]
+async fn stored_source_predicate_divergence_keeps_valid_later_pages_available() {
+    use sqlx::Connection;
+    let (mut client, mut fixture) = StoredServiceFixture::open(SERVICE, "interactive-model").await;
+    fixture.seed_subagent_fixture().await;
+    let mut connection = sqlx::SqliteConnection::connect_with(
+        &sqlx::sqlite::SqliteConnectOptions::new().filename(&fixture.database),
+    )
+    .await
+    .unwrap();
+    for (session_id, source, thread_source, timestamp) in [
+        ("user-tagged-subagent", "nested-subagent", "user", 5000),
+        ("mixed-case-source", "SubAgent", "cli", 4000),
+    ] {
+        sqlx::query("INSERT INTO threads (id,cwd,model,title,first_user_message,source,thread_source,updated_at_ms,recency_at_ms,archived) VALUES (?, '/source/owned-project', 'edge-model', 'Source edge', 'User message', ?, ?, ?, ?, 0)")
+            .bind(session_id).bind(source).bind(thread_source).bind(timestamp).bind(timestamp)
+            .execute(&mut connection).await.unwrap();
+    }
+    connection.close().await.unwrap();
+    // Baseline follows fixture arrangement; only subsequent reads are proved immutable.
+    fixture.original_database = std::fs::read(&fixture.database).unwrap();
+    for (source, expected_ids, expected_sparse_pages) in [
+        (
+            NativeSessionSource::Interactive,
+            vec!["shared-source-id"],
+            2,
+        ),
+        (
+            NativeSessionSource::Subagents,
+            vec!["user-tagged-subagent", "source-subagent"],
+            1,
+        ),
+        (
+            NativeSessionSource::All,
+            vec![
+                "user-tagged-subagent",
+                "mixed-case-source",
+                "shared-source-id",
+                "source-subagent",
+            ],
+            1,
+        ),
+    ] {
+        let mut request = paging_request(NativeSessionView::Stored);
+        request.scope = NativeSessionScope::Any;
+        request.query = None;
+        request.source = source;
+        request.page_size = 1;
+        let mut pager = NativeInventoryPager::new(request, None).unwrap();
+        let mut actual_ids = Vec::new();
+        let mut sparse_pages = 0;
+        while let Some(page) = pager.next_page(&mut client).await.unwrap() {
+            assert!(page.generation.is_none());
+            if page.sessions.is_empty() && page.next_cursor.is_some() {
+                sparse_pages += 1;
+            }
+            for summary in page.sessions {
+                assert!(source == NativeSessionSource::All || source == summary.source);
+                actual_ids.push(String::from(summary.target.session_id));
+            }
+        }
+        assert_eq!(actual_ids, expected_ids);
+        assert_eq!(sparse_pages, expected_sparse_pages);
+    }
+    client.close().await.unwrap();
+    fixture.finish().await;
+}
+
+#[tokio::test]
 async fn real_source_catalog_respects_interactive_subagent_and_all_page_filters() {
     let (mut client, mut fixture) = StoredServiceFixture::open(SERVICE, "interactive-model").await;
     fixture.seed_subagent_fixture().await;
