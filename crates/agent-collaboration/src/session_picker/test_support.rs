@@ -109,6 +109,7 @@ pub(crate) fn picker_record(
     }
 }
 
+#[cfg(test)]
 pub(crate) fn picker_action_selection(session_id: &str) -> crate::sessions::SessionActionSelection {
     let mut record = picker_record(
         session_id,
