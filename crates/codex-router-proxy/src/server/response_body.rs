@@ -244,8 +244,21 @@ pub(super) fn websocket_runtime_error_kind(error: &LoopbackRouterRuntimeError) -
             crate::websocket::WebSocketTunnelError::Handshake,
         ) => "websocket_handshake",
         LoopbackRouterRuntimeError::WebSocket(
-            crate::websocket::WebSocketTunnelError::CloseReason(_),
-        ) => "websocket_close_before_upstream",
+            crate::websocket::WebSocketTunnelError::CloseReason(reason),
+        ) => match reason {
+            crate::websocket::WebSocketCloseReason::LocalAuth { .. } => {
+                "websocket_local_auth_rejected"
+            }
+            crate::websocket::WebSocketCloseReason::Selection { .. } => {
+                "websocket_selection_rejected"
+            }
+            crate::websocket::WebSocketCloseReason::ProviderCredential => {
+                "websocket_provider_credential_rejected"
+            }
+            crate::websocket::WebSocketCloseReason::UnexpectedFirstFrame => {
+                "websocket_first_frame_rejected"
+            }
+        },
         LoopbackRouterRuntimeError::WebSocket(
             crate::websocket::WebSocketTunnelError::ConnectionTracking(_),
         ) => "websocket_connection_tracking",
@@ -512,3 +525,7 @@ pub(super) fn empty_body() -> BoxBody<Bytes, AsyncHttpBodyError> {
         .map_err(|never: Infallible| -> AsyncHttpBodyError { match never {} })
         .boxed()
 }
+
+#[cfg(test)]
+#[path = "response_body_diagnostic_tests.rs"]
+mod diagnostic_tests;
