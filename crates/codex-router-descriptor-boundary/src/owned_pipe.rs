@@ -4,7 +4,10 @@ use rustix::{
     fs::{FileType, OFlags, fcntl_getfl, fcntl_setfl, fstat},
     io::{FdFlags, fcntl_getfd, fcntl_setfd},
 };
-use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
+use std::{
+    fs::{File, OpenOptions},
+    os::fd::{AsFd, BorrowedFd, OwnedFd},
+};
 use tokio::io::unix::AsyncFd;
 pub struct OwnedPipe;
 pub struct PipeReader {
@@ -71,6 +74,19 @@ impl PipeReader {
             descriptor: AsyncFd::new(descriptor)?,
         })
     }
+    /// Duplicates stdin as the owned read carrier, then restores stdin to `/dev/null`.
+    pub async fn inherit_stdin(gate: &DescriptorGate) -> Result<Self, BoundaryError> {
+        let descriptor = {
+            let _shared = gate.creation().await;
+            let descriptor = rustix::io::dup(rustix::stdio::stdin()).map_err(io_error)?;
+            validate_pipe(descriptor.as_fd(), false)?;
+            configure(&descriptor)?;
+            let null = File::open("/dev/null")?;
+            rustix::stdio::dup2_stdin(&null).map_err(io_error)?;
+            descriptor
+        };
+        Self::from_owned(descriptor, gate).await
+    }
     pub fn as_fd(&self) -> BorrowedFd<'_> {
         self.descriptor.get_ref().as_fd()
     }
@@ -115,6 +131,19 @@ impl PipeWriter {
         Ok(Self {
             descriptor: AsyncFd::new(descriptor)?,
         })
+    }
+    /// Duplicates stdout as the owned write carrier, then restores stdout to `/dev/null`.
+    pub async fn inherit_stdout(gate: &DescriptorGate) -> Result<Self, BoundaryError> {
+        let descriptor = {
+            let _shared = gate.creation().await;
+            let descriptor = rustix::io::dup(rustix::stdio::stdout()).map_err(io_error)?;
+            validate_pipe(descriptor.as_fd(), true)?;
+            configure(&descriptor)?;
+            let null = OpenOptions::new().write(true).open("/dev/null")?;
+            rustix::stdio::dup2_stdout(&null).map_err(io_error)?;
+            descriptor
+        };
+        Self::from_owned(descriptor, gate).await
     }
     pub fn as_fd(&self) -> BorrowedFd<'_> {
         self.descriptor.get_ref().as_fd()
