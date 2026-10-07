@@ -6,7 +6,7 @@
 
 use std::{path::PathBuf, str::FromStr};
 
-use percent_encoding::percent_decode_str;
+use percent_encoding::{AsciiSet, CONTROLS, percent_decode_str, utf8_percent_encode};
 use sqlx_core::error::Error;
 use url::Url;
 
@@ -71,11 +71,30 @@ fn apply_url_parameters(
     Ok(options)
 }
 
-/// Renders the target and open mode as a `turso:` URL that parses back to the same target
+/// Path bytes escaped when rendering: everything `from_str` would otherwise read as URL syntax
+/// (`?` starts the parameters, `%` starts an escape, `#` a fragment) plus whitespace, controls
+/// and non-ASCII, so the parser's percent-decoding restores the exact path
+const PATH_ESCAPES: &AsciiSet = &CONTROLS
+    .add(b' ')
+    .add(b'"')
+    .add(b'#')
+    .add(b'%')
+    .add(b'<')
+    .add(b'>')
+    .add(b'?')
+    .add(b'`')
+    .add(b'{')
+    .add(b'}');
+
+/// Renders the target and open mode as a `turso:` URL that parses back to the same target for
+/// any UTF-8 path; a non-UTF-8 path is rendered lossily
 pub(super) fn render_connection_url(options: &TursoConnectOptions) -> Url {
     let mut url = empty_turso_url();
     match options.target() {
-        TursoDatabaseTarget::File(path) => url.set_path(&path.to_string_lossy()),
+        TursoDatabaseTarget::File(path) => {
+            let path = path.to_string_lossy();
+            url.set_path(&utf8_percent_encode(&path, PATH_ESCAPES).to_string());
+        }
         TursoDatabaseTarget::Memory => url.set_path(":memory:"),
     }
     url.query_pairs_mut()
@@ -180,6 +199,10 @@ mod tests {
         for options in [
             TursoConnectOptions::new(),
             TursoConnectOptions::new().filename("/tmp/store dir/project.db"),
+            TursoConnectOptions::new().filename("/tmp/a%20b.db"),
+            TursoConnectOptions::new().filename("/tmp/what?.db"),
+            TursoConnectOptions::new().filename("/tmp/hash#tag/100%.db"),
+            TursoConnectOptions::new().filename("/tmp/caf\u{e9}/\u{4e2d}.db"),
             TursoConnectOptions::new()
                 .filename("relative.db")
                 .create_if_missing(true),
@@ -189,6 +212,7 @@ mod tests {
             let parsed = <TursoConnectOptions as ConnectOptions>::from_url(&url)?;
 
             // Assert
+            assert!(!url.as_str().contains(' '), "{url}");
             assert_eq!(parsed.target(), options.target(), "{url}");
             assert_eq!(
                 parsed.get_create_if_missing(),
