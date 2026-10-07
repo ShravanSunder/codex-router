@@ -454,6 +454,14 @@ where
                 }
             }
             if observations_recorded > 0 {
+                quota_history_state
+                    .record_refresh_success_status(
+                        account.account_id(),
+                        RouteBand::ClaudeMessages.as_str(),
+                        observation_started_at,
+                        fresh_until_unix_seconds,
+                    )
+                    .await?;
                 refreshed_count = refreshed_count.saturating_add(1);
             }
             continue;
