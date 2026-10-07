@@ -11,6 +11,10 @@ workspace = true
 
 [lib]
 proc-macro = true
+# No unit tests here; the facade's integration tests exercise the macros. An empty proc-macro
+# test harness links libstd dynamically and fails to load under the signing test runner.
+test = false
+doctest = false
 
 [features]
 chrono = ["sqlx-turso-core/chrono"]
