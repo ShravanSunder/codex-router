@@ -276,6 +276,16 @@ pub struct AsyncWeeklyQuotaFloorMutationStore {
 }
 
 impl AsyncSqliteStateStore {
+    /// Inspects an existing account database without applying migrations or opening a store.
+    pub async fn prepare_schema(
+        database_path: &Path,
+    ) -> Result<
+        crate::schema_preparation::AccountSchemaPreparation,
+        crate::schema_preparation::StateSchemaPreparationError,
+    > {
+        crate::schema_preparation::prepare_schema(database_path).await
+    }
+
     /// Opens a SQLite state database through SQLx and applies supported migrations.
     pub async fn open(database_path: &Path) -> Result<Self, StateStoreError> {
         let options = SqliteConnectOptions::new()

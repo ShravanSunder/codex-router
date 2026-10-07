@@ -17,6 +17,7 @@ mod presence_fixtures;
 mod provider_migration;
 mod schema_contracts;
 mod schema_integrity;
+mod schema_preparation;
 mod transaction_recovery;
 
 use presence_fixtures::*;

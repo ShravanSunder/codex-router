@@ -1,0 +1,78 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        SELECT\n            version AS \"version: i64\",\n            typeof(version) AS \"version_storage!\",\n            success AS \"success: bool\",\n            typeof(success) AS \"success_storage!\",\n            CASE\n                WHEN typeof(success) = 'integer' AND success IN (0, 1) THEN 1\n                ELSE 0\n            END AS \"success_value_is_boolean: bool\",\n            checksum AS \"checksum: Vec<u8>\",\n            typeof(checksum) AS \"checksum_storage!\"\n        FROM _sqlx_migrations\n        ORDER BY version\n        ",
+  "describe": {
+    "columns": [
+      {
+        "name": "version: i64",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "_sqlx_migrations",
+            "name": "version"
+          }
+        }
+      },
+      {
+        "name": "version_storage!",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "name": "success: bool",
+        "ordinal": 2,
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "_sqlx_migrations",
+            "name": "success"
+          }
+        }
+      },
+      {
+        "name": "success_storage!",
+        "ordinal": 3,
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "name": "success_value_is_boolean: bool",
+        "ordinal": 4,
+        "type_info": "Integer",
+        "origin": "Expression"
+      },
+      {
+        "name": "checksum: Vec<u8>",
+        "ordinal": 5,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "_sqlx_migrations",
+            "name": "checksum"
+          }
+        }
+      },
+      {
+        "name": "checksum_storage!",
+        "ordinal": 6,
+        "type_info": "Text",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      true,
+      null,
+      false,
+      null,
+      false,
+      false,
+      null
+    ]
+  },
+  "hash": "50afea13af01d1bf0c366ecc8601dd26bdb5725cc50d3f1e1488d1a14c5b3bf5"
+}
