@@ -1,5 +1,7 @@
 //! Bounded native app-server control-protocol exchange.
 
+use std::future::Future;
+use std::io;
 use std::path::Path;
 use std::time::Duration;
 
@@ -8,12 +10,16 @@ use futures_util::StreamExt;
 use serde::Deserialize;
 use serde_json::Value;
 use thiserror::Error;
+use tokio::io::AsyncRead;
+use tokio::io::AsyncWrite;
 use tokio::net::UnixStream;
+use tokio::time::Instant;
 use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::client_async_with_config;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 
+use crate::app_server_probe_action::AppServerProbeAction;
 use crate::native_observation_stage::NativeObservationStage;
 use crate::native_observation_validation::AppServerObservationValidationError;
 use crate::native_observation_validation::MAX_NATIVE_PROTOCOL_EVIDENCE_BYTES;
@@ -98,16 +104,46 @@ pub async fn observe_app_server(
     native_readiness_wait: Duration,
     remote_control_wait: Duration,
 ) -> Result<AppServerObservation, CodexProtocolError> {
-    let mut exchange =
-        tokio::time::timeout(native_readiness_wait, initialize_app_server(socket_path))
+    run_app_server_probe(
+        AppServerProbeAction::Observe,
+        native_readiness_wait,
+        remote_control_wait,
+        || UnixStream::connect(socket_path),
+    )
+    .await
+}
+
+/// Runs one designed native app-server action over the caller's async transport connector.
+pub async fn run_app_server_probe<TTransport, TConnector, TConnectFuture>(
+    action: AppServerProbeAction,
+    native_readiness_wait: Duration,
+    remote_control_wait: Duration,
+    mut connector: TConnector,
+) -> Result<AppServerObservation, CodexProtocolError>
+where
+    TTransport: AsyncRead + AsyncWrite + Unpin,
+    TConnector: FnMut() -> TConnectFuture,
+    TConnectFuture: Future<Output = io::Result<TTransport>>,
+{
+    let mut exchange = match action {
+        AppServerProbeAction::WaitForReady => {
+            initialize_with_ready_budget(native_readiness_wait, &mut connector).await?
+        }
+        AppServerProbeAction::Observe | AppServerProbeAction::EnableAndObserve => {
+            tokio::time::timeout(
+                native_readiness_wait,
+                connect_and_initialize(&mut connector),
+            )
             .await
             .map_err(|_elapsed| CodexProtocolError::Timeout {
                 stage: NativeObservationStage::NativeReadiness,
-            })??;
+            })??
+        }
+    };
 
     let remote_control = match tokio::time::timeout(
         remote_control_wait,
-        remote_control_observation::observe(&mut exchange, remote_control_wait),
+        remote_control_observation::observe(&mut exchange, action, remote_control_wait),
     )
     .await
     {
@@ -126,12 +162,18 @@ pub async fn observe_app_server(
 }
 
 /// One initialized native protocol exchange handed to Remote Control observation.
-pub(crate) struct InitializedControlExchange {
-    websocket: WebSocketStream<UnixStream>,
+pub(crate) struct InitializedControlExchange<TTransport>
+where
+    TTransport: AsyncRead + AsyncWrite + Unpin,
+{
+    websocket: WebSocketStream<TTransport>,
     running_version: String,
 }
 
-impl InitializedControlExchange {
+impl<TTransport> InitializedControlExchange<TTransport>
+where
+    TTransport: AsyncRead + AsyncWrite + Unpin,
+{
     fn running_version(&self) -> &str {
         &self.running_version
     }
@@ -181,15 +223,105 @@ impl InitializedControlExchange {
     }
 }
 
-async fn initialize_app_server(
-    socket_path: &Path,
-) -> Result<InitializedControlExchange, CodexProtocolError> {
-    let stream = tokio::time::timeout(CONTROL_RESPONSE_TIMEOUT, UnixStream::connect(socket_path))
+async fn connect_and_initialize<TTransport, TConnector, TConnectFuture>(
+    connector: &mut TConnector,
+) -> Result<InitializedControlExchange<TTransport>, CodexProtocolError>
+where
+    TTransport: AsyncRead + AsyncWrite + Unpin,
+    TConnector: FnMut() -> TConnectFuture,
+    TConnectFuture: Future<Output = io::Result<TTransport>>,
+{
+    let stream = connect_transport(connector, CONTROL_RESPONSE_TIMEOUT).await?;
+    initialize_app_server(stream).await
+}
+
+async fn initialize_with_ready_budget<TTransport, TConnector, TConnectFuture>(
+    native_readiness_wait: Duration,
+    connector: &mut TConnector,
+) -> Result<InitializedControlExchange<TTransport>, CodexProtocolError>
+where
+    TTransport: AsyncRead + AsyncWrite + Unpin,
+    TConnector: FnMut() -> TConnectFuture,
+    TConnectFuture: Future<Output = io::Result<TTransport>>,
+{
+    let started_at = Instant::now();
+    loop {
+        let Some(remaining_budget) = native_readiness_wait.checked_sub(started_at.elapsed()) else {
+            return Err(CodexProtocolError::Timeout {
+                stage: NativeObservationStage::Connect,
+            });
+        };
+        if remaining_budget.is_zero() {
+            return Err(CodexProtocolError::Timeout {
+                stage: NativeObservationStage::Connect,
+            });
+        }
+
+        let attempt_budget = CONTROL_RESPONSE_TIMEOUT.min(remaining_budget);
+        match connect_transport(connector, attempt_budget).await {
+            Ok(stream) => {
+                let Some(remaining_budget) =
+                    native_readiness_wait.checked_sub(started_at.elapsed())
+                else {
+                    return Err(CodexProtocolError::Timeout {
+                        stage: NativeObservationStage::NativeReadiness,
+                    });
+                };
+                if remaining_budget.is_zero() {
+                    return Err(CodexProtocolError::Timeout {
+                        stage: NativeObservationStage::NativeReadiness,
+                    });
+                }
+                return tokio::time::timeout(remaining_budget, initialize_app_server(stream))
+                    .await
+                    .map_err(|_elapsed| CodexProtocolError::Timeout {
+                        stage: NativeObservationStage::NativeReadiness,
+                    })?;
+            }
+            Err(CodexProtocolError::Connect(_)) => {}
+            Err(CodexProtocolError::Timeout {
+                stage: NativeObservationStage::Connect,
+            }) if remaining_budget > CONTROL_RESPONSE_TIMEOUT => {}
+            Err(error) => return Err(error),
+        }
+
+        let Some(remaining_budget) = native_readiness_wait.checked_sub(started_at.elapsed()) else {
+            return Err(CodexProtocolError::Timeout {
+                stage: NativeObservationStage::Connect,
+            });
+        };
+        if remaining_budget.is_zero() {
+            return Err(CodexProtocolError::Timeout {
+                stage: NativeObservationStage::Connect,
+            });
+        }
+        tokio::time::sleep(Duration::from_millis(20).min(remaining_budget)).await;
+    }
+}
+
+async fn connect_transport<TTransport, TConnector, TConnectFuture>(
+    connector: &mut TConnector,
+    timeout_budget: Duration,
+) -> Result<TTransport, CodexProtocolError>
+where
+    TTransport: AsyncRead + AsyncWrite + Unpin,
+    TConnector: FnMut() -> TConnectFuture,
+    TConnectFuture: Future<Output = io::Result<TTransport>>,
+{
+    tokio::time::timeout(timeout_budget, connector())
         .await
         .map_err(|_elapsed| CodexProtocolError::Timeout {
             stage: NativeObservationStage::Connect,
         })?
-        .map_err(CodexProtocolError::Connect)?;
+        .map_err(CodexProtocolError::Connect)
+}
+
+async fn initialize_app_server<TTransport>(
+    stream: TTransport,
+) -> Result<InitializedControlExchange<TTransport>, CodexProtocolError>
+where
+    TTransport: AsyncRead + AsyncWrite + Unpin,
+{
     let websocket_config = WebSocketConfig::default()
         .read_buffer_size(MAX_NATIVE_PROTOCOL_EVIDENCE_BYTES)
         .max_message_size(Some(MAX_NATIVE_PROTOCOL_EVIDENCE_BYTES))
