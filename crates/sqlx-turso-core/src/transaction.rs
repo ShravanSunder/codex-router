@@ -7,9 +7,9 @@ use sqlx_core::{
     },
 };
 
-use crate::{Turso, connection::TursoConnection, executor::map_turso_error};
+use crate::{Turso, connection::TursoConnection, error::map_turso_error};
 
-/// SQLx-compatible transaction handle for Turso connections
+/// A SQLx transaction on a Turso connection
 pub type TursoTransaction<'c> = sqlx_core::transaction::Transaction<'c, Turso>;
 
 /// SQLx transaction manager for Turso connections
@@ -308,89 +308,6 @@ mod tests {
             .fetch_one("SELECT COUNT(*) AS count FROM test")
             .await?;
         assert_eq!(row.try_get::<i64, _>("count")?, 0);
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn supports_begin_concurrent_transaction() -> sqlx_core::Result<()> {
-        let path = std::env::temp_dir().join(format!(
-            "sqlx-turso-begin-concurrent-{}.db",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_file(&path);
-
-        let mut connection = TursoConnectOptions::new()
-            .filename(&path)
-            .create_if_missing(true)
-            .mvcc(true)
-            .connect()
-            .await?;
-        (&mut connection)
-            .execute("CREATE TABLE test (id INTEGER PRIMARY KEY)")
-            .await?;
-
-        let mut transaction = connection.begin_with("BEGIN CONCURRENT").await?;
-        (&mut *transaction)
-            .execute("INSERT INTO test (id) VALUES (1)")
-            .await?;
-        transaction.commit().await?;
-
-        let row = (&mut connection)
-            .fetch_one("SELECT COUNT(*) AS count FROM test")
-            .await?;
-        assert_eq!(row.try_get::<i64, _>("count")?, 1);
-
-        drop(connection);
-        let _ = std::fs::remove_file(&path);
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn begin_concurrent_conflict_rolls_back_and_keeps_connection_usable()
-    -> sqlx_core::Result<()> {
-        let path = std::env::temp_dir().join(format!(
-            "sqlx-turso-begin-concurrent-conflict-{}.db",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_file(&path);
-
-        let options = TursoConnectOptions::new()
-            .filename(&path)
-            .create_if_missing(true)
-            .mvcc(true);
-        let mut first = options.clone().connect().await?;
-        let mut second = options.connect().await?;
-
-        (&mut first)
-            .execute("CREATE TABLE test (id INTEGER PRIMARY KEY)")
-            .await?;
-
-        let mut first_transaction = first.begin_with("BEGIN CONCURRENT").await?;
-        (&mut *first_transaction)
-            .execute("INSERT INTO test (id) VALUES (1)")
-            .await?;
-
-        let mut second_transaction = second.begin_with("BEGIN CONCURRENT").await?;
-        (&mut *second_transaction)
-            .execute("INSERT INTO test (id) VALUES (1)")
-            .await?;
-
-        first_transaction.commit().await?;
-        let _error = second_transaction
-            .commit()
-            .await
-            .expect_err("second concurrent primary-key commit should conflict");
-
-        let row = (&mut second)
-            .fetch_one("SELECT COUNT(*) AS count FROM test")
-            .await?;
-        assert_eq!(row.try_get::<i64, _>("count")?, 1);
-
-        drop(first);
-        drop(second);
-        let _ = std::fs::remove_file(&path);
 
         Ok(())
     }

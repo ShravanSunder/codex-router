@@ -1,30 +1,25 @@
 [package]
 name = "sqlx-turso"
+description = "SQLx driver for the Turso database engine: connections, checked queries, migrations and Sync"
 version.workspace = true
 edition.workspace = true
-rust-version.workspace = true
 license.workspace = true
-repository.workspace = true
-homepage.workspace = true
-description = "SQLx adapter for the Rust Turso database engine"
-documentation = "https://docs.rs/sqlx-turso"
-readme = "../../README.md"
-keywords = ["sqlx", "turso", "sqlite", "database"]
-categories = ["database"]
+publish.workspace = true
+readme = "README.md"
+
+[lints]
+workspace = true
 
 [features]
-default = ["runtime-tokio"]
+# `sync` is opt-in: Turso's Sync turns on rustls's aws-lc-rs provider, which conflicts with the
+# ring provider Router's TLS clients use when both share one build. Sync tests and lints run in
+# their own `-p sqlx-turso --all-features` invocation.
+default = ["runtime-tokio", "macros", "migrate", "chrono"]
 runtime-tokio = ["sqlx-turso-core/runtime-tokio"]
 macros = ["dep:sqlx-turso-macros", "sqlx-turso-core/macros"]
-any = ["sqlx-turso-core/any"]
 sync = ["sqlx-turso-core/sync"]
-fts = ["sqlx-turso-core/fts"]
 migrate = ["sqlx-turso-core/migrate"]
-offline = ["sqlx-turso-core/offline"]
 chrono = ["sqlx-turso-core/chrono", "sqlx-turso-macros?/chrono"]
-json = ["sqlx-turso-core/json"]
-time = ["sqlx-turso-core/time", "sqlx-turso-macros?/time"]
-uuid = ["sqlx-turso-core/uuid", "sqlx-turso-macros?/uuid"]
 
 [dependencies]
 sqlx.workspace = true
@@ -32,29 +27,16 @@ sqlx-turso-core.workspace = true
 sqlx-turso-macros = { workspace = true, optional = true }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["macros", "rt"] }
+chrono.workspace = true
+# No features: the Sync tests call rustls's aws-lc-rs provider, which Turso's Sync turns on.
+rustls = { version = "0.23.45", default-features = false }
+serde.workspace = true
+serde_json.workspace = true
+sqlx = { workspace = true, features = ["macros", "migrate"] }
+tempfile = "3.27.0"
+tokio = { workspace = true, features = ["fs"] }
 trybuild.workspace = true
 
 [[example]]
-name = "checked_queries"
-required-features = ["macros"]
-
-[[example]]
-name = "migrations"
+name = "seed_native_schema"
 required-features = ["migrate"]
-
-[[example]]
-name = "sync"
-required-features = ["sync"]
-
-[[test]]
-name = "macros"
-required-features = ["macros"]
-
-[[test]]
-name = "online_macros"
-required-features = ["macros"]
-
-[[test]]
-name = "ui"
-required-features = ["macros"]

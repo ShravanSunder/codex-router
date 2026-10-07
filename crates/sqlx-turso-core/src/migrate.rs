@@ -1,56 +1,26 @@
+//! SQLx migrations on a Turso connection
+//!
+//! `Migrator::run_direct` inside a caller-owned `BEGIN IMMEDIATE` transaction is the intended
+//! path: each migration's own transaction then becomes a savepoint. Migration table names are
+//! validated SQLite identifiers because they are formatted into SQL.
+
 use std::{
     fmt,
-    path::Path,
-    str::FromStr,
     time::{Duration, Instant},
 };
 
 use futures_core::future::BoxFuture;
 use sqlx_core::{
-    connection::{ConnectOptions, Connection},
-    error::Error,
+    connection::Connection,
     executor::Executor,
-    migrate::{AppliedMigration, Migrate, MigrateDatabase, MigrateError, Migration},
+    migrate::{AppliedMigration, Migrate, MigrateError, Migration},
     query::query,
     query_as::query_as,
     query_scalar::query_scalar,
     sql_str::AssertSqlSafe,
 };
 
-use crate::{
-    Turso, TursoConnectOptions, TursoConnection, TursoDatabaseTarget,
-    lifecycle::known_database_files,
-};
-
-impl MigrateDatabase for Turso {
-    async fn create_database(url: &str) -> Result<(), Error> {
-        let options = TursoConnectOptions::from_str(url)?.create_if_missing(true);
-
-        if options.is_in_memory() {
-            return Ok(());
-        }
-
-        options.connect().await?.close().await
-    }
-
-    async fn database_exists(url: &str) -> Result<bool, Error> {
-        let options = TursoConnectOptions::from_str(url)?;
-
-        match options.target() {
-            TursoDatabaseTarget::Memory { .. } => Ok(true),
-            TursoDatabaseTarget::File(path) => Ok(path.exists()),
-        }
-    }
-
-    async fn drop_database(url: &str) -> Result<(), Error> {
-        let options = TursoConnectOptions::from_str(url)?;
-
-        match options.target() {
-            TursoDatabaseTarget::Memory { .. } => Ok(()),
-            TursoDatabaseTarget::File(path) => remove_known_database_files(path).await,
-        }
-    }
-}
+use crate::{TursoAdapterError, TursoConnection};
 
 impl Migrate for TursoConnection {
     fn create_schema_if_not_exists<'e>(
@@ -235,18 +205,6 @@ VALUES ( ?1, ?2, TRUE, ?3, -1 )
     }
 }
 
-async fn remove_known_database_files(path: &Path) -> Result<(), Error> {
-    for file in known_database_files(path) {
-        match tokio::fs::remove_file(file).await {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(Error::Io(error)),
-        }
-    }
-
-    Ok(())
-}
-
 async fn execute_migration(
     conn: &mut TursoConnection,
     table_name: &SqliteIdentifierPath,
@@ -332,26 +290,18 @@ impl SqliteIdentifier {
         value: &'a str,
         original: &str,
     ) -> Result<(Self, &'a str), MigrateError> {
-        let mut chars = value.char_indices().peekable();
-        let Some((_, first)) = chars.next() else {
+        let end = value
+            .char_indices()
+            .find(|(_, ch)| !is_identifier_continue(*ch))
+            .map_or(value.len(), |(index, _)| index);
+        let Some((identifier, rest)) = value.split_at_checked(end) else {
             return Err(invalid_identifier(original));
         };
-
-        if !is_identifier_start(first) {
+        if !identifier.chars().next().is_some_and(is_identifier_start) {
             return Err(invalid_identifier(original));
         }
 
-        let mut end = first.len_utf8();
-        while let Some((index, ch)) = chars.peek().copied() {
-            if !is_identifier_continue(ch) {
-                break;
-            }
-
-            end = index + ch.len_utf8();
-            let _ = chars.next();
-        }
-
-        Ok((Self(value[..end].to_owned()), &value[end..]))
+        Ok((Self(identifier.to_owned()), rest))
     }
 
     fn parse_quoted_prefix<'a>(
@@ -377,8 +327,10 @@ impl SqliteIdentifier {
                 return Err(invalid_identifier(original));
             }
 
-            let rest_start = index + ch.len_utf8();
-            return Ok((Self(identifier), &value[rest_start..]));
+            let rest = value
+                .get(index + ch.len_utf8()..)
+                .ok_or_else(|| invalid_identifier(original))?;
+            return Ok((Self(identifier), rest));
         }
 
         Err(invalid_identifier(original))
@@ -445,60 +397,28 @@ fn is_identifier_continue(ch: char) -> bool {
 }
 
 fn invalid_identifier(value: &str) -> MigrateError {
-    MigrateError::Execute(Error::Configuration(
-        format!("invalid SQLite identifier `{value}`").into(),
-    ))
+    MigrateError::Execute(
+        TursoAdapterError::InvalidMigrationTableName {
+            name: value.to_owned(),
+        }
+        .into(),
+    )
 }
 
 #[cfg(test)]
 mod tests {
-    use std::{borrow::Cow, process};
+    use std::borrow::Cow;
 
     use sqlx_core::{
         connection::ConnectOptions,
-        migrate::{Migrate, MigrateDatabase, Migration, MigrationType},
+        migrate::{Migrate, MigrateError, Migration, MigrationType},
         query_scalar::query_scalar,
         sql_str::{AssertSqlSafe, SqlSafeStr},
     };
 
-    use crate::{
-        Turso, TursoConnectOptions, lifecycle::known_database_files,
-        migrate::remove_known_database_files,
-    };
+    use crate::TursoConnectOptions;
 
     const MIGRATIONS_TABLE: &str = "_sqlx_migrations";
-
-    #[tokio::test]
-    async fn creates_checks_and_drops_file_database_with_known_sidecars() -> sqlx_core::Result<()> {
-        let path = temp_database_path("lifecycle");
-        remove_known_database_files(&path).await?;
-
-        let url = database_url(&path);
-        assert!(!Turso::database_exists(&url).await?);
-
-        Turso::create_database(&url).await?;
-        assert!(Turso::database_exists(&url).await?);
-
-        for file in known_database_files(&path) {
-            tokio::fs::write(file, b"sidecar").await?;
-        }
-
-        let unrelated = path.with_file_name(format!(
-            "{}-not-known",
-            path.file_name().unwrap().to_string_lossy()
-        ));
-        tokio::fs::write(&unrelated, b"keep").await?;
-
-        Turso::drop_database(&url).await?;
-
-        for file in known_database_files(&path) {
-            assert!(!file.exists());
-        }
-        assert!(unrelated.exists());
-
-        tokio::fs::remove_file(unrelated).await?;
-        Ok(())
-    }
 
     #[tokio::test]
     async fn applies_lists_and_reverts_migrations() -> sqlx_core::Result<()> {
@@ -591,11 +511,11 @@ mod tests {
             "CREATE TABLE broken(id INTEGER PRIMARY KEY); SELECT missing FROM broken",
         );
 
-        let error = conn.apply(MIGRATIONS_TABLE, &bad).await.unwrap_err();
-        assert!(matches!(
-            error,
-            sqlx_core::migrate::MigrateError::ExecuteMigration(_, 2)
-        ));
+        let error = conn
+            .apply(MIGRATIONS_TABLE, &bad)
+            .await
+            .expect_err("the migration selects a missing column");
+        assert!(matches!(error, MigrateError::ExecuteMigration(_, 2)));
         assert_eq!(conn.dirty_version(MIGRATIONS_TABLE).await?, Some(2));
 
         Ok(())
@@ -608,7 +528,7 @@ mod tests {
         let error = conn
             .ensure_migrations_table("_sqlx_migrations; DROP TABLE users")
             .await
-            .unwrap_err();
+            .expect_err("an injected table name is not an identifier");
 
         assert!(error.to_string().contains("invalid SQLite identifier"));
 
@@ -636,13 +556,5 @@ mod tests {
             AssertSqlSafe(sql).into_sql_str(),
             false,
         )
-    }
-
-    fn temp_database_path(name: &str) -> std::path::PathBuf {
-        std::env::temp_dir().join(format!("sqlx-turso-migrate-{name}-{}.db", process::id()))
-    }
-
-    fn database_url(path: &std::path::Path) -> String {
-        format!("turso://{}?mode=rwc", path.display())
     }
 }

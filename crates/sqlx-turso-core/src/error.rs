@@ -2,45 +2,87 @@ use std::{borrow::Cow, error::Error, fmt};
 
 use sqlx_core::error::{DatabaseError, Error as SqlxError, ErrorKind};
 
-/// Error type for adapter-owned setup and unsupported surfaces
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct TursoAdapterError {
-    message: String,
+use crate::value::TursoStorageClass;
+
+/// Failures the driver itself detects, before or around the Turso engine
+///
+/// Configuration and usage variants surface as [`sqlx_core::error::Error::Configuration`];
+/// decode variants surface as [`sqlx_core::error::Error::ColumnDecode`] through SQLx's decode
+/// path. Callers match on the variant by downcasting the boxed source.
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum TursoAdapterError {
+    /// The connection URL does not start with `turso:`
+    #[error("Turso connection URLs must use the `turso:` scheme")]
+    MissingTursoScheme,
+    /// The connection URL path is not valid percent-encoded UTF-8
+    #[error("the Turso connection URL path is not valid percent-encoded UTF-8")]
+    InvalidUrlPath,
+    /// The connection URL carries a parameter this driver does not accept
+    #[error("unknown Turso connection URL parameter `{name}`")]
+    UnknownUrlParameter {
+        /// The rejected parameter name
+        name: String,
+    },
+    /// A connection URL parameter has a value this driver does not accept
+    #[error("unknown value {value:?} for Turso connection URL parameter `{name}`")]
+    InvalidUrlParameterValue {
+        /// The parameter name
+        name: &'static str,
+        /// The rejected value
+        value: String,
+    },
+    /// Read-only opens need the lower Turso SDK, which this driver does not use
+    #[error("read-only Turso connections are not supported")]
+    ReadOnlyUnsupported,
+    /// Sync options were given to a build without the `sync` feature
+    #[error("Turso Sync connections require the `sync` feature")]
+    SyncFeatureDisabled,
+    /// A Sync operation was called on a connection opened without Sync options
+    #[error("this Turso connection was not opened with Sync options")]
+    NotSyncConnection,
+    /// Arguments were bound to SQL that contains more than one statement
+    #[error("arguments cannot be bound to multi-statement Turso SQL")]
+    BatchArgumentsUnsupported,
+    /// A named placeholder was used; only `?`, `?N` and `$N` are supported
+    #[error("named placeholder `{placeholder}` is not supported; use `?`, `?N` or `$N`")]
+    NamedPlaceholderUnsupported {
+        /// The placeholder as written in the SQL
+        placeholder: String,
+    },
+    /// A migrations table name is not a valid SQLite identifier path
+    #[error("invalid SQLite identifier `{name}` for the migrations table")]
+    InvalidMigrationTableName {
+        /// The rejected table name
+        name: String,
+    },
+    /// A value's storage class cannot decode into the requested Rust type
+    #[error("cannot decode a Turso {actual} value as {expected}")]
+    StorageClassMismatch {
+        /// What the requested Rust type accepts
+        expected: &'static str,
+        /// The storage class the engine returned
+        actual: TursoStorageClass,
+    },
+    /// Stored text does not parse as the requested date or time type
+    #[error("invalid Turso {kind} text {value:?}")]
+    InvalidTemporalText {
+        /// The requested temporal kind
+        kind: &'static str,
+        /// The stored text
+        value: String,
+    },
+    /// A stored number is outside the requested date or time type's range
+    #[error("Turso {kind} value is out of range")]
+    TemporalOutOfRange {
+        /// The requested temporal kind
+        kind: &'static str,
+    },
 }
 
-impl TursoAdapterError {
-    /// Creates an error for a surface that is not implemented yet
-    pub fn unsupported(surface: impl Into<String>) -> Self {
-        let surface = surface.into();
-        Self {
-            message: format!("{surface} is not supported by sqlx-turso yet"),
-        }
+impl From<TursoAdapterError> for SqlxError {
+    fn from(error: TursoAdapterError) -> Self {
+        SqlxError::Configuration(Box::new(error))
     }
-
-    /// Returns the error message
-    pub fn message(&self) -> &str {
-        &self.message
-    }
-}
-
-impl fmt::Display for TursoAdapterError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(&self.message)
-    }
-}
-
-impl Error for TursoAdapterError {}
-
-pub(crate) fn unsupported_sqlx(surface: impl Into<String>) -> sqlx_core::error::Error {
-    let error = TursoAdapterError::unsupported(surface);
-    sqlx_core::error::Error::Configuration(Box::new(error))
-}
-
-pub(crate) fn unsupported_autovacuum() -> sqlx_core::error::Error {
-    sqlx_core::error::Error::Configuration(
-        "PRAGMA auto_vacuum is not supported by sqlx-turso yet. Turso keeps autovacuum behind an experimental opt-in because there are still open correctness issues in that code path, and the pinned Rust builder does not expose an autovacuum opt-in. Regular VACUUM is still supported behind TursoExperimentalFeature::Vacuum"
-            .into(),
-    )
 }
 
 /// Database error returned by the Turso engine
@@ -93,6 +135,10 @@ impl DatabaseError for TursoDatabaseError {
     }
 }
 
+pub(crate) fn map_turso_error(error: turso::Error) -> SqlxError {
+    TursoDatabaseError::from_turso(error)
+}
+
 fn turso_error_code(error: &turso::Error) -> &'static str {
     match error {
         turso::Error::ToSqlConversionFailure(_) => "TURSO_TO_SQL_CONVERSION_FAILURE",
@@ -109,6 +155,8 @@ fn turso_error_code(error: &turso::Error) -> &'static str {
         turso::Error::NotAdb(_) => "SQLITE_NOTADB",
         turso::Error::Corrupt(_) => "SQLITE_CORRUPT",
         turso::Error::IoError(_, _) => "SQLITE_IOERR",
+        // A failed batch reports its statement's code; a failed rollback wins because the
+        // transaction state is then unknown.
         turso::Error::BatchStatementFailed { error, .. } => turso_error_code(error),
         turso::Error::BatchRollbackFailed { rollback_error, .. } => {
             turso_error_code(rollback_error)
@@ -139,4 +187,44 @@ fn sqlx_error_kind(code: &str, message: &str) -> ErrorKind {
 
 fn constraint_message_contains(message: &str, needle: &str) -> bool {
     message.to_ascii_lowercase().contains(needle)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::turso_error_code;
+
+    #[test]
+    fn batch_statement_failure_reports_the_statement_code() {
+        // Arrange
+        let error = turso::Error::BatchStatementFailed {
+            index: 1,
+            error: Box::new(turso::Error::Constraint(
+                "UNIQUE constraint failed".to_owned(),
+            )),
+            results: Vec::new(),
+        };
+
+        // Act
+        let code = turso_error_code(&error);
+
+        // Assert
+        assert_eq!(code, "SQLITE_CONSTRAINT");
+    }
+
+    #[test]
+    fn batch_rollback_failure_reports_the_rollback_code() {
+        // Arrange
+        let error = turso::Error::BatchRollbackFailed {
+            error: Box::new(turso::Error::Constraint(
+                "UNIQUE constraint failed".to_owned(),
+            )),
+            rollback_error: Box::new(turso::Error::Busy("database is locked".to_owned())),
+        };
+
+        // Act
+        let code = turso_error_code(&error);
+
+        // Assert
+        assert_eq!(code, "SQLITE_BUSY");
+    }
 }

@@ -3,8 +3,7 @@ use std::{borrow::Cow, fmt};
 use sqlx_core::type_info::TypeInfo;
 
 /// SQLite-compatible Turso type information
-#[derive(Clone, Debug, Eq, PartialEq)]
-#[cfg_attr(feature = "offline", derive(serde::Deserialize, serde::Serialize))]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct TursoTypeInfo {
     name: Cow<'static, str>,
 }
@@ -53,17 +52,17 @@ impl TursoTypeInfo {
         name.contains("real") || name.contains("floa") || name.contains("doub")
     }
 
-    #[cfg(any(feature = "chrono", feature = "time"))]
+    #[cfg(feature = "chrono")]
     pub(crate) fn has_date_affinity(&self) -> bool {
         self.name.eq_ignore_ascii_case("date")
     }
 
-    #[cfg(any(feature = "chrono", feature = "time"))]
+    #[cfg(feature = "chrono")]
     pub(crate) fn has_time_affinity(&self) -> bool {
         self.name.eq_ignore_ascii_case("time")
     }
 
-    #[cfg(any(feature = "chrono", feature = "time"))]
+    #[cfg(feature = "chrono")]
     pub(crate) fn has_datetime_affinity(&self) -> bool {
         let name = self.name.to_ascii_lowercase();
         name == "datetime" || name == "timestamp"

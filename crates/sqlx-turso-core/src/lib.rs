@@ -1,29 +1,23 @@
-//! Core SQLx adapter types for the Rust Turso database engine
+//! SQLx driver internals for the Turso database engine
 //!
-//! This crate owns the [`Turso`] SQLx database marker, connection options, runtime trait
-//! implementations, value/row/type metadata, transactions, pools, migrations, optional `Any`
-//! support, and macro metadata hooks. Most applications should depend on the `sqlx-turso`
-//! facade instead of this crate directly.
+//! This crate owns the [`Turso`] SQLx database marker, connection options, the engine
+//! connection, executor, values, transactions, migrations and the type checking that the
+//! checked query macros use. Applications depend on the `sqlx-turso` facade instead.
 
 #![warn(missing_docs)]
+#![cfg_attr(test, allow(clippy::panic_in_result_fn))]
 
-#[cfg(feature = "any")]
-mod any;
 mod arguments;
 mod column;
+mod connect_options;
 mod connection;
 mod database;
-mod driver;
+mod engine_connection;
 mod error;
 mod executor;
-mod features;
-#[cfg(feature = "migrate")]
-mod lifecycle;
-mod macros;
+mod macro_type_checking;
 #[cfg(feature = "migrate")]
 mod migrate;
-mod options;
-mod pool;
 mod query_result;
 mod row;
 mod statement;
@@ -31,27 +25,20 @@ mod transaction;
 mod type_info;
 mod value;
 
-#[cfg(feature = "any")]
-pub use any::{TURSO_ANY_DRIVER, install_turso_any_driver};
 pub use arguments::TursoArguments;
 pub use column::TursoColumn;
+pub use connect_options::{TursoConnectOptions, TursoDatabaseTarget, TursoSyncOptions};
 pub use connection::TursoConnection;
 pub use database::Turso;
-pub use error::TursoAdapterError;
-pub use macros::{TursoDescribeExt, TursoTypeChecking};
-pub use options::{
-    TursoConnectOptions, TursoDatabaseTarget, TursoEncryptionOptions, TursoExperimentalFeature,
-    TursoExperimentalFeatures, TursoIo, TursoSyncOptions,
-};
-pub use pool::{TursoExecutor, TursoPool, TursoPoolOptions};
+pub use error::{TursoAdapterError, TursoDatabaseError};
 pub use query_result::TursoQueryResult;
 pub use row::TursoRow;
 pub use statement::TursoStatement;
 pub use transaction::{TursoTransaction, TursoTransactionManager};
 pub use type_info::TursoTypeInfo;
-pub use value::{TursoValue, TursoValueRef};
+pub use value::{TursoStorageClass, TursoValue, TursoValueRef};
 
 #[cfg(feature = "migrate")]
-pub use sqlx_core::migrate::{Migrate, MigrateDatabase, Migration, MigrationType};
+pub use sqlx_core::migrate::{Migrate, Migration, MigrationType};
 
 sqlx_core::impl_acquire!(Turso, TursoConnection);

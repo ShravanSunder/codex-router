@@ -5,8 +5,7 @@ use sqlx_core::{HashMap, column::Column, ext::ustr::UStr, impl_column_index_for_
 use crate::{Turso, TursoTypeInfo};
 
 /// Column metadata for a Turso result set
-#[derive(Clone, Debug)]
-#[cfg_attr(feature = "offline", derive(serde::Deserialize, serde::Serialize))]
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 pub struct TursoColumn {
     ordinal: usize,
     name: String,

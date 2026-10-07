@@ -57,11 +57,6 @@ impl TursoStatement {
     pub(crate) fn raw(&self) -> Option<turso::Statement> {
         self.raw.clone()
     }
-
-    #[cfg(feature = "any")]
-    pub(crate) fn column_names(&self) -> Arc<HashMap<UStr, usize>> {
-        self.column_names.clone()
-    }
 }
 
 impl fmt::Debug for TursoStatement {

@@ -1,4 +1,7 @@
-use crate::{Turso, TursoTypeInfo, TursoValue};
+//! Type checking and describe hooks the checked query macros use for Turso
+//!
+//! Parameter checking is weak: the high-level Turso statement exposes no parameter metadata, so
+//! the macros cannot check bind arity or parameter types.
 
 use sqlx_core::{
     config::macros::{DateTimeCrate, NumericCrate, PreferredCrates},
@@ -7,14 +10,7 @@ use sqlx_core::{
     value::Value,
 };
 
-/// Runtime metadata extension point for checked Turso query macros
-pub trait TursoDescribeExt {}
-
-/// Type-checking extension point for checked Turso query macros
-pub trait TursoTypeChecking {}
-
-impl TursoDescribeExt for Turso {}
-impl TursoTypeChecking for Turso {}
+use crate::{Turso, TursoTypeInfo, TursoValue};
 
 impl TypeChecking for Turso {
     const PARAM_CHECKING: ParamChecking = ParamChecking::Weak;
@@ -39,17 +35,6 @@ impl TypeChecking for Turso {
 
     fn fmt_value_debug(value: &TursoValue) -> FmtValue<'_, Self> {
         let info = value.type_info();
-
-        #[cfg(feature = "time")]
-        {
-            if <sqlx_core::types::time::PrimitiveDateTime as Type<Turso>>::compatible(&info) {
-                return FmtValue::debug::<sqlx_core::types::time::PrimitiveDateTime>(value);
-            }
-
-            if <sqlx_core::types::time::Date as Type<Turso>>::compatible(&info) {
-                return FmtValue::debug::<sqlx_core::types::time::Date>(value);
-            }
-        }
 
         #[cfg(feature = "chrono")]
         {
@@ -104,6 +89,7 @@ fn type_path_for_id(
         return Ok("bool");
     }
 
+    // A declared INTEGER column maps to i32 first, matching SQLx's SQLite driver.
     if <i32 as Type<Turso>>::type_info() == *info {
         return Ok("i32");
     }
@@ -125,13 +111,6 @@ fn type_path_for_id(
         return Ok("Vec<u8>");
     }
 
-    #[cfg(feature = "uuid")]
-    if <sqlx_core::types::Uuid as Type<Turso>>::type_info() == *info
-        || <sqlx_core::types::Uuid as Type<Turso>>::compatible(info)
-    {
-        return Ok("::sqlx_turso::sqlx::types::Uuid");
-    }
-
     Err(TypeCheckingError::NoMappingFound)
 }
 
@@ -140,64 +119,34 @@ fn datetime_type_path(
     preferred_crates: &PreferredCrates,
 ) -> Option<Result<&'static str, TypeCheckingError>> {
     match preferred_crates.date_time {
-        DateTimeCrate::Time => Some(
-            time_type_path(info).unwrap_or(Err(TypeCheckingError::DateTimeCrateFeatureNotEnabled)),
-        ),
+        DateTimeCrate::Time => Some(Err(TypeCheckingError::DateTimeCrateFeatureNotEnabled)),
         DateTimeCrate::Chrono => Some(
             chrono_type_path(info)
                 .unwrap_or(Err(TypeCheckingError::DateTimeCrateFeatureNotEnabled)),
         ),
-        DateTimeCrate::Inferred => {
-            #[cfg(feature = "time")]
-            if let Some(path) = time_type_path(info) {
-                return Some(path);
-            }
-
-            #[cfg(feature = "chrono")]
-            if let Some(path) = chrono_type_path(info) {
-                return Some(path);
-            }
-
-            None
-        }
+        DateTimeCrate::Inferred => chrono_type_path(info),
     }
 }
 
-fn chrono_type_path(_info: &TursoTypeInfo) -> Option<Result<&'static str, TypeCheckingError>> {
-    #[cfg(feature = "chrono")]
+#[cfg(feature = "chrono")]
+fn chrono_type_path(info: &TursoTypeInfo) -> Option<Result<&'static str, TypeCheckingError>> {
+    if <sqlx_core::types::chrono::NaiveDate as Type<Turso>>::type_info() == *info
+        || info.has_date_affinity()
     {
-        if <sqlx_core::types::chrono::NaiveDate as Type<Turso>>::type_info() == *_info
-            || _info.has_date_affinity()
-        {
-            return Some(Ok("::sqlx_turso::sqlx::types::chrono::NaiveDate"));
-        }
+        return Some(Ok("::sqlx_turso::sqlx::types::chrono::NaiveDate"));
+    }
 
-        if <sqlx_core::types::chrono::NaiveDateTime as Type<Turso>>::type_info() == *_info
-            || _info.has_datetime_affinity()
-        {
-            return Some(Ok("::sqlx_turso::sqlx::types::chrono::NaiveDateTime"));
-        }
+    if <sqlx_core::types::chrono::NaiveDateTime as Type<Turso>>::type_info() == *info
+        || info.has_datetime_affinity()
+    {
+        return Some(Ok("::sqlx_turso::sqlx::types::chrono::NaiveDateTime"));
     }
 
     None
 }
 
-fn time_type_path(_info: &TursoTypeInfo) -> Option<Result<&'static str, TypeCheckingError>> {
-    #[cfg(feature = "time")]
-    {
-        if <sqlx_core::types::time::Date as Type<Turso>>::type_info() == *_info
-            || _info.has_date_affinity()
-        {
-            return Some(Ok("::sqlx_turso::sqlx::types::time::Date"));
-        }
-
-        if <sqlx_core::types::time::PrimitiveDateTime as Type<Turso>>::type_info() == *_info
-            || _info.has_datetime_affinity()
-        {
-            return Some(Ok("::sqlx_turso::sqlx::types::time::PrimitiveDateTime"));
-        }
-    }
-
+#[cfg(not(feature = "chrono"))]
+fn chrono_type_path(_info: &TursoTypeInfo) -> Option<Result<&'static str, TypeCheckingError>> {
     None
 }
 

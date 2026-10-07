@@ -1,4 +1,9 @@
 //! Checked query macros for sqlx-turso
+//!
+//! Each macro registers the Turso driver with sqlx-macros-core's expander, which describes the
+//! query against `DATABASE_URL` online or reads committed metadata offline, then rewrites the
+//! generated absolute `::sqlx` and `::sqlx_turso` paths through the `sqlx-turso` facade as the
+//! caller named it in `Cargo.toml`.
 
 #![warn(missing_docs)]
 
@@ -138,10 +143,12 @@ fn rewrite_sqlx_paths(tokens: TokenStream2, facade_path: &TokenStream2) -> Token
 
     while let Some(token) = iter.next() {
         match token {
-            TokenTree::Punct(first)
-                if first.as_char() == ':' && iter.peek().is_some_and(is_colon_punct) =>
-            {
-                let second = iter.next().expect("peeked token must exist");
+            TokenTree::Punct(first) if first.as_char() == ':' => {
+                // `::` followed by `sqlx` or `sqlx_turso` is an absolute path to rewrite.
+                let Some(second) = iter.next_if(is_colon_punct) else {
+                    output.extend([TokenTree::Punct(first)]);
+                    continue;
+                };
                 if let Some(replacement) = absolute_path_replacement(iter.peek(), facade_path) {
                     let _ = iter.next();
                     output.extend(replacement);

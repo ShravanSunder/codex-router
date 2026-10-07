@@ -1,30 +1,26 @@
 [package]
 name = "sqlx-turso-core"
+description = "SQLx driver internals for the Turso database engine"
 version.workspace = true
 edition.workspace = true
-rust-version.workspace = true
 license.workspace = true
-repository.workspace = true
-homepage.workspace = true
-description = "Core SQLx adapter types for the Rust Turso database engine"
-documentation = "https://docs.rs/sqlx-turso-core"
-readme = "../../README.md"
-keywords = ["sqlx", "turso", "sqlite", "database"]
-categories = ["database"]
+publish.workspace = true
+
+[lints]
+workspace = true
 
 [features]
 default = ["runtime-tokio"]
 runtime-tokio = ["sqlx-core/_rt-tokio"]
-any = ["sqlx-core/any"]
 sync = ["turso/sync"]
-fts = ["turso/fts"]
 migrate = ["sqlx-core/migrate"]
-offline = ["dep:serde", "dep:serde_json", "sqlx-core/offline"]
-macros = ["offline", "dep:sqlx-macros-core", "sqlx-macros-core/macros", "sqlx-macros-core/_rt-tokio", "sqlx-macros-core/sqlx-toml"]
+macros = [
+    "dep:sqlx-macros-core",
+    "sqlx-macros-core/macros",
+    "sqlx-macros-core/_rt-tokio",
+    "sqlx-macros-core/sqlx-toml",
+]
 chrono = ["dep:chrono", "sqlx-core/chrono"]
-json = ["dep:serde", "dep:serde_json", "sqlx-core/json"]
-time = ["dep:time", "sqlx-core/time"]
-uuid = ["dep:uuid", "sqlx-core/uuid"]
 
 [dependencies]
 chrono = { workspace = true, optional = true }
@@ -33,15 +29,16 @@ futures-core.workspace = true
 futures-util.workspace = true
 log.workspace = true
 percent-encoding.workspace = true
-serde = { workspace = true, optional = true }
-serde_json = { workspace = true, optional = true }
+serde.workspace = true
+# `Executor::describe` exists only with sqlx-core's `offline` feature, so it is always on.
 sqlx-core = { workspace = true, features = ["offline"] }
 sqlx-macros-core = { workspace = true, optional = true }
-time = { workspace = true, optional = true }
-tokio.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["fs"] }
 turso.workspace = true
 url.workspace = true
-uuid = { workspace = true, optional = true }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["macros", "rt"] }
+serde_json.workspace = true
+tempfile = "3.27.0"
+tokio = { workspace = true, features = ["fs", "macros", "rt"] }

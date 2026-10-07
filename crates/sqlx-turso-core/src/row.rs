@@ -39,11 +39,6 @@ impl TursoRow {
             values,
         }
     }
-
-    #[cfg(feature = "any")]
-    pub(crate) fn column_names(&self) -> Arc<HashMap<UStr, usize>> {
-        self.column_names.clone()
-    }
 }
 
 impl Row for TursoRow {

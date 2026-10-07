@@ -30,4 +30,4 @@ tracing.workspace = true
 [dev-dependencies]
 codex-router-secret-store = { path = "../codex-router-secret-store", version = "0.1.4", features = ["keychain-test-guard", "test-support"] }
 codex-router-state = { path = "../codex-router-state", version = "0.1.4", features = ["sync-rusqlite-fixtures"] }
-sqlx.workspace = true
+sqlx = { workspace = true, features = ["sqlite"] }

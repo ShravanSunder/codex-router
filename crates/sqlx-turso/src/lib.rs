@@ -1,8 +1,8 @@
-//! SQLx adapter for the Rust Turso database engine
+//! SQLx driver for the Turso database engine
 //!
-//! `sqlx-turso` exposes a distinct SQLx [`Database`](sqlx::Database) implementation backed by
-//! the Rust `turso` crate. The facade re-exports the runtime types from `sqlx-turso-core` and,
-//! with the `macros` feature, first-party checked query macros such as [`query!`].
+//! `sqlx-turso` exposes a distinct SQLx [`Database`](sqlx::Database), [`Turso`], backed by the
+//! Rust `turso` crate: one owned connection per store, checked queries through this crate's own
+//! [`query!`] family, SQLx migrations, and Turso Sync push and pull on the same connection.
 //!
 //! # Example
 //!
@@ -13,11 +13,15 @@
 //! };
 //!
 //! # async fn example() -> sqlx_turso::sqlx::Result<()> {
-//! let mut conn = TursoConnection::connect("turso::memory:").await?;
-//! conn.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT NOT NULL)").await?;
-//! conn.execute("INSERT INTO users (id, name) VALUES (1, 'alice')").await?;
+//! let mut connection = TursoConnection::connect("turso::memory:").await?;
+//! connection
+//!     .execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT NOT NULL)")
+//!     .await?;
+//! connection
+//!     .execute("INSERT INTO users (id, name) VALUES (1, 'alice')")
+//!     .await?;
 //!
-//! let row = conn.fetch_one("SELECT name FROM users WHERE id = 1").await?;
+//! let row = connection.fetch_one("SELECT name FROM users WHERE id = 1").await?;
 //! assert_eq!(row.try_get::<String, _>("name")?, "alice");
 //! # Ok(())
 //! # }
@@ -25,37 +29,31 @@
 //!
 //! # Features
 //!
-//! - `runtime-tokio` is enabled by default and is the supported production runtime
-//! - `macros` enables `sqlx_turso::query!` and related checked query macros
-//! - `migrate` enables SQLx migration traits and local database lifecycle helpers
-//! - `any` enables SQLx `Any` driver registration for Turso
-//! - `offline` enables serializable query metadata
-//! - `chrono`, `time`, `uuid`, and `json` enable matching value integrations
-//! - `fts` forwards Turso FTS support
-//! - `sync` enables local sync-backed connections and checkpoint/stat APIs
+//! All are on by default.
 //!
-//! Unsupported SQLite/Turso surfaces are documented in the repository README and remain disabled
-//! unless the pinned SQLx and Turso APIs expose enough behavior to test them honestly
+//! - `runtime-tokio`: the Tokio runtime integration
+//! - `macros`: `sqlx_turso::query!` and the rest of the checked query macros
+//! - `sync`: synced connections and `sync_push`, `sync_pull`, `sync_checkpoint`, `sync_stats`
+//! - `migrate`: SQLx's `Migrate` for [`TursoConnection`]
+//! - `chrono`: chrono date and time codecs
+//!
+//! The crate README lists the known limitations and where offline metadata comes from.
 
 #![warn(missing_docs)]
 
-extern crate self as sqlx_turso;
-
 pub use sqlx_turso_core::{
-    Turso, TursoAdapterError, TursoConnectOptions, TursoConnection, TursoDescribeExt,
-    TursoEncryptionOptions, TursoExecutor, TursoExperimentalFeature, TursoExperimentalFeatures,
-    TursoIo, TursoPool, TursoPoolOptions, TursoQueryResult, TursoRow, TursoStatement,
-    TursoSyncOptions, TursoTransaction, TursoTypeChecking, TursoTypeInfo,
+    Turso, TursoAdapterError, TursoArguments, TursoColumn, TursoConnectOptions, TursoConnection,
+    TursoDatabaseError, TursoDatabaseTarget, TursoQueryResult, TursoRow, TursoStatement,
+    TursoStorageClass, TursoSyncOptions, TursoTransaction, TursoTransactionManager, TursoTypeInfo,
+    TursoValue, TursoValueRef,
 };
 
 #[cfg(feature = "migrate")]
-pub use sqlx_turso_core::{Migrate, MigrateDatabase, Migration, MigrationType};
+pub use sqlx_turso_core::{Migrate, Migration, MigrationType};
 
+/// The generic SQLx crate the generated macro code and the examples refer to
 #[doc(hidden)]
 pub use sqlx;
-
-#[cfg(feature = "any")]
-pub use sqlx_turso_core::{TURSO_ANY_DRIVER, install_turso_any_driver};
 
 #[cfg(feature = "macros")]
 pub use sqlx_turso_macros::{
