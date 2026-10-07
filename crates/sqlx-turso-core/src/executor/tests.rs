@@ -1,3 +1,8 @@
+use std::{
+    sync::{Arc, Mutex},
+    time::Duration,
+};
+
 use futures_util::TryStreamExt;
 use sqlx_core::{
     column::Column,
@@ -484,5 +489,72 @@ async fn bounds_and_clears_statement_cache() -> sqlx_core::Result<()> {
 
     connection.clear_cached_statements().await?;
     assert_eq!(connection.cached_statements_size(), 0);
+    Ok(())
+}
+
+/// Keeps everything a `tracing` subscriber writes, so a test can assert on emitted logs
+#[derive(Clone, Default)]
+struct CapturedLogs(Arc<Mutex<Vec<u8>>>);
+
+impl CapturedLogs {
+    fn text(&self) -> String {
+        self.0
+            .lock()
+            .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+            .unwrap_or_default()
+    }
+}
+
+impl std::io::Write for CapturedLogs {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0
+            .lock()
+            .map_err(|_poisoned| std::io::Error::other("log buffer poisoned"))?
+            .extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'writer> tracing_subscriber::fmt::MakeWriter<'writer> for CapturedLogs {
+    type Writer = CapturedLogs;
+
+    fn make_writer(&'writer self) -> Self::Writer {
+        self.clone()
+    }
+}
+
+#[tokio::test]
+async fn statement_logging_follows_the_connection_settings() -> sqlx_core::Result<()> {
+    // Arrange: a slow threshold of zero marks every statement slow; the other connection logs
+    // nothing at all
+    let logs = CapturedLogs::default();
+    // Only SQLx's statement logs: the engine traces SQL text through its own targets
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(logs.clone())
+        .with_env_filter(tracing_subscriber::EnvFilter::new("sqlx::query=trace"))
+        .with_ansi(false)
+        .finish();
+    let _default_subscriber = tracing::subscriber::set_default(subscriber);
+    let slow_options =
+        TursoConnectOptions::new().log_slow_statements(log::LevelFilter::Warn, Duration::ZERO);
+    let quiet_options = TursoConnectOptions::new()
+        .log_statements(log::LevelFilter::Off)
+        .log_slow_statements(log::LevelFilter::Off, Duration::from_secs(3_600));
+
+    // Act
+    let mut quiet = quiet_options.connect().await?;
+    (&mut quiet).fetch_one("SELECT 2 AS quiet_marker").await?;
+    let mut slow = slow_options.connect().await?;
+    (&mut slow).fetch_one("SELECT 1 AS slow_marker").await?;
+
+    // Assert
+    let text = logs.text();
+    assert!(text.contains("slow statement"), "{text}");
+    assert!(text.contains("slow_marker"), "{text}");
+    assert!(!text.contains("quiet_marker"), "{text}");
     Ok(())
 }

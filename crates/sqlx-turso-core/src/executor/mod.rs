@@ -13,6 +13,7 @@ use futures_util::{FutureExt, StreamExt, TryStreamExt, stream};
 use sqlx_core::{
     error::Error,
     executor::{Execute, Executor},
+    logger::QueryLogger,
     sql_str::SqlStr,
     statement::Statement,
 };
@@ -33,6 +34,9 @@ impl TursoConnection {
         arguments: Option<TursoArguments>,
     ) -> Result<QueryOutputStream, Error> {
         self.clear_pending_rollback().await?;
+        // Logs the statement (and slow statements) when the query's results are done or dropped,
+        // as SQLx's other drivers do, honouring the connection's log settings.
+        let logger = QueryLogger::new(sql.clone(), self.options().log_settings().clone());
 
         let inspection = inspect_sql(sql.as_str());
         if inspection.may_contain_multiple_statements {
@@ -44,6 +48,7 @@ impl TursoConnection {
                 .execute_batch(sql.as_str())
                 .await
                 .map_err(map_turso_error)?;
+            drop(logger);
             let batch_result: Either<TursoQueryResult, TursoRow> =
                 Either::Left(TursoQueryResult::default());
             return Ok(stream::iter([Ok(batch_result)]).boxed());
@@ -73,6 +78,7 @@ impl TursoConnection {
                 columns,
                 column_names,
                 pending_row: None,
+                logger,
             },
             RowStreamState::next,
         )
