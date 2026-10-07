@@ -26,8 +26,16 @@ mod private_socket_listener;
 pub use native_relay_listener::NativeRelayListener;
 pub use private_socket_listener::{OwnerOnlySocket, SocketCleanup};
 mod conversation_operation_projection;
+mod provider_operation_schema_preparation;
 mod provider_operation_store;
+pub use provider_operation_schema_preparation::{
+    PendingProviderOperationMigrationVersions, ProviderOperationMigrationVersion,
+    ProviderOperationSchemaPreparation,
+};
+mod provider_operation_migration_history;
+mod provider_operation_schema_preparation_error;
 pub use conversation_operation_projection::conversation_operation_snapshot;
+pub use provider_operation_schema_preparation_error::ProviderOperationSchemaPreparationError;
 mod codex_conversation_operation_recorder;
 pub use codex_acp_adapter::ConversationOperationRecorder;
 pub use codex_conversation_operation_recorder::{
@@ -42,6 +50,9 @@ pub use provider_operation_store::{
 };
 mod delivery_acceptance_effect;
 mod delivery_route_projection;
+#[cfg(test)]
+#[path = "provider_operation_schema_preparation_tests.rs"]
+mod provider_operation_schema_preparation_tests;
 pub use provider_session_event_hub::{HubReceiveError, ProviderSessionEventHub, receive_hub_event};
 pub use provider_session_record::ProviderSessionRecord;
 mod app_server_event_forwarding;

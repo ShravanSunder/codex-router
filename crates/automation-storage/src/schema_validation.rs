@@ -2,7 +2,7 @@
 //!
 //! Future migrations must update these target specifications with their schema change.
 use crate::StorageError;
-use sqlx::{Row, Sqlite, Transaction};
+use sqlx::{Row, Sqlite, SqliteConnection, Transaction};
 
 const CURRENT_TARGET_DEFINITION_SOURCE: &str = concat!(
     include_str!("../migrations/20260910000000_automation_v1.sql"),
@@ -118,42 +118,42 @@ pub(crate) async fn has_domain_objects(
 }
 
 pub(crate) async fn validate_target_schema(
-    transaction: &mut Transaction<'_, Sqlite>,
+    connection: &mut SqliteConnection,
 ) -> Result<(), StorageError> {
-    validate_schema(transaction, false).await
+    validate_schema(connection, false).await
 }
 
 pub(crate) async fn validate_legacy_schema(
-    transaction: &mut Transaction<'_, Sqlite>,
+    connection: &mut SqliteConnection,
 ) -> Result<(), StorageError> {
-    validate_schema(transaction, true).await
+    validate_schema(connection, true).await
 }
 
 async fn validate_schema(
-    transaction: &mut Transaction<'_, Sqlite>,
+    connection: &mut SqliteConnection,
     legacy: bool,
 ) -> Result<(), StorageError> {
-    validate_object_inventory(transaction, legacy).await?;
+    validate_object_inventory(connection, legacy).await?;
     for table in TABLE_SPECS
         .iter()
         .filter(|table| !legacy || table.name != ROUTER_PUSH_TABLE)
     {
-        validate_columns(transaction, table, legacy).await?;
-        validate_foreign_keys(transaction, table).await?;
+        validate_columns(connection, table, legacy).await?;
+        validate_foreign_keys(connection, table).await?;
     }
-    validate_indexes(transaction, legacy).await?;
-    validate_known_definitions(transaction, legacy).await?;
+    validate_indexes(connection, legacy).await?;
+    validate_known_definitions(connection, legacy).await?;
     Ok(())
 }
 
 async fn validate_object_inventory(
-    transaction: &mut Transaction<'_, Sqlite>,
+    connection: &mut SqliteConnection,
     legacy: bool,
 ) -> Result<(), StorageError> {
     let rows = sqlx::query(
         "SELECT type,name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' AND name != '_sqlx_migrations' ORDER BY type,name",
     )
-    .fetch_all(&mut **transaction)
+    .fetch_all(&mut *connection)
     .await?;
     let mut actual_tables = Vec::new();
     let mut actual_named_indexes = Vec::new();
@@ -198,7 +198,7 @@ async fn validate_object_inventory(
 }
 
 async fn validate_columns(
-    transaction: &mut Transaction<'_, Sqlite>,
+    connection: &mut SqliteConnection,
     table: &TableSpec,
     legacy: bool,
 ) -> Result<(), StorageError> {
@@ -206,7 +206,7 @@ async fn validate_columns(
         "SELECT name,type,\"notnull\",coalesce(dflt_value,'<NULL>') AS default_value,pk FROM pragma_table_info(?1) ORDER BY cid",
     )
     .bind(table.name)
-    .fetch_all(&mut **transaction)
+    .fetch_all(&mut *connection)
     .await?;
     let actual = rows
         .into_iter()
@@ -236,14 +236,14 @@ async fn validate_columns(
 }
 
 async fn validate_foreign_keys(
-    transaction: &mut Transaction<'_, Sqlite>,
+    connection: &mut SqliteConnection,
     table: &TableSpec,
 ) -> Result<(), StorageError> {
     let rows = sqlx::query(
         "SELECT id,seq,\"table\",\"from\",\"to\",on_update,on_delete,match FROM pragma_foreign_key_list(?1) ORDER BY id,seq",
     )
     .bind(table.name)
-    .fetch_all(&mut **transaction)
+    .fetch_all(&mut *connection)
     .await?;
     let actual = rows
         .into_iter()
@@ -269,7 +269,7 @@ async fn validate_foreign_keys(
 }
 
 async fn validate_indexes(
-    transaction: &mut Transaction<'_, Sqlite>,
+    connection: &mut SqliteConnection,
     legacy: bool,
 ) -> Result<(), StorageError> {
     let mut actual = Vec::new();
@@ -281,7 +281,7 @@ async fn validate_indexes(
             "SELECT name,\"unique\",origin,partial FROM pragma_index_list(?1) ORDER BY seq",
         )
         .bind(table.name)
-        .fetch_all(&mut **transaction)
+        .fetch_all(&mut *connection)
         .await?;
         for index in indexes {
             let name: String = index.get("name");
@@ -290,7 +290,7 @@ async fn validate_indexes(
                 "SELECT name,desc,coll,key FROM pragma_index_xinfo(?1) WHERE key=1 ORDER BY seqno",
             )
             .bind(&name)
-            .fetch_all(&mut **transaction)
+            .fetch_all(&mut *connection)
             .await?
             .into_iter()
             .map(|column| {
@@ -328,7 +328,7 @@ async fn validate_indexes(
 }
 
 async fn validate_known_definitions(
-    transaction: &mut Transaction<'_, Sqlite>,
+    connection: &mut SqliteConnection,
     legacy: bool,
 ) -> Result<(), StorageError> {
     for table in TABLE_SPECS
@@ -338,7 +338,7 @@ async fn validate_known_definitions(
         let sql: String =
             sqlx::query_scalar("SELECT sql FROM sqlite_master WHERE type='table' AND name=?1")
                 .bind(table.name)
-                .fetch_one(&mut **transaction)
+                .fetch_one(&mut *connection)
                 .await?;
         if tokenize_schema_definition(&sql)?
             != expected_definition_tokens("table", table.name, legacy)?
@@ -359,7 +359,7 @@ async fn validate_known_definitions(
         let sql: String =
             sqlx::query_scalar("SELECT sql FROM sqlite_master WHERE type='index' AND name=?1")
                 .bind(index)
-                .fetch_one(&mut **transaction)
+                .fetch_one(&mut *connection)
                 .await?;
         if tokenize_schema_definition(&sql)? != expected_definition_tokens("index", index, legacy)?
         {

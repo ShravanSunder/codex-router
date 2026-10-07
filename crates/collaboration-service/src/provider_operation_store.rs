@@ -15,7 +15,7 @@ use sqlx::{
 };
 use std::{collections::HashSet, path::Path, time::Duration};
 
-static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
+pub(crate) static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 const RETENTION_BATCH_LIMIT: i64 = 1_000;
 const EXPECTED_COLUMNS: [&str; 14] = [
     "operation_id",
@@ -102,6 +102,15 @@ struct StoredProviderOperationRow {
 }
 
 impl ProviderOperationStore {
+    pub async fn prepare_schema(
+        database_path: &Path,
+    ) -> Result<
+        crate::ProviderOperationSchemaPreparation,
+        crate::ProviderOperationSchemaPreparationError,
+    > {
+        crate::provider_operation_schema_preparation::prepare_schema(database_path).await
+    }
+
     pub async fn open(path: &Path) -> Result<Self, ProviderOperationStoreError> {
         let options = SqliteConnectOptions::new()
             .filename(path)
@@ -524,7 +533,7 @@ fn validate_record(record: &ProviderOperationRecord) -> Result<(), ProviderOpera
     }
 }
 
-async fn validate_schema(
+pub(crate) async fn validate_schema(
     connection: &mut SqliteConnection,
 ) -> Result<(), ProviderOperationStoreError> {
     // SQLite PRAGMA metadata has no stable SQLx compile-time column mapping;

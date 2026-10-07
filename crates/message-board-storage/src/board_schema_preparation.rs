@@ -1,25 +1,13 @@
-use std::future::Future;
-use std::num::NonZeroI64;
-use std::path::Path;
-use std::time::Duration;
+use crate::board_migration_history::{MigrationHistoryError, SchemaPreparationHistory};
+use crate::{BoardSchemaPreparationError, BoardStorageError};
+use sqlx::{Connection, SqliteConnection, sqlite::SqliteConnectOptions};
+use std::{future::Future, num::NonZeroI64, path::Path, time::Duration};
 
-use sqlx::Connection;
-use sqlx::SqliteConnection;
-use sqlx::sqlite::SqliteConnectOptions;
-
-use crate::account_migrations::migration_history::MigrationHistoryError;
-use crate::account_migrations::migration_history::SchemaPreparationHistory;
-use crate::account_schema::validate_required_read_only_objects;
-use crate::account_schema::validate_target_schema;
-use crate::sqlite::StateStoreError;
-
-pub use crate::schema_preparation_error::StateSchemaPreparationError;
-
-/// A positive migration version embedded in the account-state image.
+/// A positive migration version embedded in the board image.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-pub struct AccountMigrationVersion(NonZeroI64);
+pub struct BoardMigrationVersion(NonZeroI64);
 
-impl AccountMigrationVersion {
+impl BoardMigrationVersion {
     /// Constructs a migration version only when it is positive.
     #[must_use]
     pub const fn new(version: i64) -> Option<Self> {
@@ -41,52 +29,52 @@ impl AccountMigrationVersion {
 
 /// A validated, nonempty and ordered remainder of the embedded migration set.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct PendingAccountMigrationVersions(Vec<AccountMigrationVersion>);
+pub struct PendingBoardMigrationVersions(Vec<BoardMigrationVersion>);
 
-impl PendingAccountMigrationVersions {
+impl PendingBoardMigrationVersions {
     /// Returns the remaining versions in the embedded migration order.
     #[must_use]
-    pub fn as_slice(&self) -> &[AccountMigrationVersion] {
+    pub fn as_slice(&self) -> &[BoardMigrationVersion] {
         &self.0
     }
 
     fn from_ordered_suffix(
-        versions: Vec<AccountMigrationVersion>,
-    ) -> Result<Self, StateSchemaPreparationError> {
+        versions: Vec<BoardMigrationVersion>,
+    ) -> Result<Self, BoardSchemaPreparationError> {
         if versions.is_empty()
             || versions.windows(2).any(|pair| match pair {
                 [first, second] => first >= second,
                 _ => false,
             })
         {
-            return Err(StateSchemaPreparationError::InvalidAppliedOrder);
+            return Err(BoardSchemaPreparationError::InvalidAppliedOrder);
         }
         Ok(Self(versions))
     }
 }
 
-/// The account database's read-only schema-preparation result.
+/// The board database's read-only schema-preparation result.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum AccountSchemaPreparation {
+pub enum BoardSchemaPreparation {
     /// The database already has this image's complete, valid schema.
     Current,
     /// The database has a valid applied prefix and these migrations remain.
     Pending {
         /// The ordered, nonempty remainder of this image's migration set.
-        migrations: PendingAccountMigrationVersions,
+        migrations: PendingBoardMigrationVersions,
     },
 }
 
 pub(crate) async fn prepare_schema(
     database_path: &Path,
-) -> Result<AccountSchemaPreparation, StateSchemaPreparationError> {
+) -> Result<BoardSchemaPreparation, BoardSchemaPreparationError> {
     prepare_schema_with_checkpoint(database_path, || async {}).await
 }
 
 pub(super) async fn prepare_schema_with_checkpoint<FCheckpoint, FCheckpointFuture>(
     database_path: &Path,
     after_history_read: FCheckpoint,
-) -> Result<AccountSchemaPreparation, StateSchemaPreparationError>
+) -> Result<BoardSchemaPreparation, BoardSchemaPreparationError>
 where
     FCheckpoint: FnOnce() -> FCheckpointFuture + Send,
     FCheckpointFuture: Future<Output = ()> + Send,
@@ -95,11 +83,12 @@ where
         .filename(database_path)
         .read_only(true)
         .create_if_missing(false)
+        .foreign_keys(false)
         .busy_timeout(Duration::ZERO)
         .pragma("query_only", "ON");
     let mut connection = SqliteConnection::connect_with(&options)
         .await
-        .map_err(|source| StateSchemaPreparationError::UnreadableStore { source })?;
+        .map_err(|source| BoardSchemaPreparationError::UnreadableStore { source })?;
 
     let preparation = match connection.begin().await {
         Ok(mut transaction) => {
@@ -107,19 +96,19 @@ where
             let rollback = transaction
                 .rollback()
                 .await
-                .map_err(|source| StateSchemaPreparationError::UnreadableStore { source });
+                .map_err(|source| BoardSchemaPreparationError::UnreadableStore { source });
             match inspection {
                 Ok(preparation) => rollback.map(|()| preparation),
                 Err(error) => Err(error),
             }
         }
-        Err(source) => Err(StateSchemaPreparationError::UnreadableStore { source }),
+        Err(source) => Err(BoardSchemaPreparationError::UnreadableStore { source }),
     };
     let close_result = connection.close().await;
     match preparation {
         Ok(preparation) => {
             close_result
-                .map_err(|source| StateSchemaPreparationError::UnreadableStore { source })?;
+                .map_err(|source| BoardSchemaPreparationError::UnreadableStore { source })?;
             Ok(preparation)
         }
         Err(error) => Err(error),
@@ -129,73 +118,64 @@ where
 async fn inspect_connection<FCheckpoint, FCheckpointFuture>(
     connection: &mut SqliteConnection,
     after_history_read: FCheckpoint,
-) -> Result<AccountSchemaPreparation, StateSchemaPreparationError>
+) -> Result<BoardSchemaPreparation, BoardSchemaPreparationError>
 where
     FCheckpoint: FnOnce() -> FCheckpointFuture + Send,
     FCheckpointFuture: Future<Output = ()> + Send,
 {
-    match crate::account_migrations::migration_history::inspect_for_preparation(connection)
+    match crate::board_migration_history::inspect_for_preparation(connection)
         .await
         .map_err(map_history_error)?
     {
         SchemaPreparationHistory::Current => {
             after_history_read().await;
-            validate_current_schema(connection).await?;
-            Ok(AccountSchemaPreparation::Current)
+            crate::board_schema_migrations::validate_current_schema(connection)
+                .await
+                .map_err(invalid_current_schema)?;
+            Ok(BoardSchemaPreparation::Current)
         }
         SchemaPreparationHistory::Pending(versions) => {
             let versions = versions
                 .into_iter()
                 .map(|version| {
-                    AccountMigrationVersion::new(version)
-                        .ok_or(StateSchemaPreparationError::InvalidMigrationVersion)
+                    BoardMigrationVersion::new(version)
+                        .ok_or(BoardSchemaPreparationError::InvalidMigrationVersion)
                 })
                 .collect::<Result<Vec<_>, _>>()?;
-            let migrations = PendingAccountMigrationVersions::from_ordered_suffix(versions)?;
-            Ok(AccountSchemaPreparation::Pending { migrations })
+            let migrations = PendingBoardMigrationVersions::from_ordered_suffix(versions)?;
+            Ok(BoardSchemaPreparation::Pending { migrations })
         }
     }
 }
 
-async fn validate_current_schema(
-    connection: &mut SqliteConnection,
-) -> Result<(), StateSchemaPreparationError> {
-    validate_required_read_only_objects(&mut *connection)
-        .await
-        .map_err(invalid_current_schema)?;
-    validate_target_schema(connection)
-        .await
-        .map_err(invalid_current_schema)
+fn invalid_current_schema(source: BoardStorageError) -> BoardSchemaPreparationError {
+    BoardSchemaPreparationError::InvalidCurrentSchema { source }
 }
 
-fn invalid_current_schema(source: StateStoreError) -> StateSchemaPreparationError {
-    StateSchemaPreparationError::InvalidCurrentSchema { source }
-}
-
-fn map_history_error(error: MigrationHistoryError) -> StateSchemaPreparationError {
+fn map_history_error(error: MigrationHistoryError) -> BoardSchemaPreparationError {
     match error {
         MigrationHistoryError::TableCheck(source) | MigrationHistoryError::RowsRead(source) => {
-            StateSchemaPreparationError::UnreadableStore { source }
+            BoardSchemaPreparationError::UnreadableStore { source }
         }
         MigrationHistoryError::UnrecognizedNativeHistory => {
-            StateSchemaPreparationError::UnrecognizedNativeHistory
+            BoardSchemaPreparationError::UnrecognizedNativeHistory
         }
         MigrationHistoryError::InvalidHistory => {
-            StateSchemaPreparationError::InvalidMigrationHistory
+            BoardSchemaPreparationError::InvalidMigrationHistory
         }
         MigrationHistoryError::InvalidVersion => {
-            StateSchemaPreparationError::InvalidMigrationVersion
+            BoardSchemaPreparationError::InvalidMigrationVersion
         }
-        MigrationHistoryError::DirtyMigration => StateSchemaPreparationError::DirtyMigration,
-        MigrationHistoryError::ChecksumMismatch => StateSchemaPreparationError::ChecksumMismatch,
+        MigrationHistoryError::DirtyMigration => BoardSchemaPreparationError::DirtyMigration,
+        MigrationHistoryError::ChecksumMismatch => BoardSchemaPreparationError::ChecksumMismatch,
         MigrationHistoryError::SchemaNewerThanImage => {
-            StateSchemaPreparationError::SchemaNewerThanImage
+            BoardSchemaPreparationError::SchemaNewerThanImage
         }
         MigrationHistoryError::UnknownAppliedMigration => {
-            StateSchemaPreparationError::UnknownAppliedMigration
+            BoardSchemaPreparationError::UnknownAppliedMigration
         }
         MigrationHistoryError::InvalidAppliedOrder => {
-            StateSchemaPreparationError::InvalidAppliedOrder
+            BoardSchemaPreparationError::InvalidAppliedOrder
         }
     }
 }

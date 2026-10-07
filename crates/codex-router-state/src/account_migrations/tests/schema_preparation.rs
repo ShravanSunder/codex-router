@@ -3,7 +3,8 @@ use crate::schema_preparation::AccountMigrationVersion;
 use crate::schema_preparation::AccountSchemaPreparation;
 use crate::schema_preparation::StateSchemaPreparationError;
 use sqlx::migrate::Migrator;
-use std::borrow::Cow;
+use sqlx::{Connection, SqliteConnection, sqlite::SqliteConnectOptions, sqlite::SqliteJournalMode};
+use std::{borrow::Cow, path::Path};
 
 async fn create_native_prefix_database(label: &str) -> TemporaryDatabase {
     let database = TemporaryDatabase::new(label);
@@ -75,6 +76,33 @@ async fn native_prefix_snapshot(database_path: &Path) -> NativePrefixSnapshot {
     }
 }
 
+async fn commit_account_schema_change_from_wal_writer(database_path: &Path) -> Result<(), String> {
+    let options = SqliteConnectOptions::new()
+        .filename(database_path)
+        .create_if_missing(false)
+        .journal_mode(SqliteJournalMode::Wal);
+    let mut connection = SqliteConnection::connect_with(&options)
+        .await
+        .map_err(|error| error.to_string())?;
+    let mut transaction = connection
+        .begin()
+        .await
+        .map_err(|error| error.to_string())?;
+    if let Err(error) = sqlx::query("ALTER TABLE accounts ADD COLUMN snapshot_probe TEXT")
+        .execute(&mut *transaction)
+        .await
+    {
+        let _ = transaction.rollback().await;
+        let _ = connection.close().await;
+        return Err(error.to_string());
+    }
+    transaction
+        .commit()
+        .await
+        .map_err(|error| error.to_string())?;
+    connection.close().await.map_err(|error| error.to_string())
+}
+
 #[derive(Debug, Eq, PartialEq)]
 struct NativePrefixSnapshot {
     main_database_bytes: Vec<u8>,
@@ -140,6 +168,115 @@ async fn prepare_schema_reports_current_without_mutating_the_database() {
     ));
 
     assert_eq!(native_prefix_snapshot(database.path()).await, before);
+}
+
+#[tokio::test]
+async fn prepare_schema_keeps_history_and_current_validation_in_one_wal_snapshot() {
+    let database = create_native_prefix_database("prepare_wal_snapshot").await;
+    let writer = AsyncSqliteStateStore::open(database.path())
+        .await
+        .expect("ordinary writer should finish the current schema");
+    writer.close().await.expect("ordinary writer should close");
+    let mut wal_check = open_test_connection(database.path(), false).await;
+    let journal_mode: String = sqlx::query_scalar("PRAGMA journal_mode")
+        .fetch_one(&mut wal_check)
+        .await
+        .expect("state database journal mode should query");
+    assert_eq!(journal_mode.to_ascii_lowercase(), "wal");
+    wal_check.close().await.expect("WAL check should close");
+    let before = native_prefix_snapshot(database.path()).await;
+    assert!(
+        !before
+            .schema_objects
+            .iter()
+            .any(|(_, name, _, definition)| name == "accounts"
+                && definition
+                    .as_deref()
+                    .is_some_and(|sql| sql.contains("snapshot_probe")))
+    );
+
+    let database_path = database.path().to_path_buf();
+    let (history_read_sender, history_read_receiver) = tokio::sync::oneshot::channel();
+    let (writer_result_sender, writer_result_receiver) = tokio::sync::oneshot::channel();
+    let writer_path = database_path.clone();
+    let writer_task = tokio::spawn(async move {
+        history_read_receiver
+            .await
+            .expect("inspector should reach the post-history checkpoint");
+        let result = commit_account_schema_change_from_wal_writer(&writer_path).await;
+        writer_result_sender
+            .send(result.clone())
+            .expect("inspector should receive writer completion");
+        result
+    });
+
+    let preparation = crate::schema_preparation::prepare_schema_with_checkpoint(
+        &database_path,
+        move || async move {
+            history_read_sender
+                .send(())
+                .expect("WAL writer should await native history read");
+            writer_result_receiver
+                .await
+                .expect("WAL writer should report its commit")
+                .expect("WAL writer should add its fixture-only column");
+        },
+    )
+    .await;
+    writer_task
+        .await
+        .expect("external schema writer should finish")
+        .expect("external schema writer should commit");
+    assert!(
+        matches!(&preparation, Ok(AccountSchemaPreparation::Current)),
+        "first inspection should use its original SQLite snapshot: {preparation:?}"
+    );
+
+    let after_writer_commit = native_prefix_snapshot(&database_path).await;
+    assert_eq!(
+        after_writer_commit.migration_history,
+        before.migration_history
+    );
+    assert_eq!(after_writer_commit.user_version, before.user_version);
+    assert_eq!(
+        after_writer_commit.preserved_account,
+        before.preserved_account
+    );
+    assert!(
+        after_writer_commit
+            .schema_objects
+            .iter()
+            .any(|(_, name, _, definition)| name == "accounts"
+                && definition
+                    .as_deref()
+                    .is_some_and(|sql| sql.contains("snapshot_probe")))
+    );
+
+    let error = AsyncSqliteStateStore::prepare_schema(&database_path)
+        .await
+        .expect_err("a later inspection should observe the committed schema change");
+    assert!(matches!(
+        error,
+        StateSchemaPreparationError::InvalidCurrentSchema { .. }
+    ));
+    let after_later_inspection = native_prefix_snapshot(&database_path).await;
+    // A WAL checkpoint may move the committed fixture DDL into the main file.
+    assert_eq!(
+        after_later_inspection.migration_history,
+        after_writer_commit.migration_history
+    );
+    assert_eq!(
+        after_later_inspection.schema_objects,
+        after_writer_commit.schema_objects
+    );
+    assert_eq!(
+        after_later_inspection.user_version,
+        after_writer_commit.user_version
+    );
+    assert_eq!(
+        after_later_inspection.preserved_account,
+        after_writer_commit.preserved_account
+    );
 }
 
 #[tokio::test]

@@ -1,25 +1,15 @@
-use std::future::Future;
-use std::num::NonZeroI64;
-use std::path::Path;
-use std::time::Duration;
+use crate::provider_operation_migration_history::{
+    MigrationHistoryError, SchemaPreparationHistory,
+};
+use crate::{ProviderOperationSchemaPreparationError, ProviderOperationStoreError};
+use sqlx::{Connection, SqliteConnection, sqlite::SqliteConnectOptions};
+use std::{future::Future, num::NonZeroI64, path::Path, time::Duration};
 
-use sqlx::Connection;
-use sqlx::SqliteConnection;
-use sqlx::sqlite::SqliteConnectOptions;
-
-use crate::account_migrations::migration_history::MigrationHistoryError;
-use crate::account_migrations::migration_history::SchemaPreparationHistory;
-use crate::account_schema::validate_required_read_only_objects;
-use crate::account_schema::validate_target_schema;
-use crate::sqlite::StateStoreError;
-
-pub use crate::schema_preparation_error::StateSchemaPreparationError;
-
-/// A positive migration version embedded in the account-state image.
+/// A positive migration version embedded in the provider-operation image.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-pub struct AccountMigrationVersion(NonZeroI64);
+pub struct ProviderOperationMigrationVersion(NonZeroI64);
 
-impl AccountMigrationVersion {
+impl ProviderOperationMigrationVersion {
     /// Constructs a migration version only when it is positive.
     #[must_use]
     pub const fn new(version: i64) -> Option<Self> {
@@ -41,52 +31,52 @@ impl AccountMigrationVersion {
 
 /// A validated, nonempty and ordered remainder of the embedded migration set.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct PendingAccountMigrationVersions(Vec<AccountMigrationVersion>);
+pub struct PendingProviderOperationMigrationVersions(Vec<ProviderOperationMigrationVersion>);
 
-impl PendingAccountMigrationVersions {
+impl PendingProviderOperationMigrationVersions {
     /// Returns the remaining versions in the embedded migration order.
     #[must_use]
-    pub fn as_slice(&self) -> &[AccountMigrationVersion] {
+    pub fn as_slice(&self) -> &[ProviderOperationMigrationVersion] {
         &self.0
     }
 
     fn from_ordered_suffix(
-        versions: Vec<AccountMigrationVersion>,
-    ) -> Result<Self, StateSchemaPreparationError> {
+        versions: Vec<ProviderOperationMigrationVersion>,
+    ) -> Result<Self, ProviderOperationSchemaPreparationError> {
         if versions.is_empty()
             || versions.windows(2).any(|pair| match pair {
                 [first, second] => first >= second,
                 _ => false,
             })
         {
-            return Err(StateSchemaPreparationError::InvalidAppliedOrder);
+            return Err(ProviderOperationSchemaPreparationError::InvalidAppliedOrder);
         }
         Ok(Self(versions))
     }
 }
 
-/// The account database's read-only schema-preparation result.
+/// The provider-operation database's read-only schema-preparation result.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum AccountSchemaPreparation {
+pub enum ProviderOperationSchemaPreparation {
     /// The database already has this image's complete, valid schema.
     Current,
     /// The database has a valid applied prefix and these migrations remain.
     Pending {
         /// The ordered, nonempty remainder of this image's migration set.
-        migrations: PendingAccountMigrationVersions,
+        migrations: PendingProviderOperationMigrationVersions,
     },
 }
 
 pub(crate) async fn prepare_schema(
     database_path: &Path,
-) -> Result<AccountSchemaPreparation, StateSchemaPreparationError> {
+) -> Result<ProviderOperationSchemaPreparation, ProviderOperationSchemaPreparationError> {
     prepare_schema_with_checkpoint(database_path, || async {}).await
 }
 
 pub(super) async fn prepare_schema_with_checkpoint<FCheckpoint, FCheckpointFuture>(
     database_path: &Path,
     after_history_read: FCheckpoint,
-) -> Result<AccountSchemaPreparation, StateSchemaPreparationError>
+) -> Result<ProviderOperationSchemaPreparation, ProviderOperationSchemaPreparationError>
 where
     FCheckpoint: FnOnce() -> FCheckpointFuture + Send,
     FCheckpointFuture: Future<Output = ()> + Send,
@@ -95,31 +85,32 @@ where
         .filename(database_path)
         .read_only(true)
         .create_if_missing(false)
+        .foreign_keys(true)
         .busy_timeout(Duration::ZERO)
         .pragma("query_only", "ON");
     let mut connection = SqliteConnection::connect_with(&options)
         .await
-        .map_err(|source| StateSchemaPreparationError::UnreadableStore { source })?;
+        .map_err(|source| ProviderOperationSchemaPreparationError::UnreadableStore { source })?;
 
     let preparation = match connection.begin().await {
         Ok(mut transaction) => {
             let inspection = inspect_connection(&mut transaction, after_history_read).await;
-            let rollback = transaction
-                .rollback()
-                .await
-                .map_err(|source| StateSchemaPreparationError::UnreadableStore { source });
+            let rollback = transaction.rollback().await.map_err(|source| {
+                ProviderOperationSchemaPreparationError::UnreadableStore { source }
+            });
             match inspection {
                 Ok(preparation) => rollback.map(|()| preparation),
                 Err(error) => Err(error),
             }
         }
-        Err(source) => Err(StateSchemaPreparationError::UnreadableStore { source }),
+        Err(source) => Err(ProviderOperationSchemaPreparationError::UnreadableStore { source }),
     };
     let close_result = connection.close().await;
     match preparation {
         Ok(preparation) => {
-            close_result
-                .map_err(|source| StateSchemaPreparationError::UnreadableStore { source })?;
+            close_result.map_err(|source| {
+                ProviderOperationSchemaPreparationError::UnreadableStore { source }
+            })?;
             Ok(preparation)
         }
         Err(error) => Err(error),
@@ -129,73 +120,71 @@ where
 async fn inspect_connection<FCheckpoint, FCheckpointFuture>(
     connection: &mut SqliteConnection,
     after_history_read: FCheckpoint,
-) -> Result<AccountSchemaPreparation, StateSchemaPreparationError>
+) -> Result<ProviderOperationSchemaPreparation, ProviderOperationSchemaPreparationError>
 where
     FCheckpoint: FnOnce() -> FCheckpointFuture + Send,
     FCheckpointFuture: Future<Output = ()> + Send,
 {
-    match crate::account_migrations::migration_history::inspect_for_preparation(connection)
+    match crate::provider_operation_migration_history::inspect_for_preparation(connection)
         .await
         .map_err(map_history_error)?
     {
         SchemaPreparationHistory::Current => {
             after_history_read().await;
-            validate_current_schema(connection).await?;
-            Ok(AccountSchemaPreparation::Current)
+            crate::provider_operation_store::validate_schema(connection)
+                .await
+                .map_err(invalid_current_schema)?;
+            Ok(ProviderOperationSchemaPreparation::Current)
         }
         SchemaPreparationHistory::Pending(versions) => {
             let versions = versions
                 .into_iter()
                 .map(|version| {
-                    AccountMigrationVersion::new(version)
-                        .ok_or(StateSchemaPreparationError::InvalidMigrationVersion)
+                    ProviderOperationMigrationVersion::new(version)
+                        .ok_or(ProviderOperationSchemaPreparationError::InvalidMigrationVersion)
                 })
                 .collect::<Result<Vec<_>, _>>()?;
-            let migrations = PendingAccountMigrationVersions::from_ordered_suffix(versions)?;
-            Ok(AccountSchemaPreparation::Pending { migrations })
+            let migrations =
+                PendingProviderOperationMigrationVersions::from_ordered_suffix(versions)?;
+            Ok(ProviderOperationSchemaPreparation::Pending { migrations })
         }
     }
 }
 
-async fn validate_current_schema(
-    connection: &mut SqliteConnection,
-) -> Result<(), StateSchemaPreparationError> {
-    validate_required_read_only_objects(&mut *connection)
-        .await
-        .map_err(invalid_current_schema)?;
-    validate_target_schema(connection)
-        .await
-        .map_err(invalid_current_schema)
+fn invalid_current_schema(
+    source: ProviderOperationStoreError,
+) -> ProviderOperationSchemaPreparationError {
+    ProviderOperationSchemaPreparationError::InvalidCurrentSchema { source }
 }
 
-fn invalid_current_schema(source: StateStoreError) -> StateSchemaPreparationError {
-    StateSchemaPreparationError::InvalidCurrentSchema { source }
-}
-
-fn map_history_error(error: MigrationHistoryError) -> StateSchemaPreparationError {
+fn map_history_error(error: MigrationHistoryError) -> ProviderOperationSchemaPreparationError {
     match error {
         MigrationHistoryError::TableCheck(source) | MigrationHistoryError::RowsRead(source) => {
-            StateSchemaPreparationError::UnreadableStore { source }
+            ProviderOperationSchemaPreparationError::UnreadableStore { source }
         }
         MigrationHistoryError::UnrecognizedNativeHistory => {
-            StateSchemaPreparationError::UnrecognizedNativeHistory
+            ProviderOperationSchemaPreparationError::UnrecognizedNativeHistory
         }
         MigrationHistoryError::InvalidHistory => {
-            StateSchemaPreparationError::InvalidMigrationHistory
+            ProviderOperationSchemaPreparationError::InvalidMigrationHistory
         }
         MigrationHistoryError::InvalidVersion => {
-            StateSchemaPreparationError::InvalidMigrationVersion
+            ProviderOperationSchemaPreparationError::InvalidMigrationVersion
         }
-        MigrationHistoryError::DirtyMigration => StateSchemaPreparationError::DirtyMigration,
-        MigrationHistoryError::ChecksumMismatch => StateSchemaPreparationError::ChecksumMismatch,
+        MigrationHistoryError::DirtyMigration => {
+            ProviderOperationSchemaPreparationError::DirtyMigration
+        }
+        MigrationHistoryError::ChecksumMismatch => {
+            ProviderOperationSchemaPreparationError::ChecksumMismatch
+        }
         MigrationHistoryError::SchemaNewerThanImage => {
-            StateSchemaPreparationError::SchemaNewerThanImage
+            ProviderOperationSchemaPreparationError::SchemaNewerThanImage
         }
         MigrationHistoryError::UnknownAppliedMigration => {
-            StateSchemaPreparationError::UnknownAppliedMigration
+            ProviderOperationSchemaPreparationError::UnknownAppliedMigration
         }
         MigrationHistoryError::InvalidAppliedOrder => {
-            StateSchemaPreparationError::InvalidAppliedOrder
+            ProviderOperationSchemaPreparationError::InvalidAppliedOrder
         }
     }
 }
