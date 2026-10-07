@@ -45,10 +45,38 @@ pub(super) async fn record_refresh_success_status_in_transaction(
              )
              VALUES (?1, ?2, ?3, ?3, NULL, ?4)
              ON CONFLICT(account_id, route_band) DO UPDATE SET
-               last_success_unix_seconds = excluded.last_success_unix_seconds,
-               last_attempt_unix_seconds = excluded.last_attempt_unix_seconds,
-               last_error_class = excluded.last_error_class,
-               stale_after_unix_seconds = excluded.stale_after_unix_seconds",
+               last_success_unix_seconds =
+                 CASE
+                   WHEN quota_refresh_status.last_success_unix_seconds IS NULL
+                     OR quota_refresh_status.last_success_unix_seconds
+                        < excluded.last_success_unix_seconds
+                   THEN excluded.last_success_unix_seconds
+                   ELSE quota_refresh_status.last_success_unix_seconds
+                 END,
+               last_attempt_unix_seconds =
+                 CASE
+                   WHEN quota_refresh_status.last_attempt_unix_seconds IS NULL
+                     OR quota_refresh_status.last_attempt_unix_seconds
+                        <= excluded.last_attempt_unix_seconds
+                   THEN excluded.last_attempt_unix_seconds
+                   ELSE quota_refresh_status.last_attempt_unix_seconds
+                 END,
+               last_error_class =
+                 CASE
+                   WHEN quota_refresh_status.last_attempt_unix_seconds IS NULL
+                     OR quota_refresh_status.last_attempt_unix_seconds
+                        <= excluded.last_attempt_unix_seconds
+                   THEN excluded.last_error_class
+                   ELSE quota_refresh_status.last_error_class
+                 END,
+               stale_after_unix_seconds =
+                 CASE
+                   WHEN quota_refresh_status.last_attempt_unix_seconds IS NULL
+                     OR quota_refresh_status.last_attempt_unix_seconds
+                        <= excluded.last_attempt_unix_seconds
+                   THEN excluded.stale_after_unix_seconds
+                   ELSE quota_refresh_status.stale_after_unix_seconds
+                 END",
         account_id_value,
         route_band,
         last_success,
