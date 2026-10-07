@@ -60,8 +60,6 @@ Recorded in `docs/specs/2026-10-07-sqlx-turso-fork/program-design.md` with reaso
    `scripts/tooling/prepare-sqlx-turso.py`; the stock script and cache are untouched.
 5. Sync integration tests require the pinned `tursodb` 0.8.1 binary, installed by a new
    checksum-pinned installer into `tmp/rust-tools/bin/`; missing binary fails loudly.
-</content>
-</invoke>
 
 ### 2026-10-07 — Advisor critique applied; design committed
 
@@ -82,3 +80,102 @@ or isolate SQL execution from executor workers.
 Decision without asking: one production `#[expect(clippy::expect_used)]` on parsing the
 constant `turso:` URL in `to_url_lossy`, because the trait cannot return an error and SQLx's
 default is `unimplemented!()`.
+
+### 2026-10-07 — Break found: Sync's TLS provider conflicts with Router's in unified builds
+
+- **Assumed (mine, not owner-authorized):** adding the Turso crates as workspace members does
+  not change how other crates build.
+- **Found:** turso 0.8.1 depends on `hyper-rustls` with default features, which turn on rustls's
+  `aws-lc-rs` provider. Router's crates turn on `ring`. In any build that unifies both (every
+  `--workspace` build once the facade enables `sync` by default), rustls has two providers and
+  `ClientConfig::builder()` panics: "Could not automatically determine the process-level
+  CryptoProvider". Reproduced: `cargo test -p codex-router-proxy -p sqlx-turso --lib --
+  claude_edge::upstream_endpoint` → 3 tests FAILED with that panic. The unified graph also breaks
+  type inference in `collaboration-service` (`wakeup_projection.rs`, E0282/E0283: aws-lc-rs adds
+  `From<()>` impls). Turso's own Sync worker builds its connector the same way
+  (`with_native_roots()`), so it would panic too in such a build.
+- **Meaning:** the conflict is real only where Sync and Router's TLS clients share a binary. No
+  Router binary links the driver yet; spec 2 will. Making `sync` a default feature pushed the
+  conflict into every workspace build for no consumer.
+- **Disposition (reversible, in scope):** the facade's default features drop `sync`; Sync tests
+  and Sync clippy run in their own `-p sqlx-turso --all-features` invocations, where rustls has
+  only `aws-lc-rs`; the Sync test harness installs the `aws-lc-rs` process default explicitly so
+  it also works in a mixed build. No Router crate changes. This reverses the all-five-defaults
+  choice the Advisor agreed with, on this evidence.
+- **Open question for the board-design Lead (spec 2, needs an owner decision):** when Router
+  links Sync, which provider wins? Options: (a) Router's binaries install `ring` as the process
+  default at startup and Router's TLS sites stop relying on implicit selection; (b) patch Turso
+  to take `hyper-rustls` without default features, so only `ring` exists (a maintained Turso
+  patch); (c) move Router to `aws-lc-rs` (changes Router's TLS crypto provider). Recommendation:
+  (a), plus an upstream Turso issue for (b).
+
+### 2026-10-07 — Implementation findings and repairs (all reversible, in scope)
+
+- **Lockfile drift.** Turso 0.8.2 now exists; a fresh resolve floated eight internal Turso
+  crates to 0.8.2 and bumped existing ICU/cc packages. Pinned all nine Turso packages to 0.8.1
+  and restored every pre-existing package version (only `itertools` 0.14→0.12, inside
+  `prost-derive`'s allowed range, for one proc-macro). Pinning new packages to the fork's lock
+  then pulled `crossbeam-epoch` back to 0.9.18 (RUSTSEC-2026-0204); lifted to 0.9.21.
+  `cargo deny check`: advisories, bans, licenses, sources ok.
+- **Synced stores expose Turso internal tables** (`turso_cdc`, `turso_sync_last_change_id`,
+  `__turso_internal_seq_…`) in `sqlite_schema`; the schema fingerprint excludes them. Spec-2
+  schema validation must too.
+- **Proc-macro test harness** cannot load `libstd` under the local signing runner; the macros
+  crate has no unit tests, so its empty harness is off (`test = false`).
+- **Path dependencies need versions** for `cargo deny` (wildcards = deny); added, as the other
+  workspace path dependencies do.
+- **CI split:** the three driver crates are linted and tested once with `--all-features` (Sync
+  included, against the pinned `tursodb`), excluded from the workspace test run.
+
+Decision without asking: kept the `itertools` unification rather than forcing two versions; it
+is inside `prost-derive`'s declared range and compile-time only.
+
+### 2026-10-07 — Workspace test failures traced to stale worktree build state, not the change
+
+- First full run (as CI, Turso crates excluded): 3,278 of 3,282 passed; 4 timeout-themed tests
+  failed (codex-router-auth ×2, codex-router-cli ×1, codex-router-proxy ×1). A second run:
+  3 failed, a different set. All passed in isolation.
+- `codex-router-auth` failed 3/3 at crate scope on this worktree while `main`, built as a
+  plain source copy in a scratch target, passed 3/3 under the same machine load (load average
+  25–56). Bypassing the signing test runner did not change that.
+- The branch's committed tree, built as a plain copy in its own target, passed 3/3; the
+  worktree's own sources with a fresh target directory passed 2/2. The resolved graph and
+  features of `codex-router-auth`, `-proxy`, `-host` and `-cli` match `main` exactly (`cargo
+  tree`, except `itertools` inside `prost-derive` for host and cli).
+- Conclusion: the failures come from artifacts already in this worktree's `target/` (4.2 GB
+  existed before this work started), not from the change. The proof run uses a fresh target
+  directory.
+
+### 2026-10-07 — Checkpoint: implementation and proof complete; design review pending
+
+Commits (local only, not pushed): design `b5487aa7`; verbatim import `9eeff879`; trim/split/
+wire `887b2395`; Router-path tests, native metadata and tooling `247138d9`; dependency policy
+`e433cb9b`; CI and docs `20e54ffd`; this checkpoint. The design commit is SSH-signed; the last
+two code commits are unsigned after two 1Password signing failures.
+
+Proof on HEAD (fresh target directory unless noted), every command exit 0:
+
+- `cargo fmt --all -- --check`; `python3 scripts/tooling/check-rust-file-size.py` (1,749 files).
+- `cargo clippy --workspace --all-targets -- -D warnings` (0 diagnostics).
+- `cargo clippy --locked -p sqlx-turso -p sqlx-turso-core -p sqlx-turso-macros --all-targets
+  --all-features -- -D warnings` (0 diagnostics);
+  `cargo check --locked -p sqlx-turso --lib --no-default-features --features runtime-tokio`.
+- `python3 scripts/tooling/prepare-sqlx.py --check` (stock, worktree target) and
+  `python3 scripts/tooling/prepare-sqlx-turso.py --check` (26 Turso descriptions).
+- `cargo nextest run --profile ci --locked -p sqlx-turso -p sqlx-turso-core -p sqlx-turso-macros
+  --all-features`: 82/82 passed (core 61; facade integration 21, Sync 5 against `tursodb`
+  0.8.1); `cargo test --locked -p sqlx-turso --doc --all-features`: 1 passed.
+- Workspace suite as CI runs it: 3,282/3,282 passed, 75 skipped; quota-reset harness 14/14.
+- Tooling unit tests 33 OK; `cargo deny check` all four ok; `cargo audit` ok (one allowed
+  warning that predates this branch).
+
+Open for the board-design Lead (not blocking this port): rustls provider policy when Router
+links Sync; inline blocking page IO in turso's statement step; the one production `expect` in
+`to_url_lossy`; the CI download of the pinned `tursodb` release.
+
+Unverified: CI itself (nothing pushed; Linux `tursodb` digests come from the release's own
+`.sha256` files, not executed here; `aws-lc-sys` build on the Ubuntu runner); trybuild on a cold
+CI cache; Sync over TLS (tests use loopback HTTP); nextest's intermittent "leaky" flag, attributed
+to the signing runner, not proven.
+
+Next: apply the independent design review's findings when they arrive.
