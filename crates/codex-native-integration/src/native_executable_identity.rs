@@ -68,7 +68,8 @@ impl RecordedExecutableIdentity {
             || path_bytes.contains(&0)
             || path_bytes
                 .split(|byte| *byte == b'/')
-                .any(|component| component == b"." || component == b"..")
+                .skip(1)
+                .any(|component| component.is_empty() || component == b"." || component == b"..")
         {
             return Err(RecordedExecutableIdentityError::InvalidPath);
         }
@@ -109,7 +110,7 @@ impl From<&ExecutableIdentity> for RecordedExecutableIdentity {
 pub enum RecordedExecutableIdentityError {
     #[error("recorded executable path must be absolute")]
     RelativePath,
-    #[error("recorded executable path must name a file without NUL or dot components")]
+    #[error("recorded executable path must name a file without NUL, dot or empty components")]
     InvalidPath,
 }
 

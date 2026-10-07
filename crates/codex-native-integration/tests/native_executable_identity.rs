@@ -99,6 +99,38 @@ fn recorded_identity_rejects_nonabsolute_or_invalid_executable_paths() {
 }
 
 #[test]
+fn recorded_identity_rejects_empty_path_components_without_filesystem_lookup() {
+    use std::os::unix::ffi::OsStringExt;
+
+    for path_bytes in [
+        b"//codex".as_slice(),
+        b"///codex".as_slice(),
+        b"/tmp//codex".as_slice(),
+        b"/tmp///codex".as_slice(),
+        b"/tmp/codex/".as_slice(),
+        b"/tmp/codex//".as_slice(),
+        b"/absent//codex-\xff".as_slice(),
+    ] {
+        let recorded_path = PathBuf::from(std::ffi::OsString::from_vec(path_bytes.to_vec()));
+        assert!(
+            matches!(
+                RecordedExecutableIdentity::new(recorded_path, [0; 32]),
+                Err(RecordedExecutableIdentityError::InvalidPath)
+            ),
+            "empty path components must be rejected: {path_bytes:?}",
+        );
+    }
+
+    for path_bytes in [
+        b"/absent/codex".as_slice(),
+        b"/absent/codex-\xff".as_slice(),
+    ] {
+        let recorded_path = PathBuf::from(std::ffi::OsString::from_vec(path_bytes.to_vec()));
+        assert!(RecordedExecutableIdentity::new(recorded_path, [0; 32]).is_ok());
+    }
+}
+
+#[test]
 fn recorded_identity_preserves_valid_non_utf8_path_without_filesystem_lookup()
 -> Result<(), Box<dyn std::error::Error>> {
     use std::os::unix::ffi::OsStringExt;
