@@ -31,6 +31,15 @@ mod build_info;
 pub use build_info::{BuildInfo, ComponentFingerprints};
 mod slot_image;
 pub use slot_image::{SlotImage, SlotImageError};
+mod generation_evidence;
+pub use generation_evidence::{
+    GenerationEvidence, GenerationEvidenceError, GenerationSchemaAvailability,
+    SchemaUnavailableReason,
+};
+mod generation_current_payload;
+pub use generation_current_payload::GenerationCurrentPayload;
+mod generation_preparation;
+pub use generation_preparation::GenerationPreparation;
 
 mod native_probe_failure;
 pub use native_probe_failure::{NativeProbeFailure, NativeProbeStage};

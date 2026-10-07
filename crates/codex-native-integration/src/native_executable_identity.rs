@@ -6,6 +6,8 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 use std::path::PathBuf;
 
+use serde::{Deserialize, Serialize};
+
 use sha2::Digest;
 use sha2::Sha256;
 use thiserror::Error;
@@ -38,10 +40,38 @@ impl ExecutableIdentity {
 }
 
 /// Captured identity of an already-observed executable, not a new file observation.
-#[derive(Clone, Eq, PartialEq)]
+#[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(
+    try_from = "RecordedExecutableIdentityWire",
+    into = "RecordedExecutableIdentityWire"
+)]
 pub struct RecordedExecutableIdentity {
     recorded_path: PathBuf,
     content_digest: [u8; 32],
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct RecordedExecutableIdentityWire {
+    recorded_path: PathBuf,
+    content_digest: [u8; 32],
+}
+
+impl TryFrom<RecordedExecutableIdentityWire> for RecordedExecutableIdentity {
+    type Error = RecordedExecutableIdentityError;
+
+    fn try_from(value: RecordedExecutableIdentityWire) -> Result<Self, Self::Error> {
+        Self::new(value.recorded_path, value.content_digest)
+    }
+}
+
+impl From<RecordedExecutableIdentity> for RecordedExecutableIdentityWire {
+    fn from(value: RecordedExecutableIdentity) -> Self {
+        Self {
+            recorded_path: value.recorded_path,
+            content_digest: value.content_digest,
+        }
+    }
 }
 
 impl std::fmt::Debug for RecordedExecutableIdentity {

@@ -208,3 +208,33 @@ fn exported_directory_rejects_symlinks_instead_of_reading_outside_files()
     }
     Ok(())
 }
+#[test]
+fn schema_digest_serde_uses_its_literal_canonical_string() -> Result<(), Box<dyn std::error::Error>>
+{
+    let bytes = [
+        0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd,
+        0xef, 0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0x01, 0x23, 0x45, 0x67, 0x89, 0xab,
+        0xcd, 0xef,
+    ];
+    let digest = NativeSchemaDigest::from_bytes(bytes);
+    let literal = r#""sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef""#;
+    let encoded = serde_json::to_string(&digest)?;
+    let decoded = serde_json::from_str::<NativeSchemaDigest>(literal)?;
+
+    if encoded != literal || decoded != digest {
+        return Err("native schema digest Serde must use the canonical scalar string".into());
+    }
+    for malformed in [
+        r#""SHA256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef""#,
+        r#""sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcde""#,
+        r#""sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0""#,
+        r#""sha256:0123456789ABCDEF0123456789abcdef0123456789abcdef0123456789abcdef""#,
+        r#""sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdeg""#,
+        r#"[1,2,3]"#,
+    ] {
+        if serde_json::from_str::<NativeSchemaDigest>(malformed).is_ok() {
+            return Err("malformed digest scalar or non-string JSON was accepted".into());
+        }
+    }
+    Ok(())
+}
