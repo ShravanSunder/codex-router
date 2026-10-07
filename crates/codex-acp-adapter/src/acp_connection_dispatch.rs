@@ -56,7 +56,7 @@ pub(crate) async fn route_codex_sessions(
     inputs: AcpConnectionInputs,
 ) -> io::Result<()> {
     let mut schema = AcpSchemaCatalog::load().map_err(io::Error::other)?;
-    let actor_retirement = inputs.retired.child_token();
+    let actor_retirement = inputs.retired.clone();
     let mut sessions = AcpSessionRegistry::new(
         router.output.clone(),
         actor_retirement,

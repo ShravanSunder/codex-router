@@ -5,7 +5,10 @@ use crate::{
 };
 use serde_json::Value;
 use std::{collections::BTreeMap, sync::Arc};
-use tokio::{sync::mpsc, task::JoinSet};
+use tokio::{
+    sync::{mpsc, oneshot},
+    task::JoinSet,
+};
 use tokio_util::sync::CancellationToken;
 
 enum SessionSlot {
@@ -40,10 +43,40 @@ pub enum SessionRegistryError {
     #[error("ACP session capacity exceeded")]
     Capacity,
 }
+// Both a failed send and a delivered-but-unobserved result retain the binding.
+// Taking the completion transfers responsibility to the registry's Ready slot.
+struct OwnedPromptCompletion {
+    completion: crate::PromptTaskCompletion,
+    holder: Arc<dyn UnmaterializedBindingStore>,
+}
+impl Drop for OwnedPromptCompletion {
+    fn drop(&mut self) {
+        if let Some(binding) = self.completion.binding.take()
+            && binding.is_unmaterialized()
+        {
+            self.holder.hold(binding);
+        }
+    }
+}
+
+fn spawn_host_prompt(
+    inputs: PromptTaskInputs,
+    holder: Arc<dyn UnmaterializedBindingStore>,
+) -> oneshot::Receiver<OwnedPromptCompletion> {
+    let (completion_sender, completion_receiver) = oneshot::channel();
+    holder.host_tasks().spawn(async move {
+        let completion = run_prompt_task(inputs).await;
+        // A dropped observer returns ownership here; the guard also covers
+        // delivery followed by an observer disappearing before consumption.
+        let _sent = completion_sender.send(OwnedPromptCompletion { completion, holder });
+    });
+    completion_receiver
+}
+
 pub struct AcpSessionRegistry {
     sessions: BTreeMap<String, SessionSlot>,
     cancellation_barriers: BTreeMap<String, crate::CancellationBarrier>,
-    prompts: JoinSet<(String, crate::PromptTaskCompletion)>,
+    prompts: JoinSet<Result<(String, OwnedPromptCompletion), SessionRegistryError>>,
     output: AcpOutputSender,
     retired: CancellationToken,
     holder: Arc<dyn UnmaterializedBindingStore>,
@@ -107,17 +140,22 @@ impl AcpSessionRegistry {
         *slot = SessionSlot::Busy(sender);
         let output = self.output.clone();
         let retired = self.retired.clone();
-        self.prompts.spawn(async move {
-            let binding = run_prompt_task(PromptTaskInputs {
+        let completion_receiver = spawn_host_prompt(
+            PromptTaskInputs {
                 session: *session,
                 request_id,
                 params,
                 commands,
                 output,
                 retired,
-            })
-            .await;
-            (id, binding)
+            },
+            Arc::clone(&self.holder),
+        );
+        self.prompts.spawn(async move {
+            completion_receiver
+                .await
+                .map(|completion| (id, completion))
+                .map_err(|_| SessionRegistryError::NotLoaded)
         });
         Ok(())
     }
@@ -179,7 +217,8 @@ impl AcpSessionRegistry {
             return Ok(());
         };
         match completed {
-            Ok((id, completed)) => {
+            Ok(Ok((id, mut owned))) => {
+                let completed = std::mem::take(&mut owned.completion);
                 if let Some(barrier) = completed.cancellation_barrier {
                     self.cancellation_barriers.insert(id.clone(), barrier);
                 }
@@ -197,36 +236,27 @@ impl AcpSessionRegistry {
                 }
                 Ok(())
             }
-            Err(_) => {
-                self.retired.cancel();
-                Err(SessionRegistryError::NotLoaded)
-            }
+            Ok(Err(error)) => Err(error),
+            Err(_) => Err(SessionRegistryError::NotLoaded),
         }
     }
-    /// Closes only this connection's prompt actors; the Host/backend lifecycle remains separate.
-    pub async fn shutdown(mut self) {
-        // Closing the ACP frontend detaches its prompt actors. Dropping their
-        // command senders lets them observe EOF and keep draining native turns.
-        for slot in self.sessions.values_mut() {
-            if matches!(slot, SessionSlot::Busy(_)) {
-                *slot = SessionSlot::Detached;
-            }
+    /// Detaches this connection's observers; Host-owned native actors keep serving.
+    pub async fn shutdown(self) {
+        drop(self);
+    }
+}
+impl Drop for AcpSessionRegistry {
+    fn drop(&mut self) {
+        // Command sender EOF detaches actors without native cancellation. Track
+        // observer destruction too so Host drain includes completion recovery.
+        let mut prompts = std::mem::take(&mut self.prompts);
+        if !prompts.is_empty() {
+            prompts.abort_all();
+            self.holder
+                .host_tasks()
+                .spawn(async move { while prompts.join_next().await.is_some() {} });
         }
-        let mut prompts = self.prompts;
-        let holder = Arc::clone(&self.holder);
-        let retired = self.retired;
-        self.holder.host_tasks().spawn(async move {
-            while let Some(completed) = prompts.join_next().await {
-                if let Ok(completed) = completed
-                    && let Some(binding) = completed.1.binding
-                    && binding.is_unmaterialized()
-                {
-                    holder.hold(binding);
-                }
-            }
-            retired.cancel();
-        });
-        for (_, slot) in self.sessions {
+        for (_, slot) in std::mem::take(&mut self.sessions) {
             if let SessionSlot::Ready(binding) = slot
                 && binding.is_unmaterialized()
             {
@@ -235,3 +265,12 @@ impl AcpSessionRegistry {
         }
     }
 }
+
+#[cfg(test)]
+use crate as adapter;
+#[cfg(test)]
+#[path = "../tests/support/actor_lifetime_fixture.rs"]
+pub(crate) mod actor_lifetime_fixture;
+#[cfg(test)]
+#[path = "session_connection_registry_tests.rs"]
+mod tests;

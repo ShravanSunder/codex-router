@@ -52,6 +52,33 @@ struct ActiveGeneration {
     pending: BTreeMap<String, Value>,
 }
 
+impl Drop for ActiveGeneration {
+    fn drop(&mut self) {
+        self.closed.cancel();
+        self.task.abort();
+    }
+}
+
+#[derive(Clone, Copy)]
+enum GenerationClosure {
+    NativeRetired,
+    RouteUnavailable,
+}
+impl GenerationClosure {
+    fn pending_message(self) -> &'static str {
+        match self {
+            Self::NativeRetired => "Codex generation retired",
+            Self::RouteUnavailable => "Codex route unavailable",
+        }
+    }
+    fn session_message(self) -> &'static str {
+        match self {
+            Self::NativeRetired => "Codex session generation retired",
+            Self::RouteUnavailable => "Codex session route unavailable",
+        }
+    }
+}
+
 enum GenerationEvent {
     Frame { epoch: u64, frame: Value },
     Retired { epoch: u64 },
@@ -62,21 +89,55 @@ fn unavailable(id: Value, reason: &str) -> Value {
     json!({"jsonrpc":"2.0","id":id,"error":{"code":-32000,"message":reason}})
 }
 
-async fn retire_active_generation(
+async fn close_active_generation(
     active: &mut Option<ActiveGeneration>,
-    retired_sessions: &mut BTreeSet<String>,
+    closed_sessions: &mut BTreeMap<String, GenerationClosure>,
+    reason: GenerationClosure,
     output: &AcpOutputSender,
 ) -> io::Result<()> {
-    let Some(current) = active.take() else {
+    let Some(mut current) = active.take() else {
         return Ok(());
     };
     current.closed.cancel();
     current.task.abort();
-    retired_sessions.extend(current.session_ids);
-    for (_, id) in current.pending {
+    for session_id in std::mem::take(&mut current.session_ids) {
+        closed_sessions.insert(session_id, reason);
+    }
+    for (_, id) in std::mem::take(&mut current.pending) {
         output
-            .send(unavailable(id, "Codex generation retired"))
+            .send(unavailable(id, reason.pending_message()))
             .await?;
+    }
+    Ok(())
+}
+
+async fn forward_active_input(
+    active: &mut Option<ActiveGeneration>,
+    closed_sessions: &mut BTreeMap<String, GenerationClosure>,
+    output: &AcpOutputSender,
+    frame: &Value,
+) -> io::Result<()> {
+    let id = frame.get("id").cloned();
+    let Some(current) = active.as_mut() else {
+        if let Some(id) = id {
+            output
+                .send(unavailable(id, "Codex session unavailable"))
+                .await?;
+        }
+        return Ok(());
+    };
+    if let Some(id) = id {
+        current.pending.insert(id.to_string(), id);
+    }
+    if current.input.send(frame.clone()).await.is_err() {
+        let reason = if current.retirement.is_cancelled() {
+            GenerationClosure::NativeRetired
+        } else {
+            GenerationClosure::RouteUnavailable
+        };
+        // The incoming ID is already pending. Settle it with this observer's
+        // other requests once; admission of later requests stays unchanged.
+        close_active_generation(active, closed_sessions, reason, output).await?;
     }
     Ok(())
 }
@@ -87,7 +148,7 @@ async fn serve_lazy_codex_sessions(
 ) -> io::Result<()> {
     let (event_sender, mut event_receiver) = mpsc::channel::<GenerationEvent>(1024);
     let mut active: Option<ActiveGeneration> = None;
-    let mut retired_sessions = BTreeSet::<String>::new();
+    let mut closed_sessions = BTreeMap::<String, GenerationClosure>::new();
     let mut next_epoch = 0_u64;
     loop {
         tokio::select! {
@@ -101,29 +162,34 @@ async fn serve_lazy_codex_sessions(
                             let key = id.to_string();
                             if current.pending.remove(&key).is_some()
                                 && let Some(session_id) = frame.pointer("/result/sessionId").and_then(Value::as_str) {
-                                retired_sessions.remove(session_id);
+                                closed_sessions.remove(session_id);
                                 current.session_ids.insert(session_id.to_owned());
                             }
                         }
                         router.output.send(frame).await?;
                     }
-                    GenerationEvent::Retired { epoch } | GenerationEvent::Closed { epoch } => {
+                    GenerationEvent::Retired { epoch } => {
                         if active.as_ref().is_none_or(|current| current.epoch != epoch) { continue; }
-                        retire_active_generation(&mut active, &mut retired_sessions, &router.output).await?;
+                        close_active_generation(&mut active, &mut closed_sessions, GenerationClosure::NativeRetired, &router.output).await?;
+                    }
+                    GenerationEvent::Closed { epoch } => {
+                        let Some(current) = active.as_ref().filter(|current| current.epoch == epoch) else { continue; };
+                        let reason = if current.retirement.is_cancelled() { GenerationClosure::NativeRetired } else { GenerationClosure::RouteUnavailable };
+                        close_active_generation(&mut active, &mut closed_sessions, reason, &router.output).await?;
                     }
                 }
             }
             frame = router.input.recv() => {
                 let Some(frame) = frame else { break; };
                 if active.as_ref().is_some_and(|current| current.retirement.is_cancelled()) {
-                    retire_active_generation(&mut active, &mut retired_sessions, &router.output).await?;
+                    close_active_generation(&mut active, &mut closed_sessions, GenerationClosure::NativeRetired, &router.output).await?;
                 }
                 let method = frame.get("method").and_then(Value::as_str).unwrap_or("");
                 let id = frame.get("id").cloned();
                 let session_id = frame.pointer("/params/sessionId").and_then(Value::as_str);
                 let admission_request = matches!(method, "session/new" | "session/load" | "session/resume" | "session/list");
-                if !admission_request && session_id.is_some_and(|id| retired_sessions.contains(id)) {
-                    if let Some(id) = id { router.output.send(unavailable(id, "Codex session generation retired")).await?; }
+                if !admission_request && let Some(reason) = session_id.and_then(|id| closed_sessions.get(id)) {
+                    if let Some(id) = id { router.output.send(unavailable(id, reason.session_message())).await?; }
                     continue;
                 }
                 if active.is_none() && admission_request {
@@ -141,6 +207,7 @@ async fn serve_lazy_codex_sessions(
                             let (output, mut output_receiver) = bounded_acp_output(closed.clone());
                             let inner = AcpRouterChannels { input: input_receiver, output, closed: closed.clone() };
                             let sender = event_sender.clone();
+                            let route_closed = closed.clone();
                             let task = tokio::spawn(async move {
                                 let run = route_codex_sessions(inner, inputs);
                                 let forward = async {
@@ -148,11 +215,20 @@ async fn serve_lazy_codex_sessions(
                                         if sender.send(GenerationEvent::Frame { epoch, frame: (*frame).clone() }).await.is_err() { break; }
                                     }
                                 };
-                                let (_run_result, ()) = tokio::join!(run, forward);
+                                tokio::select! {
+                                    _run_result = run => {},
+                                    () = forward => {},
+                                }
+                                // Freeze this observer's producer before draining its bounded
+                                // queue; Host actors keep running with detached output.
+                                route_closed.cancel();
+                                while let Ok(frame) = output_receiver.try_recv() {
+                                    if sender.send(GenerationEvent::Frame { epoch, frame: (*frame).clone() }).await.is_err() { break; }
+                                }
                                 let _sent = sender.send(GenerationEvent::Closed { epoch }).await;
                             });
                             let sender = event_sender.clone();
-                            let watcher_closed = router.closed.clone();
+                            let watcher_closed = closed.clone();
                             let retirement = retired.clone();
                             tokio::spawn(async move {
                                 tokio::select! {
@@ -166,20 +242,14 @@ async fn serve_lazy_codex_sessions(
                         }
                     }
                 }
-                let Some(current) = active.as_mut() else {
-                    if let Some(id) = id { router.output.send(unavailable(id, "Codex session unavailable")).await?; }
-                    continue;
-                };
-                if let Some(id) = id {
-                    current.pending.insert(id.to_string(), id);
-                }
-                current.input.send((*frame).clone()).await?;
+                forward_active_input(&mut active, &mut closed_sessions, &router.output, &frame).await?;
             }
         }
     }
-    if let Some(current) = active {
-        current.closed.cancel();
-        current.task.abort();
-    }
+    drop(active);
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "lazy_codex_session_route_tests.rs"]
+mod tests;
