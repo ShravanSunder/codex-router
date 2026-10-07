@@ -317,3 +317,6 @@ mod credit_transport_proof;
 
 #[path = "tests/credential_generation_websocket.rs"]
 mod credential_generation_websocket;
+
+#[path = "proxy_tests/credential_resolution_diagnostic_tests.rs"]
+mod credential_resolution_diagnostic_tests;
