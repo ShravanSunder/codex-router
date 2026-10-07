@@ -354,3 +354,14 @@ workload), or to grant that exception for store execution.
 | F14: logging options silently ignored | SQLx's `QueryLogger` wired through execution and the row stream; a test shows the settings take effect |
 | F15: basedpyright error in `prepare-sqlx-turso.py` | Positional-only runner protocol; 0 errors |
 | F16: stale default-features doc; REGEXP test dropped | Doc fixed; test restored |
+
+### 12.4 Two workspace tests that fail only in place in this worktree
+
+`codex-router-auth`'s `stalled_device_code_poll_maps_timeout_to_poll_transport_failure` and
+`refresh_timeout_is_ambiguous_and_never_returns_the_old_token` give their first loopback request
+a 100 ms budget. Run in place from this worktree they failed in every run (crate scope and full
+suite, with or without the signing runner, old or fresh target directory). The same commands
+passed 3 of 3 runs, interleaved under the same load, from plain source copies of `main`, of this
+branch at an earlier commit, of the current HEAD, and of the worktree's own files including its
+`.git` pointer. `codex-router-auth` resolves to exactly `main`'s graph and features. The failure
+follows the checkout's on-disk location, not the code; its root cause is not identified.
