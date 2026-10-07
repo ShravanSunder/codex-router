@@ -8,16 +8,23 @@ use std::time::Duration;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
+use crate::openai_oauth::OPENAI_OAUTH_CLIENT_ID;
+use crate::openai_oauth::OPENAI_OAUTH_TOKEN_ENDPOINT;
 use codex_router_core::ids::AccountId;
 use codex_router_core::provider::Provider;
 use codex_router_core::redaction::SecretString;
 use codex_router_secret_store::SecretStore;
+use codex_router_secret_store::account_credential_lock::AccountCredentialLock;
 use codex_router_secret_store::account_tokens::AccountCredentialBundle;
 use codex_router_secret_store::account_tokens::provider_credential_bundle_key;
 use codex_router_secret_store::credential_bundle::CredentialBundle;
 use codex_router_secret_store::model::SecretStoreError;
 use codex_router_state::account::AccountStatus;
 use codex_router_state::credential_maintenance::ClaimPurpose;
+use codex_router_state::credential_maintenance::CredentialFailureClass;
+use codex_router_state::credential_maintenance::CredentialMaintenanceRecord;
+use codex_router_state::credential_maintenance::CredentialMaintenanceState;
+use codex_router_state::credential_maintenance::CredentialRefreshClaimDisposition;
 use codex_router_state::credential_maintenance::LOGIN_CREDENTIAL_CLAIM_TIMEOUT_SECONDS;
 use codex_router_state::sqlite::AsyncSqliteStateStore;
 #[cfg(any(test, feature = "sync-rusqlite-fixtures"))]
@@ -26,15 +33,6 @@ use codex_router_state::sqlite::StateStoreError;
 use serde::Deserialize;
 use serde::Serialize;
 use thiserror::Error;
-use tokio_util::task::TaskTracker;
-
-use crate::openai_oauth::OPENAI_OAUTH_CLIENT_ID;
-use crate::openai_oauth::OPENAI_OAUTH_TOKEN_ENDPOINT;
-use codex_router_secret_store::account_credential_lock::AccountCredentialLock;
-use codex_router_state::credential_maintenance::CredentialFailureClass;
-use codex_router_state::credential_maintenance::CredentialMaintenanceRecord;
-use codex_router_state::credential_maintenance::CredentialMaintenanceState;
-use codex_router_state::credential_maintenance::CredentialRefreshClaimDisposition;
 
 /// Credential resolver failure.
 #[derive(Debug, Error)]
@@ -57,6 +55,9 @@ pub enum CredentialResolverError {
     /// Refresh is required but cannot be performed.
     #[error("provider credential refresh is unavailable")]
     RefreshUnavailable,
+    /// The owning runtime has closed credential-renewal admission.
+    #[error("provider credential renewal admission is closed")]
+    RenewalAdmissionClosed,
 }
 
 impl Clone for CredentialResolverError {
@@ -68,6 +69,7 @@ impl Clone for CredentialResolverError {
             Self::SecretUnavailable => Self::SecretUnavailable,
             Self::CredentialStoreUnavailable => Self::CredentialStoreUnavailable,
             Self::RefreshUnavailable => Self::RefreshUnavailable,
+            Self::RenewalAdmissionClosed => Self::RenewalAdmissionClosed,
         }
     }
 }
@@ -85,6 +87,7 @@ impl PartialEq for CredentialResolverError {
                     Self::CredentialStoreUnavailable
                 )
                 | (Self::RefreshUnavailable, Self::RefreshUnavailable)
+                | (Self::RenewalAdmissionClosed, Self::RenewalAdmissionClosed)
         )
     }
 }
@@ -776,10 +779,11 @@ fn map_secret_error(error: SecretStoreError) -> CredentialResolverError {
     }
 }
 
+mod credential_refresh_supervision;
 mod credential_renewal;
 
+pub use credential_refresh_supervision::CredentialRefreshTaskSupervisor;
 pub use credential_renewal::AsyncRouterCredentialResolver;
-pub use credential_renewal::CredentialRefreshTaskSupervisor;
 pub use credential_renewal::DefaultAsyncRouterCredentialResolver;
 #[cfg(test)]
 pub(crate) use credential_renewal::credential_renewal_is_due;

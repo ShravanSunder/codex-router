@@ -17,28 +17,8 @@ where
     fixed_now_unix_seconds: Option<u64>,
     refresh_leases: AsyncRefreshLeaseRegistry,
     refresh_tasks: CredentialRefreshTaskSupervisor,
-}
-
-/// Tracks credential rotations that must survive a requesting task's cancellation.
-#[derive(Clone, Debug, Default)]
-pub struct CredentialRefreshTaskSupervisor {
-    tasks: TaskTracker,
-}
-
-impl CredentialRefreshTaskSupervisor {
-    /// Creates one supervisor shared by all resolvers in a runtime.
-    #[must_use]
-    pub fn new() -> Self {
-        Self {
-            tasks: TaskTracker::new(),
-        }
-    }
-
-    /// Stops admission after request handlers finish and waits for claimed work.
-    pub async fn drain(&self, limit: Duration) -> bool {
-        self.tasks.close();
-        tokio::time::timeout(limit, self.tasks.wait()).await.is_ok()
-    }
+    #[cfg(test)]
+    file_lock_acquired_observer: Option<std::sync::mpsc::Sender<()>>,
 }
 
 /// Default async router credential resolver for OpenAI OAuth account tokens.
@@ -87,6 +67,8 @@ where
             fixed_now_unix_seconds,
             refresh_leases: AsyncRefreshLeaseRegistry::new(),
             refresh_tasks: CredentialRefreshTaskSupervisor::new(),
+            #[cfg(test)]
+            file_lock_acquired_observer: None,
         }
     }
 
@@ -106,6 +88,8 @@ where
             fixed_now_unix_seconds,
             refresh_leases,
             refresh_tasks: CredentialRefreshTaskSupervisor::new(),
+            #[cfg(test)]
+            file_lock_acquired_observer: None,
         }
     }
 
@@ -116,6 +100,15 @@ where
         refresh_tasks: CredentialRefreshTaskSupervisor,
     ) -> Self {
         self.refresh_tasks = refresh_tasks;
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_test_file_lock_acquired_observer(
+        mut self,
+        observer: std::sync::mpsc::Sender<()>,
+    ) -> Self {
+        self.file_lock_acquired_observer = Some(observer);
         self
     }
 
@@ -284,21 +277,28 @@ where
             let owned_resolver = self.clone();
             let owned_account_id = account_id.clone();
             let owned_expected_provider = expected_provider;
-            let (generation, bundle, provider_used) = self
+            let task = self
                 .refresh_tasks
-                .tasks
-                .spawn(async move {
+                .spawn(|waiting_lock_cancellation| async move {
                     let lease = owned_resolver.refresh_leases.lease_for(&owned_account_id);
-                    let _guard = lease.lock().await;
+                    let _guard = tokio::select! {
+                        biased;
+                        () = waiting_lock_cancellation.cancelled() => {
+                            return Err(CredentialResolverError::RenewalAdmissionClosed);
+                        }
+                        guard = lease.lock() => guard,
+                    };
                     owned_resolver
                         .renew_bundle_under_lock(
                             &owned_account_id,
                             owned_expected_provider,
                             now_unix_seconds,
                             current_trigger,
+                            waiting_lock_cancellation,
                         )
                         .await
-                })
+                })?;
+            let (generation, bundle, provider_used) = task
                 .await
                 .map_err(|_| CredentialResolverError::RefreshUnavailable)??;
             let completed_now_unix_seconds =
@@ -417,13 +417,32 @@ where
         expected_provider: Provider,
         now_unix_seconds: u64,
         trigger: RenewalTrigger,
+        waiting_lock_cancellation: tokio_util::sync::CancellationToken,
     ) -> Result<(u64, CredentialBundle, bool), CredentialResolverError> {
         let database_path = self.state_store.database_path().to_path_buf();
         let account_for_lock = account_id.clone();
-        let file_lock_result = tokio::task::spawn_blocking(move || {
-            AccountCredentialLock::acquire(&database_path, &account_for_lock)
-        })
-        .await;
+        #[cfg(test)]
+        let file_lock_acquired_observer = self.file_lock_acquired_observer.clone();
+        let file_lock_acquisition = tokio::task::spawn_blocking(move || {
+            // This closure only acquires the existing file lock. If cancellation
+            // wins while it blocks, its eventual owned guard is dropped with the
+            // detached result and cannot reach claim or provider work.
+            let result = AccountCredentialLock::acquire(&database_path, &account_for_lock);
+            #[cfg(test)]
+            if result.is_ok()
+                && let Some(observer) = file_lock_acquired_observer
+            {
+                let _ = observer.send(());
+            }
+            result
+        });
+        let file_lock_result = tokio::select! {
+            biased;
+            () = waiting_lock_cancellation.cancelled() => {
+                return Err(CredentialResolverError::RenewalAdmissionClosed);
+            }
+            result = file_lock_acquisition => result,
+        };
         let mut file_lock = match file_lock_result {
             Ok(Ok(file_lock)) => file_lock,
             Ok(Err(_)) | Err(_) => {
