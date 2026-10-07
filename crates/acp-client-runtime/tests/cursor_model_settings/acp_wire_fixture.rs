@@ -68,7 +68,7 @@ impl SessionEventSink for SettingsSink {
     }
 }
 
-pub struct WireFixture {
+pub struct AcpWireFixture {
     pub root: tempfile::TempDir,
     pub receipt: PathBuf,
     pub client: AgentSessionClient<NoopInteractionPort>,
@@ -82,7 +82,7 @@ enum ClientInitialization {
     CursorWithoutMcp,
 }
 
-impl WireFixture {
+impl AcpWireFixture {
     pub async fn start(scenario: &str, cursor_picker: bool) -> Self {
         Self::initialize(
             scenario,
@@ -108,7 +108,7 @@ impl WireFixture {
             arguments: vec![
                 "-u".into(),
                 "-c".into(),
-                include_str!("peer.py").into(),
+                include_str!("scripted_acp_agent.py").into(),
                 scenario.into(),
                 receipt.to_string_lossy().into_owned(),
             ],

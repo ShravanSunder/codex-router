@@ -1,20 +1,20 @@
 //! R1–R4: real ACP wires and returned catalogs, without native provider state.
 #![allow(clippy::expect_used)]
 
-#[path = "cursor_model_settings/support.rs"]
-mod support;
+#[path = "cursor_model_settings/acp_wire_fixture.rs"]
+mod acp_wire_fixture;
 
 use acp_client_runtime::{
     ExternalProviderRuntimeError, ProviderConfigValue, ProviderSettingKind,
     RequestedProviderSettings,
 };
+use acp_wire_fixture::AcpWireFixture;
 use session_event_model::ConfigValueState;
-use support::WireFixture;
 
 #[cfg(feature = "test-observation")]
 #[tokio::test]
 async fn native_observation_entrypoint_uses_picker_wire_without_mcp_injection() {
-    let fixture = WireFixture::start_without_mcp("thinking-first").await;
+    let fixture = AcpWireFixture::start_without_mcp("thinking-first").await;
     fixture
         .client
         .create_session(fixture.root.path().into())
@@ -31,7 +31,7 @@ async fn native_observation_entrypoint_uses_picker_wire_without_mcp_injection() 
 
 #[tokio::test]
 async fn cursor_initialize_advertises_parameterized_picker_on_the_wire() {
-    let fixture = WireFixture::start("negotiation", true).await;
+    let fixture = AcpWireFixture::start("negotiation", true).await;
     fixture.client.shutdown().await;
     let requests = fixture.requests();
     assert_eq!(
@@ -42,7 +42,7 @@ async fn cursor_initialize_advertises_parameterized_picker_on_the_wire() {
 
 #[tokio::test]
 async fn standard_initialize_omits_cursor_picker_metadata() {
-    let fixture = WireFixture::start("negotiation", false).await;
+    let fixture = AcpWireFixture::start("negotiation", false).await;
     fixture.client.shutdown().await;
     let requests = fixture.requests();
     assert!(
@@ -55,7 +55,7 @@ async fn standard_initialize_omits_cursor_picker_metadata() {
 #[tokio::test]
 async fn thinking_first_and_explicit_effort_win_without_companion_rewrites() {
     for scenario in ["thinking-first", "explicit-wins", "fallback"] {
-        let fixture = WireFixture::start(scenario, false).await;
+        let fixture = AcpWireFixture::start(scenario, false).await;
         let session = fixture
             .client
             .create_session(fixture.root.path().into())
@@ -122,7 +122,7 @@ async fn ambiguous_or_thinking_only_effort_rejects_before_rpc() {
         "duplicate-explicit",
         "duplicate-mixed",
     ] {
-        let fixture = WireFixture::start(scenario, false).await;
+        let fixture = AcpWireFixture::start(scenario, false).await;
         let session = fixture
             .client
             .create_session(fixture.root.path().into())
@@ -154,7 +154,7 @@ async fn ambiguous_or_thinking_only_effort_rejects_before_rpc() {
 
 #[tokio::test]
 async fn create_refreshes_mode_dependent_model_and_model_dependent_effort_choices() {
-    let fixture = WireFixture::start("dynamic", false).await;
+    let fixture = AcpWireFixture::start("dynamic", false).await;
     let result = fixture
         .client
         .create_session_with_settings(
@@ -186,7 +186,7 @@ async fn create_refreshes_mode_dependent_model_and_model_dependent_effort_choice
 
 #[tokio::test]
 async fn provider_adjusted_companion_values_are_reported_in_full_settings_event() {
-    let fixture = WireFixture::start("adjusted", false).await;
+    let fixture = AcpWireFixture::start("adjusted", false).await;
     let session = fixture
         .client
         .create_session(fixture.root.path().into())
@@ -223,7 +223,7 @@ async fn provider_adjusted_companion_values_are_reported_in_full_settings_event(
 
 #[tokio::test]
 async fn load_and_live_update_refresh_effort_identity_and_invalid_values_do_not_dispatch() {
-    let fixture = WireFixture::start("load-update", false).await;
+    let fixture = AcpWireFixture::start("load-update", false).await;
     fixture
         .client
         .load_session("fixture-session".into(), fixture.root.path().into())

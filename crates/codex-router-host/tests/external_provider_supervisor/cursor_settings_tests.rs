@@ -11,7 +11,7 @@ async fn cursor_effort_setting_reports_adjusted_catalog_without_public_api_expan
     let creator = actor(provider_endpoint.clone(), "creator")?;
     let mut provider_launch = launch(include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../acp-client-runtime/tests/cursor_model_settings/peer.py"
+        "/../acp-client-runtime/tests/cursor_model_settings/scripted_acp_agent.py"
     )));
     provider_launch
         .arguments
