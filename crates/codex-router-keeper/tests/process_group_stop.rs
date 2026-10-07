@@ -1,4 +1,6 @@
-use codex_router_keeper::{GroupStopStatus, GroupStopTiming, OwnedProcessGroup};
+use codex_router_keeper::{
+    GroupLaunchOutcome, GroupStopStatus, GroupStopTiming, OwnedProcessGroup,
+};
 use tokio::time::{Duration, Instant, timeout};
 #[path = "support/group_fixture.rs"]
 mod group_fixture;
@@ -6,7 +8,7 @@ use group_fixture::{TestResult, read_ready, ready_command};
 #[tokio::test]
 async fn cooperative_group_term_is_reaped_and_esrch_before_completion() -> TestResult {
     let command = ready_command("cooperative")?;
-    let mut group = OwnedProcessGroup::spawn(command).await?;
+    let mut group = require_launched(OwnedProcessGroup::spawn(command).await).await?;
     let mut output = group.take_stdout().ok_or("fixture output absent")?;
     let ready = read_ready(&mut output).await?;
     if ready.pid != group.leader_pid().as_pid().as_raw_pid()
@@ -48,7 +50,7 @@ async fn start_fixture(
     Box<dyn std::error::Error + Send + Sync>,
 > {
     let command = ready_command(mode)?;
-    let mut group = OwnedProcessGroup::spawn(command).await?;
+    let mut group = require_launched(OwnedProcessGroup::spawn(command).await).await?;
     let mut output = group.take_stdout().ok_or("fixture output absent")?;
     let ready = read_ready(&mut output).await?;
     if ready.pid != group.leader_pid().as_pid().as_raw_pid()
@@ -275,4 +277,20 @@ async fn provider_style_eof_exit_is_empty_without_extra_stop_signal() -> TestRes
         return Err("already empty group was signalled/restarted".into());
     }
     Ok(())
+}
+
+async fn require_launched(
+    outcome: GroupLaunchOutcome,
+) -> Result<OwnedProcessGroup, Box<dyn std::error::Error + Send + Sync>> {
+    match outcome {
+        GroupLaunchOutcome::Launched(group) => Ok(group),
+        GroupLaunchOutcome::Refused { reason } => Err(reason.into()),
+        GroupLaunchOutcome::CleanupPending {
+            reason,
+            mut cleanup,
+        } => {
+            cleanup.wait_for_cleanup(&CancellationToken::new()).await?;
+            Err(reason.into())
+        }
+    }
 }

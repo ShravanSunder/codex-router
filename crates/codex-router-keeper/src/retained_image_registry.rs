@@ -1,9 +1,10 @@
 use crate::{
-    ImageError, OwnedProcessGroup,
+    GroupLaunchOutcome, ImageError, OwnedProcessGroup, OwnedSpawnCleanup,
     image_directory::{OwnedImageNode, ensure_private, private_directory, validate_root},
     image_identity::{capture, digest_hex, same_node, verify},
-    image_warmup::{WarmupOutcome, warmup},
+    image_warmup::{WarmupCleanup, WarmupOutcome, warmup_with_checkpoint},
     lifecycle_bounds::PREPARE_DEADLINE,
+    owned_process_group::PostSpawnCheckpoint,
 };
 use codex_router_descriptor_boundary::DescriptorGate;
 use codex_router_keeper_protocol::{BuildInfo, ComponentFingerprint, ComponentKind, SlotImage};
@@ -59,7 +60,7 @@ pub struct ImageRegistry {
     )>,
 }
 struct PendingWarmup {
-    group: OwnedProcessGroup,
+    cleanup: WarmupCleanup,
     _image: OwnedImageNode,
 }
 #[path = "image_cache_discovery.rs"]
@@ -109,6 +110,23 @@ impl ImageRegistry {
         expected: &BuildInfo,
         link: LinkOperation,
         budget: Duration,
+    ) -> Result<ImageLease, ImageError> {
+        self.pin_with_checkpoint(
+            source,
+            expected,
+            link,
+            budget,
+            PostSpawnCheckpoint::Immediate,
+        )
+        .await
+    }
+    async fn pin_with_checkpoint(
+        &mut self,
+        source: &Path,
+        expected: &BuildInfo,
+        link: LinkOperation,
+        budget: Duration,
+        checkpoint: PostSpawnCheckpoint,
     ) -> Result<ImageLease, ImageError> {
         let source = capture(source, true).await?;
         if let Some(record) = self
@@ -208,7 +226,8 @@ impl ImageRegistry {
                 {
                     return Err(ImageError::ImageUnavailable);
                 }
-                match warmup(&candidate, expected, budget).await {
+                match warmup_with_checkpoint(&candidate, expected, budget, checkpoint.clone()).await
+                {
                     WarmupOutcome::Verified => {}
                     WarmupOutcome::Refused {
                         reason,
@@ -217,9 +236,9 @@ impl ImageRegistry {
                         let _reaped_child = finished_pid;
                         return Err(reason);
                     }
-                    WarmupOutcome::CleanupPending { group, failure } => {
+                    WarmupOutcome::CleanupPending { cleanup, failure } => {
                         self.pending_warmups.push(PendingWarmup {
-                            group,
+                            cleanup,
                             _image: guard,
                         });
                         return Err(failure);
@@ -253,7 +272,8 @@ impl ImageRegistry {
                 // A prior copy may have a different inode. It is captured anew,
                 // but never acquires a candidate's unlink-on-failure authority.
                 let guard = OwnedImageNode::observed_existing(&actual.metadata);
-                match warmup(&retained, expected, budget).await {
+                match warmup_with_checkpoint(&retained, expected, budget, checkpoint.clone()).await
+                {
                     WarmupOutcome::Verified => {}
                     WarmupOutcome::Refused {
                         reason,
@@ -262,9 +282,9 @@ impl ImageRegistry {
                         let _reaped_child = finished_pid;
                         return Err(reason);
                     }
-                    WarmupOutcome::CleanupPending { group, failure } => {
+                    WarmupOutcome::CleanupPending { cleanup, failure } => {
                         self.pending_warmups.push(PendingWarmup {
-                            group,
+                            cleanup,
                             _image: guard,
                         });
                         return Err(failure);
@@ -346,16 +366,42 @@ impl ImageRegistry {
         &self,
         lease: &ImageLease,
         arguments: &[OsString],
-    ) -> Result<OwnedProcessGroup, ImageError> {
-        self.validate_record_path(lease.image()).await?;
-        verify(lease.image()).await?;
-        let mut command = Command::new(lease.image().retained_path());
+    ) -> Result<ImageLaunchOutcome, ImageError> {
+        self.spawn_with_checkpoint(lease, arguments, PostSpawnCheckpoint::Immediate)
+            .await
+    }
+    async fn spawn_with_checkpoint(
+        &self,
+        lease: &ImageLease,
+        arguments: &[OsString],
+        checkpoint: PostSpawnCheckpoint,
+    ) -> Result<ImageLaunchOutcome, ImageError> {
+        // Clone before any asynchronous validation/spawn; the future itself also
+        // retains the exact ready image while queued behind the descriptor gate.
+        let image = lease.clone();
+        self.validate_record_path(image.image()).await?;
+        verify(image.image()).await?;
+        let mut command = Command::new(image.image().retained_path());
         command
             .args(arguments)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        Ok(OwnedProcessGroup::spawn(command).await?)
+        Ok(
+            match OwnedProcessGroup::spawn_with_checkpoint(command, checkpoint).await {
+                GroupLaunchOutcome::Launched(group) => {
+                    ImageLaunchOutcome::Launched { group, image }
+                }
+                GroupLaunchOutcome::Refused { reason } => ImageLaunchOutcome::Refused { reason },
+                GroupLaunchOutcome::CleanupPending { reason, cleanup } => {
+                    ImageLaunchOutcome::CleanupPending {
+                        reason,
+                        cleanup,
+                        image,
+                    }
+                }
+            },
+        )
     }
     pub async fn collect(&mut self) -> Result<Vec<SlotImage>, ImageError> {
         // Failed warmup still owns its process and unpublished inode until the
@@ -364,17 +410,15 @@ impl ImageRegistry {
         #[cfg(test)]
         let reap_observations = &mut self.warmup_reap_observations;
         self.pending_warmups.retain_mut(|pending| {
-            match pending.group.tick(tokio::time::Instant::now()) {
-                Ok(crate::GroupStopStatus::GroupEmpty { .. })
-                    if pending.group.leader_exit_status().is_some() =>
-                {
+            match pending.cleanup.tick(tokio::time::Instant::now()) {
+                Ok(true) => {
                     #[cfg(test)]
-                    if let Some(status) = pending.group.leader_exit_status() {
-                        reap_observations.push((pending.group.leader_pid(), status));
+                    if let Some(observation) = pending.cleanup.reaped_status() {
+                        reap_observations.push(observation);
                     }
                     false
                 }
-                Ok(_) => true,
+                Ok(false) => true,
                 Err(error) => {
                     if failure.is_none() {
                         failure = Some(ImageError::Process(error));
@@ -456,3 +500,19 @@ fn lease_entry(entry: &mut CachedImage) -> ImageLease {
 #[cfg(test)]
 #[path = "retained_image_registry_tests.rs"]
 mod registry_tests;
+
+/// The same retained image accompanies either live execution or failed-launch debt.
+pub enum ImageLaunchOutcome {
+    Launched {
+        group: OwnedProcessGroup,
+        image: ImageLease,
+    },
+    Refused {
+        reason: crate::GroupStopError,
+    },
+    CleanupPending {
+        reason: crate::GroupStopError,
+        cleanup: OwnedSpawnCleanup,
+        image: ImageLease,
+    },
+}

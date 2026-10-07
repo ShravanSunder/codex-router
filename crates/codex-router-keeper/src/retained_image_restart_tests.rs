@@ -300,7 +300,9 @@ async fn discovered_image_stays_referenced_by_pending_warmup_until_real_empty_an
     let guard = OwnedImageNode::observed_existing(&std::fs::metadata(record.retained_path())?);
     let mut command = Command::new(record.retained_path());
     command.arg("hold").stdout(Stdio::piped());
-    let mut group = OwnedProcessGroup::spawn(command).await?;
+    let mut group =
+        crate::owned_launch_test_support::require_launched(OwnedProcessGroup::spawn(command).await)
+            .await?;
     let mut output = BufReader::new(group.take_stdout().ok_or("pending stdout absent")?);
     let mut ready = String::new();
     timeout(Duration::from_secs(3), output.read_line(&mut ready)).await??;
@@ -308,7 +310,7 @@ async fn discovered_image_stays_referenced_by_pending_warmup_until_real_empty_an
         return Err("pending retained code not ready".into());
     }
     fresh.pending_warmups.push(PendingWarmup {
-        group,
+        cleanup: crate::image_warmup::WarmupCleanup::Running(group),
         _image: guard,
     });
     if !fresh.collect().await?.is_empty() || !record.retained_path().exists() {
@@ -319,14 +321,20 @@ async fn discovered_image_stays_referenced_by_pending_warmup_until_real_empty_an
         .first_mut()
         .ok_or("pending owner lost")?;
     pending
-        .group
+        .cleanup
+        .running_group_mut()?
         .begin_stop(GroupStopTiming::normal(), Instant::now())?;
     let stopped = pending
-        .group
+        .cleanup
+        .running_group_mut()?
         .wait_for_stop(&CancellationToken::new())
         .await?;
     if !matches!(stopped, GroupStopStatus::GroupEmpty { .. })
-        || pending.group.leader_exit_status().is_none()
+        || pending
+            .cleanup
+            .running_group()?
+            .leader_exit_status()
+            .is_none()
     {
         return Err("pending retained cleanup fence fabricated".into());
     }

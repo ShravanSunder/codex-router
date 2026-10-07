@@ -1,7 +1,7 @@
 use crate::lifecycle_bounds::PREPARE_DEADLINE;
 use crate::{
-    GroupStopStatus, GroupStopTiming, ImageError, OwnedProcessGroup,
-    lifecycle_bounds::GROUP_POLL_INTERVAL,
+    GroupLaunchOutcome, GroupStopStatus, GroupStopTiming, ImageError, OwnedProcessGroup,
+    OwnedSpawnCleanup, lifecycle_bounds::GROUP_POLL_INTERVAL,
 };
 use codex_router_keeper_protocol::{BuildInfo, MAX_FRAME_BYTES};
 use std::{path::Path, process::Stdio, time::Duration};
@@ -18,11 +18,69 @@ pub(crate) enum WarmupOutcome {
         finished_pid: Option<codex_router_keeper_protocol::ChildPid>,
     },
     CleanupPending {
-        group: OwnedProcessGroup,
+        cleanup: WarmupCleanup,
         failure: ImageError,
     },
 }
+pub(crate) enum WarmupCleanup {
+    Running(OwnedProcessGroup),
+    FailedLaunch(OwnedSpawnCleanup),
+}
+impl WarmupCleanup {
+    pub(crate) fn tick(&mut self, now: Instant) -> Result<bool, crate::GroupStopError> {
+        match self {
+            Self::Running(group) => Ok(matches!(
+                group.tick(now)?,
+                GroupStopStatus::GroupEmpty { .. }
+            ) && group.leader_exit_status().is_some()),
+            Self::FailedLaunch(cleanup) => cleanup.tick(now),
+        }
+    }
+    #[cfg(test)]
+    pub(crate) fn reaped_status(
+        &self,
+    ) -> Option<(
+        codex_router_keeper_protocol::ChildPid,
+        std::process::ExitStatus,
+    )> {
+        match self {
+            Self::Running(group) => group
+                .leader_exit_status()
+                .map(|status| (group.leader_pid(), status)),
+            Self::FailedLaunch(cleanup) => cleanup.leader_pid().zip(cleanup.leader_exit_status()),
+        }
+    }
+    #[cfg(test)]
+    pub(crate) fn running_group(&self) -> Result<&OwnedProcessGroup, &'static str> {
+        match self {
+            Self::Running(group) => Ok(group),
+            Self::FailedLaunch(_) => Err("expected running-group cleanup"),
+        }
+    }
+    #[cfg(test)]
+    pub(crate) fn running_group_mut(&mut self) -> Result<&mut OwnedProcessGroup, &'static str> {
+        match self {
+            Self::Running(group) => Ok(group),
+            Self::FailedLaunch(_) => Err("expected running-group cleanup"),
+        }
+    }
+}
+#[cfg(test)]
 pub(crate) async fn warmup(path: &Path, expected: &BuildInfo, budget: Duration) -> WarmupOutcome {
+    warmup_with_checkpoint(
+        path,
+        expected,
+        budget,
+        crate::owned_process_group::PostSpawnCheckpoint::Immediate,
+    )
+    .await
+}
+pub(crate) async fn warmup_with_checkpoint(
+    path: &Path,
+    expected: &BuildInfo,
+    budget: Duration,
+    checkpoint: crate::owned_process_group::PostSpawnCheckpoint,
+) -> WarmupOutcome {
     if budget.is_zero() || budget > PREPARE_DEADLINE {
         return WarmupOutcome::Refused {
             reason: ImageError::InvalidBudget,
@@ -36,23 +94,29 @@ pub(crate) async fn warmup(path: &Path, expected: &BuildInfo, budget: Duration) 
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
-    let mut launching = Box::pin(OwnedProcessGroup::spawn(command));
+    let mut launching = Box::pin(OwnedProcessGroup::spawn_with_checkpoint(
+        command, checkpoint,
+    ));
     // A missed deadline refuses readiness but never abandons queued launch ownership.
-    let mut group = match timeout_at(deadline, &mut launching).await {
-        Ok(Ok(group)) => group,
-        Ok(Err(error)) => {
+    let (outcome, expired) = match timeout_at(deadline, &mut launching).await {
+        Ok(outcome) => (outcome, false),
+        Err(_) => (launching.await, true),
+    };
+    let mut group = match outcome {
+        GroupLaunchOutcome::Launched(group) if expired => {
+            return reject_and_cleanup(group, ImageError::WarmupTimedOut).await;
+        }
+        GroupLaunchOutcome::Launched(group) => group,
+        GroupLaunchOutcome::Refused { reason } => {
             return WarmupOutcome::Refused {
-                reason: error.into(),
+                reason: reason.into(),
                 finished_pid: None,
             };
         }
-        Err(_) => {
-            return match launching.await {
-                Ok(group) => reject_and_cleanup(group, ImageError::WarmupTimedOut).await,
-                Err(error) => WarmupOutcome::Refused {
-                    reason: error.into(),
-                    finished_pid: None,
-                },
+        GroupLaunchOutcome::CleanupPending { reason, cleanup } => {
+            return WarmupOutcome::CleanupPending {
+                cleanup: WarmupCleanup::FailedLaunch(cleanup),
+                failure: reason.into(),
             };
         }
     };
@@ -82,7 +146,10 @@ async fn reject_and_cleanup(mut group: OwnedProcessGroup, reason: ImageError) ->
             reason,
             finished_pid: Some(group.leader_pid()),
         },
-        Err(failure) => WarmupOutcome::CleanupPending { group, failure },
+        Err(failure) => WarmupOutcome::CleanupPending {
+            cleanup: WarmupCleanup::Running(group),
+            failure,
+        },
     }
 }
 async fn read_and_wait(

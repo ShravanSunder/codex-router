@@ -34,8 +34,8 @@ fn pending_identity(registry: &ImageRegistry, evidence: &RefusalEvidence<'_>) ->
     let [pending] = registry.pending_warmups.as_slice() else {
         return Err("cleanup failure did not retain exactly one owned child/image".into());
     };
-    if pending.group.leader_pid() != evidence.pid
-        || pending.group.process_group_id().as_pid() != evidence.pid.as_pid()
+    if pending.cleanup.running_group()?.leader_pid() != evidence.pid
+        || pending.cleanup.running_group()?.process_group_id().as_pid() != evidence.pid.as_pid()
         || pending._image.device != evidence.record.device()
         || pending._image.inode != evidence.record.inode()
         || !registry.entries.is_empty()
@@ -93,7 +93,7 @@ async fn prove_refusal(
         .pending_warmups
         .first()
         .ok_or("pending owner missing")?;
-    let deadline = match *pending.group.progress() {
+    let deadline = match *pending.cleanup.running_group()?.progress() {
         crate::GroupStopProgress::TermSent { at, timing } => {
             at + timing.term_grace + timing.kill_observe
         }
@@ -104,8 +104,8 @@ async fn prove_refusal(
         "PENDING_REFUSAL mode={} pid={:?} error={result:?} stored={:?} progress={:?}",
         evidence.mode,
         evidence.pid,
-        pending.group.leader_exit_status(),
-        pending.group.progress()
+        pending.cleanup.running_group()?.leader_exit_status(),
+        pending.cleanup.running_group()?.progress()
     );
     timeout_at(deadline, async {
         let cadence = crate::lifecycle_bounds::GROUP_POLL_INTERVAL;

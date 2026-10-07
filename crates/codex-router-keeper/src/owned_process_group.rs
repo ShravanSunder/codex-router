@@ -1,19 +1,19 @@
 //! Sole exact-PID reaper from birth through exec; no public raw-PID control or Unix receipt.
 use crate::{
     GroupStopError, GroupStopProgress, GroupStopStatus, GroupStopTiming,
-    group_stop_progress::StopAction,
-    lifecycle_bounds::{GROUP_POLL_INTERVAL, GROUP_REAP_BOUND},
+    group_stop_progress::StopAction, lifecycle_bounds::GROUP_POLL_INTERVAL,
+    owned_spawn_cleanup::OwnedSpawnCleanup,
 };
 use codex_router_descriptor_boundary::DescriptorGate;
 use codex_router_keeper_protocol::{ChildPgid, ChildPid};
 use rustix::process::{Signal, WaitOptions};
 use std::{
     os::unix::process::{CommandExt, ExitStatusExt},
-    process::{Child as StdChild, ExitStatus},
+    process::ExitStatus,
 };
 use tokio::{
     process::{ChildStderr, ChildStdin, ChildStdout, Command},
-    time::{Instant, timeout},
+    time::Instant,
 };
 use tokio_util::sync::CancellationToken;
 pub struct OwnedProcessGroup {
@@ -26,27 +26,48 @@ pub struct OwnedProcessGroup {
     leader_wait: LeaderWaitState,
 }
 impl OwnedProcessGroup {
-    pub async fn spawn(command: Command) -> Result<Self, GroupStopError> {
+    pub async fn spawn(command: Command) -> GroupLaunchOutcome {
+        Self::spawn_with_checkpoint(command, PostSpawnCheckpoint::Immediate).await
+    }
+    pub(crate) async fn spawn_with_checkpoint(
+        command: Command,
+        checkpoint: PostSpawnCheckpoint,
+    ) -> GroupLaunchOutcome {
         let mut command = command.into_std();
         command.process_group(0);
+        #[cfg(test)]
+        if let PostSpawnCheckpoint::GroupChangeMarker(path) = &checkpoint {
+            // Only the permanent controlled fixture uses this private schedule seam.
+            command.env("LAUNCH_JOIN_MARKER", path).env(
+                "LAUNCH_PARENT_GROUP",
+                rustix::process::getpgrp().as_raw_pid().to_string(),
+            );
+        }
         let gate = DescriptorGate::global();
-        // Only synchronous spawn runs under the exclusive gate. The temporary
-        // owner also contains best-effort cleanup if this launch future is dropped.
-        let mut spawned = gate
+        // The cleanup owner is created inside the exclusive synchronous spawn,
+        // before the first cancellation point after a child exists.
+        let mut spawned = match gate
             .spawn_blocking(move || {
                 command
                     .spawn()
-                    .map(SpawnedChild::new)
+                    .map(OwnedSpawnCleanup::new)
                     .map_err(codex_router_descriptor_boundary::BoundaryError::Io)
             })
-            .await?;
+            .await
+        {
+            Ok(spawned) => spawned,
+            Err(reason) => {
+                return GroupLaunchOutcome::Refused {
+                    reason: reason.into(),
+                };
+            }
+        };
         let setup = async {
-            let child = spawned
-                .child
-                .as_mut()
+            checkpoint.observe().await?;
+            let pid = spawned
+                .leader_pid()
                 .ok_or(GroupStopError::InvalidIdentity)?;
-            let pid =
-                ChildPid::try_from(child.id()).map_err(|_| GroupStopError::InvalidIdentity)?;
+            let child = spawned.child_mut().ok_or(GroupStopError::InvalidIdentity)?;
             let (stdin, stdout, stderr) = {
                 let _creation = gate.creation().await;
                 let stdin = child
@@ -78,17 +99,15 @@ impl OwnedProcessGroup {
         .await;
         match setup {
             Ok(group) => {
-                // Dropping std Child neither kills nor reaps. Only our exact-PID
-                // reaper owns the successful child's wait status from now on.
-                drop(spawned.child.take());
-                Ok(group)
+                spawned.transfer_to_group();
+                GroupLaunchOutcome::Launched(group)
             }
-            Err(error) => {
-                if let Some(child) = spawned.child.as_mut() {
-                    cleanup_failed_spawn(child).await?;
+            Err(reason) => {
+                spawned.begin_cleanup(Instant::now());
+                GroupLaunchOutcome::CleanupPending {
+                    reason,
+                    cleanup: spawned,
                 }
-                drop(spawned.child.take());
-                Err(error)
             }
         }
     }
@@ -284,7 +303,7 @@ enum LeaderWaitState {
     Reaped(ExitStatus),
     Disqualified,
 }
-fn reap_exact_child(pid: ChildPid) -> Result<Option<ExitStatus>, GroupStopError> {
+pub(crate) fn reap_exact_child(pid: ChildPid) -> Result<Option<ExitStatus>, GroupStopError> {
     match rustix::process::waitpid(Some(pid.as_pid()), WaitOptions::NOHANG) {
         Ok(Some((reaped_pid, status))) if reaped_pid == pid.as_pid() => {
             Ok(Some(ExitStatus::from_raw(status.as_raw())))
@@ -294,43 +313,6 @@ fn reap_exact_child(pid: ChildPid) -> Result<Option<ExitStatus>, GroupStopError>
         Err(error) => Err(GroupStopError::Wait(error)),
     }
 }
-struct SpawnedChild {
-    child: Option<StdChild>,
-}
-impl SpawnedChild {
-    fn new(child: StdChild) -> Self {
-        Self { child: Some(child) }
-    }
-}
-impl Drop for SpawnedChild {
-    fn drop(&mut self) {
-        // Covers abandoned launch/setup, not a completed stop. No background reaper
-        // or blocking wait runs in Drop or under the exclusive spawn gate.
-        if let Some(child) = self.child.as_mut()
-            && matches!(child.try_wait(), Ok(None))
-        {
-            let _kill = child.kill();
-            let _reap = child.try_wait();
-        }
-    }
-}
-async fn cleanup_failed_spawn(child: &mut StdChild) -> Result<(), GroupStopError> {
-    if child.try_wait()?.is_some() {
-        return Ok(());
-    }
-    child.kill()?;
-    timeout(GROUP_REAP_BOUND, async {
-        loop {
-            if child.try_wait()?.is_some() {
-                return Ok::<_, GroupStopError>(());
-            }
-            tokio::time::sleep(GROUP_POLL_INTERVAL).await;
-        }
-    })
-    .await
-    .map_err(|_| GroupStopError::CleanupTimedOut)?
-}
-
 fn classify_group_probe(result: rustix::io::Result<()>) -> Result<bool, GroupStopError> {
     match result {
         Ok(()) => Ok(true),
@@ -357,3 +339,48 @@ mod probe_tests {
 #[cfg(test)]
 #[path = "owned_process_group_exec_tests.rs"]
 mod exec_tests;
+
+/// Every post-spawn failure carries the same sole child owner to its caller.
+pub enum GroupLaunchOutcome {
+    Launched(OwnedProcessGroup),
+    Refused {
+        reason: GroupStopError,
+    },
+    CleanupPending {
+        reason: GroupStopError,
+        cleanup: OwnedSpawnCleanup,
+    },
+}
+
+#[derive(Clone)]
+pub(crate) enum PostSpawnCheckpoint {
+    Immediate,
+    #[cfg(test)]
+    GroupChangeMarker(std::path::PathBuf),
+}
+impl PostSpawnCheckpoint {
+    async fn observe(self) -> Result<(), GroupStopError> {
+        match self {
+            Self::Immediate => Ok(()),
+            #[cfg(test)]
+            Self::GroupChangeMarker(path) => {
+                tokio::time::timeout(std::time::Duration::from_secs(3), async {
+                    loop {
+                        match tokio::fs::read(&path).await {
+                            Ok(bytes) if !bytes.is_empty() => return Ok(()),
+                            Ok(_) => {}
+                            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                            Err(error) => return Err(GroupStopError::Reap(error)),
+                        }
+                        tokio::time::sleep(GROUP_POLL_INTERVAL).await;
+                    }
+                })
+                .await
+                .map_err(|_| GroupStopError::CleanupTimedOut)?
+            }
+        }
+    }
+}
+#[cfg(test)]
+#[path = "owned_launch_failure_tests.rs"]
+pub(crate) mod launch_failure_tests;

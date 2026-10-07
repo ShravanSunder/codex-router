@@ -4,7 +4,7 @@ use codex_router_descriptor_boundary::PipeReader;
 use serde::{Deserialize, Serialize};
 use std::{io::Write, os::unix::process::CommandExt, process::Stdio};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::time::Duration;
+use tokio::time::{Duration, timeout};
 type TestResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -142,7 +142,10 @@ async fn exec_fixture_image() -> TestResult {
         image_record(ImageStage::Stopped, pid, status.signal())?;
         return Ok(());
     }
-    let mut group = OwnedProcessGroup::spawn(child_command("ignore")?).await?;
+    let mut group = crate::owned_launch_test_support::require_launched(
+        OwnedProcessGroup::spawn(child_command("ignore")?).await,
+    )
+    .await?;
     let pid = group.leader_pid();
     let mut output = BufReader::new(group.take_stdout().ok_or("child stdout absent")?);
     child_ready(&mut output).await?;
@@ -179,7 +182,9 @@ impl Drop for FixtureGroupCleanup {
 async fn same_pid_exec_preserves_same_child_and_raw_reaping_authority() -> TestResult {
     let mut command = fixture_command("owned_process_group::exec_tests::exec_fixture_image")?;
     command.env_remove("OWNED_GROUP_EXEC_CHILD_PID");
-    let mut helper = OwnedProcessGroup::spawn(command).await?;
+    let mut helper =
+        crate::owned_launch_test_support::require_launched(OwnedProcessGroup::spawn(command).await)
+            .await?;
     let mut input = helper.take_stdin().ok_or("helper stdin missing")?;
     let mut output = BufReader::new(helper.take_stdout().ok_or("helper stdout missing")?);
     let before = next_record(&mut output).await?;
@@ -272,7 +277,9 @@ async fn converted_stdio_remains_cloexec_nonblocking_and_carries_real_bytes() ->
     use tokio::io::AsyncReadExt;
     let mut command = child_command("reply")?;
     command.stderr(Stdio::piped());
-    let mut group = OwnedProcessGroup::spawn(command).await?;
+    let mut group =
+        crate::owned_launch_test_support::require_launched(OwnedProcessGroup::spawn(command).await)
+            .await?;
     let mut input = group.take_stdin().ok_or("stdin missing")?;
     let output = group.take_stdout().ok_or("stdout missing")?;
     let mut error_output = group.take_stderr().ok_or("stderr missing")?;
@@ -354,7 +361,18 @@ async fn owned_child_in_wrong_group_rejects_without_signal() -> TestResult {
     let still_alive = rustix::process::test_kill_process(claim.as_pid()).is_ok();
     let group_unchanged = rustix::process::getpgid(Some(claim.as_pid()))? == actual_group;
     // Test owns this exact std child, which was never adopted or registered with Tokio.
-    cleanup_failed_spawn(&mut child).await?;
+    child.kill()?;
+    // This fixture owns its std child; it never entered the rejected raw group.
+    // Preserve the old bounded 20ms cleanup observation instead of blocking wait.
+    timeout(crate::lifecycle_bounds::GROUP_REAP_BOUND, async {
+        loop {
+            if child.try_wait()?.is_some() {
+                return Ok::<_, std::io::Error>(());
+            }
+            tokio::time::sleep(GROUP_POLL_INTERVAL).await;
+        }
+    })
+    .await??;
     if !(rejected && still_alive && group_unchanged) {
         return Err("wrong-group rejection changed process liveness or group".into());
     }
@@ -412,7 +430,10 @@ async fn already_exited_owned_child_adopts_actual_status_once() -> TestResult {
 }
 #[tokio::test]
 async fn unrecorded_echild_disqualifies_authority_and_never_fabricates_exit() -> TestResult {
-    let mut group = OwnedProcessGroup::spawn(child_command("exit")?).await?;
+    let mut group = crate::owned_launch_test_support::require_launched(
+        OwnedProcessGroup::spawn(child_command("exit")?).await,
+    )
+    .await?;
     let mut output = BufReader::new(group.take_stdout().ok_or("stdout absent")?);
     child_ready(&mut output).await?;
     let pid = group.leader_pid();
@@ -461,7 +482,10 @@ async fn unrecorded_echild_disqualifies_authority_and_never_fabricates_exit() ->
 #[tokio::test]
 async fn controlled_exit_group_probe_before_after_sole_reap() -> TestResult {
     use rustix::process::{WaitId, WaitIdOptions};
-    let mut group = OwnedProcessGroup::spawn(child_command("controlled-exit")?).await?;
+    let mut group = crate::owned_launch_test_support::require_launched(
+        OwnedProcessGroup::spawn(child_command("controlled-exit")?).await,
+    )
+    .await?;
     let mut output = BufReader::new(group.take_stdout().ok_or("controlled stdout absent")?);
     let mut input = group.take_stdin().ok_or("controlled stdin absent")?;
     child_ready(&mut output).await?;

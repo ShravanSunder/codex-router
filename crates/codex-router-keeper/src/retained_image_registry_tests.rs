@@ -80,7 +80,10 @@ async fn finished(group: &mut OwnedProcessGroup) -> TestResult {
     .await?
 }
 async fn run_marker(registry: &ImageRegistry, lease: &ImageLease, marker: &str) -> TestResult {
-    let mut group = registry.spawn(lease, &[OsString::from("marker")]).await?;
+    let (mut group, _running_image) = crate::owned_launch_test_support::require_image_launch(
+        registry.spawn(lease, &[OsString::from("marker")]).await?,
+    )
+    .await?;
     let mut output = group.take_stdout().ok_or("stdout absent")?;
     let mut text = String::new();
     timeout(Duration::from_secs(3), output.read_to_string(&mut text)).await??;
@@ -140,7 +143,7 @@ async fn copied_image_runs_real_warmup_and_survives_source_removal() -> TestResu
         Ok(lease) => lease,
         Err(error) => {
             if let Some(pending) = registry.pending_warmups.first() {
-                let group = &pending.group;
+                let group = pending.cleanup.running_group()?;
                 eprintln!(
                     "VALID_COPY_WARMUP_FAILURE pid={:?} pgid={:?} leader={:?} progress={:?} process_probe={:?} group_probe={:?} getpgid={:?} reason={error:?}",
                     group.leader_pid(),
@@ -157,7 +160,7 @@ async fn copied_image_runs_real_warmup_and_survives_source_removal() -> TestResu
                 ImageError::Process(crate::GroupStopError::Probe(rustix::io::Errno::PERM))
             ) && let Some(pending) = registry.pending_warmups.first_mut()
             {
-                let pid = pending.group.leader_pid().as_pid();
+                let pid = pending.cleanup.running_group()?.leader_pid().as_pid();
                 let observed = rustix::process::waitid(
                     rustix::process::WaitId::Pid(pid),
                     rustix::process::WaitIdOptions::EXITED
@@ -165,11 +168,11 @@ async fn copied_image_runs_real_warmup_and_survives_source_removal() -> TestResu
                         | rustix::process::WaitIdOptions::NOWAIT,
                 );
                 eprintln!("NOWAIT_DISCRIMINATION pid={pid:?} observation={observed:?}");
-                let next = pending.group.tick(Instant::now());
+                let next = pending.cleanup.running_group_mut()?.tick(Instant::now());
                 eprintln!(
                     "ONE_TICK_DISCRIMINATION pid={pid:?} result={next:?} leader={:?} progress={:?} process_probe={:?} group_probe={:?} getpgid={:?}",
-                    pending.group.leader_exit_status(),
-                    pending.group.progress(),
+                    pending.cleanup.running_group()?.leader_exit_status(),
+                    pending.cleanup.running_group()?.progress(),
                     rustix::process::test_kill_process(pid),
                     rustix::process::test_kill_process_group(pid),
                     rustix::process::getpgid(Some(pid))
@@ -383,7 +386,10 @@ async fn slot_refusal_and_commit_keep_exact_recovery_code_through_retiring_child
     slot.prepare_candidate(b.clone())?;
     let retiring_ref = a.clone();
     let receiver_ref = a.clone();
-    let mut retiring = registry.spawn(&a, &[OsString::from("hold")]).await?;
+    let (mut retiring, retiring_image) = crate::owned_launch_test_support::require_image_launch(
+        registry.spawn(&a, &[OsString::from("hold")]).await?,
+    )
+    .await?;
     let mut output = BufReader::new(retiring.take_stdout().ok_or("retiring stdout absent")?);
     let mut ready = String::new();
     timeout(Duration::from_secs(3), output.read_line(&mut ready)).await??;
@@ -413,6 +419,7 @@ async fn slot_refusal_and_commit_keep_exact_recovery_code_through_retiring_child
         return Err("retirement fence fabricated".into());
     }
     drop(retiring_ref);
+    drop(retiring_image);
     if registry.collect().await?.len() != 1 {
         return Err("old image not collected after real child cleanup".into());
     }
@@ -464,3 +471,6 @@ async fn bounded_vm_teardown_warmup_requires_normal_exit_and_actual_reap_fence()
     std::fs::remove_file(source)?;
     run_marker(&registry, &lease, "VM_IMAGE").await
 }
+
+#[path = "retained_image_launch_failure_tests.rs"]
+mod launch_failure_tests;

@@ -103,7 +103,9 @@ async fn unfinished_warmup_reference_keeps_inode_until_real_group_empty_and_reap
     let guard = OwnedImageNode::new(candidate.clone(), &std::fs::metadata(&candidate)?);
     let mut command = Command::new(&candidate);
     command.arg("hold").stdout(Stdio::piped());
-    let mut group = OwnedProcessGroup::spawn(command).await?;
+    let mut group =
+        crate::owned_launch_test_support::require_launched(OwnedProcessGroup::spawn(command).await)
+            .await?;
     let mut output = BufReader::new(group.take_stdout().ok_or("pending stdout absent")?);
     let mut ready = String::new();
     timeout(Duration::from_secs(3), output.read_line(&mut ready)).await??;
@@ -111,7 +113,7 @@ async fn unfinished_warmup_reference_keeps_inode_until_real_group_empty_and_reap
         return Err("pending warmup code not ready".into());
     }
     registry.pending_warmups.push(PendingWarmup {
-        group,
+        cleanup: crate::image_warmup::WarmupCleanup::Running(group),
         _image: guard,
     });
     registry.collect().await?;
@@ -123,14 +125,20 @@ async fn unfinished_warmup_reference_keeps_inode_until_real_group_empty_and_reap
         .first_mut()
         .ok_or("pending owner lost")?;
     pending
-        .group
+        .cleanup
+        .running_group_mut()?
         .begin_stop(GroupStopTiming::normal(), Instant::now())?;
     let stopped = pending
-        .group
+        .cleanup
+        .running_group_mut()?
         .wait_for_stop(&CancellationToken::new())
         .await?;
     if !matches!(stopped, GroupStopStatus::GroupEmpty { .. })
-        || pending.group.leader_exit_status().is_none()
+        || pending
+            .cleanup
+            .running_group()?
+            .leader_exit_status()
+            .is_none()
     {
         return Err("pending empty/reap fence fabricated".into());
     }
@@ -152,7 +160,8 @@ async fn startup_gate_wait_counts_against_prepare_and_late_launch_is_reaped() ->
     // launch boundary for the deadline oracle while holding its exclusive gate.
     let gate = DescriptorGate::global().spawn().await;
     let expected = expected_build(1)?;
-    let preparing = warmup(&captured.path, &expected, Duration::from_millis(20));
+    let preparing =
+        crate::image_warmup::warmup(&captured.path, &expected, Duration::from_millis(20));
     let release = async {
         tokio::time::sleep_until(Instant::now() + Duration::from_millis(80)).await;
         drop(gate);
