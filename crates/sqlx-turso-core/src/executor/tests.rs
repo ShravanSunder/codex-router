@@ -320,6 +320,50 @@ async fn maps_turso_database_errors_to_sqlx_database_errors() -> sqlx_core::Resu
 }
 
 #[tokio::test]
+async fn a_not_null_violation_on_a_column_named_like_a_constraint_is_not_null()
+-> sqlx_core::Result<()> {
+    // Arrange: column names that contain other constraint words
+    let mut connection = memory_connection().await?;
+    (&mut connection)
+        .execute(
+            "CREATE TABLE accounts (\
+             id INTEGER PRIMARY KEY, \
+             unique_key TEXT NOT NULL, \
+             primary_account_id INTEGER NOT NULL)",
+        )
+        .await?;
+
+    // Act
+    let error = (&mut connection)
+        .execute("INSERT INTO accounts (id, unique_key, primary_account_id) VALUES (1, NULL, 7)")
+        .await
+        .expect_err("unique_key is NOT NULL");
+
+    // Assert
+    let database_error = error
+        .as_database_error()
+        .expect("Turso errors should map to SQLx database errors");
+    assert_eq!(
+        database_error.kind(),
+        ErrorKind::NotNullViolation,
+        "{error}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn supports_builtin_regexp_operator() -> sqlx_core::Result<()> {
+    let mut connection = memory_connection().await?;
+
+    let row = (&mut connection)
+        .fetch_one("SELECT 'alphabet' REGEXP '^alpha' AS matched")
+        .await?;
+
+    assert_eq!(row.try_get::<i64, _>("matched")?, 1);
+    Ok(())
+}
+
+#[tokio::test]
 async fn serializes_describe_metadata_for_offline_mode() -> sqlx_core::Result<()> {
     // Arrange
     let mut connection = memory_connection().await?;

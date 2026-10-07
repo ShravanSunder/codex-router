@@ -166,32 +166,79 @@ fn turso_error_code(error: &turso::Error) -> &'static str {
 
 fn sqlx_error_kind(code: &str, message: &str) -> ErrorKind {
     match code {
-        "SQLITE_CONSTRAINT" if constraint_message_contains(message, "unique") => {
-            ErrorKind::UniqueViolation
-        }
-        "SQLITE_CONSTRAINT" if constraint_message_contains(message, "primary") => {
-            ErrorKind::UniqueViolation
-        }
-        "SQLITE_CONSTRAINT" if constraint_message_contains(message, "foreign") => {
-            ErrorKind::ForeignKeyViolation
-        }
-        "SQLITE_CONSTRAINT" if constraint_message_contains(message, "not null") => {
-            ErrorKind::NotNullViolation
-        }
-        "SQLITE_CONSTRAINT" if constraint_message_contains(message, "check") => {
-            ErrorKind::CheckViolation
-        }
+        "SQLITE_CONSTRAINT" => constraint_kind(message),
         _ => ErrorKind::Other,
     }
 }
 
-fn constraint_message_contains(message: &str, needle: &str) -> bool {
-    message.to_ascii_lowercase().contains(needle)
+/// Classifies a constraint failure by the clause the engine writes first
+///
+/// The engine reports `<KIND> constraint failed[: <table>.<column>]`; a batch error prefixes
+/// `batch statement N failed: `. Turso's SDK collapses SQLite's extended constraint codes into
+/// one `Constraint(String)`, so this clause is the only structured signal. Words in the table
+/// or column name after it (`tasks.unique_key`) never decide the kind.
+fn constraint_kind(message: &str) -> ErrorKind {
+    let Some((before_failure, _)) = message.split_once(" constraint failed") else {
+        return ErrorKind::Other;
+    };
+    let clause = before_failure
+        .rsplit(": ")
+        .next()
+        .unwrap_or(before_failure)
+        .trim();
+    match clause {
+        "UNIQUE" | "PRIMARY KEY" => ErrorKind::UniqueViolation,
+        "FOREIGN KEY" => ErrorKind::ForeignKeyViolation,
+        "NOT NULL" => ErrorKind::NotNullViolation,
+        "CHECK" => ErrorKind::CheckViolation,
+        _ => ErrorKind::Other,
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::turso_error_code;
+    use sqlx_core::error::ErrorKind;
+
+    use super::{constraint_kind, turso_error_code};
+
+    #[test]
+    fn constraint_kind_comes_from_the_leading_clause_not_the_column_name() {
+        let cases = [
+            (
+                "UNIQUE constraint failed: tasks.id",
+                ErrorKind::UniqueViolation,
+            ),
+            (
+                "NOT NULL constraint failed: tasks.unique_key",
+                ErrorKind::NotNullViolation,
+            ),
+            (
+                "NOT NULL constraint failed: accounts.primary_account_id",
+                ErrorKind::NotNullViolation,
+            ),
+            (
+                "UNIQUE constraint failed: checks.foreign_key_name",
+                ErrorKind::UniqueViolation,
+            ),
+            (
+                "FOREIGN KEY constraint failed",
+                ErrorKind::ForeignKeyViolation,
+            ),
+            (
+                "CHECK constraint failed: is_default",
+                ErrorKind::CheckViolation,
+            ),
+            (
+                "batch statement 2 failed: NOT NULL constraint failed: t.unique_key",
+                ErrorKind::NotNullViolation,
+            ),
+            ("database is locked", ErrorKind::Other),
+        ];
+
+        for (message, expected) in cases {
+            assert_eq!(constraint_kind(message), expected, "{message}");
+        }
+    }
 
     #[test]
     fn batch_statement_failure_reports_the_statement_code() {
