@@ -156,13 +156,25 @@ impl OwnedProcessGroup {
     pub fn progress(&self) -> &GroupStopProgress {
         &self.progress
     }
-    fn group_exists(&self) -> Result<bool, GroupStopError> {
+    fn group_exists(&mut self) -> Result<bool, GroupStopError> {
         if matches!(self.leader_wait, LeaderWaitState::Disqualified) {
             return Err(GroupStopError::NotOwnedChild);
         }
-        classify_group_probe(rustix::process::test_kill_process_group(
-            self.group.as_pid(),
-        ))
+        let first_probe = rustix::process::test_kill_process_group(self.group.as_pid());
+        if matches!(first_probe, Err(rustix::io::Errno::PERM))
+            && matches!(self.leader_wait, LeaderWaitState::Running)
+        {
+            // The leader may have exited after our earlier NOHANG observation.
+            // Only a newly recorded owned exit permits one fresh group observation;
+            // neither the exit itself nor PERM establishes group emptiness.
+            self.reap_leader()?;
+            if matches!(self.leader_wait, LeaderWaitState::Reaped(_)) {
+                return classify_group_probe(rustix::process::test_kill_process_group(
+                    self.group.as_pid(),
+                ));
+            }
+        }
+        classify_group_probe(first_probe)
     }
     fn send_group_signal(&mut self, signal: Signal) -> Result<bool, GroupStopError> {
         match rustix::process::kill_process_group(self.group.as_pid(), signal) {

@@ -97,6 +97,10 @@ async fn exec_fixture_child() -> TestResult {
     match std::env::var("OWNED_GROUP_CHILD_MODE")?.as_str() {
         "ignore" => std::future::pending::<()>().await,
         "exit" => std::process::exit(42),
+        "controlled-exit" => {
+            stdin_marker(b'X').await?;
+            std::process::exit(42);
+        }
         "reply" => {
             stdin_marker(b'P').await?;
             println!("PONG");
@@ -451,5 +455,98 @@ async fn unrecorded_echild_disqualifies_authority_and_never_fabricates_exit() ->
         return Err("authority error manufactured stop progress".into());
     }
     drop(group);
+    Ok(())
+}
+
+#[tokio::test]
+async fn controlled_exit_group_probe_before_after_sole_reap() -> TestResult {
+    use rustix::process::{WaitId, WaitIdOptions};
+    let mut group = OwnedProcessGroup::spawn(child_command("controlled-exit")?).await?;
+    let mut output = BufReader::new(group.take_stdout().ok_or("controlled stdout absent")?);
+    let mut input = group.take_stdin().ok_or("controlled stdin absent")?;
+    child_ready(&mut output).await?;
+    let pid = group.leader_pid().as_pid();
+    if group.process_group_id().as_pid() != pid
+        || rustix::process::getpgid(Some(pid))? != pid
+        || pid == rustix::process::getpid()
+    {
+        return Err("controlled fixture is not the distinct owned group leader".into());
+    }
+    group.reap_leader()?;
+    if group.leader_exit_status().is_some() || *group.progress() != GroupStopProgress::Running {
+        return Err("NOHANG alive observation manufactured an exit or stop".into());
+    }
+    eprintln!(
+        "CONTROLLED_ALIVE pid={pid:?} stored_exit={:?} progress={:?} process_probe={:?} group_probe={:?}",
+        group.leader_exit_status(),
+        group.progress(),
+        rustix::process::test_kill_process(pid),
+        rustix::process::test_kill_process_group(pid)
+    );
+    input.write_all(b"X").await?;
+    let exited = timeout(Duration::from_secs(3), async {
+        let mut ticks =
+            tokio::time::interval_at(Instant::now() + GROUP_POLL_INTERVAL, GROUP_POLL_INTERVAL);
+        loop {
+            ticks.tick().await;
+            if let Some(status) = rustix::process::waitid(
+                WaitId::Pid(pid),
+                WaitIdOptions::EXITED | WaitIdOptions::NOHANG | WaitIdOptions::NOWAIT,
+            )? {
+                return Ok::<_, Box<dyn std::error::Error + Send + Sync>>(status);
+            }
+        }
+    })
+    .await??;
+    if exited.exit_status() != Some(42) || group.leader_exit_status().is_some() {
+        return Err("NOWAIT exit42 oracle missing or status was stolen".into());
+    }
+    let before_process = rustix::process::test_kill_process(pid);
+    let before_group = rustix::process::test_kill_process_group(pid);
+    let before_pgid = rustix::process::getpgid(Some(pid));
+    eprintln!(
+        "CONTROLLED_BEFORE_REAP pid={pid:?} nowait={exited:?} stored_exit={:?} progress={:?} process_probe={before_process:?} group_probe={before_group:?} getpgid={before_pgid:?}",
+        group.leader_exit_status(),
+        group.progress()
+    );
+    let observation = group.group_exists();
+    eprintln!(
+        "PRODUCTION_GROUP_OBSERVATION pid={pid:?} first_probe={before_group:?} result={observation:?} stored_exit={:?}",
+        group.leader_exit_status()
+    );
+    if matches!(before_group, Err(rustix::io::Errno::PERM)) {
+        if observation? || group.leader_exit_status().and_then(|status| status.code()) != Some(42) {
+            return Err(
+                "terminal PERM observation did not reconcile actual exit42 and actual empty probe"
+                    .into(),
+            );
+        }
+    } else {
+        observation?;
+    }
+    group.reap_leader()?;
+    let after_process = rustix::process::test_kill_process(pid);
+    let after_group = rustix::process::test_kill_process_group(pid);
+    let after_pgid = rustix::process::getpgid(Some(pid));
+    let after_nowait = rustix::process::waitid(
+        WaitId::Pid(pid),
+        WaitIdOptions::EXITED | WaitIdOptions::NOHANG | WaitIdOptions::NOWAIT,
+    );
+    eprintln!(
+        "CONTROLLED_AFTER_REAP pid={pid:?} stored_exit={:?} progress={:?} process_probe={after_process:?} group_probe={after_group:?} getpgid={after_pgid:?} nowait={after_nowait:?}",
+        group.leader_exit_status(),
+        group.progress()
+    );
+    if group.leader_exit_status().and_then(|status| status.code()) != Some(42)
+        || *group.progress() != GroupStopProgress::Running
+        || !matches!(after_nowait, Err(rustix::io::Errno::CHILD))
+    {
+        return Err(
+            "sole reaper lost actual status, manufactured stop progress or failed to consume exit"
+                .into(),
+        );
+    }
+    // Actual group probe values are observations, not cross-platform EPERM assertions
+    // or an invitation to infer a retirement fence without the production observation.
     Ok(())
 }
