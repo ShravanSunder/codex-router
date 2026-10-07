@@ -176,6 +176,7 @@ jobs:
         run: |
           cargo nextest run --profile ci --workspace --features codex-router-cli/keychain-test-support --exclude sqlx-turso --exclude sqlx-turso-core --exclude sqlx-turso-macros --no-run
           cargo nextest run --profile ci --locked -p sqlx-turso -p sqlx-turso-core -p sqlx-turso-macros --all-features --no-run
+          cargo nextest run --profile ci --locked -p sqlx-turso-core --no-run
       - name: Test quota-reset terminal integration
         id: quota_reset_terminal_integration
         background: true
@@ -184,13 +185,16 @@ jobs:
         id: workspace_tests
         background: true
         run: cargo nextest run --profile ci --workspace --features codex-router-cli/keychain-test-support --exclude codex-router-quota-reset-test-harness --exclude sqlx-turso --exclude sqlx-turso-core --exclude sqlx-turso-macros
-      # The driver crates run once, with every feature, so their Sync tests run against tursodb.
-      - name: Test the Turso driver with Sync against tursodb
-        id: turso_driver_tests
-        background: true
-        run: cargo nextest run --profile ci --locked -p sqlx-turso -p sqlx-turso-core -p sqlx-turso-macros --all-features
       - name: Wait for tests
         wait-all:
+      # The Turso driver runs after the timing-sensitive suites above have finished: its
+      # trybuild test compiles a cold dependency graph that would compete with them. Every
+      # feature runs once (Sync against tursodb), then the driver core without Sync, which
+      # covers its `not(feature = "sync")` branches.
+      - name: Test the Turso driver with Sync against tursodb
+        run: cargo nextest run --profile ci --locked -p sqlx-turso -p sqlx-turso-core -p sqlx-turso-macros --all-features
+      - name: Test the Turso driver core without Sync
+        run: cargo nextest run --profile ci --locked -p sqlx-turso-core
 
   validated:
     name: Validate Rust workspace
