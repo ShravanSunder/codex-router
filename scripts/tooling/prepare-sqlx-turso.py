@@ -28,6 +28,7 @@ class ProcessRunner(t.Protocol):
     def __call__(
         self,
         command: list[str],
+        /,
         *,
         cwd: Path,
         env: dict[str, str] | None = None,
