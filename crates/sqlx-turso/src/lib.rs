@@ -29,7 +29,8 @@
 //!
 //! # Features
 //!
-//! All are on by default.
+//! All but `sync` are on by default. `sync` is opt-in: it turns on rustls's aws-lc-rs provider,
+//! which conflicts with other rustls clients in the same build (see the crate README).
 //!
 //! - `runtime-tokio`: the Tokio runtime integration
 //! - `macros`: `sqlx_turso::query!` and the rest of the checked query macros

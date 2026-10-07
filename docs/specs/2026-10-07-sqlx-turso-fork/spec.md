@@ -73,12 +73,13 @@ unsafe instrumentation.
 | `PRAGMA defer_foreign_keys=ON` does not defer | A child row inserted before its parent fails immediately with a foreign-key violation. | Tested |
 | Same-name table rebuild with incoming FKs enabled | The migration fails with a foreign-key violation. The FK-off-before-transaction policy succeeds. | Tested |
 | No read-only opens | `?mode=ro` is rejected. | Tested |
-| Inline blocking page IO | A statement step runs its pending page IO inside `poll` (turso 0.8.1 `Statement::step` → `run_io`); the default Unix backend issues synchronous `pread`, `pwrite` and `fsync` on the calling runtime worker. No bound on its duration is established. Raised for spec 2. | Source |
+| Blocking file IO inside the engine step | turso 0.8.1 drives each statement step from `Future::poll`. The default Unix backend (`UnixIO`) issues `pread`, `pwrite` and `fsync` synchronously inside the step itself; its `run_io` is a no-op. Opening (`Builder::build`, `connect`), `pragma_update` and `execute_batch` do the same. Each call blocks the runtime worker that polls it; a current-thread runtime stalls. No bound on its duration is established. Raised for spec 2. | Source (review-verified) |
+| Lock waits busy-poll the runtime | A statement that meets a lock gets `StepResult::Sleep`, which wakes its task at once, so it re-polls until `busy_timeout` expires instead of sleeping. Measured by the review: about 0.5 s of CPU per 2 s wait, two connections on one file. The default `busy_timeout` is 5 s. Raised for spec 2. | Measured (review) |
 | One Sync IO thread per synced handle | Each synced open starts one detached `turso-sync-io` thread with its own small runtime. After a drained final push, dropping the handle ended it in the probes; termination while an HTTP request hangs is unverified. | Source and probes |
 | Push/pull timeouts are caller-side | A timed-out or dropped push may still have been applied remotely. | Probes |
 | Whole-database replication | No table selector exists on this API. | Tested (every replication test reads all tables) |
 | Turso's own tables on synced stores | `sqlite_schema` lists `turso_cdc`, `turso_sync_last_change_id` and similar on a synced store; schema checks must exclude them. | Tested |
-| Sync needs an explicit rustls provider beside other rustls clients | Sync enables rustls's `aws-lc-rs`; with `ring` also enabled, `ClientConfig::builder()` panics unless a process default is installed. | Reproduced; Sync tests install a default |
+| Sync needs an explicit rustls provider beside other rustls clients | Sync enables rustls's `aws-lc-rs`. In a build that also enables `ring` and installs no process default, the `turso-sync-io` worker thread panics while building its HTTPS client, and a synced open, push or pull then hangs until the caller's own timeout: no error reaches the caller. Router TLS code that relies on rustls's automatic choice panics in the same build, and `cargo build/clippy/test --workspace --all-features` fails to compile `collaboration-service`. | Reproduced; Sync tests install a default |
 
 ## S5. Offline metadata contract
 
@@ -92,8 +93,9 @@ unsafe instrumentation.
   names, same bytes. Missing, extra and changed files all fail.
 - Ordinary builds stay offline (`SQLX_OFFLINE=true` from `.cargo/config.toml`).
 - A crate that invokes Turso macros is registered as a Turso preparation target and never as a
-  stock target. The isolation holds only under that rule: the stock script sets
-  `SQLX_OFFLINE_DIR`, which macros consult before a crate-local `.sqlx`.
+  stock target. The isolation holds only under that rule: `cargo sqlx prepare`, which the stock
+  script runs, sets `SQLX_OFFLINE_DIR` for its compile, and macros consult that directory before
+  a crate-local `.sqlx`. (The stock script itself removes any inherited `SQLX_OFFLINE_DIR`.)
 
 ## S6. Sync server contract for tests
 

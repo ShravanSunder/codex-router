@@ -107,7 +107,8 @@ them at another `tursodb` 0.8.1.
 | Rebuilding a referenced table with foreign keys on fails; use the policy above | Tested |
 | No read-only opens; `?mode=ro` is rejected | Tested |
 | No `VACUUM`: the engine keeps it behind an experimental flag this driver does not set | Source |
-| A statement step runs its page IO (`pread`, `pwrite`, `fsync`) on the calling runtime worker | Source |
+| Each statement step does its file IO (`pread`, `pwrite`, `fsync`) synchronously inside `poll`, on the runtime worker that polls it; opening a store does too | Source |
+| A statement waiting on a lock busy-polls its task until `busy_timeout` (about 0.5 s CPU per 2 s wait, measured) | Measured |
 | Each synced handle runs one `turso-sync-io` thread with its own small runtime | Source and probes |
 | Sync replicates the whole database; there is no table selector | Tested |
 
@@ -115,7 +116,16 @@ them at another `tursodb` 0.8.1.
 
 Turso's Sync takes `hyper-rustls` with its default features, which turn on rustls's
 `aws-lc-rs` provider. Crates that use rustls's `ring` provider in the same build leave rustls
-with two providers, and any `ClientConfig::builder()` that relies on the automatic choice
-panics. A process that links Sync together with other rustls clients must install a process
-default (`CryptoProvider::install_default`) before its first TLS client or synced open. The
-Sync tests install aws-lc-rs for this reason.
+with two providers, and rustls can no longer choose one by itself:
+
+- Sync does not return an error. The `turso-sync-io` worker thread panics while building its
+  HTTPS client, and every synced open, push and pull on that handle then hangs until the
+  caller's own timeout. Bound them all.
+- Any other `ClientConfig::builder()` that relies on the automatic choice panics.
+- `cargo build`, `clippy` or `test --workspace --all-features` fails to compile
+  `collaboration-service`, because aws-lc-rs adds `From<()>` impls that break its type
+  inference.
+
+A process that links Sync together with other rustls clients must install a process default
+(`CryptoProvider::install_default`) before its first TLS client or synced open. The Sync tests
+install aws-lc-rs for this reason. How Router resolves this is an owner decision for spec 2.

@@ -163,6 +163,14 @@ configuration, not every combination.
 - License: MIT OR Apache-2.0, identical to the workspace. The facade README records the upstream
   project, author, license and the imported commits (`b7e5fab9` upstream, `1833f652` port), and
   points at the mirror. No upstream LICENSE file exists to copy.
+- Effects on existing crates, measured by the independent review with `cargo tree -p <member>
+  -e normal,build,dev,features --target all` against `77a7f94f`: 23 of 27 pre-existing members
+  resolve identically. `codex-router-cli`, `codex-router-host`, `codex-router-test-support` and
+  the quota-reset harness differ only by `itertools` 0.14.0 → 0.12.1, a build-time dependency of
+  the `prost-derive` proc macro (0.12 is forced by Turso's `bindgen` 0.69, `<0.13`; Cargo
+  unifies to one version inside `prost-derive`'s `>=0.10, <0.15` range). No runtime code of a
+  release binary changes. The proxy's manifest gains one line (its dev-dependency `sqlx` now
+  names `sqlite`); its resolved graph is identical, line for line.
 - No workspace version bump: no binary changes behaviour (`AGENTS.md` release rule applies to
   user-facing changes).
 
@@ -270,7 +278,7 @@ barriers (need the PoC gateway).
 
 | Choice | Gain | Cost |
 |---|---|---|
-| High-level Sync API (decided) | Proven path, small port | One `turso-sync-io` thread per synced handle; inline blocking page IO on runtime workers (raised to the board-design Lead for spec 2: accept the exception, or isolate SQL execution from executor workers); no bind arity |
+| High-level Sync API (decided) | Proven path, small port | One `turso-sync-io` thread per synced handle; blocking file IO inside each engine step and busy-polled lock waits on runtime workers (owner decision for spec 2: accept and budget, or isolate store execution as an exception like the Sync thread); no bind arity |
 | `sync` opt-in, other features default | No workspace build links Sync, so Router's TLS clients keep one rustls provider | Sync lint and tests need their own `--all-features` invocations; the consumer that enables `sync` inherits the provider choice (§12) |
 | `macros` feature links `sqlx-macros-core` into the runtime graph (upstream design) | `DatabaseExt` can live where orphan rules allow | Larger dependency graph for applications that enable `macros`. Narrowing it is follow-up work. |
 | Workspace `sqlx` without `sqlite` | Turso crates stay Turso-only; exact SQLx pin visible | Thirteen existing manifests each gain `features = ["sqlite"]` |
@@ -300,7 +308,29 @@ GPT 6.1 Sol xhigh reviewed this design read-only on 2026-10-07.
 
 | Finding | Evidence | Disposition |
 |---|---|---|
-| Turso's Sync and Router's TLS clients cannot share a build without an explicit rustls provider | turso 0.8.1 takes `hyper-rustls` with default features (`aws-lc-rs`); Router enables `ring`. Unified build: `cargo test -p codex-router-proxy -p sqlx-turso --lib -- claude_edge::upstream_endpoint` → 3 tests panic in `rustls::crypto::CryptoProvider` ("Could not automatically determine the process-level CryptoProvider"); `collaboration-service` stops compiling (E0282/E0283: aws-lc-rs adds `From<()>` impls). Turso's Sync worker calls `with_native_roots()` the same way. | `sync` opt-in (§4); Sync tests install the aws-lc-rs default; open question for spec 2 (which provider a Router binary that links Sync installs, or a Turso patch) |
+| Turso's Sync and Router's TLS clients cannot share a build without an explicit rustls provider | turso 0.8.1 takes `hyper-rustls` with default features (`aws-lc-rs`); Router enables `ring`. Unified build: `cargo test -p codex-router-proxy -p sqlx-turso --lib -- claude_edge::upstream_endpoint` → 3 tests panic in `rustls::crypto::CryptoProvider` ("Could not automatically determine the process-level CryptoProvider"); `collaboration-service` stops compiling (E0282/E0283: aws-lc-rs adds `From<()>` impls), so `--workspace --all-features` no longer builds. The independent review added what a Sync user sees: the `turso-sync-io` thread panics while building its connector (`with_native_roots()`), `IoWorker::kick` ignores the failed send, nothing wakes the waiters, and a synced open hangs until the caller's timeout (`open: Err(Elapsed)` after 5 s; control build without `ring`: open in 114 ms, push in 48 ms). | `sync` opt-in (§4); Sync tests install the aws-lc-rs default. Owner decision for spec 2, with this evidence: see §12.1 |
 | Synced stores expose Turso's internal tables in `sqlite_schema` | The replicated-migration test saw `turso_cdc`, `turso_cdc_version`, `turso_sync_last_change_id`, `__turso_internal_seq_…` on the synced reader | Schema fingerprints exclude `sqlite_`, `turso_` and `__turso_internal` names; spec-2 schema validation must do the same |
 | Turso 0.8.2 now exists; internal crates float within `^0.8.1` | A fresh resolve picked 0.8.2 for eight of the nine Turso packages | Lockfile pinned to 0.8.1 for all nine with `cargo update --precise`; `--locked` keeps it |
 | The pinned release binary is the probes' binary | `tmp/rust-tools/bin/tursodb` SHA-256 `fe4e1435…` equals the investigation's recorded digest | — |
+| Blocking file IO sits inside the engine step, not in `run_io`; lock waits busy-poll | Independent review: `UnixIO::step()` is a no-op and `UnixFile::pread`, `pwrite` and `sync` run `libc` calls synchronously, inside the VDBE step that turso 0.8.1 drives from `Future::poll` (`async_io: true`). Opening, `connect`, `pragma_update` and `execute_batch` do the same. A busy statement returns `StepResult::Sleep` and wakes itself at once, so it re-polls until `busy_timeout`: 2.0 s wall, 0.49–0.52 s CPU for one waiter on a current-thread runtime. | Documented in spec S4, R8 and the README. Owner decision for spec 2 (§12.2); no change to execution here |
+
+### 12.1 Evidence for spec 2's rustls decision (not decided here)
+
+| Option | Proxy code | Proxy tests in a unified build | `collaboration-service` | Cost |
+|---|---|---|---|---|
+| (a) Router binaries install `ring` as the process default | Untouched only if just `main` changes; making Router's TLS sites explicit is a proxy change | Panic unless changed or excluded: they never run `main` | Still breaks (aws-lc-rs stays in the graph); needs a code fix | Every binary and test path must install first |
+| (b) Manifest-only patch of turso 0.8.1: `hyper-rustls = { version = "0.27.9", default-features = false, features = ["ring", "native-tokio", "http1", "tls12", "logging"] }` | Untouched | Untouched | Fixed: aws-lc-rs leaves the graph | A maintained `[patch.crates-io]` entry until upstream offers a no-provider feature; the tests' provider install and `rustls` dev-dependency become unnecessary |
+| (c) Move Router to aws-lc-rs | Changes the proxy's TLS provider through workspace features | — | Still breaks | Changes Router's TLS crypto provider |
+
+The review checked that `with_native_roots()` stays available under (b), because it is gated on
+`any(ring, aws-lc-rs)` plus `rustls-native-certs`. On this evidence only (b) leaves the proxy
+untouched in code, manifest, tests and runtime crypto. The choice belongs to the owner.
+
+### 12.2 Evidence for spec 2's execution decision (not decided here)
+
+The engine's blocking IO and busy-polled lock waits run on whichever runtime worker polls the
+statement. Neither obvious isolation (a dedicated store thread with its own runtime, or
+`spawn_blocking` plus `Handle::block_on`) fits the current one-runtime, no-`block_on` rules
+without an owner exception like the one granted for the `turso-sync-io` thread. The options are
+to accept and budget it (the investigation measured a 67.7 ms worst heartbeat lateness under its
+workload), or to grant that exception for store execution.
