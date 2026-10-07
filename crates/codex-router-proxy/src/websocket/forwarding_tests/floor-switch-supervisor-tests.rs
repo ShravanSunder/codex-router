@@ -1,11 +1,96 @@
 use super::floor_switch_tests::{HeldSelectableFloorPeer, ImmediateSelectableFloorPeer};
 use super::*;
+use crate::websocket::transport_cleanup::close_websocket_sink_best_effort;
 
 #[derive(Clone, Copy)]
 enum LocalFloorExit {
     PreCancelledHard,
     EarlyDecision,
     HardDuringPeerAssessment,
+}
+
+#[tokio::test]
+async fn floor_reconnect_supervisor_preserves_upstream_close_when_signal_pump_finishes_first() {
+    use std::{future::Future, task::Poll};
+    let (router_local_stream, client_stream) = duplex(4096);
+    let (router_upstream_stream, upstream_stream) = duplex(4096);
+    let router_local =
+        WebSocketStream::from_raw_socket(router_local_stream, Role::Server, None).await;
+    let mut client = WebSocketStream::from_raw_socket(client_stream, Role::Client, None).await;
+    let router_upstream =
+        WebSocketStream::from_raw_socket(router_upstream_stream, Role::Client, None).await;
+    let mut upstream_peer =
+        WebSocketStream::from_raw_socket(upstream_stream, Role::Server, None).await;
+    let (mut local_write, _local_read) = router_local.split();
+    let (mut upstream_write, upstream_read) = router_upstream.split();
+    let (close_permit_sender, close_permit_receiver) = tokio::sync::oneshot::channel();
+    let local_task = tokio::spawn(async move {
+        close_permit_receiver
+            .await
+            .map_err(|_| WebSocketTunnelError::TaskJoin("close permit dropped".to_owned()))?;
+        close_websocket_sink_best_effort(&mut upstream_write).await
+    });
+    let tunnel_shutdown = CancellationToken::new();
+    let signal_shutdown = tunnel_shutdown.clone();
+    let upstream_task = tokio::spawn(async move {
+        signal_shutdown.cancel();
+        local_write
+            .send(Message::text(CODEX_WEBSOCKET_RECONNECT_SIGNAL))
+            .await?;
+        let result = close_websocket_sink_best_effort(&mut local_write).await;
+        drop(upstream_read);
+        result
+    });
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while !upstream_task.is_finished() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("signal pump must finish before close is permitted");
+    let revocation = CancellationToken::new();
+    let session_shutdown = CancellationToken::new();
+    let supervisor = supervise_websocket_pumps(
+        &revocation,
+        &session_shutdown,
+        &tunnel_shutdown,
+        local_task,
+        upstream_task,
+    );
+    tokio::pin!(supervisor);
+    // Present the already-finished signal side to the real supervisor while the other
+    // side is deliberately held. Aborting that held side loses the observable Close frame.
+    std::future::poll_fn(|context| {
+        assert!(
+            supervisor.as_mut().poll(context).is_pending(),
+            "upstream Close is still outstanding"
+        );
+        Poll::Ready(())
+    })
+    .await;
+    close_permit_sender
+        .send(())
+        .expect("closing pump must retain its permit receiver");
+    let observe_peers = async {
+        let reconnect = client
+            .next()
+            .await
+            .expect("client reconnect")
+            .expect("decoded reconnect");
+        assert_eq!(reconnect.to_string(), CODEX_WEBSOCKET_RECONNECT_SIGNAL);
+        let close = upstream_peer
+            .next()
+            .await
+            .expect("upstream closing frame")
+            .expect("upstream must close with a handshake");
+        assert!(matches!(close, Message::Close(_)));
+    };
+    let (result, ()) = tokio::time::timeout(Duration::from_secs(2), async {
+        tokio::join!(supervisor, observe_peers)
+    })
+    .await
+    .expect("both signal delivery and upstream Close must complete");
+    assert!(result.is_ok(), "supervised close result: {result:?}");
 }
 
 #[tokio::test]
