@@ -8,7 +8,7 @@ Structure: [program-design.md](program-design.md).
 | Entity | Meaning |
 |---|---|
 | `Turso` | The SQLx database marker for the Turso engine. URL scheme `turso:`. |
-| `TursoConnectOptions` | How to open one store: a target, an open mode, busy timeout, statement-cache capacity, foreign-key enforcement, optional Sync settings, statement logging. |
+| `TursoConnectOptions` | How to open one store: a target, an open mode, busy timeout, statement-cache capacity, foreign-key enforcement, optional Sync settings, statement logging (SQLx's `QueryLogger`: statements and slow statements, logged when results finish). |
 | `TursoDatabaseTarget` | `File(path)` or `Memory`. A memory target is private to its one connection. |
 | Open mode | `ReadWrite` (file must exist) or `CreateIfMissing`. There is no read-only mode. |
 | `TursoSyncOptions` | Remote base URL, optional auth token, client name, long-poll timeout, bootstrap-if-empty. Configured in code only. |
@@ -72,6 +72,8 @@ unsafe instrumentation.
 | Weak bind arity | Extra binds compile and fail at execution; a missing bind compiles and reads NULL. | Tested |
 | `PRAGMA defer_foreign_keys=ON` does not defer | A child row inserted before its parent fails immediately with a foreign-key violation. | Tested |
 | Same-name table rebuild with incoming FKs enabled | The migration fails with a foreign-key violation. The FK-off-before-transaction policy succeeds. | Tested |
+| A synced store cannot push a transaction that writes rows into a table dropped or renamed before it commits | The SQL-only copy-and-rename rebuild (create, `INSERT … SELECT`, drop, rename) works locally, but its push fails on the hub (replay syntax error, `BATCH_STEP_ERROR`). Copying rows out to a backup table and back fails the same way. The drop, recreate and reinsert-from-application shape replicates. | Tested |
+| A failed push is not atomic on the hub | After that failed push, a reader pulls a half-applied migration: `tasks` dropped, `tasks_rebuilt` created, not renamed. | Tested |
 | No read-only opens | `?mode=ro` is rejected. | Tested |
 | Blocking file IO inside the engine step | turso 0.8.1 drives each statement step from `Future::poll`. The default Unix backend (`UnixIO`) issues `pread`, `pwrite` and `fsync` synchronously inside the step itself; its `run_io` is a no-op. Opening (`Builder::build`, `connect`), `pragma_update` and `execute_batch` do the same. Each call blocks the runtime worker that polls it; a current-thread runtime stalls. No bound on its duration is established. Raised for spec 2. | Source (review-verified) |
 | Lock waits busy-poll the runtime | A statement that meets a lock gets `StepResult::Sleep`, which wakes its task at once, so it re-polls until `busy_timeout` expires instead of sleeping. Measured by the review: about 0.5 s of CPU per 2 s wait, two connections on one file. The default `busy_timeout` is 5 s. Raised for spec 2. | Measured (review) |

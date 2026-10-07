@@ -105,6 +105,7 @@ them at another `tursodb` 0.8.1.
 | Bind arity is not checked: an extra bind fails only at execution; a missing bind reads NULL | Tested |
 | `PRAGMA defer_foreign_keys = ON` does not defer; write parents first | Tested |
 | Rebuilding a referenced table with foreign keys on fails; use the policy above | Tested |
+| On a synced store, a transaction that writes rows into a table it drops or renames before commit cannot be pushed, so a SQL-only copy-and-rename rebuild fails to replicate; the failed push is not atomic on the hub and readers can pull a half-applied migration. Rebuild by drop, recreate and reinserting rows from the application | Tested |
 | No read-only opens; `?mode=ro` is rejected | Tested |
 | No `VACUUM`: the engine keeps it behind an experimental flag this driver does not set | Source |
 | Each statement step does its file IO (`pread`, `pwrite`, `fsync`) synchronously inside `poll`, on the runtime worker that polls it; opening a store does too | Source |
