@@ -3,6 +3,9 @@ use codex_router_auth::resolver::ResolvedProviderCredential;
 use codex_router_core::route_profile::WindowKind;
 use codex_router_state::quota_snapshot::QuotaRefreshStatusView;
 
+#[path = "claude_quota_status_attempt_time_tests.rs"]
+mod claude_quota_status_attempt_time_tests;
+
 struct SyntheticClaudeCredentialResolver;
 
 impl AsyncProviderCredentialResolver for SyntheticClaudeCredentialResolver {
@@ -186,11 +189,20 @@ impl ClaudeRefreshFixture {
 #[tokio::test]
 async fn actual_claude_refresh_success_clears_failure_and_records_observation_time() {
     let fixture = ClaudeRefreshFixture::new().await;
+    let initial_failure_started_before = current_unix_seconds();
     let (result, _) = fixture
         .refresh(SyntheticClaudeQuotaResponse::ParseError, 1_000)
         .await;
+    let initial_failure_finished_after = current_unix_seconds();
     assert!(result.is_err());
-    let failed_report = fixture.report(1_001).await;
+    let (_, initial_failure_status) = fixture.read_observations_and_status().await;
+    let initial_failure_status = initial_failure_status.expect("initial failure status");
+    let initial_failure_attempt = initial_failure_status
+        .last_attempt_unix_seconds()
+        .expect("initial failure records the attempted operation time");
+    assert!(initial_failure_attempt >= initial_failure_started_before);
+    assert!(initial_failure_attempt <= initial_failure_finished_after);
+    let failed_report = fixture.report(initial_failure_finished_after).await;
     let failed_row = failed_report
         .rows()
         .iter()
@@ -260,11 +272,17 @@ async fn actual_claude_refresh_success_clears_failure_and_records_observation_ti
         }
     }
 
-    let inside_failure_at = observation_started_at + 1;
-    assert!(inside_failure_at < fresh_until);
+    let inside_failure_cycle_time = observation_started_at
+        .checked_sub(1)
+        .expect("successful observation time is positive");
+    let inside_failure_started_before = current_unix_seconds();
     let (result, _) = fixture
-        .refresh(SyntheticClaudeQuotaResponse::ParseError, inside_failure_at)
+        .refresh(
+            SyntheticClaudeQuotaResponse::ParseError,
+            inside_failure_cycle_time,
+        )
         .await;
+    let inside_failure_finished_after = current_unix_seconds();
     assert!(result.is_err());
     let (preserved_observations, failed_status) = fixture.read_observations_and_status().await;
     assert_eq!(preserved_observations, accepted_observations);
@@ -273,22 +291,25 @@ async fn actual_claude_refresh_success_clears_failure_and_records_observation_ti
         failed_status.last_success_unix_seconds(),
         Some(observation_started_at)
     );
-    assert_eq!(
-        failed_status.last_attempt_unix_seconds(),
-        Some(inside_failure_at)
-    );
+    let inside_failure_attempt = failed_status
+        .last_attempt_unix_seconds()
+        .expect("poll failure records its operation start");
+    assert!(inside_failure_attempt >= inside_failure_started_before);
+    assert!(inside_failure_attempt <= inside_failure_finished_after);
+    assert!(inside_failure_attempt >= observation_started_at);
+    assert!(inside_failure_attempt < fresh_until);
     assert_eq!(
         failed_status.last_error_class(),
         Some(QuotaRefreshErrorClass::ParseError)
     );
     assert_eq!(
         failed_status.stale_after_unix_seconds(),
-        Some(inside_failure_at)
+        Some(inside_failure_attempt)
     );
 
     // The status deadline now differs from the still-fresh observation deadline.
     for (now_unix_seconds, expected_freshness) in [
-        (inside_failure_at, QuotaEvidenceFreshness::Fresh),
+        (inside_failure_attempt, QuotaEvidenceFreshness::Fresh),
         (fresh_until, QuotaEvidenceFreshness::Fresh),
         (fresh_until + 1, QuotaEvidenceFreshness::Stale),
     ] {
@@ -317,10 +338,22 @@ async fn actual_claude_refresh_success_clears_failure_and_records_observation_ti
         }
     }
 
-    let (result, _) = fixture
-        .refresh(SyntheticClaudeQuotaResponse::ParseError, fresh_until + 1)
-        .await;
-    assert!(result.is_err());
+    // An actual future provider attempt is unavailable here; exercise expiry
+    // through the real state API with an explicit synthetic timestamp.
+    let after_expiry_attempt = fresh_until + 1;
+    let state = AsyncSqliteStateStore::open(&fixture.router_root.join("state.sqlite"))
+        .await
+        .expect("state store for deterministic expiry write");
+    state
+        .record_refresh_failure_preserving_selector_windows(
+            &fixture.account_id,
+            RouteBand::ClaudeMessages.as_str(),
+            after_expiry_attempt,
+            QuotaRefreshErrorClass::ParseError,
+        )
+        .await
+        .expect("explicit after-expiry failure should persist");
+    state.close().await.expect("close expiry state");
     let (preserved_observations, failed_status) = fixture.read_observations_and_status().await;
     assert_eq!(preserved_observations, accepted_observations);
     let failed_status = failed_status.expect("later failure status");
@@ -330,12 +363,30 @@ async fn actual_claude_refresh_success_clears_failure_and_records_observation_ti
     );
     assert_eq!(
         failed_status.last_attempt_unix_seconds(),
-        Some(fresh_until + 1)
+        Some(after_expiry_attempt)
     );
     assert_eq!(
         failed_status.last_error_class(),
         Some(QuotaRefreshErrorClass::ParseError)
     );
+    let expired_report = fixture.report(after_expiry_attempt).await;
+    let expired_row = expired_report
+        .rows()
+        .iter()
+        .find(|row| row.account_id == fixture.account_id)
+        .expect("Claude row after deterministic expiry write");
+    assert!(
+        expired_row.updated.contains("failed"),
+        "{}",
+        expired_row.updated
+    );
+    assert!(
+        expired_row.updated.contains(": parse"),
+        "{}",
+        expired_row.updated
+    );
+    assert_eq!(expired_row.freshness, QuotaEvidenceFreshness::Stale);
+    assert_eq!(expired_row.windows.len(), 2);
 }
 
 #[tokio::test]
