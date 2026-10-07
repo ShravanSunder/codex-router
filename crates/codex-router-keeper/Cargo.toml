@@ -9,8 +9,8 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
-codex-router-keeper-protocol = { path = "../codex-router-keeper-protocol" }
-codex-router-descriptor-boundary = { path = "../codex-router-descriptor-boundary" }
+codex-router-keeper-protocol = { path = "../codex-router-keeper-protocol", version = "0.1.63" }
+codex-router-descriptor-boundary = { path = "../codex-router-descriptor-boundary", version = "0.1.63" }
 thiserror.workspace = true
 tokio.workspace = true
 
