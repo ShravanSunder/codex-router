@@ -45,53 +45,24 @@ pub(in crate::interaction_broker) struct InteractionHistoryStore {
     data: Mutex<InteractionHistoryData>,
 }
 
-fn parse_history_timestamp(value: &str) -> Result<DateTime<Utc>, InteractionHistoryError> {
-    if !value.ends_with('Z') {
-        return Err(InteractionHistoryError::Unavailable);
-    }
-    chrono::DateTime::parse_from_rfc3339(value)
-        .map(|timestamp| timestamp.with_timezone(&Utc))
-        .map_err(|_| InteractionHistoryError::Unavailable)
-}
-
 impl InteractionHistoryStore {
     pub(in crate::interaction_broker) async fn load(
         path: PathBuf,
     ) -> Result<Self, InteractionHistoryError> {
         let upgraded_at = Utc::now();
-        let (mut data, had_undated_records) = match tokio::fs::read(&path).await {
-            Ok(bytes) => {
-                let stored_values: BTreeMap<String, serde_json::Value> =
-                    serde_json::from_slice(&bytes)
-                        .map_err(|_| InteractionHistoryError::Unavailable)?;
-                let mut data = InteractionHistoryData::default();
-                let mut had_undated_records = false;
-                for (request_id, mut value) in stored_values {
-                    let object = value
-                        .as_object_mut()
-                        .ok_or(InteractionHistoryError::Unavailable)?;
-                    let created_at = match object.remove("createdAt") {
-                        Some(serde_json::Value::String(value)) => parse_history_timestamp(&value)?,
-                        None => {
-                            had_undated_records = true;
-                            upgraded_at
-                        }
-                        Some(_) => return Err(InteractionHistoryError::Unavailable),
-                    };
-                    let record: InteractionHistoryRecord = serde_json::from_value(value)
-                        .map_err(|_| InteractionHistoryError::Unavailable)?;
-                    if request_id != record.request_id() || !record.is_valid_stored_value() {
-                        return Err(InteractionHistoryError::Unavailable);
-                    }
-                    data.insert_with_timestamp(request_id, record, created_at);
+        let parsed = parse_interaction_history_file(&path).await?;
+        let mut data = InteractionHistoryData::default();
+        let mut had_undated_records = false;
+        for (request_id, row) in parsed.records {
+            let created_at = match row.created_at {
+                Some(created_at) => created_at,
+                None => {
+                    had_undated_records = true;
+                    upgraded_at
                 }
-                (data, had_undated_records)
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                (InteractionHistoryData::default(), false)
-            }
-            Err(_) => return Err(InteractionHistoryError::Unavailable),
-        };
+            };
+            data.insert_with_timestamp(request_id, row.record, created_at);
+        }
         let store = Self {
             path,
             data: Mutex::new(data.clone()),
