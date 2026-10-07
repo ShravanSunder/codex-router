@@ -4,9 +4,11 @@
 The Turso sync server ships only inside the Turso CLI release, not as a library crate, so the
 tests use the release binary. This script downloads `turso_cli-<target>.tar.xz` for the pinned
 version, refuses it unless its SHA-256 matches the digest pinned below, extracts only the
-`tursodb` member, installs it atomically into `tmp/rust-tools/bin/` (or
-`$ROUTER_TOOL_INSTALL_ROOT/bin/`), and verifies `tursodb --version`. `--check` verifies an
-existing installation without downloading.
+`tursodb` member, refuses it unless its own SHA-256 matches the binary digest pinned below,
+installs it atomically into `tmp/rust-tools/bin/` (or `$ROUTER_TOOL_INSTALL_ROOT/bin/`), and
+verifies `tursodb --version`. An existing binary, such as one restored from a CI cache, is kept
+only when its SHA-256 matches the pin and it reports the pinned version. `--check` verifies an
+existing installation that way without downloading.
 """
 
 import hashlib
@@ -33,6 +35,13 @@ ARCHIVE_SHA256: t.Final[dict[str, str]] = {
     "x86_64-apple-darwin": "bfb324858bb1d3d5f609f87f421d10aebfbae22039c8854b700b7e07aa156523",
     "aarch64-unknown-linux-gnu": "a1dfe53b18e273beb97e91f32e57148692e0529450d0db85234a524b5dfafd37",
     "x86_64-unknown-linux-gnu": "b4b94f334cc8ccbf6a7cde1aa7c2949acbc51c83dc41680192a47bd619c021eb",
+}
+# Digests of the `tursodb` binary inside each archive, computed from the verified archives.
+BINARY_SHA256: t.Final[dict[str, str]] = {
+    "aarch64-apple-darwin": "fe4e14355e966207922561a602964cfc82328aebeaa6db6b84e0628da1e0d97b",
+    "x86_64-apple-darwin": "8d539d21cea1d8b9abb4893ff83050eb6f24cca55e5beb197ed4956bc03ea312",
+    "aarch64-unknown-linux-gnu": "90bad14fcb5cfdea84cfb80e87342c5262427fc4b0cd98032be1778bfb7cc3f4",
+    "x86_64-unknown-linux-gnu": "57f21919a4bce47aff3f780b2269e4785f01c9469d452144a2508486a6766890",
 }
 DOWNLOAD_TIMEOUT_SECONDS: t.Final[int] = 300
 
@@ -96,7 +105,21 @@ def verified_tursodb_bytes(archive: bytes, target: str) -> bytes:
         extracted = bundle.extractfile(member)
         if extracted is None:
             raise SyncServerInstallError(f"cannot read {member_name}")
-        return extracted.read()
+        content = extracted.read()
+    binary_digest = hashlib.sha256(content).hexdigest()
+    if binary_digest != BINARY_SHA256[target]:
+        raise SyncServerInstallError(
+            f"{member_name} has SHA-256 {binary_digest}, expected {BINARY_SHA256[target]}"
+        )
+    return content
+
+
+def installed_binary_matches(binary: Path, target: str, probe_version: VersionProbe) -> bool:
+    try:
+        digest = hashlib.sha256(binary.read_bytes()).hexdigest()
+    except OSError:
+        return False
+    return digest == BINARY_SHA256[target] and probe_version(binary) == EXPECTED_VERSION_OUTPUT
 
 
 def install_binary(binary: Path, content: bytes) -> None:
@@ -121,13 +144,13 @@ def install_sync_server(
     probe_version: VersionProbe = probe_installed_version,
 ) -> int:
     binary = install_root / "bin" / "tursodb"
-    if probe_version(binary) == EXPECTED_VERSION_OUTPUT:
+    if installed_binary_matches(binary, target, probe_version):
         print(f"tursodb {TURSO_VERSION} at {binary}")
         return 0
     if check_only:
         print(
-            f"missing or mismatched tursodb at {binary}; run "
-            "python3 scripts/tooling/install-turso-sync-server.py",
+            f"missing tursodb at {binary}, or its SHA-256 or version does not match the pin; "
+            "run python3 scripts/tooling/install-turso-sync-server.py",
             file=sys.stderr,
         )
         return 2
@@ -140,10 +163,10 @@ def install_sync_server(
         print(f"tursodb installation failed: {error}", file=sys.stderr)
         return 1
 
-    installed = probe_version(binary)
-    if installed != EXPECTED_VERSION_OUTPUT:
+    if not installed_binary_matches(binary, target, probe_version):
         print(
-            f"installed tursodb reports {installed!r}, expected {EXPECTED_VERSION_OUTPUT!r}",
+            f"installed tursodb reports {probe_version(binary)!r} or a different SHA-256; "
+            f"expected {EXPECTED_VERSION_OUTPUT!r} and {BINARY_SHA256[target]}",
             file=sys.stderr,
         )
         return 1

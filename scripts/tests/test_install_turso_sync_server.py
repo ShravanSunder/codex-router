@@ -77,6 +77,15 @@ class InstallTursoSyncServerTests(unittest.TestCase):
         INSTALLER.ARCHIVE_SHA256[TARGET] = hashlib.sha256(archive).hexdigest()
         self.addCleanup(INSTALLER.ARCHIVE_SHA256.update, original)
 
+    def pin_binary_digest_of(self, binary: bytes) -> None:
+        original = dict(INSTALLER.BINARY_SHA256)
+        INSTALLER.BINARY_SHA256[TARGET] = hashlib.sha256(binary).hexdigest()
+        self.addCleanup(INSTALLER.BINARY_SHA256.update, original)
+
+    def write_cached_binary(self, content: bytes) -> None:
+        self.binary.parent.mkdir(parents=True)
+        self.binary.write_bytes(content)
+
     def test_maps_hosts_to_release_targets(self) -> None:
         self.assertEqual(INSTALLER.host_target("Darwin", "arm64"), "aarch64-apple-darwin")
         self.assertEqual(INSTALLER.host_target("Linux", "x86_64"), "x86_64-unknown-linux-gnu")
@@ -87,6 +96,7 @@ class InstallTursoSyncServerTests(unittest.TestCase):
     def test_installs_only_the_server_binary_from_a_verified_archive(self) -> None:
         archive = release_archive(TARGET, b"server")
         self.pin_digest_of(archive)
+        self.pin_binary_digest_of(b"server")
 
         result, fetched = self.install(archive=archive)
 
@@ -103,6 +113,15 @@ class InstallTursoSyncServerTests(unittest.TestCase):
         self.assertEqual(result, 1)
         self.assertFalse(self.binary.exists())
 
+    def test_refuses_a_binary_whose_own_digest_does_not_match(self) -> None:
+        archive = release_archive(TARGET, b"server")
+        self.pin_digest_of(archive)
+
+        result, _ = self.install(archive=archive)
+
+        self.assertEqual(result, 1)
+        self.assertFalse(self.binary.exists())
+
     def test_check_mode_never_downloads(self) -> None:
         result, fetched = self.install(archive=b"", check_only=True)
 
@@ -110,8 +129,8 @@ class InstallTursoSyncServerTests(unittest.TestCase):
         self.assertEqual(fetched, [])
 
     def test_a_matching_installation_is_kept(self) -> None:
-        self.binary.parent.mkdir(parents=True)
-        self.binary.write_bytes(b"existing")
+        self.write_cached_binary(b"existing")
+        self.pin_binary_digest_of(b"existing")
 
         result, fetched = self.install(archive=b"")
 
@@ -119,9 +138,24 @@ class InstallTursoSyncServerTests(unittest.TestCase):
         self.assertEqual(fetched, [])
         self.assertEqual(self.binary.read_bytes(), b"existing")
 
+    def test_a_cached_binary_with_the_right_version_but_another_digest_is_replaced(self) -> None:
+        self.write_cached_binary(b"substituted")
+        archive = release_archive(TARGET, b"server")
+        self.pin_digest_of(archive)
+        self.pin_binary_digest_of(b"server")
+
+        checked, _ = self.install(archive=archive, check_only=True)
+        installed, fetched = self.install(archive=archive)
+
+        self.assertEqual(checked, 2)
+        self.assertEqual(installed, 0)
+        self.assertEqual(len(fetched), 1)
+        self.assertEqual(self.binary.read_bytes(), b"server")
+
     def test_a_binary_reporting_the_wrong_version_fails(self) -> None:
         archive = release_archive(TARGET, b"server")
         self.pin_digest_of(archive)
+        self.pin_binary_digest_of(b"server")
 
         result, _ = self.install(archive=archive, reported_version="Turso 0.8.2")
 
