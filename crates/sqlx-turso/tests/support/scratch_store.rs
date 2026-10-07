@@ -18,26 +18,50 @@ pub static PROJECT_STORE_MIGRATOR: Migrator = sqlx::migrate!("./tests/migrations
 
 const TASKS_LABEL_STEP: &str = include_str!("../migration_steps/2_tasks_label.sql");
 const TASKS_REBUILD_STEP: &str = include_str!("../migration_steps/3_tasks_rebuild.sql");
+const TASKS_COPY_RENAME_REBUILD_STEP: &str =
+    include_str!("../migration_steps/3_tasks_copy_rename_rebuild.sql");
+
+type MigrationStep = (i64, &'static str, &'static str);
 
 /// The project-store migrations through `last_version`
 ///
-/// Version 1 is the base slice, 2 adds `tasks.label`, 3 rebuilds `tasks` under the same name.
+/// Version 1 is the base slice, 2 adds `tasks.label`, 3 drops and recreates `tasks` under the
+/// same name (the caller reinserts the rows).
 pub fn project_store_migrator_through(last_version: i64) -> Migrator {
     let steps = [
         (2, "tasks label", TASKS_LABEL_STEP),
         (3, "tasks rebuild", TASKS_REBUILD_STEP),
     ];
+    let selected: Vec<MigrationStep> = steps
+        .into_iter()
+        .filter(|(version, _, _)| *version <= last_version)
+        .collect();
+    migrator_with_steps(&selected)
+}
+
+/// The base slice, the label step, then a SQL-only rebuild of `tasks` as version 3: create the
+/// new table, copy the rows, drop the old table, rename the new one
+pub fn project_store_migrator_with_copy_rename_rebuild() -> Migrator {
+    migrator_with_steps(&[
+        (2, "tasks label", TASKS_LABEL_STEP),
+        (
+            3,
+            "tasks copy and rename rebuild",
+            TASKS_COPY_RENAME_REBUILD_STEP,
+        ),
+    ])
+}
+
+fn migrator_with_steps(steps: &[MigrationStep]) -> Migrator {
     let mut migrations: Vec<Migration> = PROJECT_STORE_MIGRATOR.iter().cloned().collect();
-    for (version, description, sql) in steps {
-        if version <= last_version {
-            migrations.push(Migration::new(
-                version,
-                description.into(),
-                MigrationType::Simple,
-                AssertSqlSafe(sql).into_sql_str(),
-                false,
-            ));
-        }
+    for &(version, description, sql) in steps {
+        migrations.push(Migration::new(
+            version,
+            description.into(),
+            MigrationType::Simple,
+            AssertSqlSafe(sql).into_sql_str(),
+            false,
+        ));
     }
     Migrator::with_migrations(migrations)
 }

@@ -8,11 +8,14 @@ use sqlx::{error::ErrorKind, migrate::MigrateError};
 use sqlx_turso::{TursoConnection, sqlx::Connection};
 use support::{
     TestResult,
-    project_admission::{ProjectSnapshot, TaskRow, admit_task, complete_task, initialize_project},
+    project_admission::{
+        ProjectSnapshot, TaskRow, admit_task, complete_task, initialize_project, task_id,
+    },
     scratch_store::{
         PROJECT_STORE_MIGRATOR, ensure_no_dangling_foreign_keys, expected_fingerprint,
         foreign_keys_enabled, migrate_in_owned_transaction, open_local_store,
-        project_store_migrator_through, schema_fingerprint, set_foreign_keys,
+        project_store_migrator_through, project_store_migrator_with_copy_rename_rebuild,
+        schema_fingerprint, set_foreign_keys,
     },
 };
 
@@ -115,6 +118,53 @@ async fn a_same_name_rebuild_with_foreign_keys_off_keeps_the_row_graph() -> Test
     assert_eq!(migrated, expected);
     assert!(foreign_keys_enabled(&mut store).await?);
     assert_eq!(ProjectSnapshot::read(&mut store).await?, before);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_sql_only_copy_and_rename_rebuild_with_foreign_keys_off_keeps_the_row_graph() -> TestResult
+{
+    // Arrange
+    let directory = tempfile::tempdir()?;
+    let mut store = populated_store(&directory).await?;
+    let before = ProjectSnapshot::read(&mut store).await?;
+    let migrator = project_store_migrator_with_copy_rename_rebuild();
+    let expected = expected_fingerprint(&migrator).await?;
+
+    // Act: the rows move in SQL (copy, drop, rename) inside the owned transaction
+    set_foreign_keys(&mut store, false).await?;
+    migrate_in_owned_transaction(&mut store, &migrator).await?;
+    set_foreign_keys(&mut store, true).await?;
+    let orphan = sqlx_turso::query!(
+        "INSERT INTO tasks (id, milestone_id, status, revision) VALUES (?, ?, ?, ?)",
+        task_id(99),
+        "019a0000-0000-7000-8000-00000000dead",
+        "open",
+        1_i64
+    )
+    .execute(&mut store)
+    .await;
+    let dependency_on_rebuilt_table = sqlx_turso::query!(
+        "INSERT INTO task_dependencies (task_id, dependency_id) VALUES (?, ?)",
+        task_id(3),
+        task_id(98)
+    )
+    .execute(&mut store)
+    .await;
+
+    // Assert: same rows, the new schema, and both directions of the foreign keys still enforced
+    assert_eq!(schema_fingerprint(&mut store).await?, expected);
+    assert!(foreign_keys_enabled(&mut store).await?);
+    assert_eq!(ProjectSnapshot::read(&mut store).await?, before);
+    for rejected in [orphan, dependency_on_rebuilt_table] {
+        let error = rejected.expect_err("a dangling reference is rejected");
+        assert!(
+            error.as_database_error().is_some_and(
+                |database_error| database_error.kind() == ErrorKind::ForeignKeyViolation
+            ),
+            "{error}"
+        );
+    }
     Ok(())
 }
 
