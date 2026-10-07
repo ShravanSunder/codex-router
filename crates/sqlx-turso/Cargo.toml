@@ -40,3 +40,27 @@ trybuild.workspace = true
 [[example]]
 name = "seed_native_schema"
 required-features = ["migrate"]
+
+[[test]]
+name = "checked_query_macros"
+required-features = ["macros", "migrate", "chrono"]
+
+[[test]]
+name = "checked_query_diagnostics"
+required-features = ["macros"]
+
+[[test]]
+name = "owned_migration_transactions"
+required-features = ["macros", "migrate", "chrono"]
+
+[[test]]
+name = "foreign_key_enforcement"
+required-features = ["macros", "migrate", "chrono"]
+
+# Runs in its own `-p sqlx-turso --all-features` invocation; see the `sync` feature note above.
+[[test]]
+name = "sync_replication"
+required-features = ["macros", "migrate", "chrono", "sync"]
+
+[[test]]
+name = "turso_only_dependency_graph"
