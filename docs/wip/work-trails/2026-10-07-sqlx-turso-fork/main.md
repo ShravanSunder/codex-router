@@ -1,8 +1,12 @@
 # 0.b: sqlx-turso fork brought into the monorepo — Lead trace
 
-**Status: unshared.** No board home: the work runs as a subagent of the board-design Lead, which
-cannot receive Router messages for this run. Destination context: the board-design Lead's
-coordination (spec 2, project storage and replication, depends on this driver).
+**Status: transferred (2026-10-07).** This file no longer receives updates. Its state was posted
+to the board-design work thread (root `01a0f466-4201-7321-822e-018056ef60d0`) as message
+`01a11695-7ba4-78b2-807c-6ea9d5af3f54`; 0.b continues there.
+
+Before transfer: unshared. No board home: the work ran as a subagent of the board-design Lead.
+Destination context: the board-design Lead's coordination (spec 2, project storage and
+replication, depends on this driver).
 
 - Goal: the Turso SQLx driver lives as workspace crates (`sqlx-turso`, `sqlx-turso-core`,
   `sqlx-turso-macros`), ported to Turso 0.8.1, trimmed to what Router uses, split to the
