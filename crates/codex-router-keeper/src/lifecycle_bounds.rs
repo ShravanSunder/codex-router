@@ -4,6 +4,7 @@ pub const STOP_GRACE: Duration = Duration::from_secs(1);
 pub const GROUP_REAP_BOUND: Duration = Duration::from_secs(2);
 pub const FORCED_TERM_GRACE: Duration = Duration::from_millis(150);
 pub const KILL_OBSERVE_BOUND: Duration = Duration::from_millis(100);
+pub const PREPARE_DEADLINE: Duration = Duration::from_secs(30);
 pub const GROUP_POLL_INTERVAL: Duration = Duration::from_millis(20);
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GroupStopProfile {

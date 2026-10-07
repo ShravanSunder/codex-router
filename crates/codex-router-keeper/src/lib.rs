@@ -23,3 +23,14 @@ pub use group_stop_error::GroupStopError;
 pub use group_stop_progress::{GroupStopProgress, GroupStopStatus};
 pub use lifecycle_bounds::{GroupStopProfile, GroupStopTiming};
 pub use owned_process_group::OwnedProcessGroup;
+
+mod image_error;
+pub use image_error::ImageError;
+mod image_directory;
+mod image_identity;
+mod image_warmup;
+pub use lifecycle_bounds::PREPARE_DEADLINE;
+mod retained_image_registry;
+pub use retained_image_registry::{ImageLease, ImageRegistry};
+mod slot_image_state;
+pub use slot_image_state::{ImageCommitRelease, SlotImageState};
