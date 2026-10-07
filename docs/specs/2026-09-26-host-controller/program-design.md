@@ -18,7 +18,7 @@ flowchart TB
     EL["KeeperEventLoop<br/>single owner of keeper state"]
     LR["ListenerRegistry<br/>binds and holds listening fds"]
     GC["GenerationController<br/>E2 lifecycle · E1 publication"]
-    CS["ChildSupervisor<br/>E4 · E5 lifecycle"]
+    CS["ChildSupervisor<br/>E4 · E5 · E11 lifecycle"]
     UC["UpdateCoordinator<br/>E7"]
     HO["KeeperHandoff<br/>quiesce · self-exec · adoption"]
     OPS["OperatorService<br/>E10 host.sock"]
@@ -38,8 +38,8 @@ flowchart TB
     GM["gen N+1 (during a swap)"]
   end
   E1L["E1 app-server-control.sock<br/>symlink → gen-‹epoch›-N.sock"]
-  LR -- "ListenerGrant (SCM_RIGHTS on KeeperChannel)" --> CR
-  LR -- "ListenerGrant (SCM_RIGHTS on KeeperChannel)" --> PX
+  LR -- "ListenerGrant (SCM_RIGHTS on send-only grant carrier)" --> CR
+  LR -- "ListenerGrant (SCM_RIGHTS on send-only grant carrier)" --> PX
   GC -- "spawn · probe · retire" --> GN
   GC -- "symlink + rename" --> E1L
   E1L -.-> GN
@@ -64,7 +64,7 @@ flowchart TB
   - `codex-router agent-provider-services` owns the external ACP provider processes
     (Claude, Cursor), so collaboration restarts don't end provider turns (owner P3).
 - **The keeper binds every non-app-server listening endpoint once and never
-  closes it.** Children receive duplicates over their KeeperChannel. During a
+  closes it.** Children receive duplicates over a separate Unix grant carrier. During a
   replacement, connects wait in the kernel accept queue.
 - **Children are replaced by prepare → deactivate → activate.** A new child
   prepares while the old one serves; the handover itself is two channel
@@ -93,11 +93,14 @@ flowchart TB
 
 **What we pay:**
 
-- three processes;
-- KeeperChannel;
+- three business-role processes, transient keeper-side request/probe receivers,
+  and per-connection E4/E11 Unix readers (two on each native relay). Embedded
+  MCP/control client paths have no demonstrated aggregate cap; §6.0 retains
+  their existing admission boundaries and includes spawn cost in R7 proof;
+- KeeperChannel: two anonymous control/event pipes and a separate grant socket;
 - the exact quiesce and handoff code;
 - two rename cutovers;
-- rustix's `net` feature;
+- a dependency-neutral `codex-router-descriptor-boundary` crate and rustix's `net` feature;
 - a `cargo_metadata` build-dependency.
 
 **What would justify more:** turns having to survive app-server restarts, or
@@ -111,7 +114,7 @@ frequent keeper changes.
 | Services' dial target | The generation alias named in `GenerationCurrent` | **E1:** the admitted generation and schema would not match the peer across a swap (review G5). |
 | Retirement | Swap, **1 s settle**, group stop (owner) | **Stop at swap:** in-flight handshakes fall back to embedded (upstream `tui/src/lib.rs:559-585`). **10 s settle:** upstream timeout, not handshake time; the owner rejected it. |
 | Child replacement | Prepare, then deactivate the old, then activate the new | **Stop-then-spawn:** the outage includes startup. **Two active children:** double accept, and workers that assume one runtime (W8 §F). |
-| fd transfer | Framed SCM_RIGHTS over Unix stream sockets (`rustix::net::sendmsg`/`recvmsg`, safe; rustix 1.1.4 `send_recv/msg.rs:143-181,712,789`) | Raw fd numbers need `unsafe` (`unsafe_code = "forbid"`). `command-fds` does not cover self-exec, and its macOS support is unverified. `listenfd` handles listeners only (W7). |
+| fd transfer | Bounded SCM_RIGHTS on grant/bootstrap and pre-runtime handoff carriers, with receiving-process containment (6.0). Safe rustix APIs provide OwnedFd; they do not establish in-process truncation cleanup. | Raw fd numbers need `unsafe` (`unsafe_code = "forbid"`). `command-fds` does not cover self-exec, and its macOS support is unverified. `listenfd` handles listeners only (W7). |
 | Keeper placement | Separate process (K2), self-exec (D1) | In-process re-adoption on every update (K1) |
 | Reaping | `rustix::process::waitpid(Some(pid), NOHANG)` per owned PID on SIGCHLD | `tokio::process::Child` cannot survive exec. `waitpid(-1)` would steal Tokio's statuses. |
 | Where provider processes live (owner P3) | A fourth keeper child, `agent-provider-services`, runs `acp-client-runtime` and owns the provider processes. It is replaced only when its fingerprint changes. | **P1:** providers stay in services, so every services restart ends their turns (`lost`). **P2:** hand provider stdio and live ACP connection state from old services to new, which is delicate mid-stream JSON-RPC adoption. |
@@ -151,15 +154,15 @@ flowchart LR
 |---|---|---|---|---|---|---|
 | E1 Default endpoint | `GenerationController` | `codex-router-keeper` (new) | `codex_router_keeper_protocol::default_endpoint` (new) | A filesystem symlink `<CODEX_HOME>/app-server-control/app-server-control.sock` → relative `gen-<epoch8>-<N>.sock`. Clients see the unchanged Codex contract. | persisted (filesystem) | newtype |
 | E2 App-server generation | `GenerationController` | `codex-router-keeper` (new); launch plan, schema export and probe moved from `codex-router-host::managed_app_server` to `codex-native-integration` (modified) | `codex_router_keeper_protocol::app_server_generation` (new) | Keeper → services: `PrepareGeneration{generation, alias, evidence}`, `CommitGeneration`, `AbandonGeneration`, `RetireGeneration`. Operator: `GenerationStatus`. Handoff: `HandoffGeneration`. | derived (memory; carried in handoff) | tagged enums, newtypes |
-| E3 Keeper | `KeeperEventLoop` | `codex-router-keeper` (new); lock logic moved from `host_singleton_authority` | `codex_router_keeper_protocol::keeper_handoff` (new) | Self-exec: a `KeeperHandoff` frame with SCM_RIGHTS on stdin | derived | versioned tagged enum |
-| E4 Agent collaboration services | `ChildSupervisor` (lifecycle); `CollaborationRuntime` (behavior) | `codex-router-keeper`; crate `agent-collaboration-services` (renamed from `codex-router-host`, minus lifecycle, operator and lock) | `codex_router_keeper_protocol::keeper_channel` (new) | KeeperChannel frames on the child's stdin socket | derived | tagged enums |
-| E5 Agent proxy services | `ChildSupervisor` (lifecycle); `ProxyRoleRuntime` (behavior) | `codex-router-keeper`; crate `agent-proxy-services` (new role crate, mirroring E4 and E11): the role entrypoint plus the serve-owned modules that today live in `codex-router-cli` and so sit outside the proxy crate's closure: `credential_upkeep_worker.rs`, `quota/quota_background_refresh_worker.rs` and the `quota_refresh_service.rs` it drives, `credential_runtime.rs`, `token_reload_watcher.rs`, and the serve startup at `lib.rs:271-313`. `codex-router-cli` keeps its quota and account commands by depending on this crate. `codex-router-proxy` (modified: `LoopbackRouterRuntime::prepare`/`activate` replace `start`, `server.rs:600-612,646-766`, and `AsyncLoopbackServerRuntime::bind`, `:262-277`) | `codex_router_keeper_protocol::keeper_channel` | KeeperChannel | derived | tagged enums |
+| E3 Keeper | `KeeperEventLoop` | `codex-router-keeper` (new); lock logic moved from `host_singleton_authority` | `codex_router_keeper_protocol::keeper_handoff` (new) | Self-exec: a `KeeperHandoff` header with SCM_RIGHTS on stdin before runtime; E3 transport image in manifest | derived | versioned tagged enum |
+| E4 Agent collaboration services | `ChildSupervisor` (lifecycle); `CollaborationRuntime` (behavior) | `codex-router-keeper`; crate `agent-collaboration-services` (renamed from `codex-router-host`, minus lifecycle, operator and lock) | `codex_router_keeper_protocol::keeper_channel` (new) | KeeperChannel control/event frames on two anonymous pipes; stdin carries bootstrap/listener grants only | derived | tagged enums |
+| E5 Agent proxy services | `ChildSupervisor` (lifecycle); `ProxyRoleRuntime` (behavior) | `codex-router-keeper`; crate `agent-proxy-services` (new role crate, mirroring E4 and E11): the role entrypoint plus the serve-owned modules that today live in `codex-router-cli` and so sit outside the proxy crate's closure: `credential_upkeep_worker.rs`, `quota/quota_background_refresh_worker.rs` and the `quota_refresh_service.rs` it drives, `credential_runtime.rs`, `token_reload_watcher.rs`, and the serve startup at `lib.rs:271-313`. `codex-router-cli` keeps its quota and account commands by depending on this crate. `codex-router-proxy` (modified: `LoopbackRouterRuntime::prepare`/`activate` replace `start`, `server.rs:600-612,646-766`, and `AsyncLoopbackServerRuntime::bind`, `:262-277`) | `codex_router_keeper_protocol::keeper_channel` | KeeperChannel control/event pipes plus a separate Unix grant carrier | derived | tagged enums |
 | E11 Agent provider services | `ChildSupervisor` (lifecycle); `ProviderHostRuntime` (behavior) | `codex-router-keeper`; crate `agent-provider-services` (new): hosts one `acp_client_runtime::AgentSessionClient<LinkInteractionPort>` per provider with a `RingEventSink`; provider configuration reading (`providers.json`) moves here from `codex-router-host::provider_configuration_file` | `provider_link_protocol` crate (new; payloads are `session-event-model` types) | ProviderLink: length-prefixed JSON frames on a keeper-granted Unix socket (`ListenerKind::ProviderLink`), accepted by E11 and dialed by E4 | derived (provider sessions live in provider processes; the ring is memory) | tagged enums; RSP serde types |
 | E6 Component fingerprint (kinds: keeper, services, proxy, provider) | `BuildFingerprints` | `codex-router-cli` `build.rs` (new) | `codex_router_keeper_protocol::component_fingerprint` (new) | `codex-router build-info --json` → `BuildInfo`. Channel: `ChildToKeeper::Prepared{fingerprint}`. | derived (compiled in) | newtype |
 | E7 Update | `UpdateCoordinator` | `codex-router-keeper` | `codex_router_keeper_protocol::component_update` (new) | Operator: `Update` → `UpdateOutcome`; `AwaitUpdateResult`. Handoff: `InFlightUpdate`. | derived | tagged enums |
 | E8 Live turn | upstream app-server | upstream | upstream; RSP `_session/state.turn` (RSP codec in `session-event-model`, RSP PR 3 slice 3.5) | Native `thread/resume` (upstream `thread_processor.rs:4211-4255`); ACP `_session/state{turn:{turnId,status,stopReason?,reason?}}` | persisted by Codex (rollout) | upstream / RSP |
 | E9 Relay connection | `NativeRelayListener`, `AcpChannelListener` | `collaboration-service` (modified: granted listeners, generation alias dial, `ServicesHandover` build and adoption); `codex-acp-adapter` (modified: `LifecycleRelease` for turn owners, adopted owners, the `Attached` slot, `LiveTurnAttachment`) | `agent_collaboration_services::services_handover` (new, versioned) | Unix WebSocket pass-through (existing); ACP JSON-RPC; `RoleHandover` body on KeeperChannel | derived | existing; versioned tagged enum |
-| E10 Control surface | `OperatorService` | `codex-router-keeper` (moved from `codex-router-host::operator_*`) | `codex_router_keeper_protocol::operator_protocol` (moved, modified) | `host.sock` versioned JSON lines (existing framing, `operator_messages.rs:87-164`) | derived | tagged enums |
+| E10 Control surface | `OperatorService` | `codex-router-keeper` (moved from `codex-router-host::operator_*`) | `codex_router_keeper_protocol::operator_protocol` (moved, modified) | `host.sock` existing external operator framing; one-shot request receiver → complete pipe record → keeper codec; keeper writes replies directly (6.0) | derived | tagged enums |
 
 **Design-only concepts and what they serve:**
 
@@ -167,6 +170,7 @@ flowchart LR
 |---|---|
 | `KeeperEpoch` | E2 identity |
 | `ListenerRegistry` | R4, R7, R12 |
+| `UnixReadReceiver`, `NativeProbeProcess`, `SocketReadStream`, `ChildGrantFrame` | E3/E10; R3, R7, R11–R14: receiving-process containment without moving policy |
 | KeeperChannel | R1–R3, R5, R7 |
 | `KeeperHandoff`, `ChildSnapshot` | R11, R13, R14 |
 | `UpdateId`, `KeeperRestartId` | R10, R14 |
@@ -189,7 +193,7 @@ pub struct ChildPgid(rustix::process::Pid);     // group leader; ChildPgid::of_l
 pub struct UpdateId(Uuid);                      // UUIDv7, minted at admission
 pub struct KeeperRestartId(Uuid);               // UUIDv7, minted at admission
 pub struct ComponentFingerprint([u8; 32]);      // from_hex(&str) -> Result<_, FingerprintError>
-pub struct DefaultEndpointPath(PathBuf);        // absolute; file name app-server-control.sock
+pub struct DefaultEndpointPath(PathBuf);        // absolute effective endpoint; production projection fixes app-server-control.sock; existing isolated debug override retains its supplied basename
 pub struct GenerationAliasPath(PathBuf);        // sibling of E1; file name gen-<epoch8>-<N>.sock; built only from GenerationId
 
 pub enum ComponentKind { Keeper, AgentCollaborationServices, AgentProxyServices, AgentProviderServices }
@@ -229,14 +233,28 @@ pub enum SchemaUnavailableReason { ExportFailed }
 // Every GenerationCurrentPayload and HandoffGeneration carries this same schema state.
 
 // ---------- KeeperChannel frames ----------
-// Wire: u32 big-endian length, then that many bytes of JSON. A frame that carries fds is written
-// with one sendmsg whose iov starts at the length prefix; the receiver reads every length prefix
-// with recvmsg and ancillary space for MAX_FRAME_FDS, so rights bind to exactly one frame.
-// Rejected: MSG_CTRUNC, rights on a frame kind that carries none, fd count != declared, length > MAX_FRAME_BYTES.
+// Control/event wire: u32 big-endian length, then JSON, on anonymous pipes; no rights are possible.
+// ChildGrantFrame uses the same byte framing on the separate Unix grant carrier. A rights-bearing
+// sendmsg starts at the prefix; every socket read uses bounded recvmsg, including body continuations.
+// Invalid ancillary/grant receipt is process-fatal; pipe/framing/domain errors retain existing channel handling.
+// The full encoded frame, count, fd kinds and phase are validated before any role effect (6.0).
+
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum ChildGrantFrame {
+    Bootstrap { launch: ChildLaunchContext, listeners: Vec<ListenerKind> },
+    ListenerGrant { listeners: Vec<ListenerKind> },
+}
+pub struct ChildLaunchContext { pub role: ComponentKind, pub image: SlotImage, pub fingerprint: ComponentFingerprint }
+// Keeper supplies its pinned committed/candidate image for this child, never an ambient installed path.
+// Child validates role/fingerprint against its compiled entrypoint; context does not transfer keeper lifecycle authority.
+// Bootstrap rights: child command-read, child event-write, listeners in list order.
+// 2 + listeners.len() must fit MAX_FRAME_FDS. A second Bootstrap is invalid.
+// A later grant contains only listeners; the child waits for its exact requested
+// kinds before Prepared. Cross-carrier arrival order never substitutes for that guard.
+// Listener requests are serial per child; the response kind identifies that pending request.
 
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum KeeperToChild {
-    ListenerGrant { listeners: Vec<ListenerKind> }, // rights in list order
     Prepare { generation: Option<GenerationPreparation>, mode: PrepareMode }, // services: Some once a candidate or current generation exists; explicit evidence use below
     Activate { handover: Option<RoleHandover> },     // services: the outgoing child's ServicesHandover, relayed unread (6.5)
     Deactivate { reason: DeactivateReason, handover_to: Option<RoleHandoverVersion> }, // services: the incoming child's accepted version
@@ -307,12 +325,13 @@ pub enum ChildToKeeper {
     RequestListener { kind: ListenerKind },         // Prepare phase only; the keeper binds once, keeps it, and replies with ListenerGrant
 }
 pub struct ChildSnapshot {
-    pub phase: ChildPhase,                          // Prepared | Active | Deactivating
+    pub phase: ChildPhase,                          // Granted | Preparing | Prepared | Active | Deactivating
     pub fingerprint: ComponentFingerprint,
     pub committed_generation: Option<GenerationId>,
+    pub pending_listener_request: Option<ListenerKind>, // Granted/Preparing only; exact request retained by the still-live child
     pub degraded: Vec<(ChildComponent, ChildDegradation)>,
 }
-pub enum ChildPhase { Prepared, Active, Deactivating }
+pub enum ChildPhase { Granted, Preparing, Prepared, Active, Deactivating }
 pub enum PrepareFailure {
     StoreOpenFailed,
     StoreSchemaNewerThanImage { store: StoreKind },  // the store has migrations this image doesn't know: never downgrade
@@ -347,8 +366,13 @@ pub enum KeeperUpdateOutcome {
 pub enum KeeperUpdateFailure {
     BuildInfoUnreadable, QuiesceTimedOut, ExecFailed,
     DeferredChildRetiring { kind: ComponentKind, state: RetiringState }, // CC2: exec refused while an old child is still retiring
+    TransportImageRejected { reason: TransportImageFailure },
+    HandoffPreparationFailed { reason: HandoffPreparationFailure },
     AdoptionFallbackFailed { reason: GenerationFailure },
 }
+
+pub enum TransportImageFailure { PinFailed, SnapshotFailed, IdentityMismatch, FingerprintMismatch }
+pub enum HandoffPreparationFailure { ManifestTooLarge, DescriptorCapacityExceeded, HeaderTooLarge, ManifestCreationFailed, CarrierCreationFailed, HeaderSendFailed, StdinPreparationFailed }
 
 #[serde(tag = "outcome", rename_all = "camelCase")]
 pub enum ChildUpdateOutcome {
@@ -463,6 +487,8 @@ pub enum KeeperHandoff {
     V2 {
         epoch: KeeperEpoch,
         launch_path: InstalledExecutablePath,     // default E7 target; carried, never re-derived (6.7)
+        transport_image: SlotImage,               // retained incoming keeper image for receiver launches (6.0)
+        transport_snapshot: ImageSnapshotRecord,  // private unlinked O_RDONLY verified copy, carried as KeeperTransportImage
         next_generation: GenerationNumber,
         recovery_budget: RecoveryBudget,
         current_generation: Option<HandoffGeneration>,
@@ -486,12 +512,16 @@ pub enum HandoffFdRole {
     Manifest,                                     // unlinked O_RDONLY file holding the KeeperHandoff::V2 JSON
     SingletonLock,
     OperatorListener,
+    KeeperTransportImage,                        // open O_RDONLY retained incoming image; survives cache-path removal
     Listener { kind: ListenerKind },
-    ChildChannel { kind: ComponentKind },
+    ChildEventRead { kind: ComponentKind },         // keeper reads ChildToKeeper events; O_RDONLY pipe
+    ChildCommandWrite { kind: ComponentKind },      // keeper writes KeeperToChild commands; O_WRONLY pipe
+    ChildGrantSender { kind: ComponentKind },
     ChildStderr { of: StderrOwner },
 }
 pub struct HandoffGeneration { pub id: GenerationId, pub pid: ChildPid, pub alias: GenerationAliasPath, pub evidence: GenerationEvidence }
 pub struct HandoffChild { pub pid: ChildPid, pub snapshot: ChildSnapshot, pub held_output: Vec<ChildToKeeper>, pub image: SlotImage }
+pub struct ImageSnapshotRecord { pub file_sha256: [u8; 32], pub byte_length: u64 } // nonempty, matches transport_image digest; bytes live only behind O_RDONLY KeeperTransportImage
 pub struct SlotImage { pub retained_path: PathBuf, pub file_sha256: [u8; 32], pub device: u64, pub inode: u64 } // the keeper-retained file a slot's children spawn from (6.7)
 pub struct InFlightUpdate {
     pub update_id: UpdateId,
@@ -821,7 +851,8 @@ boundary:
 | `PREPARE_DEADLINE` | 30 s | off the interruption path |
 | `GENERATION_READY_DEADLINE` | 10 s | existing |
 | `SERVICES_CRASH_BACKOFF` | 0, 250 ms, 1 s, 5 s cap | |
-| `MAX_FRAME_BYTES` | 1 MiB | |
+| `MAX_FRAME_BYTES` | 1 MiB | the shared transport bound, re-exported by keeper-protocol; includes each complete encoded bridge record |
+| `SOCKET_READ_CHUNK_BYTES` | 16 KiB | role reader I/O chunk only, not a native logical-message limit (6.0); operator input is one complete record |
 | `MAX_FRAME_FDS` | 64 | |
 | `HANDOFF_HEADER_MAX` | 4 KiB | the pre-exec header and its rights; below the 8 KiB macOS socketpair buffer (6.4) |
 | `ADOPT_DEADLINE` | 5 s per resume attempt | incoming E4 adoption by `thread/resume`, after `Active` and off the interruption path. A missed attempt retries on `SERVICES_CRASH_BACKOFF`; responsibility is never dropped (6.5) |
@@ -841,8 +872,10 @@ boundary:
 | Acting on unvalidated handoff data | only `ValidatedHandoff` reaches supervisors, and phase 1 performs no signal, rename or spawn | type |
 | A keeper-only outcome on a child | separate `KeeperUpdateOutcome` / `ChildUpdateOutcome` | type |
 | Update in progress without a carried result | `IdentityDefect::UpdateWithoutOutcome` / `OutcomeWithoutUpdate` | runtime guard at the trusted entry |
-| A received fd leaking into a later child | Every `recvmsg` of rights and its `fcntl_setfd(FD_CLOEXEC)` run under a process-wide **spawn gate** (an `RwLock`: receipt takes it for writing, every child spawn for reading). That covers role startup and later `RequestListener` grants on macOS, which has no `MSG_CMSG_CLOEXEC`. On Linux, `MSG_CMSG_CLOEXEC` is also set. | runtime guard |
+| A received fd leaking into a later child | Every `recvmsg` of rights and its `fcntl_setfd(FD_CLOEXEC)` run under a process-wide **spawn gate** (an `RwLock`: receipt takes it for reading, every child spawn for writing). That covers role startup and later `RequestListener` grants on macOS, which has no `MSG_CMSG_CLOEXEC`. On Linux, `MSG_CMSG_CLOEXEC` is also set. | runtime guard |
 | A child unlinking a keeper-owned socket path | Children build listeners only from granted fds (`from_std`), never from a path, so drop closes the fd and never unlinks. The RSP façade's `PrivateSocketListener` path binding (`router_session_app_server.rs:76-93`) moves to the keeper's `ListenerRegistry`. The keeper binds each façade path once, on the first `RequestListener`, and grants duplicates to every later incarnation. | type |
+| A live keeper receiving hidden Unix rights | Connected Unix reads are confined to disposable receivers; keeper reads anonymous pipes. The only in-image Unix receipt is pre-runtime self-exec handoff, whose failure exits (6.0). | typed carriers plus source/real-path audit |
+| An aborted operator receiver admitting a JSON prefix | Only complete validated ReadComplete plus successful one-shot receiver completion reaches operator decode; missing/partial output or abnormal exit is I/O failure | transport state and operator integration proof |
 | An unsafe fd conversion | `unsafe_code = "forbid"`; fds arrive only as `OwnedFd` | lint |
 
 ## 5. Components
@@ -852,11 +885,13 @@ boundary:
 | `KeeperEventLoop` | The only mutable keeper state: one Tokio task receiving `KeeperEvent`s (operator requests, SIGCHLD, channel frames, timers), with no shared mutex. Startup and shutdown order. A `TaskTracker` plus a `CancellationToken` for helper tasks (channel readers, stderr readers, probes). | all keeper components | the keeper's process model changes |
 | `ListenerRegistry` | Binding each endpoint once (`host.sock`, `control.sock`, `codex-native.sock`, `codex-acp.sock`, MCP HTTP, proxy HTTP) under the existing private rules (`private_socket_listener.rs:13-45`, `host_singleton_authority.rs:107-125`); duplicates for grants and handoff | `ChildSupervisor`, `KeeperHandoff` | a new endpoint kind |
 | `GenerationController` | E2 states and the transition slot; alias naming; E1 publication; settle and retire; schema export and evidence (moved from `managed_app_server.rs:122-163`); readiness probe (`:252-313`, which now also carries the validated server display name); recovery budget (policy moved from `lifecycle_owner.rs:613-681`); alias and physical-socket sweep | `UpdateCoordinator`, `OperatorService`, `ChildSupervisor` | Codex endpoint or lifecycle changes |
-| `ChildSupervisor` | E4, E5 and E11 slots; spawn with a channel socket as stdin; `ListenerGrant`; prepare, deactivate, activate; the handover budget; crash respawn; stderr telemetry (existing behavior); group stop (6.8) | `UpdateCoordinator`, `OperatorService`, `GenerationController` (services preparation for schema changes) | the child launch contract changes |
+| `ChildSupervisor` | E4, E5 and E11 slots; spawn with a grant socket as stdin; bootstrap two pipe ends and listeners; `ListenerGrant`; prepare, deactivate, activate; the handover budget; crash respawn; stderr telemetry (existing behavior); group stop (6.8) | `UpdateCoordinator`, `OperatorService`, `GenerationController` (services preparation for schema changes) | the child launch contract changes |
 | `UpdateCoordinator` | E7: `build-info`, fingerprint comparison, parallel child replacements, keeper replacement last, `InFlightUpdate`, `UpdateOutcome` | `OperatorService` | update policy changes |
 | `KeeperHandoff` | Quiesce, the framed SCM_RIGHTS bundle, exec, receive, phase-1 validation, phase-2 health classification and recovery dispatch, and exec-failure resume | `UpdateCoordinator`, `KeeperEventLoop` startup | the handoff format changes |
 | `OperatorService` | `host.sock` sessions, admission, status composition, bounded records (last update, stops, handovers) | CLI, Agent Studio | operator protocol changes |
-| `KeeperChannelEndpoint` (child side, `codex_router_keeper_protocol::keeper_channel_endpoint`) | Framing, grant receipt with CLOEXEC, the child phase machine, the quiesce hold buffer | services and proxy role entrypoints | the channel protocol changes |
+| `UnixReadReceiver` (entrypoint shared by CLI) | Connected Unix read only; operator complete record or role byte records; no business policy or child spawns. Native probe entrypoint reuses native codec and returns a typed observation. | keeper operator/probes and role reader owners | the receiving-process boundary changes |
+| `UnixReceiptBoundary` / `SocketReadStream` (`codex-router-descriptor-boundary`) | Bounded ancillary receipt, receive/spawn exclusion, gated spawn, owned carriers and descriptor-free pipe framing; no domain imports | keeper, keeper-protocol, native integration and role/client transports | descriptor or process-boundary mechanics change |
+| `KeeperChannelEndpoint` (child side, `codex_router_keeper_protocol::keeper_channel_endpoint`) | Pipe control/event framing, separate grant receipt with CLOEXEC and fatal containment, the child phase machine, the quiesce hold buffer | services and proxy role entrypoints | the channel protocol changes |
 | `CollaborationRuntime` (moved into `agent-collaboration-services`) | Collaboration behavior, split into the effect classes in §6.1 | ACP, relay, control and MCP clients | collaboration features change |
 | `SessionConnectionRegistry` + `LiveTurnAttachment` (`codex-acp-adapter`, modified and new) | Turn owners (prompt task, detached drain, adopted owner) and `LifecycleRelease` without cancel (6.5); the `Attached{turn}` observer slot; `_session/state.turn` through the merged RSP codec | ACP clients; `ServicesHandover` | ACP projection or RSP profile changes |
 | `ProviderHostRuntime` (new, crate `agent-provider-services`) | One `AgentSessionClient<LinkInteractionPort>` per configured provider (the process, stdio ACP connection, session actors: all RSP `acp-client-runtime`). `RingEventSink` keeps a bounded per-provider ring of **folded** events: `ItemUpdated` is folded per `item_id`, matching the hub's per-item folding and per-session locks (RSP review B1/M7), never raw cumulative chunks. It forwards to the link. `LinkInteractionPort` turns `request_approval` into `InteractionRequest` and awaits `InteractionDecision`, and keeps pending requests alive across link loss. `ProviderLinkServer` accepts one active link and supersedes an older link epoch. Provider process environment is configured against the proxy endpoint and the local Router token, as collaboration does today (`collaboration_lifecycle.rs:33-57`); E11 reads both in Prepare. | E4's `ProviderLinkClient` | provider hosting or ACP client changes |
@@ -869,15 +904,23 @@ test):
 
 ```text
 codex-router-cli              → codex-router-keeper, agent-collaboration-services, agent-proxy-services, agent-provider-services, codex-router-keeper-protocol
-codex-router-keeper           → codex-router-keeper-protocol, codex-native-integration
+codex-router-keeper           → codex-router-keeper-protocol, codex-native-integration, codex-router-descriptor-boundary
 agent-collaboration-services  → codex-router-keeper-protocol, collaboration-service, codex-acp-adapter, …
 agent-proxy-services          → codex-router-proxy, codex-router-keeper-protocol, codex-router-auth, codex-router-quota, codex-router-secret-store, codex-router-state
-codex-router-proxy            → (no keeper or role crate), …
+codex-router-proxy            → codex-router-descriptor-boundary (gated carrier creation), (no keeper or role crate), …
 agent-provider-services       → acp-client-runtime, session-event-model, provider-link-protocol, codex-router-keeper-protocol
 agent-collaboration-services  → provider-link-protocol (not acp-client-runtime once P3 lands)
 provider-link-protocol        → session-event-model, serde, uuid (never acp-client-runtime; the conversions live in agent-provider-services and agent-collaboration-services)
 codex-acp-adapter             → session-event-model (RSP codec), …
-codex-router-keeper-protocol  → codex-native-integration (RecordedExecutableIdentity and NativeSchemaDigest, both added at their existing semantic owners), serde, uuid, chrono, semver, rustix(net)
+codex-router-keeper-protocol  → codex-native-integration (RecordedExecutableIdentity and NativeSchemaDigest, both added at their existing semantic owners), collaboration-protocol (the existing EndpointId only), codex-router-descriptor-boundary, serde, uuid, chrono, semver
+codex-native-integration     → codex-router-descriptor-boundary (byte I/O and gated process/socket creation, never keeper schemas)
+acp-client-runtime          → codex-router-descriptor-boundary (synchronous provider spawn gate)
+collaboration-client        → codex-router-descriptor-boundary (Unix readers and gated git/identity subprocesses)
+collaboration-service       → codex-router-descriptor-boundary (Unix reader and socket-creation boundary)
+codex-acp-adapter            → codex-router-descriptor-boundary (Unix reader and socket-creation boundary)
+collaboration-mcp           → codex-router-descriptor-boundary (embedded Unix clients and carrier creation)
+agent-collaboration-services, agent-proxy-services, agent-provider-services → codex-router-descriptor-boundary (their applicable spawn/socket/reader boundary)
+codex-router-descriptor-boundary  → rustix(net), tokio, tokio-util, serde, serde_json, thiserror (no domain crates)
 ```
 
 **Forbidden edges:**
@@ -896,6 +939,378 @@ codex-router-keeper-protocol  → codex-native-integration (RecordedExecutableId
 Change markers used in the sequence views: `[added]`, `[changed]`,
 `[removed]`, `[unchanged]`.
 
+### 6.0 Unix receipt and process containment
+
+The keeper retains endpoint, lifecycle and admission authority. Its running
+code never reads a connected Router-owned Unix socket. A byte-only protocol
+is not descriptor-free: the private macOS diagnostics retained hidden rights
+after ordinary reads and zero-capacity ancillary receipt. The containment
+boundary is the receiving process. TCP, anonymous pipes and regular files
+cannot carry SCM_RIGHTS. Upstream Codex, desktop and OS framework transports
+are not Router-owned readers and are outside this mechanism.
+
+#### Carrier and policy ownership
+
+| Path | Receipt and return path | Rights allowed | Failure owner |
+|---|---|---|---|
+| Keeper → E4/E5/E11 lifecycle control | Child reads an anonymous pipe | impossible | existing child-channel handling |
+| E4/E5/E11 → keeper events and handover | Keeper reads an anonymous pipe | impossible | `ChildSupervisor`; no Unix receipt in keeper |
+| Bootstrap and later listener grants | Child reads a separate anonymous Unix grant carrier; keeper only sends | exact declared set, at most 64 | invalid receipt exits the child; supervisor records and reaps it |
+| `host.sock` request | One-shot operator receiver reads to EOF and returns one bounded complete record over stdout pipe; keeper retains a write-only duplicate of the accepted socket | zero on the peer connection | `OperatorService`; failed read is never admission |
+| Native readiness/status, Remote Control enable/observe and adoption probes | One-shot native probe process runs the existing native codec and returns a typed observation over stdout pipe | zero | keeper's existing readiness/degraded/error classification |
+| E4 Control server/client, MCP clients, ACP, native relay/client, RSP provider faces; both ProviderLink ends | Per-connection disposable Unix reader sends bounded byte records on a pipe; role writes directly to a write-only duplicate of the same socket | zero | existing connection/link I/O failure; receipt poison does not kill the business role |
+| CLI operator/native/ACP/Control clients | Ancillary-aware receipt with the process-wide spawn exclusion | zero | CLI actionable transport failure; no success inferred from connection loss |
+| Keeper self-exec stdin header | Incoming image receives before runtime, spawn, signal or publication | exact header role list, at most 64 | fatal exit; no signals; existing R11 debt |
+
+Every operator/probe result is wire-to-domain validated. One-shot result
+acceptance also requires normal receiver exit; receipt of a hello or partial
+result is not completion.
+
+The keeper binds and retains `host.sock`. Accepting or connecting a socket is
+not receiving application data. It gives a duplicate of an accepted operator
+socket to a receiver without first reading it. Its own duplicate exposes only
+write, flush and write-half shutdown. The two copies share one connection; the
+keeper never shuts down the read half, which would also stop the receiver.
+All returned descriptors and all duplicate socket ends are closed when their
+owning connection ends. Reverse-direction rights queued on a send-only socket
+are not claimed cleaned before the last socket endpoint is closed.
+
+```mermaid
+flowchart LR
+  OP["Owner-private operator client"] -->|"Unix request then write-half close"| OR["One-shot request receiver<br/>no admission policy"]
+  OR -->|"one complete bounded record<br/>anonymous pipe"| K["Keeper<br/>codecs, admission and lifecycle authority"]
+  K -->|"direct Unix writes<br/>progress and terminal reply"| OP
+  AS["Native app-server<br/>unchanged"] <-->|"existing native protocol"| PR["One-shot native probe<br/>existing codec, no lifecycle policy"]
+  PR -->|"typed observation<br/>anonymous pipe"| K
+  K -->|"lifecycle commands<br/>anonymous pipe"| C["E4 / E5 / E11"]
+  C -->|"events and handover<br/>anonymous pipe"| K
+  K -->|"declared grants only<br/>SCM_RIGHTS, keeper never reads"| C
+  OR -->|"poisoned receipt"| X["Receiver exits and is reaped<br/>OS releases its descriptors"]
+  PR -->|"poisoned receipt"| X
+```
+
+#### Current paths and the changed boundary
+
+Current operator input is `HostRuntime` accept → `spawn_operator_connection` →
+`read_request_from_stream` → bounded EOF read → decode → `handle_operator_work`
+(`lifecycle_owner.rs:402`, `lifecycle_owner/request_admission.rs:117-178`,
+`operator_connection.rs:15-31,72-90`). The CLI writes, half-closes, then reads
+bounded response frames (`host_command/operator_client.rs:128-159`, at
+`77a7f94f`). The target inserts the one-shot read before the unchanged
+codec/admission owner. Request decode occurs only after a complete successful
+receiver record. A complete-looking JSON prefix followed by missing/partial
+output or abnormal exit is an I/O failure, not a request.
+
+Replies stay on the original direct write path. Today `ReExecuting` is
+acknowledged only after `write_frame_to_stream` wrote and flushed it to the
+socket (`request_admission.rs:146-165`). Exec keeps that acknowledgement's
+meaning. Writing a progress frame into a helper pipe is not equivalent, and no
+outbound reply relay is introduced.
+
+Readiness and status call `observe_app_server` inside the current Host
+(`managed_app_server.rs:252-270`, `status_observation.rs:65-82`); the native
+codec connects/initializes WebSocket and reads Remote Control status
+(`native_protocol_observation.rs:80-135,169`,
+`remote_control_observation.rs:47`). Their transport work moves to a probe
+process; version matching, readiness classification, generation selection and
+the decision to enable Remote Control stay with the keeper. The job projects
+only the selected alias, existing deadlines and explicit observe/enable action.
+Status retains its existing single-flight `active_status` admission. Operator
+receiver creation occurs only after the existing connection permit is acquired
+(`lifecycle_owner.rs:55,359,402-412`: eight connections); the permit stays owned
+through its reply/cleanup lifetime. The reader adds no separate accept path or
+new overload response. Existing read/probe deadlines include receiver startup
+and record collection, rather than restarting their clocks after spawn.
+
+E1 inspection and alias sweep remain connect-and-drop, never receive
+(`app_server_endpoint_guard.rs:8-16`). Proxy/MCP HTTP probes are TCP. Schema
+export, build-info and managed updater results already arrive over pipes.
+Write-only Claude peer messaging is not a receiver. These distinctions are
+source-audited; a future read cannot silently enter the keeper.
+
+Role readers include Control and embedded MCP clients, both native relay sides,
+ACP, RSP provider faces and native RPC clients (`control_connection.rs:21-84`,
+`collaboration-client/control_connection.rs`, `mcp_server.rs:127-128`,
+`native_channel_relay.rs:64-98`, `acp_connection_transport.rs:37`,
+`router_session_app_server.rs:96-120,164`, `native_protocol_connection.rs:77-109`).
+Their codecs and effect owners do not move. The descriptor receipt moves to a
+non-spawning reader. Both ProviderLink directions use that same boundary, so
+poison is a link drop, not evidence of provider loss or an E11 restart. Grants
+and the self-exec rights header are target-only paths; the existing v1 lock-on-
+stdin restart proves none of their descriptor cleanup or adoption.
+
+#### Homes, shapes and backpressure
+
+The dependency-neutral home is `codex-router-descriptor-boundary` (new): bounded
+ancillary receipt, owned typed carrier handles, receive/spawn exclusion, gated
+spawn and descriptor-free pipe I/O. It imports no native, keeper, role or
+collaboration domain. Native integration and keeper-protocol both import it;
+native integration never imports keeper-protocol, which already imports native
+evidence values. Recorded executable/schema ownership is unchanged.
+
+Receiver entrypoint dispatch is shared CLI code covered by every applicable
+role fingerprint. Lifecycle belongs to the parent: keeper for operator/probes;
+E4/E11 for their readers. Each receiver uses its parent's retained image. A
+receiver is not a fourth business role or a fifth fingerprint. Its entrypoint
+runs before ordinary configuration/credential/Host startup and never forks.
+Operator receivers collect bounded bytes; native probes reuse native encoding/
+decoding; neither decides admission, updates, generation promotion, provider
+loss, credential renewal or interaction resolution.
+
+Keeper-protocol owns the startup and one-shot job/result wire shapes; the
+existing native observation owner supplies their domain values. Their fields
+and discriminants are fixed at this boundary:
+
+```rust
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum ReceiverHelloWire {
+    Hello { parent_role: ComponentKind, fingerprint: ComponentFingerprint },
+}
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum OperatorReadResultWire {
+    ReadComplete { bytes: Vec<u8> }, // at most MAX_OPERATOR_FRAME_BYTES, not a parsed command
+    TooLarge,
+}
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum NativeProbeJobWire {
+    Observe { alias: GenerationAliasPath, native_wait_ms: u64, remote_wait_ms: u64 },
+    WaitForReady { alias: GenerationAliasPath, native_wait_ms: u64, remote_wait_ms: u64 },
+    EnableAndObserve { alias: GenerationAliasPath, native_wait_ms: u64, remote_wait_ms: u64 },
+}
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum NativeProbeResultWire {
+    Observed { running_version: String, remote_control: RemoteControlObservationWire },
+    Failed { reason: NativeProbeFailure },
+}
+#[serde(tag = "state", rename_all = "camelCase")]
+pub enum RemoteControlObservationWire {
+    Connected { server_name: String, environment_id: Option<String> },
+    Connecting { server_name: String, environment_id: Option<String> },
+    Errored { server_name: String, environment_id: Option<String> },
+    Disabled { server_name: String, environment_id: Option<String> },
+}
+// NativeProbeFailure is a closed tagged enum: Connect, WebSocket, Json,
+// Timeout{stage}, Closed{stage}, InvalidResponse{stage}, InvalidUserAgent.
+// NativeObservationStage is owned by codex-native-integration and is a closed enum:
+// Connect | WebSocketUpgrade | NativeReadiness | Initialize |
+// RemoteControlStatus | RemoteControlStatusChange | RemoteControlEnable.
+// Keeper-protocol exhaustively mirrors it as NativeProbeStage; native producers
+// use this enum rather than stage-label strings. The final
+// stage belongs to the already-planned generation enable path; no caller text is accepted.
+// TryFrom validates alias, duration representation, bounded strings and the
+// existing native observation invariants; classification stays in keeper.
+```
+
+`TryFrom` validates the complete operator record and the existing 64 KiB bound.
+A partial record, missing record, timeout or abnormal receiver exit is I/O
+failure. The parent drains bounded stdout records while the receiver runs and
+awaits/reaps it concurrently; it never waits for process exit before reading.
+An operator result may exceed the kernel pipe buffer, so that opposite order
+would deadlock a valid request. Parsed records remain held until normal exit is
+observed; neither draining stdout nor seeing ReadComplete alone admits input.
+The existing end-to-end deadline covers both, and cancellation drains/joins
+bounded output ownership while stopping/reaping the child. The native job is a
+closed tagged enum for observe or explicit enable-
+and-observe, with alias and existing deadlines. Its result is either the
+existing typed `AppServerObservation` fields or a bounded `NativeProbeFailure`
+variant for connect, WebSocket, JSON, timeout, closed, invalid response or
+invalid user agent; raw backend payloads are not logged. Reconstruction of the
+observation uses a fallible recorded-parts constructor at its existing native
+owner, where its private fields live (`native_protocol_observation.rs:24-28`),
+not public field access or a reverse dependency on keeper-protocol. The wire
+`TryFrom` lives in keeper-protocol and calls that constructor. It preserves the
+existing nonempty version-token rule (`:218-230`), existing Remote Control
+variants and optional/empty name behavior, and bounded native-message evidence.
+It performs no new native connection or filesystem observation. The keeper
+performs its original result classification after validating this reported
+observation; a struct reconstructed from bytes is not a fresh probe.
+
+Readiness uses one WaitForReady probe process for the entire supplied readiness
+budget, not one new process per 20 ms attempt. That job repeats only the existing
+connect-transport failures (Connect and Timeout at Connect), at the existing
+20 ms cadence, within the same absolute native deadline. All other native
+protocol failures return immediately. Observe (status/adoption) and
+EnableAndObserve retain their existing single-attempt behavior. The native
+observation owner implements this connect-only retry and closed-stage mapping;
+it does not choose generation readiness, promotion, retry/crash policy or
+Remote Control enablement. The keeper retains the existing distinction between
+connect-budget exhaustion, native-readiness timeout and other protocol failure,
+using closed stage values. Every attempt spends the original job budget; no
+new process or deadline is allocated to a retry.
+
+Role connection readers use `SocketReadRecord::{Data{bytes},ReadHalfClosed}`
+in the descriptor-boundary crate. A validated chunk is 1..=16 KiB; each entire
+encoded record fits `MAX_FRAME_BYTES`. This is an I/O chunk bound, not a new
+logical-message limit. `SocketReadStream` exposes clean EOF only after the
+explicit marker; unexpected pipe EOF is an error. Ordinary EOF closes only the
+read direction; the parent may continue direct writes. Pipe backpressure and a
+single ordered writer replace unbounded buffering. Existing per-codec limits
+remain: 64 KiB operator/observation and 64 MiB relay/ACP/general native messages.
+There is no raw-read fallback, duplex pipe bridge or new request retry policy.
+
+#### Bootstrap, spawn and fatal receipt
+
+A role's stdin is the grant carrier. The keeper creates two anonymous pipes
+and sends the child ends plus initial listeners in `ChildGrantFrame::Bootstrap`
+with the keeper-supplied `ChildLaunchContext` (role, pinned image record and
+expected fingerprint);
+rights order is control-read, event-write, then listeners. Later
+`ChildGrantFrame::ListenerGrant` carries only the listed listeners. These tagged
+keeper-protocol variants validate count, phase, pipe access direction and
+listener kind/address before use. Keeper retains the command-write and event-read pipe ends and
+its send-only grant endpoint. There is one pending listener request per child;
+`Prepared` waits until that request's exact grant kinds have passed validation.
+Sending Prepare on the command pipe does not prove an earlier grant has arrived
+on its separate carrier.
+
+A read-only operator/connection receiver needs no descriptor bootstrap hop:
+stdin is its accepted/connected stream, stdout its record pipe and stderr
+bounded telemetry, passed with safe `Stdio::from(OwnedFd)`. Native probe stdin
+is a bounded job pipe; the probe connects itself using the projected alias.
+The launch projects the expected parent-role fingerprint. The receiver itself
+compares that with its compiled value before any peer receipt, then emits a
+startup hello; it never needs a second Unix bootstrap or a parent ACK to gate
+reading. A mismatch rejects and reaps the candidate receiver. A common
+keeper-protocol `ReceiverHelloWire::Hello{parent_role, fingerprint}` is the first
+stdout record; operator/probe result or connection-data records follow only
+after it. Both parent and reader validate the projected role/fingerprint before
+any peer bytes reach a codec. No reader may start from whatever binary happens
+to occupy the installed launch path.
+
+Inherited stdin is duplicated through safe `rustix::stdio::stdin()` plus
+`rustix::io::dup`, followed by CLOEXEC before any spawn, and converted from
+`OwnedFd` to the typed socket or pipe. `rustix::stdio::take_stdin` and raw-fd
+construction are not used. The duplicate becomes the sole transport owner;
+stdin is restored to `/dev/null`, as the current lock-handoff path already does
+(`host_singleton_authority.rs:49-79`). The entrypoint validates socket/pipe kind
+and access direction before selecting its receive path. The prototype's
+`FrameChannel::from_stream` is not evidence that this inherited-entry path has
+been exercised.
+
+Every Unix receipt reserves ancillary space for 64 descriptors, even when zero
+are legal. Unexpected rights, CTRUNC or invalid grant counts/kinds are fatal to
+the receiving process before forwarding or another spawn. A pinned rustix
+parser abort is death by signal, not a typed cleanup success. Poisoned receivers
+never spawn; invalid role grant receipt keeps the spawn exclusion held until
+process exit. Process-level cleanup is proved after exit/reap, not by closing
+only returned descriptors.
+
+Receipts take the shared side of the process-wide gate; spawns take the
+exclusive side, for the synchronous spawn only. Receipt readiness waits occur
+outside it, and CLOEXEC installation and descriptor validation finish before
+release. Synchronous launch sites acquire the gate in bounded blocking work,
+not by calling Tokio blocking acquisition inside a runtime task. Every relevant
+std/Tokio/SDK spawn is audited. Non-atomic descriptor creation and duplication
+also stay under a shared gate until CLOEXEC is installed. On macOS this includes
+`rustix::pipe::pipe` plus fcntl: `pipe_with` is not exposed on Apple in the
+pinned rustix source. Linux may use `pipe_with(CLOEXEC)` without relying on it
+for portability. The same creation rule covers macOS socket, accept, connect
+socket and socketpair creation, including the non-atomic mio/std CLOEXEC windows
+behind current Tokio APIs. Project-owned gated creation primitives establish
+NONBLOCK/CLOEXEC before exposing an owned socket to Tokio. Readiness waits and
+connect completion occur outside the shared creation guard; holding it across
+an idle accept/connect await would prevent reader spawn and is forbidden.
+Every socket creation/accept path in a process that can spawn a reader is
+covered, including the transport's TCP carriers; ordinary Tokio calls are not
+assumed to make macOS CLOEXEC atomic. No created descriptor reaches another
+spawn before CLOEXEC has been installed. The pinned SDK's `AcpAgent::spawn_process`
+(`agent-client-protocol` 2.2.0, `acp_agent.rs:250-306`) invokes synchronous
+`async_process::Command::spawn` → `std::process::Command::spawn`; the Router's
+`provider_connection_task.rs:13-17` can therefore hold the exclusive gate for
+that exact call and release it before initialization I/O. This is source
+feasibility, not runtime inheritance proof. Provider processes remain in their
+existing separate groups. Role readers inherit the parent role's process group; their launch does
+not call `process_group(0)`. The current `ProcessGroupChild::spawn_inner`
+forces a new group (`process_group_child.rs:143-147`), so that factory is not
+silently reused for these readers. A role connection cancels/stops only its
+retained reader Child/PID and reaps it; it never signals the role's group to
+close one connection. Role-group crash cleanup still reaches all readers.
+Keeper readers are individually tracked for bounded cancellation/reap. Existing outer task abortion alone is
+not evidence of this new cleanup: ACP normal exit cancels/awaits a nested
+transport task, but aborting the outer connection bypasses that code
+(`acp_connection_router.rs:281-287`). A parent-owned `TaskTracker` retains the
+receiver wait/cleanup task, and a connection-owned cancellation drop guard
+notifies it even if its codec task is aborted. The waiter owns the Child
+handle, stops the reader on cancellation and reaps it; no abandoned JoinHandle
+is the ownership model. Role deactivation and keeper quiesce close/drain the
+tracker at their existing lifecycle barriers. Business turn owners are not
+cancelled merely to tidy a transport task.
+
+Connection limits remain at their current consumers. E4 Control/native/ACP
+share one 32-connection budget (`collaboration_runtime.rs:506-526`), and each
+RSP provider face has its own 32 permits (`router_session_app_server.rs:82-89`).
+A receiver starts only for an admitted connection and shares its permit's
+lifetime. Native relay needs one reader per receiving side, so a relay's one
+connection permit may cover two readers. Embedded MCP's TCP tasks and outbound
+Control clients have no demonstrated aggregate application cap in the current
+source. No global subprocess cap, queue or new overload contract is inferred;
+reader count/cost on those paths is an explicit capacity and R7 proof boundary.
+
+
+#### Retained images, exec and proof
+
+Before fresh startup can become Running, and before an incoming keeper can
+exec, its receiver image is pinned and verified. The keeper also retains a
+private unlinked O_RDONLY snapshot of those verified image bytes, using the
+same read-only/unlink lifetime mechanism specified for the handoff manifest.
+There is no remaining writable handle or pathname to that snapshot. Its
+`ImageSnapshotRecord` carries the measured nonzero length and digest; the
+handoff carries its open handle as `KeeperTransportImage`. It is not a store,
+journal or alternative software version.
+
+Normal receiver launches use the protected slot-image hard link/copy. Cache
+path removal or changed cache contents are repaired by re-pinning the same
+verified bytes from the snapshot, never by selecting another installed image.
+This uses the copy mechanism specified in §6.7, which remains proposed rather
+than implemented, and does not require reading an
+operator request first. Startup fingerprint mismatch refuses startup before
+Running; a mismatched update candidate refuses before exec, keeping the old
+keeper/image. Receiver identity is checked before peer receipt. Snapshot loss,
+corruption, or an environment that cannot create or launch any executable is
+an explicit feasibility/proof gap, not an accepted R12 exception or permission
+for reply-without-reading. No existing continuity guarantee is narrowed.
+Collection preserves all image/snapshot references through the keeper,
+candidate and receiver lifetimes.
+
+The incoming keeper execs the retained candidate image, not the mutable
+installed path. `launch_path` remains the separately carried default E7 target.
+The handoff carries the incoming transport-image reference/read-only handle,
+both control pipe ends per role and each grant sender, plus existing authority
+fds. Phase 1 validates file/pipe kinds, access directions and authority before
+runtime or signals, without hashing a recorded generation executable. It only
+checks the snapshot record's structure and carried read-only file role. Phase 2
+verifies the snapshot bytes against their length/digest before image re-pinning
+or receiver launch. This cannot turn a missing generation path into a phase-1
+fatal error; the captured generation evidence rules remain unchanged. No connected operator/probe receiver is adopted across exec. The
+operator read is already complete before an update is admitted; its replies,
+including `KeeperReExecuting`, remain direct socket writes. Pending probe/read
+processes cancel/reap within existing quiesce/admission or exec is refused.
+Child output still uses `Quiesced`/held-output/`Resume` on control pipes.
+A live child can quiesce in Granted or Preparing as well as later phases.
+Its exact pending listener request is in ChildSnapshot; unsent RequestListener
+frames stay in held output. Its preparation task remains child-owned and resumes
+with that phase, without another bootstrap, a second listener request or an
+invented Prepared acknowledgement. If it cannot reach its safe quiesce point,
+QuiesceTimedOut resumes the old keeper; no partial snapshot is adopted.
+
+Prepare creates role pipes/grants and verifies incoming receiver execution
+before the R7 cut. Existing warm-image and interruption budgets are unchanged;
+process-start, record transfer, gated-spawn concurrency and first responses are
+measured on the actual path. No new grace is hidden in the design.
+
+Proof preserves the same128-to64 sender/witness, covering operator, native
+probe, role reader, role grant and pre-runtime handoff, including reverse queued
+rights until every relevant socket end closes. Observe exit/reap, witness EOF,
+unchanged surviving keeper/unrelated-role FD inventories and no child spawn
+from a poisoned process. Also prove actual CLI half-close/terminal reply,
+complete-looking prefix without `ReadComplete` never admitted, `ReExecuting`
+flushed before same-PID exec, `AwaitUpdateResult`, typed native observation,
+valid/later listener grants, CLOEXEC including SDK/git descendants, both pipe
+kinds/directions, receiver-image removal/change re-pinned from the unlinked verified snapshot and startup/candidate fingerprint mismatch,
+failed exec resume, and actual R7 first-request timing. Fixtures establish only
+their own seams; every V1–V12 gate remains.
+
+
 ### 6.1 Spawn, grant, and what each phase may do (G11)
 
 ```mermaid
@@ -904,12 +1319,12 @@ sequenceDiagram
   participant CS as ChildSupervisor
   participant LR as ListenerRegistry
   participant C as child
-  CS->>CS: socketpair(stream) → (keeperEnd, childEnd) [added]
-  CS->>C: spawn role with stdin = childEnd, stderr = pipe, process_group(0) [changed]
+  CS->>CS: two anonymous control/event pipes + separate grant socketpair [added]
+  CS->>C: spawn role with stdin = grant receiver, stderr = pipe, process_group(0) [changed]
   CS->>LR: duplicate the listening fds for this kind
-  CS->>C: frame ListenerGrant{kinds} + SCM_RIGHTS [added]
-  C->>C: recvmsg → OwnedFds · set CLOEXEC on each · check each fd against its kind (getsockname) [added]
-  CS->>C: frame Prepare{generation}
+  CS->>C: ChildGrantFrame Bootstrap{listeners} + SCM_RIGHTS[control read, event write, listeners] [added]
+  C->>C: bounded recvmsg → OwnedFds · CLOEXEC · pipe direction/listener kind validation · invalid receipt exits [added]
+  CS->>C: pipe frame Prepare{generation}
   C->>C: PREPARE effects only (table below)
   C-->>CS: Prepared{fingerprint} · or PrepareFailed · or PREPARE_DEADLINE
   CS->>C: Activate (only when the kind has no Active child)
@@ -1241,40 +1656,63 @@ sequenceDiagram
 ```mermaid
 sequenceDiagram
   autonumber
+  participant OPS as OperatorService
   participant UC as UpdateCoordinator (old image)
   participant HO as KeeperHandoff
   participant K as children
   participant Img as new image (same PID)
   participant G as generations
-  UC->>UC: exec admission: every retiring child fully stopped (group empty) · wait for a draining proxy ≤ RENEWAL_DRAIN_BOUND · a group StuckAfterKill (D2) is not waited for [C3, CC2]
-  alt a child still retiring (Draining past the bound, or StuckAfterKill)
-    UC-->>OPS: keeper = Failed{DeferredChildRetiring{kind, state}} · UpdateCompleted · last_update · admission released · NO exec
-    Note over UC: the old image keeps running and keeps owning every child · the next `host restart` retries
-  else no child retiring
+  UC->>UC: require no retiring child · pin/verify incoming image and snapshot · receiver fingerprint preflight
+  alt retirement or image preparation refused
+    UC-->>OPS: terminal UpdateCompleted with DeferredChildRetiring or TransportImageRejected · release admission · END
+  else admitted before Quiesce
     UC->>HO: handoff(InFlightUpdate)
-  end
-  HO->>K: Quiesce (each channel) [added]
-  K-->>HO: Quiesced(ChildSnapshot) · the child now holds further output
-  HO->>HO: channel readers stop after Quiesced (nothing unprocessed in user space) · cancel stderr readers and flush partial lines · TaskTracker cancel + wait ≤ QUIESCE_DEADLINE
-  alt a child fails to quiesce in time
-    HO->>K: Resume · Failed{QuiesceTimedOut} · old image continues
-  end
-  HO->>HO: write the KeeperHandoff::V2 manifest to a 0700 runtime file · open it O_RDONLY · unlink the path [changed]
-  HO->>HO: socketpair a/b · sendmsg(a, KeeperHandoffHeader{version, manifest_len, manifest_sha256, fd roles} + SCM_RIGHTS[manifest fd, …]) ≤ HANDOFF_HEADER_MAX · dup2_stdin(b) · clear CLOEXEC on stdin only · drop a [changed]
-  HO->>Img: exec(update target, reconstructed host args, marker env) [existing mechanism]
-  Img->>Img: recvmsg(stdin) → header + OwnedFds · CLOEXEC on all · read the manifest fd to EOF · check length and SHA-256 · stdin ← /dev/null [changed]
-  Img->>Img: phase 1 TryFrom → ValidatedHandoff (versions, fd roles and kinds, lock inode, ids, alias names, update pairing)
-  alt HandoffInvalid (fatal envelope or authority error)
-    Img->>Img: signal nothing · log · exit non-zero (children orphaned: accepted debt)
-  else an item is NotOurChild
-    Img->>Img: drop that item only · never signal it · recover its role fresh · adopt the rest
-  else valid
-    Img->>G: phase 2 health per item (waitpid NOHANG, probe alias)
-    Img->>K: Resume · the children flush held output
-    Note over Img: recover each unhealthy item independently (table below)
-    Img->>Img: UpdateOutcome = InFlightUpdate + keeper outcome · last_update · release admission
+    HO->>K: Quiesce on control pipes
+    K-->>HO: Quiesced(ChildSnapshot) · subsequent output held
+    HO->>HO: stop channel/stderr readers · cancel and reap operator/probe children · TaskTracker wait within QUIESCE_DEADLINE
+    alt quiesce or receiver reap timed out
+      HO->>K: Resume · restart old readers
+      HO-->>OPS: terminal Failed QuiesceTimedOut · release admission · END
+    else quiesced
+      HO->>HO: encode complete manifest/header · check lengths and rights · create read-only unlinked manifest · socketpair · send header and rights · prepare stdin
+      alt bound or preparation IO failure
+        HO->>HO: restore stdin if changed · drop only candidate/duplicate carriers
+        HO->>K: Resume · restart old readers
+        HO-->>OPS: terminal Failed HandoffPreparationFailed · release admission · END
+      else complete preparation
+        HO->>Img: exec retained candidate image with carried launch path
+        alt exec returns in old image
+          HO->>HO: restore stdin and prepared authority
+          HO->>K: Resume · restart old readers
+          HO-->>OPS: terminal Failed ExecFailed · release admission · END
+        else new image runs
+          Img->>Img: bounded recvmsg before runtime · CLOEXEC · read manifest · check length/digest · stdin to dev null
+          Img->>Img: phase 1 wire-to-domain authority/envelope validation · per-item ownership
+          alt HandoffInvalid envelope or authority
+            Img->>Img: signal nothing · log · exit nonzero (accepted orphan debt)
+          else validated
+            Img->>Img: drop NotOurChild items without signals · recover each role independently
+            Img->>G: phase 2 alias/health probes · preserve healthy generations
+            Img->>K: Resume · held output flushes
+            Img-->>OPS: terminal UpdateCompleted with carried outcomes · release admission
+          end
+        end
+      end
+    end
   end
 ```
+
+**Pre-exec failure control flow.** Image pin/snapshot verification and receiver
+fingerprint checks finish before Quiesce; failure returns
+TransportImageRejected with the original image and readers untouched. After
+Quiesced, header/manifest serialization, bounds, file/carrier creation, send and
+stdin preparation run as one preparation phase. Each failure restores stdin if
+changed, drops only candidate/duplicate carriers, sends Resume, restarts the
+old image's stopped readers, completes UpdateCompleted with
+HandoffPreparationFailed, releases admission and returns before exec. The
+sequence's END branches are terminal returns, not fall-through edges.
+Quiesce/reap timeout uses QuiesceTimedOut; an actual exec call that returns uses
+ExecFailed. No pre-exec refusal reports that exec ran.
 
 **Why a header plus a manifest file.** Nothing reads the socketpair until after
 exec, because the only reader is this same process. So everything written
@@ -1294,7 +1732,10 @@ would tear, or block forever.
   unprivileged sockets at `wmem_max`, about 208 KiB), a pipe has the same
   limit, and raw fd numbers across exec need `unsafe`.
 - **Failure.** A length or digest mismatch is `HandoffInvalid::ManifestMismatch`,
-  which is fatal and signals nothing.
+  which is fatal and signals nothing. A descriptor-count or header-size overflow
+  is checked before exec while the old image still owns its endpoints; it is not
+  split into a second handoff or hidden by increasing either bound. The snapshot
+  handle and both role pipe directions count against the same 64-right limit.
 - **Cleanup.** A keeper that dies between writing and unlinking leaves a
   `handoff-*.json` in its 0700 runtime directory. The next keeper start sweeps
   it.
@@ -1745,7 +2186,9 @@ stays **slot-local**:
       the outgoing image/fingerprint paired with the outgoing child's snapshot;
     - a crash respawn reuses the slot image unchanged.
 - **Garbage collection.** At keeper start and after each E7, retain every image
-  referenced by a committed slot, a live/prepared candidate or a retiring child.
+  referenced by the running keeper's transport image, an incoming keeper image
+  until its exec/refusal settles, a live receiver/probe, a committed slot, a
+  live/prepared candidate or a retiring child.
   Stop a refused candidate and release only its reference; keep the old committed
   reference. Remove an image only when none of those references remains.
 - **What this buys.** A crash respawns exactly the code that slot was running,
@@ -1835,7 +2278,7 @@ codex-router host
   → services Prepare{Fresh} (its generation-1 payload, including the server display name, plus a standby attach to E11)
   → publish E1 · services Activate
   → DesktopReconciler (6.9a, OwnerProduction only): relaunch the desktop app if it launched before generation 1 became current (R19)
-  → OperatorService accepts on host.sock
+  → OperatorService accepts on host.sock without reading it; a one-shot receiver returns a complete bounded request record, and keeper replies directly (6.0)
 ```
 
 `host keeper restart` (explicit full restart):
@@ -1978,6 +2421,9 @@ below can build on main:
   - generation-gate wiring;
   - turn owners, `LifecycleRelease`, `ServicesHandover`, `Attached` and
     `LiveTurnAttachment` (6.5);
+  - the receive/spawn gate at RSP's synchronous `AcpAgent::spawn_process` call
+    in `acp-client-runtime`, coordinated as an unchanged provider lifecycle and
+    audited with actual descendant descriptor inventory;
   - the provider host (6.11). It moves RSP's `AgentSessionClient` composition
     out of the collaboration process. RSP main reviewed the ProviderLink
     protocol on 2026-09-27; this revision adds `Query`, `QueryResult` and the
@@ -1999,8 +2445,11 @@ below can build on main:
 **Inputs**, hashed in sorted relative order with the domain separator
 `"codex-router-fingerprint/v1\0<role>\0"`:
 
-1. The role entry file, plus the shared CLI dispatch (`main.rs` and `lib.rs`
-   argument parsing) for every role.
+1. The role entry file, every internal receiver/probe entry it can launch,
+   and the shared CLI dispatch (`main.rs` and `lib.rs` argument parsing).
+   Helper implementation lives in the already-included descriptor-boundary,
+   keeper-protocol or native-integration closure. No helper behavior may sit
+   in an unhashed CLI-only module merely because it is not a business role.
 2. For every **workspace** crate in the closure: **every file under the crate
    directory** except the exclusion list below. That covers `src/`, `build.rs`,
    `migrations/`, `legacy-migrations/` (`codex-router-state`'s `include_str!`
@@ -2021,6 +2470,17 @@ therefore rebuilds the CLI and refreshes the embedded fingerprints.
 
 **Shared crates:** a crate in several closures moves every affected role, which
 is deliberate.
+
+`ListenerKind::RouterSessionFace` reuses `collaboration_protocol::EndpointId`
+at its existing semantic home. The keeper-protocol edge therefore adds
+`collaboration-protocol`, `session-event-model` and `agent-automation` to the
+keeper's resolved workspace closure. Changes to those included inputs also
+change the keeper fingerprint and can trigger its automatic same-PID exec.
+The keeper imports no collaboration behavior or Question schema; its direct
+forbidden edges remain enforced. This binding avoids a duplicate identity or
+an identity-ownership move, at the cost of more frequent keeper image updates.
+R11 still requires unchanged children, generation and live turns through that
+exec; a broad fingerprint is not permission to restart them.
 
 **Accepted debt:** a colocated test edit inside `src/` moves the fingerprint.
 Payer: one unnecessary restart.
@@ -2043,7 +2503,7 @@ None stands in for another.
 |---|---|---|---|
 | `GenerationController` | E2 plus the transition slot | `Starting → Current` (ready, services adopted, E1 renamed); `Current → Settling` (newer promoted); `Settling → Retiring` (`GENERATION_SETTLE`); `Retiring → Gone` (group empty, then release the transition); `Starting → Failed`; `Current → Gone` (crash) | A new candidate while the transition is `Some` → Busy |
 | `ChildSupervisor` | E4, E5 slot | `Starting → Prepared → Active → Deactivating → Stopping → gone`; `Deactivating → Active` on DeactivateRefused, with the committed image unchanged; candidate image commits only on accepted release or completed forced predicate, before Activate; `Active → Crashed → Starting`; `Prepared → died` counts as `IncomingDiedBeforeActive` | Activate while another is Active: unrepresentable |
-| child phase | runtime | `Granted → Prepared → Active → Deactivating`; `any → Quiesced → (Resume) → previous` | Activate before Prepared → `PrepareFailed{FrameInvalid}` |
+| child phase | runtime | `Granted → Preparing → Prepared → Active → Deactivating`; `any → Quiesced → (Resume) → previous` | Activate before Prepared → `PrepareFailed{FrameInvalid}` |
 | `OperatorService` | admission | `Idle → Mutating(ActiveMutation) → Idle`; `GenerationTransition` outlives its terminal reply until group-empty; `Update` carried across exec | a second mutation → `Busy{active}` |
 | `ProviderHostRuntime` | link | `Unlinked → Linked(epoch)`; `Linked → Unlinked` (EOF: keep sessions, keep pending interactions, keep buffering); `Standby(e') → Active(e')` on Promote (the old Active link is demoted then closed); a new Attach never supersedes the Active link | frames from a demoted or closed link are dropped |
 | broker (E4) | pre-restart Pending rows, reread at Activate (RC3) | provider rows: `HeldForSnapshot → Live` (in `AttachSnapshot.pending_interactions`) \| `CancelledHostRestarted` (absent from that snapshot), held without limit while the link is interrupted (no timeout inference, H1). Codex rows: `HeldForAdoption → Bound` (matched by native request id on replay; a decision received meanwhile is held, then written upstream) \| `Withdrawn{NativeRequestResolved}` (observed matching serverRequest/resolved) \| `Withdrawn{TurnEnded}` (authoritative terminal evidence for the handed-over turn id) \| `CancelledHostRestarted` (in no handover). Missing or delayed replay never settles a row. Outgoing side: `Pending → Transferring` at `LifecycleRelease`, with no write | a Transferring row written by the old process after `Deactivated`: unrepresentable, because its write tracker was joined |
@@ -2064,7 +2524,9 @@ None stands in for another.
 | Exec returns | `exec` error | restore stdin, `Resume`, `Failed{ExecFailed}` | `KeeperHandoff` |
 | Invalid handoff | phase 1 | no signals; exit; operator runs a full stop/start (accepted debt) | `KeeperHandoff` |
 | New image dies after exec | the process is gone | children orphaned; next start refuses on a live E1 (accepted debt) | operator |
-| Truncated or oversized frame, wrong fd count, or invalid present role-handover body | recvmsg flags/counts or role `TryFrom` validation | reject the frame; the channel counts as broken for that child → child replacement | `KeeperChannelEndpoint` |
+| Invalid ancillary receipt or grant descriptor count/kind | recvmsg flags/counts or grant validation | receiving process exits without another spawn/effect; exit/reap cleanup; surviving keeper and unrelated roles remain untouched (6.0) | receiving process; `ChildSupervisor` or bridge owner |
+| Oversized pipe control frame or invalid present role-handover body | framing bound or role `TryFrom` validation | reject; existing broken-channel/replacement or DeactivateRefused path, without a descriptor receipt in keeper | `KeeperChannelEndpoint` |
+| Operator/probe receiver dies without a complete successful result | partial/missing pipe record or abnormal child exit | I/O failure, never complete an operator JSON prefix as a request or invent a successful result; cancel and reap the receiver | `OperatorService`, `GenerationController`, `KeeperHandoff` |
 | Two services processes during Prepare | by design | Prepare under `Replacement` is non-mutating (6.1): non-migrating store opens, broker histories parsed but not rewritten, `SubscriptionDeliveryService` built but not started. Every exclusive effect happens at Activate. | `CollaborationRuntime` |
 | A store holds migrations the candidate doesn't know (downgrade) | Prepare's applied-set check | `PrepareFailed{StoreSchemaNewerThanImage}`; the old child stays Active; nothing migrated | the role |
 | Activate fails after it applied migrations | `Active` missing or SIGCHLD | the outgoing image is never reactivated against a migrated store; the crash path respawns from the slot image (6.7) | `ChildSupervisor` |
@@ -2088,7 +2550,7 @@ None stands in for another.
 - **Trust.**
   - Existing owner-private permissions stay.
   - fds go only to the keeper's own children, spawned from their slot image (6.7). "Verified" means what it means today for `RestartHost`: an absolute path to a regular executable file (`request_admission.rs:392-404`), plus `build-info` for E7. Distribution signing is verified by the release and tap jobs (`release.yml:391-424`). The keeper adds no signature check (W17 §10).
-  - Handoff and channel frames travel only on anonymous socketpairs.
+  - Control/event frames travel on anonymous pipes; grants and the pre-runtime handoff travel on anonymous Unix socketpairs. Operator input returns as one complete record; native probes return typed observations; keeper replies stay direct writes (6.0).
   - Each received fd is type-checked against its role and made CLOEXEC before any spawn.
   - Retained slot images (6.7) live under the owner-private Router root, as hard links or copies of the signed executables the keeper was given. Nothing else is executed.
   - The schema bundle directory is 0700.
@@ -2131,7 +2593,7 @@ None stands in for another.
   - One runtime per process, owned by the entrypoint.
   - The settle carried across exec as a `Duration` remainder, rebuilt as a monotonic timer.
 - **Dependencies.**
-  - rustix `net` feature (`Cargo.toml:69`);
+  - rustix `net` and `pipe` features through the descriptor-boundary crate;
   - `cargo_metadata` as a build-dependency;
   - `session-event-model` (RSP) for `codex-acp-adapter`.
 - **Not applicable:** privacy and data lifecycle, accessibility.
@@ -2186,11 +2648,12 @@ None stands in for another.
 | V11 provider survival | real `claude-agent-acp` and Cursor `agent acp` (their own logins, isolated homes), real E4 and E11, front doors via ACP and the RSP app-server face | none | two refused approvals in one operation, recorded with their own request ids and offers (CC1); same E11 incarnation and provider pids across an E4 replacement and an abrupt E4 crash; same turn id reaching a terminal `_session/state.turn`, including a turn that ended while unlinked with its transcript evicted (settled from the ledger); a pending approval answerable after the restart; a decision in transit when the link drops (applied once, `InteractionDecisionResult`); a delayed standby attach with the provider alive (no false `lost`); a snapshot cut racing a settings change and a turn end (no double apply); per-session `TruncatedBefore`; a late interaction for a cancelling turn never presented; E11 replacement sends `session/cancel` and uses the runtime's group shutdown, checked with a provider wrapper that ignores stdin EOF |
 | Auth during handover (V8) | the real proxy with #83 upkeep and the Claude edge against test OAuth endpoints for both providers (existing quota-reset harness patterns) | the provider token endpoints | no second refresh of a generation; a successful token response near each provider's timeout (Claude 30 s, OpenAI 15 s) followed by a delayed secret and DB commit completes before `Drained`; a CLI login claim running across the replacement is neither drained nor interrupted; a candidate whose secret store isn't `Ready` fails Prepare while the old proxy serves; on a real signed install (owner-authorized, non-production root), the candidate opens the store without a Keychain prompt; a failure-disposition retry completes; a late 401 on an old stream after `Deactivated` starts no renewal; simultaneous upkeep and quota renewals both settle; the account is not `reauth_required`; durable credential state is checked, not only request counts |
 | Platforms | Linux CI (#82) and macOS | none | SCM_RIGHTS, CLOEXEC after receipt, process groups and the symlink swap exercised on both; Linux-only flags (`MSG_CMSG_CLOEXEC`) are not relied on |
+| Process containment (6.0, V3–V10 as applicable) | real isolated keeper, role processes, CLI operator and native codecs | malformed sender and fixture native backend only | same128-to64 poison and witness EOF after exit/reap; no surviving-authority FD growth; no spawn after poison; bootstrap/listener counts/kinds; valid control pipes; operator half-close and direct terminal reply; complete-looking JSON prefix without ReadComplete never admitted; ReExecuting flushed to the socket before exec; typed native probe observation; same-PID exec carries both control directions and grants; failed exec resumes; full encoded bounds and actual R7 first requests; concurrent reader/SDK/git spawns racing socket creation and accept inherit no unrelated socket, and owner-initiated close/retirement reaches the original peer |
 | Generation publication (V2, V4, V7) | real keeper, fixture or pinned app-server, real services | none | rename failure after services staged N+1 (services stays on N); an N connection kept through promotion; retirement of N after N+1 is committed never drops N+1 admissions; commit-not-applied and commit-applied-but-ack-lost, each followed by a failed recovery Prepare (N retained, transition held, truthful `ServicesReplacementFailed`), for both `host app-server restart` and `update` |
 | Schema availability (V2, V4, V10) | real keeper/services and the schema-export failure seam | export failure only | fresh start or recovery of an exited generation publishes the real generation/alias/executable with Unavailable schema, raw native relay answers, Codex ACP reports SchemaUnavailable, and self-exec re-adopts the same raw-only state without invented digest/bundle. With any live predecessor, including live-but-unverified R11 fallback, export failure keeps that predecessor and E1 unchanged |
 | Generation evidence (V2, V4, V6, V10) | real temporary executable/bundle files, keeper and services | none | recorded-identity and canonical-digest round trip; malformed record rejected structurally without file I/O; CandidateAdmission and PrepareGeneration reject same-path changed content or missing executable before publication and reject bundle mismatch; CurrentGeneration E4 crash respawn, E7 services replacement and post-exec child recovery become active with recorded path removed/changed, verifying the retained bundle without re-hashing that path; phase-1 decoding never hashes/spawns or converts that removed path into a fatal envelope error |
 | Exec admission (V7, V10) | real keeper with controlled stop observations | an uninterruptible wait is simulated by the stop-observation seam, not manufactured | `DeferredChildRetiring{Draining}` after the drain bound and `{StuckAfterKill}` immediately: terminal `UpdateCompleted`, admission released, no exec, ownership retained |
-| Handoff (V10) | the real exec on macOS and Linux | none | child fd inventory (no leaked lock, listeners or channels), including after a later `RequestListener` grant; partial and oversized frames rejected; quiesce with held output; failed-exec resume; a manifest naming a live unrelated pid (`NotOurChild`) → never signalled, role restarted fresh ; the pre-exec header plus manifest file carrying a near-`MAX_FRAME_BYTES` manifest and 64 fds on macOS and Linux; a truncated manifest and a digest mismatch (`ManifestMismatch`, no signals); a stale `handoff-*.json` swept at the next start |
+| Handoff (V10) | the real exec on macOS and Linux | none | child fd inventory (no leaked lock, listeners or channels), including after a later `RequestListener` grant and image-snapshot transfer; partial and oversized frames rejected; quiesce with held output; failed-exec resume; a manifest naming a live unrelated pid (`NotOurChild`) → never signalled, role restarted fresh ; the pre-exec header plus manifest file carrying a near-`MAX_FRAME_BYTES` manifest and 64 fds on macOS and Linux; a truncated manifest and a digest mismatch (`ManifestMismatch`, no signals); a stale `handoff-*.json` swept at the next start |
 | Prepare effects (RC5, RC3, V8) | real candidate E4 and E5 binaries against a snapshot of the shared state root (isolated debug root) | none | under `Replacement` with complete, missing and degraded prerequisites, then a forced Prepare failure: the snapshot is byte-identical. That covers the Keychain item (isolated keychain), store marker, token, affinity secret, service identity, control schema, histories and SQLite schema. Under `Fresh`, the creators run once |
 | Migration-bearing activation (V8) | real E4 and E5 with an **unapplied** migration over representative data: the #121 participant-history backfill over a realistic board, and a state-DB migration while the old proxy is mid-renewal under A1 | none | a valid older native schema reaches Prepared with its pending set and byte-identical DB/schema; dirty, checksum-mismatched and newer applied history fail without writes; activation time including the migration and the broker reread, against `ACTIVATE_DEADLINE`. A measured overrun is a design break returned to the owner, never a quietly raised deadline. The old proxy finishes its claimed renewal and joined response-side state-DB writes against the migrated schema: delay an affinity ownership record and passive quota observation across activation, then observe both durably committed before Drained and the continuation request using the recorded affinity. An already-migrated DB is not accepted as this proof |
 | Fresh startup order (RC7) | an empty isolated Router root with Claude configured | none | the token exists before E11 Prepare reads it; E11 becomes ready and E4 attaches; the existing-root and Keychain-unavailable cases stay distinct |

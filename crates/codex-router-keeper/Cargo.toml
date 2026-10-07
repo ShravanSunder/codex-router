@@ -1,0 +1,21 @@
+[package]
+name = "codex-router-keeper"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+codex-router-keeper-protocol = { path = "../codex-router-keeper-protocol" }
+codex-router-descriptor-boundary = { path = "../codex-router-descriptor-boundary" }
+thiserror.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+serde.workspace = true
+serde_json.workspace = true
+rustix.workspace = true
+tempfile = "3.27.0"
