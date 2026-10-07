@@ -14,11 +14,14 @@ use tokio_tungstenite::client_async_with_config;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 
+use crate::native_observation_stage::NativeObservationStage;
+use crate::native_observation_validation::AppServerObservationValidationError;
+use crate::native_observation_validation::MAX_NATIVE_PROTOCOL_EVIDENCE_BYTES;
+use crate::native_observation_validation::validate_recorded_observation;
 use crate::remote_control_observation;
 use crate::remote_control_observation::RemoteControlObservation;
 
 pub(crate) const CONTROL_RESPONSE_TIMEOUT: Duration = Duration::from_secs(2);
-const MAX_PROTOCOL_MESSAGE_BYTES: usize = 64 * 1024;
 const INITIALIZE_REQUEST_ID: u64 = 1;
 
 /// Native app-server observation used by host readiness derivation.
@@ -29,6 +32,18 @@ pub struct AppServerObservation {
 }
 
 impl AppServerObservation {
+    /// Reconstructs a captured native observation without performing a new observation.
+    pub fn from_recorded_parts(
+        running_version: String,
+        remote_control: RemoteControlObservation,
+    ) -> Result<Self, AppServerObservationValidationError> {
+        validate_recorded_observation(&running_version, &remote_control)?;
+        Ok(Self {
+            running_version,
+            remote_control,
+        })
+    }
+
     /// Returns the version reported by native initialize.
     #[must_use]
     pub fn running_version(&self) -> &str {
@@ -58,19 +73,19 @@ pub enum CodexProtocolError {
     #[error("native app-server {stage} timed out")]
     Timeout {
         /// Low-cardinality protocol stage.
-        stage: &'static str,
+        stage: NativeObservationStage,
     },
     /// The server closed before returning the requested result.
     #[error("native app-server closed during {stage}")]
     Closed {
         /// Low-cardinality protocol stage.
-        stage: &'static str,
+        stage: NativeObservationStage,
     },
     /// A response violated the pinned protocol contract.
     #[error("native app-server returned an invalid {stage} response")]
     InvalidResponse {
         /// Low-cardinality protocol stage.
-        stage: &'static str,
+        stage: NativeObservationStage,
     },
     /// Initialize user agent did not contain a version.
     #[error("native app-server initialize user agent omitted its version")]
@@ -87,7 +102,7 @@ pub async fn observe_app_server(
         tokio::time::timeout(native_readiness_wait, initialize_app_server(socket_path))
             .await
             .map_err(|_elapsed| CodexProtocolError::Timeout {
-                stage: "native readiness",
+                stage: NativeObservationStage::NativeReadiness,
             })??;
 
     let remote_control = match tokio::time::timeout(
@@ -135,7 +150,7 @@ impl InitializedControlExchange {
     pub(crate) async fn read_response(
         &mut self,
         expected_id: u64,
-        stage: &'static str,
+        stage: NativeObservationStage,
     ) -> Result<Value, CodexProtocolError> {
         loop {
             let value = self.read_json(CONTROL_RESPONSE_TIMEOUT, stage).await?;
@@ -152,7 +167,7 @@ impl InitializedControlExchange {
     pub(crate) async fn read_json(
         &mut self,
         deadline: Duration,
-        stage: &'static str,
+        stage: NativeObservationStage,
     ) -> Result<Value, CodexProtocolError> {
         loop {
             let frame = tokio::time::timeout(deadline, self.websocket.next())
@@ -171,19 +186,21 @@ async fn initialize_app_server(
 ) -> Result<InitializedControlExchange, CodexProtocolError> {
     let stream = tokio::time::timeout(CONTROL_RESPONSE_TIMEOUT, UnixStream::connect(socket_path))
         .await
-        .map_err(|_elapsed| CodexProtocolError::Timeout { stage: "connect" })?
+        .map_err(|_elapsed| CodexProtocolError::Timeout {
+            stage: NativeObservationStage::Connect,
+        })?
         .map_err(CodexProtocolError::Connect)?;
     let websocket_config = WebSocketConfig::default()
-        .read_buffer_size(MAX_PROTOCOL_MESSAGE_BYTES)
-        .max_message_size(Some(MAX_PROTOCOL_MESSAGE_BYTES))
-        .max_frame_size(Some(MAX_PROTOCOL_MESSAGE_BYTES));
+        .read_buffer_size(MAX_NATIVE_PROTOCOL_EVIDENCE_BYTES)
+        .max_message_size(Some(MAX_NATIVE_PROTOCOL_EVIDENCE_BYTES))
+        .max_frame_size(Some(MAX_NATIVE_PROTOCOL_EVIDENCE_BYTES));
     let (websocket, _response) = tokio::time::timeout(
         CONTROL_RESPONSE_TIMEOUT,
         client_async_with_config("ws://localhost/", stream, Some(websocket_config)),
     )
     .await
     .map_err(|_elapsed| CodexProtocolError::Timeout {
-        stage: "websocket upgrade",
+        stage: NativeObservationStage::WebSocketUpgrade,
     })??;
     let mut exchange = InitializedControlExchange {
         websocket,
@@ -205,7 +222,7 @@ async fn initialize_app_server(
         }))
         .await?;
     let initialize_result = exchange
-        .read_response(INITIALIZE_REQUEST_ID, "initialize")
+        .read_response(INITIALIZE_REQUEST_ID, NativeObservationStage::Initialize)
         .await
         .and_then(|result| {
             serde_json::from_value::<InitializeResult>(result).map_err(CodexProtocolError::Json)

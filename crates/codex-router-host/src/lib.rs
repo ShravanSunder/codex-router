@@ -77,11 +77,11 @@ pub use app_server_shutdown::AppServerShutdownError;
 pub use app_server_shutdown::ExpectedExit;
 pub use app_server_shutdown::ShutdownAction;
 pub use app_server_shutdown::ShutdownOutcome;
+pub use codex_native_integration::RemoteControlServerName;
 pub use managed_app_server::AppServerChild;
 pub use managed_app_server::AppServerLaunchPlan;
 pub use managed_app_server::AppServerReadiness;
 pub use managed_app_server::AppServerReadinessError;
-pub use managed_app_server::RemoteControlServerName;
 
 pub use codex_update_preparation::UpdateDeadlineError;
 pub use codex_update_preparation::UpdateDeadlines;

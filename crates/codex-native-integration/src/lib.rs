@@ -15,10 +15,13 @@ pub use stored_thread_query::{
 };
 mod desktop_launch_policy;
 mod native_executable_identity;
+mod native_observation_stage;
+mod native_observation_validation;
 mod native_protocol_observation;
 mod native_session_launch;
 mod native_state_paths;
 mod remote_control_observation;
+mod remote_control_server_name;
 mod remote_resume_permission_keys;
 mod router_profile_projection;
 mod router_tool_locations;
@@ -39,6 +42,10 @@ pub use native_executable_identity::managed_executable_version;
 pub use native_executable_identity::parse_executable_version;
 pub use native_executable_identity::start_executable_identity;
 pub use native_executable_identity::{RecordedExecutableIdentity, RecordedExecutableIdentityError};
+pub use native_observation_stage::NativeObservationStage;
+pub use native_observation_validation::{
+    AppServerObservationField, AppServerObservationValidationError,
+};
 pub use native_protocol_observation::AppServerObservation;
 pub use native_protocol_observation::CodexProtocolError;
 pub use native_protocol_observation::observe_app_server;
@@ -49,6 +56,7 @@ pub use native_session_launch::SessionProfile;
 pub use native_session_launch::caller_overrides;
 pub use native_state_paths::CodexPaths;
 pub use remote_control_observation::RemoteControlObservation;
+pub use remote_control_server_name::RemoteControlServerName;
 pub use remote_resume_permission_keys::{
     REMOTE_RESUME_PERMISSION_KEYS, profile_remote_resume_permission_keys,
 };

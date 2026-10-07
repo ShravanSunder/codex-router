@@ -8,6 +8,7 @@ use serde_json::Value;
 use super::native_protocol_observation::CONTROL_RESPONSE_TIMEOUT;
 use super::native_protocol_observation::CodexProtocolError;
 use super::native_protocol_observation::InitializedControlExchange;
+use crate::native_observation_stage::NativeObservationStage;
 
 const REMOTE_STATUS_REQUEST_ID: u64 = 2;
 
@@ -58,7 +59,10 @@ pub(crate) async fn observe(
         }))
         .await?;
     let status_result = exchange
-        .read_response(REMOTE_STATUS_REQUEST_ID, "Remote Control status")
+        .read_response(
+            REMOTE_STATUS_REQUEST_ID,
+            NativeObservationStage::RemoteControlStatus,
+        )
         .await
         .and_then(|result| {
             serde_json::from_value::<RemoteStatus>(result).map_err(CodexProtocolError::Json)
@@ -78,7 +82,10 @@ async fn wait_for_remote_status_change(
     let changed = tokio::time::timeout(remote_control_wait, async {
         loop {
             let value = exchange
-                .read_json(CONTROL_RESPONSE_TIMEOUT, "Remote Control status change")
+                .read_json(
+                    CONTROL_RESPONSE_TIMEOUT,
+                    NativeObservationStage::RemoteControlStatusChange,
+                )
                 .await?;
             if value.get("method").and_then(Value::as_str) != Some("remoteControl/status/changed") {
                 continue;
@@ -88,7 +95,7 @@ async fn wait_for_remote_status_change(
                     .get("params")
                     .cloned()
                     .ok_or(CodexProtocolError::InvalidResponse {
-                        stage: "Remote Control status change",
+                        stage: NativeObservationStage::RemoteControlStatusChange,
                     })?;
             let status = serde_json::from_value::<RemoteStatus>(params)?;
             return Ok::<RemoteStatus, CodexProtocolError>(status);

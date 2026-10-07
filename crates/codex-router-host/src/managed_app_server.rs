@@ -4,7 +4,9 @@ use std::path::Path;
 use std::time::Duration;
 
 use codex_native_integration::ExecutableIdentity;
+use codex_native_integration::NativeObservationStage;
 use codex_native_integration::RemoteControlObservation;
+use codex_native_integration::RemoteControlServerName;
 use codex_native_integration::observe_app_server;
 use thiserror::Error;
 
@@ -32,33 +34,6 @@ pub enum AppServerReadiness {
         /// Validated Remote Control machine display name, when supplied.
         remote_control_server_name: Option<RemoteControlServerName>,
     },
-}
-
-/// Upstream Remote Control server name validated at the Host boundary.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RemoteControlServerName(String);
-
-const MAX_REMOTE_CONTROL_SERVER_NAME_BYTES: usize = 4096;
-
-impl TryFrom<String> for RemoteControlServerName {
-    type Error = &'static str;
-
-    fn try_from(value: String) -> Result<Self, Self::Error> {
-        if value.trim().is_empty()
-            || value.len() > MAX_REMOTE_CONTROL_SERVER_NAME_BYTES
-            || value.contains('\0')
-        {
-            return Err("invalid Remote Control server name");
-        }
-        Ok(Self(value))
-    }
-}
-
-impl RemoteControlServerName {
-    #[must_use]
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
 }
 
 impl AppServerReadiness {
@@ -303,12 +278,13 @@ impl AppServerChild {
                     });
                 }
                 Err(codex_native_integration::CodexProtocolError::Connect(_))
-                | Err(codex_native_integration::CodexProtocolError::Timeout { stage: "connect" }) =>
-                {
+                | Err(codex_native_integration::CodexProtocolError::Timeout {
+                    stage: NativeObservationStage::Connect,
+                }) => {
                     tokio::time::sleep(Duration::from_millis(20).min(remaining)).await;
                 }
                 Err(codex_native_integration::CodexProtocolError::Timeout {
-                    stage: "native readiness",
+                    stage: NativeObservationStage::NativeReadiness,
                 }) => return Err(AppServerReadinessError::StartupTimeout),
                 Err(error) => return Err(AppServerReadinessError::Protocol(error)),
             }
