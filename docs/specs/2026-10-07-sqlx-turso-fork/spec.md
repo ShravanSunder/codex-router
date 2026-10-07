@@ -12,7 +12,7 @@ Structure: [program-design.md](program-design.md).
 | `TursoDatabaseTarget` | `File(path)` or `Memory`. A memory target is private to its one connection. |
 | Open mode | `ReadWrite` (file must exist) or `CreateIfMissing`. There is no read-only mode. |
 | `TursoSyncOptions` | Remote base URL, optional auth token, client name, long-poll timeout, bootstrap-if-empty. Configured in code only. |
-| `TursoConnection` | One owned engine connection. With Sync it also holds the Sync database handle that `sync_push`, `sync_pull`, `sync_checkpoint` and `sync_stats` act on. |
+| `TursoConnection` | One owned engine connection. With Sync (opt-in feature) it also holds the Sync database handle that `sync_push`, `sync_pull`, `sync_checkpoint` and `sync_stats` act on. |
 | Offline metadata | `query-<hash>.json` files that the checked macros read when `SQLX_OFFLINE=true`. Turso metadata lives beside the crate that invokes the macros. |
 | Native schema database | A fresh Turso file built by applying a crate's migrations through this driver. Metadata is described against it, never against SQLite. |
 | Sync server | `tursodb` 0.8.1 with `--sync-server`, single-file or `--sync-dir` directory mode. Test infrastructure here; production service is spec 2. |
@@ -77,6 +77,8 @@ unsafe instrumentation.
 | One Sync IO thread per synced handle | Each synced open starts one detached `turso-sync-io` thread with its own small runtime. After a drained final push, dropping the handle ended it in the probes; termination while an HTTP request hangs is unverified. | Source and probes |
 | Push/pull timeouts are caller-side | A timed-out or dropped push may still have been applied remotely. | Probes |
 | Whole-database replication | No table selector exists on this API. | Tested (every replication test reads all tables) |
+| Turso's own tables on synced stores | `sqlite_schema` lists `turso_cdc`, `turso_sync_last_change_id` and similar on a synced store; schema checks must exclude them. | Tested |
+| Sync needs an explicit rustls provider beside other rustls clients | Sync enables rustls's `aws-lc-rs`; with `ring` also enabled, `ClientConfig::builder()` panics unless a process default is installed. | Reproduced; Sync tests install a default |
 
 ## S5. Offline metadata contract
 

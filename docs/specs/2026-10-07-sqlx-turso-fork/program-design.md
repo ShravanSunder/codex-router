@@ -61,7 +61,7 @@ moves to `connection.rs` tests), `options.rs`, `value.rs`, `driver.rs`, `macros.
 condition the driver raises: URL (`MissingTursoScheme`, `InvalidUrlPath`,
 `UnknownUrlParameter`, `InvalidUrlParameterValue`), unsupported or misused surfaces
 (`ReadOnlyUnsupported`, `SyncFeatureDisabled`, `NotSyncConnection`,
-`BatchArgumentsUnsupported`, `NamedPlaceholderUnsupported`) and decoding
+`BatchArgumentsUnsupported`, `NamedPlaceholderUnsupported`, `InvalidMigrationTableName`) and decoding
 (`StorageClassMismatch { expected, actual: TursoStorageClass }`, `InvalidTemporalText`,
 `TemporalOutOfRange`). Configuration and usage variants surface as
 `sqlx::Error::Configuration`; decode variants travel SQLx's decode path. Callers downcast the
@@ -126,17 +126,21 @@ struct ConnectOptionsInner {
 
 | Crate | Features | Default |
 |---|---|---|
-| `sqlx-turso` | `runtime-tokio`, `macros`, `sync`, `migrate`, `chrono` | all five |
+| `sqlx-turso` | `runtime-tokio`, `macros`, `sync`, `migrate`, `chrono` | all but `sync` |
 | `sqlx-turso-core` | the same five, forwarded; `macros` also turns on serde for describe metadata | `runtime-tokio` |
 | `sqlx-turso-macros` | `chrono` (type mapping) | none |
 
-All five are on by default in the facade because Router uses all five. Consequently
-`cargo clippy --workspace --all-targets` and `cargo nextest run --workspace` compile and run
-every kept path; facade test targets need no `required-features`. The upstream `offline`
-feature folds into `macros` (macros always needed it). The reduced build
-reduced build runs in CI so the That check is
-`cargo check --locked -p sqlx-turso --lib --no-default-features --features runtime-tokio`; it
-proves that one reduced configuration, not every combination.
+`sync` is opt-in; the other four are on by default. The first cut defaulted all five so that
+workspace lint and test covered every path. Implementation found that this breaks unrelated
+crates (§12): Turso's Sync enables rustls's `aws-lc-rs` provider, Router's crates enable `ring`,
+and a build with both cannot pick a default provider. With `sync` opt-in, no current workspace
+build links Sync, and the Sync paths are covered by their own invocations instead: CI lints the
+three driver crates with `--all-features` and runs their tests once, with `--all-features`,
+excluding them from the workspace test run. The upstream `offline` feature folds into
+`macros`. The reduced build
+`cargo check --locked -p sqlx-turso --lib --no-default-features --features runtime-tokio` runs
+in CI so the `not(feature = …)` branches keep compiling; it proves that one reduced
+configuration, not every combination.
 
 ## 5. Workspace integration
 
@@ -170,7 +174,7 @@ prepare-sqlx-turso.py [--check]
     1. scratch dir under tmp/ (TemporaryDirectory)
     2. cargo run --locked -p sqlx-turso --example seed_native_schema -- <scratch>/schema.db <migration dirs…>
     3. cargo clean --locked -p <package>             # proc macros re-run only when the crate recompiles (same reason as verify-sqlx-contract.py)
-    4. cargo check --locked -j 1 -p <package> --all-targets
+    4. cargo check --locked -j 1 -p <package> --all-targets --all-features
          env: SQLX_OFFLINE=false  DATABASE_URL=turso:<scratch>/schema.db  SQLX_OFFLINE_DIR=<scratch>/metadata
     5. --check: committed set == staged set (names and bytes) else exit 1 with the differing names
        write:   replace <package>/.sqlx/query-*.json with the staged set
@@ -206,7 +210,9 @@ prepare-sqlx-turso.py [--check]
   `x86_64-unknown-linux-gnu`, extracts only `tursodb` into `tmp/rust-tools/bin/`, and verifies
   `tursodb --version` reports `Turso 0.8.1`. `--check` verifies without downloading. Unit tests
   cover target selection, digest mismatch and the version check.
-- CI `test` job runs the installer (cached on the script's hash) before `nextest`.
+- CI `test` job runs the installer (cached on the script's hash), then runs the three driver
+  crates' tests with `--all-features` in their own `nextest` invocation, excluded from the
+  workspace run. The trybuild test gets a longer `slow-timeout` in `.config/nextest.toml`.
 - `tests/support/sync_server.rs`: `SyncServer::start_single_file` and
   `SyncServer::start_directory`; checks `tursodb --version` reports `Turso 0.8.1` (also for an
   override binary), binds a free `127.0.0.1` port, spawns `tursodb`, waits for TCP readiness
@@ -265,7 +271,7 @@ barriers (need the PoC gateway).
 | Choice | Gain | Cost |
 |---|---|---|
 | High-level Sync API (decided) | Proven path, small port | One `turso-sync-io` thread per synced handle; inline blocking page IO on runtime workers (raised to the board-design Lead for spec 2: accept the exception, or isolate SQL execution from executor workers); no bind arity |
-| Facade defaults = all features | Workspace lint/test cover every kept path | Applications get all five unless they opt out |
+| `sync` opt-in, other features default | No workspace build links Sync, so Router's TLS clients keep one rustls provider | Sync lint and tests need their own `--all-features` invocations; the consumer that enables `sync` inherits the provider choice (§12) |
 | `macros` feature links `sqlx-macros-core` into the runtime graph (upstream design) | `DatabaseExt` can live where orphan rules allow | Larger dependency graph for applications that enable `macros`. Narrowing it is follow-up work. |
 | Workspace `sqlx` without `sqlite` | Turso crates stay Turso-only; exact SQLx pin visible | Thirteen existing manifests each gain `features = ["sqlite"]` |
 | Crate-local `.sqlx` plus a second prep script | Zero interaction with the stock cache and script | Two prep commands; CI runs both |
@@ -282,10 +288,19 @@ GPT 6.1 Sol xhigh reviewed this design read-only on 2026-10-07.
 | 1 | Keep the workspace `sqlx` change, but scope the SQLite-free guarantee to separate Turso builds and check it | Accepted: §5 wording and `turso_only_dependency_graph.rs` |
 | 2 | Isolation holds only while no stock target invokes Turso macros; prefer package clean; keep the seed tool metadata-free | Accepted: spec S5 rule, §6 notes |
 | 3 | Pinned release installer; also verify an override binary | Accepted: version check in the harness |
-| 4 | All-five defaults; reduced check as `--locked --lib --no-default-features --features runtime-tokio` | Accepted: §4 |
+| 4 | All-five defaults; reduced check as `--locked --lib --no-default-features --features runtime-tokio` | Reduced check accepted. All-five defaults accepted, then reversed on implementation evidence (§12): `sync` is opt-in |
 | 5 | Trims fine; Vacuum removal makes `VACUUM` unavailable even as SQL; local read-only does not need the lower SDK | Accepted: spec S3 wording corrected |
 | 6 | Strengthen proof: replicated FK-off rebuild; keep D1's transactional snapshots, exact agreement and interleaving; trybuild re-exec needs guard, exact selection, private metadata, bounded child, status | Accepted: §8 |
 | 7 | Raise inline blocking page IO to the board-design Lead as a spec-2 choice | Accepted: open question in the report; spec S4 and §10 |
 | 8 | Thiserror enum is in scope; do not discard parse causes | Partly accepted: temporal variants keep the offending text and kind. Rejected attaching chrono's `ParseError`: decoding tries up to twelve formats, so no single parse error is the cause, and the stored text is the diagnostic a caller needs. |
 | 9 | S4 overclaimed tests for every limitation; qualify Sync thread termination | Accepted: S4 now marks tested versus source-established limitations |
 | — | Bounded awaited server shutdown, kill-on-drop only as fallback; redact the auth token in `Debug` | Accepted: §7 and `TursoSyncOptions` `Debug` |
+
+## 12. Findings during implementation
+
+| Finding | Evidence | Disposition |
+|---|---|---|
+| Turso's Sync and Router's TLS clients cannot share a build without an explicit rustls provider | turso 0.8.1 takes `hyper-rustls` with default features (`aws-lc-rs`); Router enables `ring`. Unified build: `cargo test -p codex-router-proxy -p sqlx-turso --lib -- claude_edge::upstream_endpoint` → 3 tests panic in `rustls::crypto::CryptoProvider` ("Could not automatically determine the process-level CryptoProvider"); `collaboration-service` stops compiling (E0282/E0283: aws-lc-rs adds `From<()>` impls). Turso's Sync worker calls `with_native_roots()` the same way. | `sync` opt-in (§4); Sync tests install the aws-lc-rs default; open question for spec 2 (which provider a Router binary that links Sync installs, or a Turso patch) |
+| Synced stores expose Turso's internal tables in `sqlite_schema` | The replicated-migration test saw `turso_cdc`, `turso_cdc_version`, `turso_sync_last_change_id`, `__turso_internal_seq_…` on the synced reader | Schema fingerprints exclude `sqlite_`, `turso_` and `__turso_internal` names; spec-2 schema validation must do the same |
+| Turso 0.8.2 now exists; internal crates float within `^0.8.1` | A fresh resolve picked 0.8.2 for eight of the nine Turso packages | Lockfile pinned to 0.8.1 for all nine with `cargo update --precise`; `--locked` keeps it |
+| The pinned release binary is the probes' binary | `tmp/rust-tools/bin/tursodb` SHA-256 `fe4e1435…` equals the investigation's recorded digest | — |
