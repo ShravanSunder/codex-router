@@ -5,6 +5,7 @@ use super::*;
 impl<P: InteractionPort> AgentSessionClient<P> {
     pub(super) async fn initialize_with_timeout_and_mcp_servers(
         launch: ExternalProviderLaunch,
+        model_picker: crate::ProviderModelPicker,
         initialize_timeout: Duration,
         configured_mcp_servers: Vec<McpServer>,
         interaction_port: Arc<P>,
@@ -236,7 +237,7 @@ impl<P: InteractionPort> AgentSessionClient<P> {
                         () = task_shutdown.cancelled() => {
                             return Ok(());
                         }
-                        response = initialize_provider_connection(&connection) => response,
+                        response = initialize_provider_connection(&connection, model_picker) => response,
                     };
                     let admission = match initialized {
                         Ok(response) if response.protocol_version == ProtocolVersion::V1 => {

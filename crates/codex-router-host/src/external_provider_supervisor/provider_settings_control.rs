@@ -142,7 +142,7 @@ fn setting_error(
                 kind: ProviderSettingsFailureKind::InvalidSetting,
                 stage: None,
                 target: Some(request.target.clone()),
-                message: "setting value was not advertised by the provider".into(),
+                message: "setting value requires an unambiguous advertised provider option".into(),
                 setting: Some(request.setting),
                 value: Some(request.value.clone()),
                 advertised,

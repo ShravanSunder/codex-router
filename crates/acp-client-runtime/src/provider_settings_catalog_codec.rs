@@ -127,6 +127,14 @@ fn setting_category(
     category: Option<&SessionConfigOptionCategory>,
     id: &str,
 ) -> Option<ProviderSettingKind> {
+    // Cursor gives both toggled thinking and reasoning effort the broad
+    // thought_level category. Their advertised identities remain distinct.
+    if id == "thinking" {
+        return None;
+    }
+    if id == "effort" {
+        return Some(ProviderSettingKind::Effort);
+    }
     match category {
         Some(SessionConfigOptionCategory::Mode) => return Some(ProviderSettingKind::Mode),
         Some(SessionConfigOptionCategory::Model) => return Some(ProviderSettingKind::Model),

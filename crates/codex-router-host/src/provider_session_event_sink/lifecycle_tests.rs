@@ -103,6 +103,7 @@ async fn fixture_with_script(script: &str, arguments: &[&str]) -> Fixture {
                 .collect(),
             environment: Vec::new(),
         },
+        acp_client_runtime::ProviderModelPicker::Standard,
         "fixture",
         "http://127.0.0.1:1/mcp",
         Arc::clone(&hub),
