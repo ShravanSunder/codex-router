@@ -16,3 +16,9 @@ pub use app_server_generation::{
 };
 mod default_endpoint;
 pub use default_endpoint::{DefaultEndpointPath, EndpointPathError, GenerationAliasPath};
+
+mod child_process_identity;
+pub use child_process_identity::{ChildIdentityError, ChildPgid, ChildPid};
+
+mod group_stop_result;
+pub use group_stop_result::GroupStopResult;

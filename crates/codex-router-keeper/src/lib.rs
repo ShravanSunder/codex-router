@@ -13,3 +13,13 @@ mod publication_error;
 mod publication_node;
 pub use generation_publication::GenerationEndpointPublisher;
 pub use publication_error::PublicationError;
+
+mod group_stop_error;
+mod group_stop_progress;
+pub mod lifecycle_bounds;
+mod owned_process_group;
+pub use codex_router_keeper_protocol::GroupStopResult;
+pub use group_stop_error::GroupStopError;
+pub use group_stop_progress::{GroupStopProgress, GroupStopStatus};
+pub use lifecycle_bounds::{GroupStopProfile, GroupStopTiming};
+pub use owned_process_group::OwnedProcessGroup;

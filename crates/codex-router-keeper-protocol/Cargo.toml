@@ -9,6 +9,7 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+rustix.workspace = true
 collaboration-protocol = { path = "../collaboration-protocol", version = "0.1.63" }
 codex-router-descriptor-boundary = { path = "../codex-router-descriptor-boundary", version = "0.1.63" }
 codex-native-integration.workspace = true
@@ -20,5 +21,4 @@ tokio.workspace = true
 tokio-util.workspace = true
 
 [dev-dependencies]
-rustix.workspace = true
 tempfile = "3.27.0"
