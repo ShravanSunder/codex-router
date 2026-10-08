@@ -10,7 +10,7 @@ pub struct MessageText(String);
 
 #[derive(Debug, thiserror::Error)]
 #[error(
-    "message text must be nonempty, free of C0 controls other than newline and tab, and within the Control frame limit"
+    "message text must be nonempty, free of C0 controls other than newline and tab, and within the message size limit"
 )]
 pub struct MessageTextError;
 

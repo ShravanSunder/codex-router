@@ -3,7 +3,7 @@ use super::board_thread_subscription_preparation::PendingSubscriptionActor;
 use super::board_thread_wait_preparation::PendingSubscriptionWait;
 use super::board_value_parsing::*;
 use collaboration_client::BoardRepositoryLocation;
-use collaboration_client::ControlClient;
+use collaboration_client::CollaborationClient;
 use collaboration_client::board::*;
 use collaboration_client::protocol::{
     ThreadSubscribeRequest, ThreadSubscriptionsRequest, ThreadUnsubscribeRequest,
@@ -104,7 +104,7 @@ pub(super) struct PendingThreadLeave {
 
 pub(super) fn finalize_actor(
     actor: &ActorInput,
-    client: &ControlClient,
+    client: &CollaborationClient,
 ) -> Result<Identity, String> {
     match actor {
         ActorInput::Explicit(identity) => Ok(identity.clone()),
@@ -112,7 +112,7 @@ pub(super) fn finalize_actor(
     }
 }
 
-fn self_identity(client: &ControlClient) -> Result<Identity, String> {
+fn self_identity(client: &CollaborationClient) -> Result<Identity, String> {
     let harness = crate::current_session_identity::read_harness_session_identity()
         .map_err(|error| format!("--actor self: {error}"))?;
     let service_id: ServiceId = String::from(client.identity().service_id.clone())
@@ -137,7 +137,7 @@ fn self_identity(client: &ControlClient) -> Result<Identity, String> {
     })
 }
 
-fn finalize_identity(identity: &mut Identity, client: &ControlClient) -> Result<(), String> {
+fn finalize_identity(identity: &mut Identity, client: &CollaborationClient) -> Result<(), String> {
     if identity
         .as_human()
         .is_some_and(|id| id.as_str() == "__agent_collaboration_self__")
@@ -149,7 +149,7 @@ fn finalize_identity(identity: &mut Identity, client: &ControlClient) -> Result<
 
 pub(super) fn finalize_command(
     command: &mut PreparedBoardCommand,
-    client: &ControlClient,
+    client: &CollaborationClient,
 ) -> Result<(), String> {
     match command {
         PreparedBoardCommand::RepositoryAttach { actor, .. }

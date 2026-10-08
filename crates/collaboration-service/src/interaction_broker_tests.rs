@@ -825,19 +825,15 @@ pub(super) async fn fixture_broker() -> (Arc<ServiceInteractionBroker>, CodexGen
             .unwrap_or_else(|error| panic!("automation store: {error}")),
     ));
     let service_id_text = String::from(service_id.clone());
-    let identity = crate::ServiceIdentity::new(
-        &service_id_text,
-        &service_id_text,
-        &format!("sha256:{}", "a".repeat(64)),
-    )
-    .unwrap_or_else(|error| panic!("service identity: {error}"))
-    .with_automation_store(automation_store)
-    .with_machine_identity(
-        crate::MachineIdentity::new(service_id, Some("Approval Fixture"))
-            .unwrap_or_else(|error| panic!("machine identity: {error}")),
-    )
-    .unwrap_or_else(|error| panic!("machine identity ownership: {error}"))
-    .with_approval_broker(Arc::clone(&broker));
+    let identity = crate::ServiceIdentity::new(&service_id_text, &service_id_text)
+        .unwrap_or_else(|error| panic!("service identity: {error}"))
+        .with_automation_store(automation_store)
+        .with_machine_identity(
+            crate::MachineIdentity::new(service_id, Some("Approval Fixture"))
+                .unwrap_or_else(|error| panic!("machine identity: {error}")),
+        )
+        .unwrap_or_else(|error| panic!("machine identity ownership: {error}"))
+        .with_approval_broker(Arc::clone(&broker));
     drop(identity);
     (broker, generation, directory)
 }

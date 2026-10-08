@@ -47,16 +47,12 @@ impl BoardControlFixture {
             clock: Arc::new(SystemSubscriptionClock),
         });
         owner.start().await.expect("real reader owner starts");
-        let identity = ServiceIdentity::new(
-            SERVICE_ID,
-            SERVICE_ID,
-            &format!("sha256:{}", "a".repeat(64)),
-        )
-        .expect("service identity")
-        .with_board_store(board)
-        .with_automation_store(Arc::clone(&pushes))
-        .with_session_delivery(delivery)
-        .with_subscription_delivery_service(owner.clone(), presence);
+        let identity = ServiceIdentity::new(SERVICE_ID, SERVICE_ID)
+            .expect("service identity")
+            .with_board_store(board)
+            .with_automation_store(Arc::clone(&pushes))
+            .with_session_delivery(delivery)
+            .with_subscription_delivery_service(owner.clone(), presence);
         let retention = identity
             .automation_retention_worker()
             .expect("real retention worker");

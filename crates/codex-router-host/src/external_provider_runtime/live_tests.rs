@@ -1,5 +1,5 @@
 use super::*;
-use collaboration_client::ControlClient;
+use collaboration_client::CollaborationClient;
 use collaboration_protocol::{
     ApprovalDecideParams, ApprovalDecision, EndpointDescription, EndpointId, EndpointRef,
     GenerationNumber, OperationId, RouterOriginRef, SessionId, UuidIdentity,
@@ -626,8 +626,8 @@ async fn live_composed_cursor_native_mcp_requires_typed_call_and_router_result()
     let manifest: collaboration_protocol::ServiceManifest =
         serde_json::from_slice(&std::fs::read(host_directory.join("service.json"))?)?;
     let service_id = manifest.service_id.clone();
-    let mut control =
-        ControlClient::connect(&host_directory, "cursor-native-live-proof", "1").await?;
+    let control =
+        CollaborationClient::connect(&host_directory, "cursor-native-live-proof", "1").await?;
     let actual_inventory = control.list_endpoints().await?;
     let actual_result_has_owned_service = actual_inventory
         .endpoints

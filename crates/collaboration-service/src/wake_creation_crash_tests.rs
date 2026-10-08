@@ -1,7 +1,10 @@
 //! A lost service process cannot turn a replayed creation into a duplicate wake.
-use super::serve_control_connection;
+//!
+//! The child process exits either before the creation runs or after it ran but before any
+//! caller could receive its answer; the parent then replays the same operation.
+use crate::CollaborationApplication;
+use crate::collaboration_application::API_RESULT_BUDGET;
 use automation_storage::AutomationStore;
-use collaboration_client::ControlClient;
 use collaboration_protocol::{AutomationPageRequest, OperationId, WakeSendRequest};
 use serde_json::json;
 use std::{
@@ -17,8 +20,8 @@ const SERVICE: &str = "00000000-0000-4000-8000-000000000001";
 const CRASH_EXIT: i32 = 92;
 type TestResult<TValue> = Result<TValue, Box<dyn std::error::Error>>;
 
-pub(super) fn checkpoint(stage: &str, method: &str) {
-    if method == "wake/send" && std::env::var(STAGE_ENV).as_deref() == Ok(stage) {
+fn checkpoint(stage: &str) {
+    if std::env::var(STAGE_ENV).as_deref() == Ok(stage) {
         std::process::exit(CRASH_EXIT);
     }
 }
@@ -34,7 +37,7 @@ async fn wake_creation_replay_survives_service_exit_before_response() -> TestRes
             tokio::process::Command::new(std::env::current_exe()?)
                 .args([
                     "--exact",
-                    "control_connection::wake_creation_crash_tests::wake_crash_child",
+                    "wake_creation_crash_tests::wake_crash_child",
                     "--ignored",
                     "--nocapture",
                 ])
@@ -54,17 +57,30 @@ async fn wake_creation_replay_survives_service_exit_before_response() -> TestRes
             )
             .into());
         }
-        let (mut client, server) = connect(&root, "00000000-0000-4000-8000-000000000003").await?;
-        let before = client.list_wakeups(page()?).await?;
+        let application = connect(&root, "00000000-0000-4000-8000-000000000003").await?;
+        let wakes = application.wakes();
+        let before = wakes
+            .wake_list(page()?, API_RESULT_BUDGET)
+            .await
+            .map_err(|failure| format!("{stage}: list failed: {failure:?}"))?;
         let expected_count = usize::from(stage == "after-dispatch");
         if before.records.len() != expected_count {
             return Err(
                 format!("{stage}: incorrect committed creation count before replay").into(),
             );
         }
-        let first = client.send_wakeup(request(operation.clone())?).await?;
-        let second = client.send_wakeup(request(operation)?).await?;
-        let after = client.list_wakeups(page()?).await?;
+        let first = wakes
+            .wake_send(request(operation.clone())?)
+            .await
+            .map_err(|failure| format!("{stage}: first replay failed: {failure:?}"))?;
+        let second = wakes
+            .wake_send(request(operation)?)
+            .await
+            .map_err(|failure| format!("{stage}: second replay failed: {failure:?}"))?;
+        let after = wakes
+            .wake_list(page()?, API_RESULT_BUDGET)
+            .await
+            .map_err(|failure| format!("{stage}: list failed: {failure:?}"))?;
         if first.definition.wakeup_id != second.definition.wakeup_id
             || after.records.len() != 1
             || first.first_fire.is_some()
@@ -78,8 +94,7 @@ async fn wake_creation_replay_survives_service_exit_before_response() -> TestRes
                 format!("{stage}: replay duplicated creation or invented native delivery").into(),
             );
         }
-        client.close().await?;
-        server.await??;
+        drop(application);
         for entry in std::fs::read_dir(&root)? {
             let entry = entry?;
             if !entry.file_type()?.is_file() {
@@ -100,28 +115,21 @@ async fn wake_crash_child() -> TestResult<()> {
     if root.as_path() != Path::new(&format!("/tmp/wake-crash-{}", operation.as_str())) {
         return Err("refusing non-fixture creation root".into());
     }
-    let (mut client, _server) = connect(&root, "00000000-0000-4000-8000-000000000002").await?;
-    client.send_wakeup(request(operation)?).await?;
-    Err("creation did not stop at selected checkpoint".into())
+    let application = connect(&root, "00000000-0000-4000-8000-000000000002").await?;
+    checkpoint("before-dispatch");
+    let created = application.wakes().wake_send(request(operation)?).await;
+    checkpoint("after-dispatch");
+    Err(format!("creation did not stop at selected checkpoint: {created:?}").into())
 }
 
-async fn connect(
-    root: &Path,
-    epoch: &str,
-) -> TestResult<(ControlClient, tokio::task::JoinHandle<std::io::Result<()>>)> {
+async fn connect(root: &Path, epoch: &str) -> TestResult<CollaborationApplication> {
     let store = Arc::new(tokio::sync::Mutex::new(
         AutomationStore::open(&root.join("automation.sqlite")).await?,
     ));
-    let identity =
-        crate::ServiceIdentity::new(SERVICE, epoch, &format!("sha256:{}", "a".repeat(64)))
-            .map_err(std::io::Error::other)?
-            .with_automation_store(store);
-    let (client, server) = tokio::net::UnixStream::pair()?;
-    let server = tokio::spawn(serve_control_connection(server, identity));
-    Ok((
-        ControlClient::initialize(client, "wake-crash-proof", "1").await?,
-        server,
-    ))
+    let identity = crate::ServiceIdentity::new(SERVICE, epoch)
+        .map_err(std::io::Error::other)?
+        .with_automation_store(store);
+    Ok(CollaborationApplication::new(identity))
 }
 
 fn page() -> TestResult<AutomationPageRequest> {

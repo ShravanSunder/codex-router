@@ -221,7 +221,6 @@ pub async fn exercise() -> ProofResult<()> {
             "betaThread":beta_thread,
         }),
     )?;
-    proof.client.close().await?;
     Ok(())
 }
 

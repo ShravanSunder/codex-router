@@ -1,10 +1,9 @@
 //! Focused CLI coverage for fetching and replying to stored Router push records.
 use serde_json::{Value, json};
 use std::{error::Error, ffi::OsString, time::Duration};
-use tokio::{
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
-    net::UnixListener,
-};
+
+mod fake_api_support;
+use fake_api_support::{FakeCollaborationApi, FakeReply};
 
 const SERVICE_ID: &str = "00000000-0000-4000-8000-000000000001";
 const SERVICE_EPOCH: &str = "00000000-0000-4000-8000-000000000002";
@@ -26,18 +25,18 @@ async fn root_show_fetches_a_push_by_link_using_the_harness_identity() {
         MockReply::Result(show_result()),
     )
     .await
-    .expect("show command completes against the Control fixture");
+    .expect("show command completes against the stand-in API");
 
     assert_eq!(
-        request.get("method").and_then(Value::as_str),
-        Some("router/show")
+        request.get("tool").and_then(Value::as_str),
+        Some("router_show")
     );
     assert_eq!(
-        request.pointer("/params/reference"),
+        request.pointer("/arguments/reference"),
         Some(&json!(PUSH_LINK))
     );
     assert_eq!(
-        request.pointer("/params/caller"),
+        request.pointer("/arguments/caller"),
         Some(&session_ref(CALLER_SESSION_ID, "codex-local"))
     );
     assert_eq!(
@@ -75,14 +74,14 @@ async fn show_preserves_a_not_permitted_service_error() {
         MockReply::Error(error),
     )
     .await
-    .expect("show command completes against the Control fixture");
+    .expect("show command completes against the stand-in API");
 
     assert_eq!(
-        request.get("method").and_then(Value::as_str),
-        Some("router/show")
+        request.get("tool").and_then(Value::as_str),
+        Some("router_show")
     );
     assert_eq!(
-        request.pointer("/params/caller/sessionId"),
+        request.pointer("/arguments/caller/sessionId"),
         Some(&json!(CALLER_SESSION_ID))
     );
     assert_eq!(
@@ -120,18 +119,18 @@ async fn message_send_reports_the_stored_push_and_uses_the_harness_sender() {
         MockReply::Result(send_result(target)),
     )
     .await
-    .expect("message send completes against the Control fixture");
+    .expect("message send completes against the stand-in API");
 
     assert_eq!(
-        request.get("method").and_then(Value::as_str),
-        Some("message/send")
+        request.get("tool").and_then(Value::as_str),
+        Some("message_send")
     );
     assert_eq!(
-        request.pointer("/params/message/sender"),
+        request.pointer("/arguments/message/sender"),
         Some(&session_ref(CALLER_SESSION_ID, "codex-local"))
     );
     assert_eq!(
-        request.pointer("/params/message/text"),
+        request.pointer("/arguments/message/text"),
         Some(&json!("hello recipient"))
     );
     assert_eq!(output.status.code(), Some(0));
@@ -162,7 +161,7 @@ async fn held_message_send_prints_the_delivery_condition_and_exits_zero() {
         MockReply::Result(result),
     )
     .await
-    .expect("message send completes against the Control fixture");
+    .expect("message send completes against the stand-in API");
 
     assert_eq!(output.status.code(), Some(0));
     assert!(output.stdout.is_empty());
@@ -199,7 +198,7 @@ async fn rejected_message_send_prints_one_actionable_line_and_exit_four() {
         MockReply::Result(result),
     )
     .await
-    .expect("message send completes against the Control fixture");
+    .expect("message send completes against the stand-in API");
 
     assert_eq!(output.status.code(), Some(4));
     assert!(output.stdout.is_empty());
@@ -238,7 +237,7 @@ async fn claude_queue_rejection_recommends_auto_and_exits_four() {
         MockReply::Result(result),
     )
     .await
-    .expect("message send completes against the Control fixture");
+    .expect("message send completes against the stand-in API");
 
     assert_eq!(output.status.code(), Some(4));
     assert!(output.stdout.is_empty());
@@ -279,7 +278,7 @@ async fn ambiguous_peer_rejection_lists_claims_and_the_branch_next_step() {
         MockReply::Result(result),
     )
     .await
-    .expect("message send completes against the Control fixture");
+    .expect("message send completes against the stand-in API");
 
     assert_eq!(output.status.code(), Some(4));
     assert!(output.stdout.is_empty());
@@ -312,7 +311,7 @@ async fn unknown_message_send_points_to_show_before_retrying_and_exits_five() {
         MockReply::Result(result),
     )
     .await
-    .expect("message send completes against the Control fixture");
+    .expect("message send completes against the stand-in API");
 
     assert_eq!(output.status.code(), Some(5));
     assert!(output.stdout.is_empty());
@@ -353,7 +352,7 @@ async fn stored_message_send_outcome_unknown_keeps_the_push_link_and_exits_five(
         MockReply::Error(error),
     )
     .await
-    .expect("message send completes against the Control fixture");
+    .expect("message send completes against the stand-in API");
 
     assert_eq!(output.status.code(), Some(5));
     assert!(output.stdout.is_empty());
@@ -406,14 +405,14 @@ async fn message_inbox_prints_only_the_notice_line() {
         MockReply::Result(notice_list()),
     )
     .await
-    .expect("message inbox completes against the Control fixture");
+    .expect("message inbox completes against the stand-in API");
 
     assert_eq!(
-        request.get("method").and_then(Value::as_str),
-        Some("message/inbox")
+        request.get("tool").and_then(Value::as_str),
+        Some("message_inbox")
     );
     assert_eq!(
-        request.pointer("/params/caller"),
+        request.pointer("/arguments/caller"),
         Some(&session_ref(CALLER_SESSION_ID, "codex-local"))
     );
     assert_eq!(output.status.code(), Some(0));
@@ -439,15 +438,15 @@ async fn message_history_uses_the_explicit_session_and_returns_notice_records() 
         MockReply::Result(notice_list()),
     )
     .await
-    .expect("message history completes against the Control fixture");
+    .expect("message history completes against the stand-in API");
 
     assert_eq!(
-        request.get("method").and_then(Value::as_str),
-        Some("message/history")
+        request.get("tool").and_then(Value::as_str),
+        Some("message_history")
     );
-    assert_eq!(request.pointer("/params/with"), Some(&other_session));
+    assert_eq!(request.pointer("/arguments/with"), Some(&other_session));
     assert_eq!(
-        request.pointer("/params/caller/sessionId"),
+        request.pointer("/arguments/caller/sessionId"),
         Some(&json!(CALLER_SESSION_ID))
     );
     assert_eq!(output.status.code(), Some(0));
@@ -473,16 +472,22 @@ async fn message_reply_uses_an_explicit_push_id_and_reports_the_recipient() {
         MockReply::Result(reply_result()),
     )
     .await
-    .expect("message reply completes against the Control fixture");
+    .expect("message reply completes against the stand-in API");
 
     assert_eq!(
-        request.get("method").and_then(Value::as_str),
-        Some("message/reply")
+        request.get("tool").and_then(Value::as_str),
+        Some("message_reply")
     );
-    assert_eq!(request.pointer("/params/reference"), Some(&json!(PUSH_ID)));
-    assert_eq!(request.pointer("/params/text"), Some(&json!("answer text")));
     assert_eq!(
-        request.pointer("/params/caller"),
+        request.pointer("/arguments/reference"),
+        Some(&json!(PUSH_ID))
+    );
+    assert_eq!(
+        request.pointer("/arguments/text"),
+        Some(&json!("answer text"))
+    );
+    assert_eq!(
+        request.pointer("/arguments/caller"),
         Some(&session_ref(CALLER_SESSION_ID, "codex-local"))
     );
     assert_eq!(output.status.code(), Some(0));
@@ -513,10 +518,10 @@ async fn message_reply_accepts_a_router_link_reference() {
         MockReply::Result(reply_result()),
     )
     .await
-    .expect("message reply completes against the Control fixture");
+    .expect("message reply completes against the stand-in API");
 
     assert_eq!(
-        request.pointer("/params/reference"),
+        request.pointer("/arguments/reference"),
         Some(&json!(PUSH_LINK))
     );
     assert_eq!(output.status.code(), Some(0));
@@ -624,9 +629,9 @@ fn root_show_without_a_reference_returns_required_syntax() {
 }
 
 #[test]
-fn show_result_fixture_matches_the_typed_control_result() {
+fn show_result_fixture_matches_the_typed_show_result() {
     serde_json::from_value::<collaboration_client::protocol::PushRecordShowResult>(show_result())
-        .expect("show result fixture matches its Control type");
+        .expect("show result fixture matches its typed result");
 }
 
 enum MockReply {
@@ -634,101 +639,31 @@ enum MockReply {
     Error(Value),
 }
 
-struct ServiceFixture {
-    directory: tempfile::TempDir,
-    _publication: collaboration_service::ManifestPublication,
-    listener: Option<UnixListener>,
-}
-
-impl ServiceFixture {
-    fn new() -> TestResult<Self> {
-        let directory = tempfile::tempdir()?;
-        let listener = UnixListener::bind(directory.path().join("control.sock"))?;
-        let digest = format!("sha256:{}", "a".repeat(64));
-        let manifest: collaboration_client::protocol::ServiceManifest =
-            serde_json::from_value(json!({
-                "version": 2,
-                "serviceId": SERVICE_ID,
-                "serviceEpoch": SERVICE_EPOCH,
-                "machineLabel": "fixture-host",
-                "control": {"transport": "unixJsonLines", "path": "control.sock"},
-                "controlSchemaDigest": digest,
-                "mcp": {"transport": "streamableHttp", "url": "http://127.0.0.1:0/mcp"}
-            }))?;
-        let publication =
-            collaboration_service::ManifestPublication::publish(directory.path(), &manifest)?;
-        Ok(Self {
-            directory,
-            _publication: publication,
-            listener: Some(listener),
-        })
-    }
-}
-
+/// Runs the CLI against a stand-in API that answers its one tool call with `reply`, and
+/// returns the output with the call as `{"tool", "arguments"}`.
 async fn invoke_with_reply(
     arguments: Vec<OsString>,
     reply: MockReply,
 ) -> TestResult<(std::process::Output, Value)> {
-    let mut fixture = ServiceFixture::new()?;
-    let listener = fixture.listener.take().ok_or("fixture listener missing")?;
-    let response_task = tokio::spawn(serve_control_request(listener, reply));
+    let mut fixture = FakeCollaborationApi::new(SERVICE_ID, SERVICE_EPOCH)?;
+    // The message tools present a stored push's receipt; other results pass through as is.
+    let reply = match reply {
+        MockReply::Result(result) => FakeReply::Receipt(result),
+        MockReply::Error(error) => FakeReply::Error(error),
+    };
+    let response_task = fixture.serve(vec![reply]);
     let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_agent-collaboration"));
     command
         .args(arguments)
         .arg("--service-directory")
-        .arg(fixture.directory.path())
+        .arg(fixture.directory())
         .env("CODEX_THREAD_ID", CALLER_SESSION_ID)
         .env_remove("CLAUDE_CODE_SESSION_ID")
         .env_remove("CURSOR_CONVERSATION_ID");
     let output = tokio::time::timeout(Duration::from_secs(5), command.output()).await??;
-    let request = response_task.await??;
+    let mut calls = response_task.await??;
+    let request = calls.pop().ok_or("the CLI made no tool call")?;
     Ok((output, request))
-}
-
-async fn serve_control_request(listener: UnixListener, reply: MockReply) -> TestResult<Value> {
-    let (stream, _) = listener.accept().await?;
-    let mut stream = BufReader::new(stream);
-    let initialize = read_request(&mut stream).await?;
-    assert_eq!(
-        initialize.get("method").and_then(Value::as_str),
-        Some("control/initialize")
-    );
-    let initialize_id = initialize
-        .get("id")
-        .cloned()
-        .ok_or("initialize ID missing")?;
-    let initialized = json!({
-        "jsonrpc": "2.0",
-        "id": initialize_id,
-        "result": {
-            "version": {"major": 1, "minor": 0},
-            "serviceId": SERVICE_ID,
-            "serviceEpoch": SERVICE_EPOCH,
-            "controlSchemaDigest": format!("sha256:{}", "a".repeat(64))
-        }
-    });
-    stream
-        .get_mut()
-        .write_all(format!("{initialized}\n").as_bytes())
-        .await?;
-
-    let request = read_request(&mut stream).await?;
-    let request_id = request.get("id").cloned().ok_or("request ID missing")?;
-    let response = match reply {
-        MockReply::Result(result) => json!({"jsonrpc":"2.0","id":request_id,"result":result}),
-        MockReply::Error(error) => json!({"jsonrpc":"2.0","id":request_id,"error":error}),
-    };
-    stream
-        .get_mut()
-        .write_all(format!("{response}\n").as_bytes())
-        .await?;
-    Ok(request)
-}
-
-async fn read_request(stream: &mut BufReader<tokio::net::UnixStream>) -> TestResult<Value> {
-    let mut line = String::new();
-    stream.read_line(&mut line).await?;
-    Ok(serde_json::from_str(&line)?)
 }
 
 fn session_ref(session_id: &str, endpoint_id: &str) -> Value {

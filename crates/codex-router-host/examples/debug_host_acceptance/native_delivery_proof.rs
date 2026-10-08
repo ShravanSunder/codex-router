@@ -4,7 +4,7 @@ use super::{
     owned_thread_registry::OwnedThreadRegistry,
 };
 use codex_native_integration::NativeProtocolConnection;
-use collaboration_client::ControlClient;
+use collaboration_client::CollaborationClient;
 use serde_json::{Value, json};
 use std::{error::Error, path::Path};
 
@@ -18,13 +18,13 @@ pub async fn run_delivery_proof(
     owned: &mut OwnedThreadRegistry,
     request: DeliveryProofRequest<'_>,
 ) -> Result<(), Box<dyn Error>> {
-    let control = ControlClient::connect(
+    let client = CollaborationClient::connect(
         request.directory,
         "native-delivery-proof",
         env!("CARGO_PKG_VERSION"),
     )
     .await?;
-    let service = control.identity().service_id.clone();
+    let service = client.identity().service_id.clone();
     let first = owned.create(native, request.cwd).await?;
     let second = owned.create(native, request.cwd).await?;
     // Materialize before the public listener explicitly attaches by native resume.
@@ -198,7 +198,6 @@ pub async fn run_delivery_proof(
         return Err("idle queued turn did not complete".into());
     }
     idle_listener.close().await?;
-    control.close().await?;
     println!(
         "{}",
         json!({"kind":"idleQueuePassed","threadId":second,"turnId":idle_turn,"acceptance":idle_queue.get("acceptance"),"result":"IDLE_QUEUE_RESULT"})

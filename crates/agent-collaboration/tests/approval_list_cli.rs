@@ -36,7 +36,6 @@ async fn provider_pending_approval_uses_legacy_cli_shape_and_safe_decision() {
         .expect("private fixture permissions");
     let service_id = "00000000-0000-4000-8000-000000000001";
     let epoch = "00000000-0000-4000-8000-000000000002";
-    let digest = format!("sha256:{}", "a".repeat(64));
     let typed_service_id: collaboration_protocol::UuidIdentity =
         service_id.to_owned().try_into().expect("service ID");
     let endpoint = collaboration_protocol::EndpointRef {
@@ -62,7 +61,7 @@ async fn provider_pending_approval_uses_legacy_cli_shape_and_safe_decision() {
             .await
             .expect("automation store"),
     ));
-    let identity = collaboration_service::ServiceIdentity::new(service_id, epoch, &digest)
+    let identity = collaboration_service::ServiceIdentity::new(service_id, epoch)
         .expect("service identity")
         .with_automation_store(Arc::clone(&automation_store))
         .with_approval_broker(Arc::clone(&broker));
@@ -107,23 +106,12 @@ async fn provider_pending_approval_uses_legacy_cli_shape_and_safe_decision() {
         )
         .await
         .expect("pending provider approval");
-    let control = collaboration_service::LocalControlService::bind(
-        &directory.path().join("control.sock"),
-        identity,
+    let served = collaboration_mcp::test_support::ServedCollaborationApi::start(
+        directory.path(),
+        collaboration_service::CollaborationApplication::new(identity),
     )
-    .expect("control bind");
-    let manifest = serde_json::from_value(json!({
-        "version":2,"serviceId":service_id,"serviceEpoch":epoch,
-        "machineLabel":"fixture-host","control":{"transport":"unixJsonLines","path":"control.sock"},
-        "controlSchemaDigest":digest,
-        "mcp":{"transport":"streamableHttp","url":"http://127.0.0.1:0/mcp"}
-    }))
-    .expect("manifest");
-    let publication =
-        collaboration_service::ManifestPublication::publish(directory.path(), &manifest)
-            .expect("publish manifest");
-    let stop = CancellationToken::new();
-    let service = tokio::spawn(control.run(stop.clone()));
+    .await
+    .expect("serve collaboration API");
     let listed = tokio::process::Command::new(env!("CARGO_BIN_EXE_agent-collaboration"))
         .args([
             "approval",
@@ -176,12 +164,7 @@ async fn provider_pending_approval_uses_legacy_cli_shape_and_safe_decision() {
     assert!(matches!(receiver.await.expect("agent resolution"),
         collaboration_service::TypedApprovalResolution::Selected(selected)
             if selected.option_id.as_str() == "allow-once"));
-    stop.cancel();
-    service
-        .await
-        .expect("service join")
-        .expect("service shutdown");
-    drop(publication);
+    served.stop().await.expect("collaboration API stops");
 }
 
 #[tokio::test]
@@ -193,35 +176,21 @@ async fn approval_list_rejection_preserves_rejected_kind_and_exit_four() {
         .expect("private fixture directory");
     let service_id = "00000000-0000-4000-8000-000000000001";
     let epoch = "00000000-0000-4000-8000-000000000002";
-    let digest = format!("sha256:{}", "a".repeat(64));
-    let identity = collaboration_service::ServiceIdentity::new(service_id, epoch, &digest)
-        .expect("service identity");
-    let control =
-        collaboration_service::LocalControlService::bind(&root.join("control.sock"), identity)
-            .expect("control listener");
-    let manifest = serde_json::from_value(json!({
-        "version":2,"serviceId":service_id,"serviceEpoch":epoch,
-        "machineLabel":"fixture-host","control":{"transport":"unixJsonLines","path":"control.sock"},
-        "controlSchemaDigest":digest,
-        "mcp":{"transport":"streamableHttp","url":"http://127.0.0.1:0/mcp"}
-    }))
-    .expect("manifest");
-    let publication = collaboration_service::ManifestPublication::publish(&root, &manifest)
-        .expect("manifest publication");
-    let stop = CancellationToken::new();
-    let service = tokio::spawn(control.run(stop.clone()));
+    let identity =
+        collaboration_service::ServiceIdentity::new(service_id, epoch).expect("service identity");
+    let served = collaboration_mcp::test_support::ServedCollaborationApi::start(
+        &root,
+        collaboration_service::CollaborationApplication::new(identity),
+    )
+    .await
+    .expect("serve collaboration API");
     let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_agent-collaboration"))
         .args(["approval", "list", "--json", "--service-directory"])
         .arg(&root)
         .output()
         .await
         .expect("approval list output");
-    stop.cancel();
-    service
-        .await
-        .expect("service join")
-        .expect("service shutdown");
-    drop(publication);
+    served.stop().await.expect("collaboration API stops");
     std::fs::remove_dir(&root).expect("fixture cleanup");
 
     assert_eq!(

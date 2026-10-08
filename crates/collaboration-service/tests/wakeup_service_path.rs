@@ -1,9 +1,10 @@
 use automation_storage::AutomationStore;
-use collaboration_client::ControlClient;
 use collaboration_protocol::{OperationId, WakeSendRequest, WakeShowRequest};
-use collaboration_service::{ServiceIdentity, serve_control_connection};
+use collaboration_service::ServiceIdentity;
 use serde_json::json;
 use std::sync::Arc;
+#[path = "support/served_api.rs"]
+mod served_api;
 #[path = "support/wake_push_draft.rs"]
 mod wake_push_test_support;
 
@@ -18,13 +19,11 @@ async fn real_control_client_preserves_wake_identity_timing_and_message()
     let identity = ServiceIdentity::new(
         "00000000-0000-4000-8000-000000000001",
         "00000000-0000-4000-8000-000000000002",
-        &format!("sha256:{}", "a".repeat(64)),
     )
     .map_err(std::io::Error::other)?
     .with_automation_store(store.clone());
-    let (socket, server) = tokio::net::UnixStream::pair()?;
-    let task = tokio::spawn(serve_control_connection(server, identity));
-    let mut client = ControlClient::initialize(socket, "wake-test", "1").await?;
+    let served = served_api::ServedApi::start(identity).await?;
+    let client = served.client("wake-test").await?;
     let target = json!({"endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"codex-local"},"sessionId":"fixture-only-thread"});
     let request: WakeSendRequest = serde_json::from_value(
         json!({"operationId":OperationId::generate(),"message":{"target":target.clone(),"content":{"kind":"agent","sender":target,"text":"Check status"},"delivery":"queue","generationGuard":null},"timing":{"kind":"after","seconds":60},"expiry":{"kind":"after","seconds":120}}),
@@ -231,8 +230,7 @@ async fn real_control_client_preserves_wake_identity_timing_and_message()
     if !matches!(error, collaboration_client::WakeClientError::Rejected(_)) {
         return Err(format!("invalid timezone lacked structured guidance: {error:?}").into());
     }
-    client.close().await?;
-    task.await??;
+    served.stop().await?;
     drop(store);
     std::fs::remove_file(path)?;
     Ok(())

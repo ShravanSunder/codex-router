@@ -6,8 +6,7 @@ use collaboration_protocol::{
     ObservationTimestamp, ProviderKind, RouterExecutableRelation, SchemaDigest, UuidIdentity,
 };
 use collaboration_service::{
-    LocalControlService, NativeRelayListener, ServiceIdentity, load_service_identity,
-    new_service_uuid,
+    NativeRelayListener, ServiceIdentity, load_service_identity, new_service_uuid,
 };
 use std::{io, net::SocketAddr, path::PathBuf};
 use tokio::task::JoinSet;
@@ -108,7 +107,9 @@ pub struct CollaborationRuntime {
     provider_delivery_route: Option<std::sync::Arc<crate::ProviderAcpDeliveryRoute>>,
     provider_retention: Option<tokio::task::JoinHandle<()>>,
     directory: PathBuf,
-    control_schema: collaboration_protocol::ControlSchema,
+    /// The native schema bundle the Host started with, published as the manifest's
+    /// `nativeSchemaDigest`.
+    native_digest: Option<SchemaDigest>,
     payload_cache: crate::native_schema_cache::NativeSchemaCache,
     service_id: UuidIdentity,
     service_epoch: UuidIdentity,
@@ -124,7 +125,7 @@ pub struct CollaborationRuntime {
     current_generation: Option<CodexGeneration>,
     observer_task: Option<tokio::task::JoinHandle<()>>,
     manifest: Option<collaboration_service::ManifestPublication>,
-    mcp: Option<collaboration_mcp::CollaborationMcpListener>,
+    collaboration_api: ServedCollaborationApi,
 }
 impl CollaborationRuntime {
     pub async fn configure_provider_operation_retention(
@@ -253,9 +254,9 @@ impl CollaborationRuntime {
         } else {
             None
         };
-        let control_schema = collaboration_protocol::ControlSchema::generate(native_digest)
-            .map_err(io::Error::other)?;
-        collaboration_service::publish_control_schema(&inputs.directory, &control_schema)?;
+        let native_definitions = inputs.native_schema.as_ref().and_then(|export| {
+            collaboration_mcp::NativeSchemaDefinitions::from_bundle(export.bundle())
+        });
         let journal = async {
             let database = lifecycle_observation::ObservationJournal::open(
                 &inputs.directory.join("session-registry.sqlite"),
@@ -281,7 +282,6 @@ impl CollaborationRuntime {
         let mut identity = ServiceIdentity::new(
             &String::from(service_id.clone()),
             &String::from(service_epoch.clone()),
-            &String::from(control_schema.digest().clone()),
         )
         .map_err(io::Error::other)?
         .with_machine_identity(machine_identity.clone())
@@ -347,18 +347,8 @@ impl CollaborationRuntime {
                 None
             }
         };
-        let mcp_bind = collaboration_mcp::LoopbackBindAddress::new(inputs.mcp_bind)
-            .map_err(io::Error::other)?;
-        let mcp = collaboration_mcp::CollaborationMcpListener::start_with_router_relation(
-            collaboration_mcp::CollaborationMcpListenerConfig {
-                bind_address: mcp_bind,
-                service_directory: inputs.directory.clone(),
-                allowed_origins: Vec::new(),
-            },
-            relation_receiver,
-        )
-        .await?;
-        let mcp_url = mcp.local_url();
+        let collaboration_api = BoundCollaborationApi::bind(inputs.mcp_bind).await?;
+        let mcp_url = collaboration_api.url();
         let startup = crate::provider_startup_composition::compose_provider_startup(
             provider_launches,
             provider_store.clone(),
@@ -504,8 +494,9 @@ impl CollaborationRuntime {
             identity
         };
         let permits = std::sync::Arc::new(tokio::sync::Semaphore::new(32));
-        let control = LocalControlService::bind(&inputs.directory.join("control.sock"), identity)?
-            .with_connection_budget(std::sync::Arc::clone(&permits));
+        let application = collaboration_service::CollaborationApplication::new(identity);
+        let collaboration_api =
+            collaboration_api.with_service_socket(&inputs.directory.join("control.sock"))?;
         let native = NativeRelayListener::bind(
             &inputs.directory.join("codex-native.sock"),
             publication.admission_gate(),
@@ -613,19 +604,21 @@ impl CollaborationRuntime {
         let manifest = collaboration_service::ManifestPublication::publish(
             &inputs.directory,
             &collaboration_protocol::ServiceManifest {
-                version: 2,
+                version: collaboration_protocol::SERVICE_MANIFEST_VERSION,
                 service_id: machine_identity.service_id().clone(),
-                machine_label: machine_identity.machine_label().clone(),
                 service_epoch: service_epoch.clone(),
-                control: collaboration_protocol::ControlSelector {
-                    transport: collaboration_protocol::ControlTransport::UnixJsonLines,
-                    path: collaboration_protocol::ControlSocketPath::ControlSocket,
+                machine_label: machine_identity.machine_label().clone(),
+                service_version: NonEmptyText::try_from(env!("CARGO_PKG_VERSION").to_owned())
+                    .map_err(io::Error::other)?,
+                api: collaboration_protocol::ApiSelector {
+                    transport: collaboration_protocol::ApiTransport::StreamableHttpUnix,
+                    path: collaboration_protocol::ApiSocketPath::ServiceSocket,
                 },
-                control_schema_digest: control_schema.digest().clone(),
                 mcp: collaboration_protocol::McpSelector {
                     transport: collaboration_protocol::McpTransport::StreamableHttp,
                     url: mcp_url,
                 },
+                native_schema_digest: native_digest.clone(),
                 router_proxy_endpoint,
             },
         )?;
@@ -643,9 +636,17 @@ impl CollaborationRuntime {
             schedule_worker.map(|worker| tokio::spawn(worker.run(shutdown.clone())));
         let automation_maintenance =
             retention_worker.map(|worker| tokio::spawn(worker.run(shutdown.clone())));
+        let collaboration_api =
+            collaboration_api.serve(&collaboration_mcp::CollaborationApiConfig {
+                application,
+                service_directory: inputs.directory.clone(),
+                native_definitions,
+                router_executable_relation: relation_receiver,
+                concurrent_requests: collaboration_mcp::DEFAULT_CONCURRENT_REQUESTS,
+                shutdown: shutdown.clone(),
+            });
         let mut tasks = JoinSet::new();
         let mut provider_retirement_tasks = JoinSet::new();
-        tasks.spawn(control.run(shutdown.clone()));
         tasks.spawn(native.run(shutdown.clone()));
         tasks.spawn(acp.run(shutdown.clone()));
         for app_server in provider_app_servers {
@@ -683,7 +684,7 @@ impl CollaborationRuntime {
             provider_delivery_route,
             provider_retention: None,
             directory: inputs.directory,
-            control_schema,
+            native_digest,
             payload_cache: crate::native_schema_cache::NativeSchemaCache::default(),
             service_id,
             service_epoch,
@@ -699,7 +700,7 @@ impl CollaborationRuntime {
             automation_maintenance,
             current_generation: None,
             observer_task: None,
-            mcp: Some(mcp),
+            collaboration_api,
         })
     }
 
@@ -742,7 +743,7 @@ impl CollaborationRuntime {
         let generation = self.publication.ready(
             at.clone(),
             schema.clone(),
-            if self.control_schema.native_digest() == schema.as_ref() {
+            if self.native_digest.as_ref() == schema.as_ref() {
                 payload_schemas.clone()
             } else {
                 None
@@ -915,6 +916,9 @@ impl CollaborationRuntime {
     }
 }
 
+#[path = "collaboration_runtime/collaboration_api_serving.rs"]
+mod collaboration_api_serving;
+use collaboration_api_serving::{BoundCollaborationApi, ServedCollaborationApi};
 #[path = "collaboration_runtime/lifecycle.rs"]
 mod lifecycle;
 

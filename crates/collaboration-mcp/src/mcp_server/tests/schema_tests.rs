@@ -25,61 +25,45 @@ fn native_schema_refs_bind_when_advertised_and_remain_honestly_opaque_otherwise(
 
 #[test]
 fn advertised_native_bundle_is_loaded_into_discovered_tool_schema() {
-    let temporary = tempfile::tempdir().expect("temporary directory");
-    let control_hex = "a".repeat(64);
-    let native_hex = "b".repeat(64);
-    std::fs::write(
-        temporary.path().join("service.json"),
-        serde_json::to_vec(&serde_json::json!({
-            "controlSchemaDigest": format!("sha256:{control_hex}")
-        }))
-        .expect("manifest JSON"),
-    )
-    .expect("manifest write");
-    std::fs::write(
-        temporary
-            .path()
-            .join(format!("control-schema-{control_hex}.json")),
-        serde_json::to_vec(&serde_json::json!({
-            "x-nativeSchemaDigest": format!("sha256:{native_hex}")
-        }))
-        .expect("Control schema JSON"),
-    )
-    .expect("Control schema write");
-    std::fs::write(
-        temporary.path().join(format!("{native_hex}.json")),
-        serde_json::to_vec(&serde_json::json!({
-            "documents": {
-                "codex_app_server_protocol.schemas.json": {
-                        "definitions": {"v2": {
-                            "AbsolutePathBuf":{"type":"string","minLength":1},
-                            "ThreadEnvironment":{"type":"object","required":["cwd"],"properties":{
-                                "cwd":{"$ref":"#/definitions/v2/AbsolutePathBuf"}
-                            }},
-                            "ThreadExtra":{"type":"object","properties":{
-                                "parent":{"$ref":"#/definitions/v2/Thread"}
-                            }},
-                            "Unrelated":{"type":"object","properties":{"ignored":{"type":"boolean"}}},
-                            "Thread": {
-                                "type":"object","required":["id","environment"],
-                                "properties":{
-                                    "id":{"type":"string"},
-                                    "environment":{"$ref":"#/definitions/v2/ThreadEnvironment"},
-                                    "extra":{"$ref":"#/definitions/v2/ThreadExtra"}
-                                }
-                            }
-                        }}
+    let document = serde_json::json!({
+        "definitions": {"v2": {
+            "AbsolutePathBuf":{"type":"string","minLength":1},
+            "ThreadEnvironment":{"type":"object","required":["cwd"],"properties":{
+                "cwd":{"$ref":"#/definitions/v2/AbsolutePathBuf"}
+            }},
+            "ThreadExtra":{"type":"object","properties":{
+                "parent":{"$ref":"#/definitions/v2/Thread"}
+            }},
+            "Unrelated":{"type":"object","properties":{"ignored":{"type":"boolean"}}},
+            "Thread": {
+                "type":"object","required":["id","environment"],
+                "properties":{
+                    "id":{"type":"string"},
+                    "environment":{"$ref":"#/definitions/v2/ThreadEnvironment"},
+                    "extra":{"$ref":"#/definitions/v2/ThreadExtra"}
                 }
             }
-        }))
-        .expect("native schema JSON"),
+        }}
+    });
+    let bundle = codex_native_integration::NativeSchemaBundle::from_documents(
+        std::collections::BTreeMap::from([(
+            "codex_app_server_protocol.schemas.json".to_owned(),
+            serde_json::to_vec(&document).expect("native schema JSON"),
+        )]),
     )
-    .expect("native schema write");
-    let server = CollaborationMcpServer::new(temporary.path().to_owned());
-    let inspect = server
-        .resolved_tools()
-        .into_iter()
+    .expect("native schema bundle");
+    let definitions =
+        crate::NativeSchemaDefinitions::from_bundle(&bundle).expect("bundle v2 definitions");
+    assert_eq!(
+        definitions.digest(),
+        codex_native_integration::NativeSchemaDigest::from(&bundle)
+    );
+    let surface = super::super::ToolSurface::new(Some(&definitions));
+    let inspect = surface
+        .tools()
+        .iter()
         .find(|tool| tool.name == "session_inspect")
+        .cloned()
         .expect("session inspect tool");
     let schema = serde_json::Value::Object(
         (**inspect
@@ -103,9 +87,9 @@ fn advertised_native_bundle_is_loaded_into_discovered_tool_schema() {
     });
     assert!(validator.is_valid(&result));
 
-    let board = server
-        .resolved_tools()
-        .into_iter()
+    let board = surface
+        .tools()
+        .iter()
         .find(|tool| tool.name == "board_list")
         .expect("board list tool");
     let board_schema = serde_json::to_string(&board.input_schema).expect("board schema encoding");
@@ -114,8 +98,7 @@ fn advertised_native_bundle_is_loaded_into_discovered_tool_schema() {
 
 #[test]
 fn advertised_tool_output_schemas_have_object_roots() {
-    let temporary = tempfile::tempdir().expect("temporary directory");
-    let server = CollaborationMcpServer::new(temporary.path().to_owned());
+    let server = CollaborationMcpServer::catalog_only();
     let invalid = server
         .resolved_tools()
         .into_iter()
@@ -139,8 +122,7 @@ fn advertised_tool_output_schemas_have_object_roots() {
 
 #[test]
 fn described_success_types_keep_their_output_root_description() {
-    let temporary = tempfile::tempdir().expect("temporary directory");
-    let server = CollaborationMcpServer::new(temporary.path().to_owned());
+    let server = CollaborationMcpServer::catalog_only();
     for name in ["board_message_show", "board_thread_show"] {
         let schema = server
             .resolved_tools()
@@ -274,8 +256,7 @@ fn boolean_schema_normalization_preserves_instance_and_annotation_booleans() {
 
 #[test]
 fn advertised_tool_schemas_validate_available_success_and_every_error_sample() {
-    let temporary = tempfile::tempdir().expect("temporary directory");
-    let server = CollaborationMcpServer::new(temporary.path().to_owned());
+    let server = CollaborationMcpServer::catalog_only();
     let advertised = server
         .resolved_tools()
         .into_iter()

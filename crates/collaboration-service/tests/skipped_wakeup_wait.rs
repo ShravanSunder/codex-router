@@ -1,10 +1,12 @@
 //! A paused one-shot cannot fabricate a first firing when resumed after its due time.
 use automation_storage::{AutomationStore, WakeAction, WakeCreate, WakeMutation};
-use collaboration_client::{ControlClient, WakeWaitError};
+use collaboration_client::WakeWaitError;
 use collaboration_protocol::{OperationId, SavedMessage, WakeShowRequest};
-use collaboration_service::{ServiceIdentity, serve_control_connection};
+use collaboration_service::ServiceIdentity;
 use serde_json::json;
 use std::sync::Arc;
+#[path = "support/served_api.rs"]
+mod served_api;
 
 #[tokio::test]
 async fn sdk_wait_reports_skipped_one_shot_without_a_delivery()
@@ -41,13 +43,11 @@ async fn sdk_wait_reports_skipped_one_shot_without_a_delivery()
     let identity = ServiceIdentity::new(
         "00000000-0000-4000-8000-000000000001",
         "00000000-0000-4000-8000-000000000002",
-        &format!("sha256:{}", "a".repeat(64)),
     )
     .map_err(std::io::Error::other)?
     .with_automation_store(Arc::clone(&store));
-    let (socket, server) = tokio::net::UnixStream::pair()?;
-    let task = tokio::spawn(serve_control_connection(server, identity));
-    let mut client = ControlClient::initialize(socket, "skipped-wait", "1").await?;
+    let served = served_api::ServedApi::start(identity).await?;
+    let client = served.client("skipped-wait").await?;
     let current = client
         .read_wakeup(WakeShowRequest {
             wakeup_id: wake.definition.wakeup_id.clone(),
@@ -66,7 +66,7 @@ async fn sdk_wait_reports_skipped_one_shot_without_a_delivery()
     if !matches!(result, Err(WakeWaitError::FinishedWithoutFiring { .. })) {
         return Err("skipped one-shot did not return its typed terminal wait error".into());
     }
-    task.await??;
+    served.stop().await?;
     drop(store);
     std::fs::remove_file(path)?;
     Ok(())

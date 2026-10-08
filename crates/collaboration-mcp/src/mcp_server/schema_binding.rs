@@ -1,33 +1,4 @@
-use std::{collections::BTreeSet, path::Path};
-
-pub(super) fn load_advertised_native_definitions(
-    service_directory: &Path,
-) -> Option<serde_json::Map<String, serde_json::Value>> {
-    let manifest: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(service_directory.join("service.json")).ok()?)
-            .ok()?;
-    let control_digest = manifest.get("controlSchemaDigest")?.as_str()?;
-    let control_hex = validated_digest_suffix(control_digest)?;
-    let control: serde_json::Value = serde_json::from_slice(
-        &std::fs::read(service_directory.join(format!("control-schema-{control_hex}.json")))
-            .ok()?,
-    )
-    .ok()?;
-    let native_hex = validated_digest_suffix(control.get("x-nativeSchemaDigest")?.as_str()?)?;
-    let bundle: serde_json::Value = serde_json::from_slice(
-        &std::fs::read(service_directory.join(format!("{native_hex}.json"))).ok()?,
-    )
-    .ok()?;
-    bundle
-        .pointer("/documents/codex_app_server_protocol.schemas.json/definitions/v2")?
-        .as_object()
-        .cloned()
-}
-
-fn validated_digest_suffix(digest: &str) -> Option<&str> {
-    let suffix = digest.strip_prefix("sha256:")?;
-    (suffix.len() == 64 && suffix.bytes().all(|byte| byte.is_ascii_hexdigit())).then_some(suffix)
-}
+use std::collections::BTreeSet;
 
 pub(super) fn bind_native_schema_refs(
     value: &mut serde_json::Value,

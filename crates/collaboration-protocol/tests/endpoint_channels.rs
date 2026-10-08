@@ -1,4 +1,4 @@
-use collaboration_protocol::{EndpointDescription, control_schema_document};
+use collaboration_protocol::{EndpointDescription, EndpointInventory};
 use serde_json::{Value, json};
 
 #[test]
@@ -80,22 +80,14 @@ fn external_provider_advertisement_is_typed_without_private_launch_details() {
 
 #[test]
 fn endpoint_inventory_schema_publishes_external_provider_binding() {
-    let schema = control_schema_document(None).unwrap_or_else(|error| panic!("schema: {error}"));
-    let schema_reference = schema["x-methods"]["endpoint/list"]["response"]["$ref"]
-        .as_str()
-        .unwrap_or_else(|| panic!("endpoint response schema"));
-    let mut selected = schema.clone();
-    selected["$ref"] = json!(schema_reference);
+    let schema = serde_json::to_value(schemars::schema_for!(EndpointInventory))
+        .unwrap_or_else(|error| panic!("schema: {error}"));
     let validator =
-        jsonschema::validator_for(&selected).unwrap_or_else(|error| panic!("validator: {error}"));
+        jsonschema::validator_for(&schema).unwrap_or_else(|error| panic!("validator: {error}"));
     let response = json!({
-        "jsonrpc": "2.0",
-        "id": "endpoint-list-1",
-        "result": {
-            "serviceEpoch": "00000000-0000-4000-8000-000000000002",
-            "sequence": 4,
-            "endpoints": [external_provider_endpoint()]
-        }
+        "serviceEpoch": "00000000-0000-4000-8000-000000000002",
+        "sequence": 4,
+        "endpoints": [external_provider_endpoint()]
     });
     assert!(validator.is_valid(&response));
 }

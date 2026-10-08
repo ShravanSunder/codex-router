@@ -85,7 +85,8 @@ impl CollaborationLifecycle {
         let export = child.schema_export();
         let digest = export.as_ref().map(|export| *export.bundle().digest());
         if self.runtime.is_some() && digest != self.schema_digest {
-            // A changed Control payload profile cannot flow over old initialized connections.
+            // The manifest's native schema digest and the tool schemas bound to it are fixed for
+            // a runtime; a changed native schema starts a new one.
             self.shutdown().await?;
         }
         if self.runtime.is_none() {

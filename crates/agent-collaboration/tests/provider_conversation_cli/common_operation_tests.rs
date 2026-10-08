@@ -2,16 +2,17 @@ use super::*;
 
 #[tokio::test]
 async fn common_provider_cancel_allocates_and_prints_omitted_operation_id() {
-    let root = fixture_directory("common-cancel-generated-id");
-    let listener = publish_fixture(&root);
-    let fixture = tokio::spawn(async move {
-        serve_one(&listener, "conversation/cancel", |request| {
-            let operation_id = request["params"]["operationId"].as_str().expect("generated operation ID");
+    let fixture = ProviderFixture::start(
+        "common-cancel-generated-id",
+        vec![ScriptedStep::responding("cancel", |request| {
+            let operation_id = request["operationId"].as_str().expect("generated operation ID");
             let _: collaboration_client::protocol::OperationId = operation_id.to_owned().try_into().expect("UUIDv7 operation ID");
-            assert_eq!(request["params"]["targetOperationId"], PROMPT_OPERATION);
-            json!({"admission":"admitted","operation":operation_snapshot(operation_id, "conversationCancel", Some(target()), "admitted", "none")})
-        }).await;
-    });
+            assert_eq!(request["targetOperationId"], PROMPT_OPERATION);
+            ScriptedAnswer::Answer(json!({"admission":"admitted","operation":operation_snapshot(operation_id, "conversationCancel", Some(target()), "admitted", "none")}))
+        })],
+    )
+    .await;
+    let root = fixture.root().to_owned();
     let output = run_cli(
         &root,
         vec![
@@ -47,26 +48,26 @@ async fn common_provider_cancel_allocates_and_prints_omitted_operation_id() {
         lines[0]["operationId"],
         lines[1]["operation"]["operationId"]
     );
-    fixture.await.expect("fixture");
-    cleanup_fixture(&root);
+    fixture.finish().await;
 }
 
 #[tokio::test]
 async fn common_new_prompt_composes_provider_create_then_prompt() {
-    let root = fixture_directory("common-new-prompt");
-    let listener = publish_fixture(&root);
-    let fixture = tokio::spawn(async move {
-        serve_inventory_only(&listener).await;
-        serve_one(&listener, "conversation/create", |request| {
-            assert_eq!(request["params"]["operationId"], CREATE_OPERATION);
-            json!({"admission":"admitted","operation":operation_snapshot(CREATE_OPERATION, "conversationCreate", Some(target()), "terminal", "applied")})
-        }).await;
-        serve_one(&listener, "conversation/prompt", |request| {
-            assert_eq!(request["params"]["operationId"], PROMPT_OPERATION);
-            assert_eq!(request["params"]["target"], target());
-            json!({"admission":"admitted","operation":operation_snapshot(PROMPT_OPERATION, "conversationPrompt", Some(target()), "admitted", "none")})
-        }).await;
-    });
+    let fixture = ProviderFixture::start(
+        "common-new-prompt",
+        [
+            create_steps(|request| assert_eq!(request["operationId"], CREATE_OPERATION)),
+            prompt_steps(|request| {
+                assert_eq!(request["operationId"], PROMPT_OPERATION);
+                assert_eq!(request["target"], target());
+            }),
+        ]
+        .into_iter()
+        .flatten()
+        .collect(),
+    )
+    .await;
+    let root = fixture.root().to_owned();
     let output = run_cli(
         &root,
         vec![
@@ -118,27 +119,26 @@ async fn common_new_prompt_composes_provider_create_then_prompt() {
         outcome["prompt"]["settlement"]["detail"]["kind"],
         "providerPrompt"
     );
-    fixture.await.expect("fixture");
-    cleanup_fixture(&root);
+    fixture.finish().await;
 }
 
 #[tokio::test]
 async fn common_load_settles_and_cancel_names_exact_operation() {
-    let root = fixture_directory("common-load-cancel");
-    let listener = publish_fixture(&root);
-    let fixture = tokio::spawn(async move {
-        serve_one(&listener, "conversation/load", |request| {
-            assert_eq!(request["params"]["operationId"], LOAD_OPERATION);
-            assert_eq!(request["params"]["target"], target());
-            json!({"admission":"admitted","operation":operation_snapshot(LOAD_OPERATION, "conversationLoad", Some(target()), "admitted", "none")})
-        }).await;
-        serve_one(&listener, "conversation/cancel", |request| {
-            assert_eq!(request["params"]["operationId"], CANCEL_OPERATION);
-            assert_eq!(request["params"]["targetOperationId"], PROMPT_OPERATION);
-            assert_eq!(request["params"]["target"], target());
-            json!({"admission":"admitted","operation":operation_snapshot(CANCEL_OPERATION, "conversationCancel", Some(target()), "admitted", "none")})
-        }).await;
+    let mut steps = load_steps(|request| {
+        assert_eq!(request["operationId"], LOAD_OPERATION);
+        assert_eq!(request["target"], target());
     });
+    steps.push(ScriptedStep::new(
+        "cancel",
+        |request| {
+            assert_eq!(request["operationId"], CANCEL_OPERATION);
+            assert_eq!(request["targetOperationId"], PROMPT_OPERATION);
+            assert_eq!(request["target"], target());
+        },
+        ScriptedAnswer::Answer(json!({"admission":"admitted","operation":operation_snapshot(CANCEL_OPERATION, "conversationCancel", Some(target()), "admitted", "none")})),
+    ));
+    let fixture = ProviderFixture::start("common-load-cancel", steps).await;
+    let root = fixture.root().to_owned();
     let load = run_cli(
         &root,
         vec![
@@ -210,68 +210,40 @@ async fn common_load_settles_and_cancel_names_exact_operation() {
     );
     let cancelled = common_result(&cancel.stdout);
     assert_eq!(cancelled["operation"]["operationId"], CANCEL_OPERATION);
-    fixture.await.expect("fixture");
-    cleanup_fixture(&root);
+    fixture.finish().await;
 }
 
 #[tokio::test]
 async fn common_create_waits_for_provider_target_and_prints_operation_first() {
-    let root = fixture_directory("common-create");
-    let listener = publish_fixture(&root);
-    let fixture = tokio::spawn(async move {
-        let (stream, _) = listener.accept().await.expect("accept common create");
-        let (read, mut write) = stream.into_split();
-        let mut lines = BufReader::new(read).lines();
-        initialize_fixture(&mut lines, &mut write).await;
-        let list: Value = serde_json::from_str(
-            &lines
-                .next_line()
-                .await
-                .expect("list read")
-                .expect("list frame"),
-        )
-        .expect("list JSON");
-        assert_eq!(list["method"], "endpoint/list");
-        write_response(&mut write, &list, json!({"serviceEpoch":SERVICE_EPOCH,"sequence":1,"endpoints":[{
-            "endpoint":endpoint(),"label":"Claude fixture",
-            "availability":{"state":"available","observedAt":"2026-09-24T00:00:00Z"},
-            "channels":[{"kind":"externalProvider","transport":"stdioAcp","bindingId":"fixture-binding","bindingGeneration":7,
-                "runtime":{"provider":"claudeCode","runtimeName":"fixture"},
-                "capabilities":[{"name":"create","status":"supported","evidence":"advertised"}]}]
-        }]})).await;
-        let create: Value = serde_json::from_str(
-            &lines
-                .next_line()
-                .await
-                .expect("create read")
-                .expect("create frame"),
-        )
-        .expect("create JSON");
-        assert_eq!(create["method"], "conversation/create");
-        assert_eq!(create["params"]["operationId"], CREATE_OPERATION);
-        assert_eq!(create["params"]["generation"], generation());
-        assert_eq!(
-            create["params"]["settings"],
-            json!({
-                "mode":"ask", "model":"provider-model", "effort":"high"
-            })
-        );
-        write_response(&mut write, &create, json!({"admission":"admitted","operation":operation_snapshot(CREATE_OPERATION, "conversationCreate", None, "admitted", "none")})).await;
-        let wait: Value = serde_json::from_str(
-            &lines
-                .next_line()
-                .await
-                .expect("wait read")
-                .expect("wait frame"),
-        )
-        .expect("wait JSON");
-        assert_eq!(wait["method"], "conversation/operationWait");
-        assert_eq!(wait["params"]["operationId"], CREATE_OPERATION);
-        write_response(&mut write, &wait, json!({"operation":operation_snapshot(CREATE_OPERATION, "conversationCreate", Some(target()), "terminal", "applied"),
-            "output":{"kind":"available","settlement":{"kind":"created","target":target(),
-                "effectiveSettings":{"requestedPolicy":{"access":"workspace-write"},"mappingStatus":"verified",
-                    "authentication":"authenticated","mode":"ask","model":"provider-model","effort":"high"}}}})).await;
-    });
+    let fixture = ProviderFixture::start(
+        "common-create",
+        vec![
+            ScriptedStep::new(
+                "create",
+                |create| {
+                    assert_eq!(create["operationId"], CREATE_OPERATION);
+                    assert_eq!(create["generation"], generation());
+                    assert_eq!(
+                        create["settings"],
+                        json!({
+                            "mode":"ask", "model":"provider-model", "effort":"high"
+                        })
+                    );
+                },
+                ScriptedAnswer::Answer(json!({"admission":"admitted","operation":operation_snapshot(CREATE_OPERATION, "conversationCreate", None, "admitted", "none")})),
+            ),
+            ScriptedStep::new(
+                "wait",
+                |wait| assert_eq!(wait["operationId"], CREATE_OPERATION),
+                ScriptedAnswer::Answer(json!({"operation":operation_snapshot(CREATE_OPERATION, "conversationCreate", Some(target()), "terminal", "applied"),
+                    "output":{"kind":"available","settlement":{"kind":"created","target":target(),
+                        "effectiveSettings":{"requestedPolicy":{"access":"workspace-write"},"mappingStatus":"verified",
+                            "authentication":"authenticated","mode":"ask","model":"provider-model","effort":"high"}}}})),
+            ),
+        ],
+    )
+    .await;
+    let root = fixture.root().to_owned();
     let create = run_cli(
         &root,
         vec![
@@ -319,34 +291,40 @@ async fn common_create_waits_for_provider_target_and_prints_operation_first() {
     assert_eq!(lines[1]["kind"], "created");
     assert_eq!(lines[1]["operationId"], CREATE_OPERATION);
     assert_eq!(lines[1]["target"], target());
-    fixture.await.expect("fixture");
-    cleanup_fixture(&root);
+    fixture.finish().await;
 }
 
 #[tokio::test]
-async fn provider_settings_set_and_accept_use_immediate_control_methods() {
-    let root = fixture_directory("provider-settings-actions");
-    let listener = publish_fixture(&root);
-    let fixture = tokio::spawn(async move {
-        serve_one(&listener, "conversation/settingsSet", |request| {
-            assert_eq!(request["params"]["target"], target());
-            assert_eq!(
-                request["params"]["actor"],
-                json!(serde_json::from_str::<Value>(&actor()).expect("actor"))
-            );
-            assert_eq!(request["params"]["setting"], "mode");
-            assert_eq!(request["params"]["value"], "ask");
-            assert!(request["params"].get("operationId").is_none());
-            settings_result()
-        })
-        .await;
-        serve_one(&listener, "conversation/settingsAccept", |request| {
-            assert_eq!(request["params"]["target"], target());
-            assert!(request["params"].get("operationId").is_none());
-            settings_result()
-        })
-        .await;
-    });
+async fn provider_settings_set_and_accept_use_immediate_settings_tools() {
+    let fixture = ProviderFixture::start(
+        "provider-settings-actions",
+        vec![
+            ScriptedStep::new(
+                "settingsSet",
+                |request| {
+                    assert_eq!(request["target"], target());
+                    assert_eq!(
+                        request["actor"],
+                        json!(serde_json::from_str::<Value>(&actor()).expect("actor"))
+                    );
+                    assert_eq!(request["setting"], "mode");
+                    assert_eq!(request["value"], "ask");
+                    assert!(request.get("operationId").is_none());
+                },
+                ScriptedAnswer::Answer(settings_result()),
+            ),
+            ScriptedStep::new(
+                "settingsAccept",
+                |request| {
+                    assert_eq!(request["target"], target());
+                    assert!(request.get("operationId").is_none());
+                },
+                ScriptedAnswer::Answer(settings_result()),
+            ),
+        ],
+    )
+    .await;
+    let root = fixture.root().to_owned();
     let target_json = target().to_string();
     let actor_json = actor();
     let set = run_cli(
@@ -403,25 +381,26 @@ async fn provider_settings_set_and_accept_use_immediate_control_methods() {
     );
     let accept_result: Value = serde_json::from_slice(&accept.stdout).expect("accept result");
     assert_eq!(accept_result["result"]["target"], target());
-    fixture.await.expect("fixture");
-    cleanup_fixture(&root);
+    fixture.finish().await;
 }
 
 #[tokio::test]
 async fn provider_session_inspect_shows_capabilities_and_last_settings() {
-    let root = fixture_directory("provider-session-inspect");
-    let listener = publish_fixture(&root);
-    let fixture = tokio::spawn(async move {
-        serve_one(&listener, "provider/sessionInspect", |request| {
-            assert_eq!(request["params"]["target"], target());
-            json!({"target":target(),"state":"idle","history":"available",
+    let fixture = ProviderFixture::start(
+        "provider-session-inspect",
+        vec![ScriptedStep::new(
+            "inspectSession",
+            |request| assert_eq!(request["target"], target()),
+            ScriptedAnswer::Answer(json!({"target":target(),"state":"idle","history":"available",
                 "capabilities":{"load":true,"resume":true,"close":true,"list":true,"steer":false,
                     "queue":{"kind":"router","canCancel":true},"modes":true,"configOptions":true,
                     "elicitation":true,"usage":false,"promptContent":{"image":false,"audio":false,"embeddedContext":false},
                     "authStatus":{"kind":"account","label":"Signed in"}},
-                "settingsCatalog":{"currentMode":"ask","modes":[{"value":"ask","label":"Ask"}],"configOptions":[]}})
-        }).await;
-    });
+                "settingsCatalog":{"currentMode":"ask","modes":[{"value":"ask","label":"Ask"}],"configOptions":[]}})),
+        )],
+    )
+    .await;
+    let root = fixture.root().to_owned();
     let output = run_cli(
         &root,
         vec![
@@ -453,8 +432,149 @@ async fn provider_session_inspect_shows_capabilities_and_last_settings() {
         value["result"]["record"]["settingsCatalog"]["currentMode"],
         "ask"
     );
-    fixture.await.expect("fixture");
-    cleanup_fixture(&root);
+    fixture.finish().await;
+}
+
+#[tokio::test]
+async fn provider_resume_close_and_operation_reads_reach_the_scripted_provider() {
+    const RESUME_OPERATION: &str = "019c6e27-e55b-73d1-87d8-4e01f1f75107";
+    const CLOSE_OPERATION: &str = "019c6e27-e55b-73d1-87d8-4e01f1f75108";
+    let settled = |operation_id: &'static str, operation: &'static str, settlement: Value| {
+        ScriptedStep::new(
+            "wait",
+            move |request| assert_eq!(request["operationId"], operation_id),
+            ScriptedAnswer::Answer(json!({
+                "operation":operation_snapshot(operation_id, operation, Some(target()), "terminal", "applied"),
+                "output":{"kind":"available","settlement":settlement}
+            })),
+        )
+    };
+    let admitted = |method: &'static str, operation_id: &'static str, operation: &'static str| {
+        ScriptedStep::new(
+            method,
+            move |request| {
+                assert_eq!(request["operationId"], operation_id);
+                assert_eq!(request["target"], target());
+                // The CLI's Human `--approver` reaches the provider operation unchanged.
+                assert_eq!(request["approver"], json!({"humanId":"lifecycle-owner"}));
+            },
+            ScriptedAnswer::Answer(
+                json!({"admission":"admitted","operation":operation_snapshot(
+                operation_id, operation, Some(target()), "admitted", "none")}),
+            ),
+        )
+    };
+    let effective = json!({"requestedPolicy":{"access":"workspace-write"},"mappingStatus":"verified","authentication":"authenticated"});
+    let fixture = ProviderFixture::start(
+        "lifecycle-and-reads",
+        vec![
+            admitted("resume", RESUME_OPERATION, "conversationResume"),
+            settled(
+                RESUME_OPERATION,
+                "conversationResume",
+                json!({"kind":"resumed","target":target(),"effectiveSettings":effective,"history":"available"}),
+            ),
+            admitted("close", CLOSE_OPERATION, "conversationClose"),
+            settled(
+                CLOSE_OPERATION,
+                "conversationClose",
+                json!({"kind":"closed","target":target()}),
+            ),
+            settled(
+                CLOSE_OPERATION,
+                "conversationClose",
+                json!({"kind":"closed","target":target()}),
+            ),
+            ScriptedStep::new(
+                "reconcile",
+                |request| assert_eq!(request["operationId"], CLOSE_OPERATION),
+                ScriptedAnswer::Answer(operation_snapshot(
+                    CLOSE_OPERATION,
+                    "conversationClose",
+                    Some(target()),
+                    "terminal",
+                    "applied",
+                )),
+            ),
+        ],
+    )
+    .await;
+    let root = fixture.root().to_owned();
+    let lifecycle = |command: &str, operation_id: &str| {
+        let mut arguments = vec![
+            "conversation".to_owned(),
+            command.to_owned(),
+            "--operation-id".to_owned(),
+            operation_id.to_owned(),
+            "--target".to_owned(),
+            target().to_string(),
+            "--generation".to_owned(),
+            generation().to_string(),
+            "--from".to_owned(),
+            actor(),
+            "--approver".to_owned(),
+            json!({"humanId":"lifecycle-owner"}).to_string(),
+            "--json".to_owned(),
+        ];
+        if command == "resume" {
+            arguments.extend(
+                ["--cwd", "/tmp/project", "--access", "workspace-write"].map(str::to_owned),
+            );
+        }
+        arguments
+    };
+    for (command, operation_id, settlement) in [
+        ("resume", RESUME_OPERATION, "resumed"),
+        ("close", CLOSE_OPERATION, "closed"),
+    ] {
+        let output = run_cli(&root, lifecycle(command, operation_id)).await;
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "{command}: stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let lines: Vec<Value> = String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("CLI JSON line"))
+            .collect();
+        assert_eq!(lines.len(), 2, "{command}");
+        assert_eq!(lines[0]["kind"], "conversationOperationStarted");
+        assert_eq!(lines[0]["operationId"], operation_id);
+        assert_eq!(lines[1]["operation"]["operationId"], operation_id);
+        assert_eq!(lines[1]["output"]["settlement"]["kind"], settlement);
+    }
+    for (command, expected) in [("wait", "closed"), ("reconcile", "terminal")] {
+        let mut arguments: Vec<String> = [
+            "conversation",
+            "operation",
+            command,
+            "--operation-id",
+            CLOSE_OPERATION,
+            "--json",
+        ]
+        .map(str::to_owned)
+        .to_vec();
+        if command == "wait" {
+            arguments.extend(["--timeout-seconds", "5"].map(str::to_owned));
+        }
+        let output = run_cli(&root, arguments).await;
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "{command}: {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        let read: Value = serde_json::from_slice(&output.stdout).expect("operation read JSON");
+        let observed = if command == "wait" {
+            &read["result"]["record"]["output"]["settlement"]["kind"]
+        } else {
+            &read["result"]["record"]["stage"]
+        };
+        assert_eq!(observed, expected, "{command}: {read}");
+    }
+    fixture.finish().await;
 }
 
 fn settings_result() -> Value {

@@ -2,8 +2,7 @@ use super::*;
 
 #[test]
 fn catalog_has_complete_unique_tools_with_resolvable_schemas() {
-    let temporary = tempfile::tempdir().expect("temporary directory");
-    let server = CollaborationMcpServer::new(temporary.path().to_owned());
+    let server = CollaborationMcpServer::catalog_only();
     let tools = server.resolved_tools();
     assert_eq!(tools.len(), 107);
     let mut names = tools
@@ -38,38 +37,25 @@ fn catalog_has_complete_unique_tools_with_resolvable_schemas() {
 }
 
 #[test]
-fn typed_tool_names_cover_every_control_domain_operation() {
-    let temporary = tempfile::tempdir().expect("temporary directory");
-    let server = CollaborationMcpServer::new(temporary.path().to_owned());
+fn catalog_exposes_one_conversation_surface_with_its_composite_tools() {
+    // The whole tool set is pinned by the success-schema snapshot; this pins the shape of the
+    // conversation surface within it.
+    let server = CollaborationMcpServer::catalog_only();
     let actual = server
-        .tool_router
+        .surface
+        .router
         .list_all()
         .into_iter()
         .map(|tool| tool.name.into_owned())
         .collect::<BTreeSet<_>>();
-    let document =
-        collaboration_protocol::control_schema_document(None).expect("Control schema document");
-    let methods = document
-        .get("x-methods")
-        .and_then(Value::as_object)
-        .expect("Control method map");
-    let expected = methods
-        .keys()
-        .filter(|method| {
-            !matches!(
-                method.as_str(),
-                "control/initialize" | "provider/sessionObserve" | "provider/sessionListen"
-            )
-        })
-        .map(|method| expected_tool_name(method))
-        .chain([
-            "conversation_create".to_owned(),
-            "conversation_create_and_prompt".to_owned(),
-            "conversation_prompt".to_owned(),
-            "events_observe".to_owned(),
-        ])
-        .collect::<BTreeSet<_>>();
-    assert_eq!(actual, expected);
+    for composite in [
+        "conversation_create",
+        "conversation_create_and_prompt",
+        "conversation_prompt",
+        "events_observe",
+    ] {
+        assert!(actual.contains(composite), "missing {composite}");
+    }
     assert!(
         actual
             .iter()
@@ -80,9 +66,8 @@ fn typed_tool_names_cover_every_control_domain_operation() {
 
 #[test]
 fn conversation_catalog_defers_operation_id_requirement_until_route_selection() {
-    let temporary = tempfile::tempdir().expect("temporary directory");
-    let server = CollaborationMcpServer::new(temporary.path().to_owned());
-    let tools = server.tool_router.list_all();
+    let server = CollaborationMcpServer::catalog_only();
+    let tools = server.surface.router.list_all();
     for name in ["conversation_load", "conversation_prompt"] {
         let tool = tools
             .iter()
@@ -120,8 +105,7 @@ fn conversation_catalog_defers_operation_id_requirement_until_route_selection() 
 
 #[test]
 fn tool_schemas_match_known_runtime_defaults_and_conditional_requirements() {
-    let temporary = tempfile::tempdir().expect("temporary directory");
-    let server = CollaborationMcpServer::new(temporary.path().to_owned());
+    let server = CollaborationMcpServer::catalog_only();
     let tools = server.resolved_tools();
     let schema_for = |name: &str| {
         tools
@@ -296,8 +280,7 @@ fn tool_schemas_match_known_runtime_defaults_and_conditional_requirements() {
 
 #[test]
 fn thread_subscription_tools_expose_subscription_policy_and_join_options() {
-    let temporary = tempfile::tempdir().expect("temporary directory");
-    let server = CollaborationMcpServer::new(temporary.path().to_owned());
+    let server = CollaborationMcpServer::catalog_only();
     let tools = server.resolved_tools();
     let schema_for = |name: &str| {
         tools
@@ -479,8 +462,7 @@ fn conversation_create_tool_reports_endpoint_named_unsupported_input() {
 
 #[test]
 fn representative_catalog_descriptions_explain_operation_specific_behavior() {
-    let temporary = tempfile::tempdir().expect("temporary directory");
-    let server = CollaborationMcpServer::new(temporary.path().to_owned());
+    let server = CollaborationMcpServer::catalog_only();
     let descriptions = server
         .resolved_tools()
         .into_iter()

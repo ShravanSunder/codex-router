@@ -209,7 +209,6 @@ pub async fn exercise() -> ProofResult<()> {
         "boardSkillDxComplete",
         json!({"trace":"session-trace.json","operators":5,"coveredOperations":coverage.len(),"refusalCorrections":refusal_corrections.len()}),
     )?;
-    proof.client.close().await?;
     Ok(())
 }
 

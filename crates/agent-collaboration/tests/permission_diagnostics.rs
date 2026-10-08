@@ -276,7 +276,7 @@ fn missing_service_remains_unavailable() {
 }
 
 #[test]
-fn control_command_families_share_permission_diagnostic() {
+fn api_command_families_share_permission_diagnostic() {
     let fixture = DeniedServiceDirectory::create("control-families")
         .unwrap_or_else(|error| panic!("fixture: {error}"));
     let directory = fixture.root.to_string_lossy().into_owned();

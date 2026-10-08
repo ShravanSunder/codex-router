@@ -1,14 +1,13 @@
-//! Explicit CLI summary skip crosses real Control and SQLite, preserving worker outcome.
+//! Explicit CLI summary skip crosses the real collaboration API and SQLite, preserving worker outcome.
 use agent_automation::{
     ContinuityInput, ExecutionDestination, InstructionText, NativeEffectEvidence, OperationId,
     ScheduleDefinition, TimingRule,
 };
 use automation_storage::{AutomationStore, RunDispatchIntent, ScheduleCreate};
 use collaboration_client::protocol::{CodexGeneration, EndpointRef, NativeSendReceipt, SessionRef};
-use collaboration_service::{LocalControlService, ManifestPublication, ServiceIdentity};
+use collaboration_service::ServiceIdentity;
 use serde_json::{Value, json};
 use std::{os::unix::fs::DirBuilderExt, sync::Arc, time::Duration};
-use tokio_util::sync::CancellationToken;
 
 #[tokio::test]
 async fn cli_summary_skip_preserves_worker_and_releases_schedule()
@@ -130,18 +129,14 @@ async fn cli_summary_skip_preserves_worker_and_releases_schedule()
         })
         .await?;
     let store = Arc::new(tokio::sync::Mutex::new(store));
-    let digest = format!("sha256:{}", "a".repeat(64));
-    let identity = ServiceIdentity::new(service_id, service_id, &digest)
+    let identity = ServiceIdentity::new(service_id, service_id)
         .map_err(std::io::Error::other)?
         .with_automation_store(Arc::clone(&store));
-    let listener = LocalControlService::bind(&root.join("control.sock"), identity)?;
-    let manifest = serde_json::from_value(
-        json!({"version":2,"serviceId":service_id,"serviceEpoch":service_id,
-        "machineLabel":"fixture-host","control":{"transport":"unixJsonLines","path":"control.sock"},"controlSchemaDigest":digest,"mcp":{"transport":"streamableHttp","url":"http://127.0.0.1:0/mcp"}}),
-    )?;
-    let publication = ManifestPublication::publish(&root, &manifest)?;
-    let stop = CancellationToken::new();
-    let server = tokio::spawn(listener.run(stop.clone()));
+    let served = collaboration_mcp::test_support::ServedCollaborationApi::start(
+        &root,
+        collaboration_service::CollaborationApplication::new(identity),
+    )
+    .await?;
     let operation = OperationId::generate();
     let output = tokio::time::timeout(
         Duration::from_secs(10),
@@ -161,9 +156,7 @@ async fn cli_summary_skip_preserves_worker_and_releases_schedule()
             .output(),
     )
     .await;
-    stop.cancel();
-    server.await??;
-    drop(publication);
+    served.stop().await?;
     let output = output??;
     if !output.status.success() {
         return Err(format!(

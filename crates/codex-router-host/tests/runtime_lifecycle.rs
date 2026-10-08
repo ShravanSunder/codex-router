@@ -142,7 +142,7 @@ async fn runtime_recovery_restart_is_bounded_and_idle_is_event_driven()
         }),
         "host startup must stream router, app-server, and Remote Control readiness phases",
     )?;
-    let mut collaboration = collaboration_client::ControlClient::connect(
+    let collaboration = collaboration_client::CollaborationClient::connect(
         &collaboration_directory,
         "host-loop-proof",
         "1",
@@ -266,7 +266,6 @@ async fn runtime_recovery_restart_is_bounded_and_idle_is_event_driven()
         }),
         "explicit restart must restore communication publication",
     )?;
-    collaboration.close().await?;
     let explicitly_restarted_processes = wait_for_process_ids(&process_log, 3).await?;
     check_equal(
         terminal_snapshot(&restart_frames)?.recovery_budget(),
