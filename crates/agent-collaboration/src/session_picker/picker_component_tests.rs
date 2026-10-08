@@ -262,3 +262,6 @@ mod picker_capture_tests;
 
 #[path = "picker_machine_control_tests.rs"]
 mod picker_machine_control_tests;
+
+#[path = "picker_single_view_tests.rs"]
+mod picker_single_view_tests;

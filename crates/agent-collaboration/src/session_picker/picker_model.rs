@@ -306,6 +306,16 @@ impl SessionsPickerModel {
     }
 
     pub(super) fn source_contexts(&self) -> Vec<super::PickerSourceContext> {
+        if let super::picker_machine_controls::PickerMachineStage::Loading { source, .. } =
+            &self.machine_controls.stage
+        {
+            return vec![source.as_ref().clone()];
+        }
+        if let super::picker_machine_controls::PickerMachineFilter::Single { source } =
+            &self.machine_controls.filter
+        {
+            return vec![source.as_ref().clone()];
+        }
         let default_source = match self.request.machine_mode {
             super::PickerMachineSourceMode::HostedDefault => {
                 super::PickerSourceContext::DefaultHosted

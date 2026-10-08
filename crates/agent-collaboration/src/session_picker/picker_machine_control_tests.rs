@@ -15,7 +15,8 @@ fn key(code: KeyCode) -> TerminalEvent {
     TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, code))
 }
 
-fn configured_request() -> Result<SessionsPickerRequest, crate::sessions::RouterRegistryError> {
+pub(super) fn configured_request()
+-> Result<SessionsPickerRequest, crate::sessions::RouterRegistryError> {
     let mut request = picker_request();
     request.router_registry = RouterRegistryRead::Ready(
         crate::sessions::router_connection_registry::RouterConnectionRegistry::parse(
@@ -29,6 +30,88 @@ fn configured_request() -> Result<SessionsPickerRequest, crate::sessions::Router
         )?,
     );
     Ok(request)
+}
+
+#[tokio::test]
+async fn individual_machine_switch_reads_and_publishes_only_its_bound_source() {
+    use crate::presentation::session_picker::{PickerSourceContext, SourceInventoryResult};
+    let mut request = configured_request().unwrap();
+    request.root = SessionsPickerRoot::Any;
+    let endpoint: collaboration_client::protocol::EndpointRef = serde_json::from_value(
+        serde_json::json!({"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"source-native"}),
+    ).unwrap();
+    let expected_endpoint = endpoint.clone();
+    let loader: SessionsPickerRecordLoader = Arc::new(move |request| {
+        let endpoint = endpoint.clone();
+        Box::pin(async move {
+            if !matches!(
+                request.source_context,
+                PickerSourceContext::ConfiguredHosted(_)
+            ) {
+                futures_util::future::pending::<()>().await;
+            }
+            let mut row = picker_record(
+                "source-only-id",
+                "Source-only result",
+                "/source/only",
+                "codex-router",
+                "cli",
+            )
+            .with_hosted_codex(&endpoint);
+            row.provenance = crate::sessions::SessionRowProvenance::ObservedHosted;
+            row.normalized_cwd = None;
+            SourceInventoryResult::Ready {
+                request,
+                bound_endpoint: Some(endpoint),
+                snapshot: observed_records(vec![row]),
+            }
+        })
+    });
+    let mut outcome = None;
+    let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+    sender.send(key(KeyCode::F(2))).unwrap();
+    let input = futures_util::stream::unfold(receiver, |mut receiver| async {
+        receiver.recv().await.map(|event| (event, receiver))
+    });
+    let frames = tokio::time::timeout(Duration::from_secs(2), async {
+        let mut picker = element! { SessionsPickerComponent(request, record_loader: Some(loader), width: 130usize, height: 40usize, selected_outcome_out: &mut outcome) };
+        let canvases = picker.mock_terminal_render_loop(MockTerminalConfig::with_events(input));
+        tokio::pin!(canvases);
+        let mut selected = false;
+        let mut activated = false;
+        let mut frames = Vec::new();
+        while let Some(canvas) = canvases.next().await {
+            let text = canvas.to_string();
+            if !selected && text.contains("Choose machine") {
+                selected = true;
+                sender.send(key(KeyCode::Down)).unwrap();
+                sender.send(key(KeyCode::Down)).unwrap();
+                sender.send(key(KeyCode::Enter)).unwrap();
+            }
+            if !activated && text.contains("Machine: Sunbook") && text.contains("Source-only result") {
+                activated = true;
+                sender.send(key(KeyCode::Home)).unwrap();
+                sender.send(key(KeyCode::Down)).unwrap();
+                sender.send(key(KeyCode::Enter)).unwrap();
+            }
+            frames.push(text);
+        }
+        frames
+    }).await.expect("individual source must publish through the existing loader before activation");
+    assert!(frames.iter().any(|frame| frame.contains("Machine: Sunbook") && frame.contains("Source-only result")));
+    let Some(SessionsPickerOutcome::ResumeSession(selection)) = outcome else {
+        panic!("source row must resume");
+    };
+    assert_eq!(selection.session_id(), "source-only-id");
+    assert_eq!(
+        selection.identity,
+        crate::sessions::SessionPickerIdentity::HostedCodex(
+            collaboration_client::protocol::SessionRef {
+                endpoint: expected_endpoint,
+                session_id: "source-only-id".to_owned().try_into().unwrap()
+            }
+        )
+    );
 }
 
 #[tokio::test]

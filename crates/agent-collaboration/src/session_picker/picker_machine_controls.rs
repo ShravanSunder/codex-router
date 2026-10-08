@@ -1,4 +1,5 @@
 //! Invocation-local machine browsing and NEW choice; configured routes require qualification.
+use super::{PickerSourceContext, SourceInventoryRejection};
 use crate::sessions::{RouterRegistryError, RouterRegistryRead};
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -8,10 +9,13 @@ pub(crate) enum PickerMachineSourceMode {
     LocalCodex,
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(super) enum PickerMachineFilter {
     #[default]
     Default,
+    Single {
+        source: Box<PickerSourceContext>,
+    },
     All,
 }
 
@@ -30,12 +34,20 @@ pub(super) enum PickerMachineStage {
         focus: usize,
         notice: Option<MachineChoiceNotice>,
     },
+    Loading {
+        source: Box<PickerSourceContext>,
+        focus: usize,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) enum MachineChoiceNotice {
     Registry(RouterRegistryError),
     SourceNotQualified(String),
+    SourceReadFailed {
+        name: String,
+        reason: SourceInventoryRejection,
+    },
     MissingDestinationCwd(String),
     NativeRouteUnavailable(String),
     NativeCredentialTransportUnsupported(String),
@@ -48,6 +60,9 @@ impl MachineChoiceNotice {
             Self::Registry(error) => error.to_string(),
             Self::SourceNotQualified(name) => {
                 format!("{name}: machine connection needs verification; previous view retained")
+            }
+            Self::SourceReadFailed { name, reason } => {
+                format!("{name}: {reason}; previous view retained")
             }
             Self::MissingDestinationCwd(name) => format!(
                 "{name}: configure a destination working directory before creating a session"
@@ -73,11 +88,16 @@ pub(super) struct PickerMachineControls {
 }
 
 impl PickerMachineControls {
-    pub(super) fn label(&self, mode: PickerMachineSourceMode) -> &'static str {
-        match (mode, self.filter) {
+    pub(super) fn label(&self, mode: PickerMachineSourceMode) -> &str {
+        match (mode, &self.filter) {
             (PickerMachineSourceMode::LocalCodex, _) => "Local Codex",
             (_, PickerMachineFilter::Default) => "This machine",
             (_, PickerMachineFilter::All) => "All machines",
+            (_, PickerMachineFilter::Single { source }) => match source.as_ref() {
+                PickerSourceContext::ConfiguredHosted(profile) => profile.name.as_str(),
+                PickerSourceContext::DefaultHosted => "This machine",
+                PickerSourceContext::LocalCodex => "Local Codex",
+            },
         }
     }
 
@@ -96,9 +116,15 @@ impl PickerMachineControls {
             RouterRegistryRead::Rejected(_) => true,
         };
         if needs_choice {
+            let focus = match (&self.filter, registry) {
+                (PickerMachineFilter::Single { source }, RouterRegistryRead::Ready(registry)) => registry.routers.iter().position(|profile| {
+                    matches!(source.as_ref(), PickerSourceContext::ConfiguredHosted(selected) if selected == profile)
+                }).map_or(0, |index| index + 1),
+                _ => 0,
+            };
             self.stage = PickerMachineStage::Choosing {
                 purpose: MachineChoicePurpose::NewSession,
-                focus: 0,
+                focus,
                 notice: registry_notice(registry),
             };
         }
@@ -154,13 +180,17 @@ impl PickerMachineControls {
         &mut self,
         registry: &RouterRegistryRead,
         mode: PickerMachineSourceMode,
+        can_load_source: bool,
     ) -> bool {
         let PickerMachineStage::Choosing { purpose, focus, .. } = self.stage else {
             return false;
         };
         if focus == 0 {
-            self.filter = PickerMachineFilter::Default;
-            self.cancel_choice();
+            if matches!(purpose, MachineChoicePurpose::Browse) {
+                self.return_to_default(mode, can_load_source);
+            } else {
+                self.cancel_choice();
+            }
             return matches!(purpose, MachineChoicePurpose::NewSession);
         }
         let has_all = mode == PickerMachineSourceMode::HostedDefault
@@ -179,6 +209,13 @@ impl PickerMachineControls {
             return false;
         };
         let name = profile.name.as_str().to_owned();
+        if matches!(purpose, MachineChoicePurpose::Browse) && can_load_source {
+            self.stage = PickerMachineStage::Loading {
+                source: Box::new(PickerSourceContext::ConfiguredHosted(profile.clone())),
+                focus,
+            };
+            return false;
+        }
         let notice = match purpose {
             MachineChoicePurpose::Browse => MachineChoiceNotice::SourceNotQualified(name),
             MachineChoicePurpose::NewSession if profile.default_remote_cwd.is_none() => {
@@ -201,6 +238,59 @@ impl PickerMachineControls {
             notice: Some(notice),
         };
         false
+    }
+
+    /// A read result never launches; commit only after the worker validates the source tuple.
+    pub(super) fn complete_source_switch(&mut self, result: Result<(), SourceInventoryRejection>) {
+        let PickerMachineStage::Loading { source, focus } = &self.stage else {
+            return;
+        };
+        match result {
+            Ok(()) => {
+                self.filter = match source.as_ref() {
+                    PickerSourceContext::ConfiguredHosted(_) => PickerMachineFilter::Single {
+                        source: source.clone(),
+                    },
+                    PickerSourceContext::DefaultHosted | PickerSourceContext::LocalCodex => {
+                        PickerMachineFilter::Default
+                    }
+                };
+                self.cancel_choice();
+            }
+            Err(reason) => {
+                let name = match source.as_ref() {
+                    PickerSourceContext::ConfiguredHosted(profile) => {
+                        profile.name.as_str().to_owned()
+                    }
+                    PickerSourceContext::DefaultHosted => "This machine".to_owned(),
+                    PickerSourceContext::LocalCodex => "Local Codex".to_owned(),
+                };
+                self.stage = PickerMachineStage::Choosing {
+                    purpose: MachineChoicePurpose::Browse,
+                    focus: *focus,
+                    notice: Some(MachineChoiceNotice::SourceReadFailed { name, reason }),
+                };
+            }
+        }
+    }
+
+    pub(super) fn return_to_default(
+        &mut self,
+        mode: PickerMachineSourceMode,
+        can_load_source: bool,
+    ) {
+        if can_load_source && self.filter != PickerMachineFilter::Default {
+            self.stage = PickerMachineStage::Loading {
+                source: Box::new(match mode {
+                    PickerMachineSourceMode::HostedDefault => PickerSourceContext::DefaultHosted,
+                    PickerMachineSourceMode::LocalCodex => PickerSourceContext::LocalCodex,
+                }),
+                focus: 0,
+            };
+        } else {
+            self.filter = PickerMachineFilter::Default;
+            self.cancel_choice();
+        }
     }
 
     pub(super) fn all_notice(&self, registry: &RouterRegistryRead) -> Option<String> {

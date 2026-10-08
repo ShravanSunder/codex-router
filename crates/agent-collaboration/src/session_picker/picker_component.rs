@@ -159,32 +159,7 @@ pub(crate) fn SessionsPickerComponent<'a>(
                 if reload_generation.get() != request.generation {
                     return;
                 }
-                let mut model_value = model.write();
-                if model_value.data_query() == request.query
-                    && model_value.source_contexts() == request.sources
-                {
-                    model_value.source_progress = update.source_progress;
-                    match update.records_update {
-                        super::source_reload_progress::SourceRecordsUpdate::Pending => {}
-                        super::source_reload_progress::SourceRecordsUpdate::Ready(records) => {
-                            model_value.replace_records(records)
-                        }
-                        super::source_reload_progress::SourceRecordsUpdate::Rejected(reason) => {
-                            for progress in &mut model_value.source_progress {
-                                if matches!(
-                                    progress.read_state,
-                                    super::source_reload_progress::SourceReadState::Loading
-                                ) {
-                                    progress.read_state =
-                                        super::source_reload_progress::SourceReadState::Rejected {
-                                            reason,
-                                        };
-                                }
-                            }
-                            model_value.invalidate_runtime_statuses();
-                        }
-                    }
-                }
+                model.write().accept_source_reload(&request, update);
             })
             .await;
         }
@@ -240,6 +215,7 @@ pub(crate) fn SessionsPickerComponent<'a>(
         let mut observed_width = observed_width;
         let mut observed_height = observed_height;
         let mut reload_generation = reload_generation;
+        let can_load_source = props.record_loader.is_some();
         move |event| {
             if let TerminalEvent::Resize(width, height) = event {
                 if live_terminal_width {
@@ -292,6 +268,23 @@ pub(crate) fn SessionsPickerComponent<'a>(
             }
             if matches!(
                 model_value.machine_controls.stage,
+                PickerMachineStage::Loading { .. }
+            ) {
+                if matches!(code, KeyCode::Esc) {
+                    model_value.machine_controls.cancel_choice();
+                    conversation_cache.write().invalidate();
+                    let generation = reload_generation.get().saturating_add(1);
+                    reload_generation.set(generation);
+                    reload_port.send(SessionRecordsReloadRequest {
+                        generation,
+                        query: model_value.data_query(),
+                        sources: model_value.source_contexts(),
+                    });
+                }
+                return;
+            }
+            if matches!(
+                model_value.machine_controls.stage,
                 PickerMachineStage::Choosing { .. }
             ) {
                 let registry = model_value.request.router_registry.clone();
@@ -306,12 +299,21 @@ pub(crate) fn SessionsPickerComponent<'a>(
                             KeyModifiers::ALT | KeyModifiers::CONTROL | KeyModifiers::SUPER,
                         ) =>
                     {
-                        let previous_filter = model_value.machine_controls.filter;
-                        if model_value.machine_controls.select_choice(&registry, mode) {
+                        let previous_filter = model_value.machine_controls.filter.clone();
+                        if model_value.machine_controls.select_choice(
+                            &registry,
+                            mode,
+                            can_load_source,
+                        ) {
                             selected_outcome.set(Some(SessionsPickerOutcome::StartNewSession));
                         }
                         conversation_cache.write().invalidate();
-                        if model_value.machine_controls.filter != previous_filter {
+                        if model_value.machine_controls.filter != previous_filter
+                            || matches!(
+                                model_value.machine_controls.stage,
+                                PickerMachineStage::Loading { .. }
+                            )
+                        {
                             let generation = reload_generation.get().saturating_add(1);
                             reload_generation.set(generation);
                             reload_port.send(SessionRecordsReloadRequest {
@@ -421,7 +423,10 @@ pub(crate) fn SessionsPickerComponent<'a>(
                     } else if model_value.search.is_empty()
                         && model_value.machine_controls.filter != PickerMachineFilter::Default
                     {
-                        model_value.machine_controls.filter = PickerMachineFilter::Default;
+                        let mode = model_value.request.machine_mode;
+                        model_value
+                            .machine_controls
+                            .return_to_default(mode, can_load_source);
                         conversation_cache.write().invalidate();
                         let generation = reload_generation.get().saturating_add(1);
                         reload_generation.set(generation);

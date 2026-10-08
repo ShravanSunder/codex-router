@@ -36,6 +36,22 @@ pub(super) fn render_machine_choices(
     model: &SessionsPickerModel,
     height: usize,
 ) -> Element<'static, View> {
+    if let PickerMachineStage::Loading { source, .. } = &model.machine_controls.stage {
+        let name = match source.as_ref() {
+            super::PickerSourceContext::ConfiguredHosted(profile) => profile.name.as_str(),
+            super::PickerSourceContext::DefaultHosted => "This machine",
+            super::PickerSourceContext::LocalCodex => "Local Codex",
+        };
+        return element! {
+            View(width: model.width as u32, height: height as u32, padding: 1,
+                flex_direction: FlexDirection::Column, border_style: BorderStyle::Round, border_color: Color::Cyan) {
+                Text(content: format!("Loading machine: {name}"), color: Color::Cyan, weight: Weight::Bold)
+                Text(content: "Previous view retained until the selected source is verified", color: Color::Grey)
+                View(flex_grow: 1.0_f32) {}
+                Text(content: "Esc Back | Ctrl+C Exit", color: Color::Grey)
+            }
+        };
+    }
     let PickerMachineStage::Choosing {
         purpose,
         focus,

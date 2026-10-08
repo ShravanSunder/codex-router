@@ -7,6 +7,7 @@ mod picker_fork_view;
 mod picker_machine_controls;
 mod picker_machine_view;
 mod picker_model;
+mod picker_source_view;
 pub(crate) use picker_machine_controls::PickerMachineSourceMode;
 #[cfg(test)]
 mod picker_model_tests;
