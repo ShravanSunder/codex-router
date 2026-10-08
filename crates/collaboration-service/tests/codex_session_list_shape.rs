@@ -53,8 +53,7 @@ async fn send_raw(
 }
 
 #[tokio::test]
-async fn stored_sessions_publish_absent_model_and_effort_as_null()
--> Result<(), Box<dyn std::error::Error>> {
+async fn stored_sessions_omit_absent_model_and_effort() -> Result<(), Box<dyn std::error::Error>> {
     // Arrange: a stored catalog with one session lacking model and effort, one with both.
     let root = tempfile::tempdir()?;
     std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700))?;

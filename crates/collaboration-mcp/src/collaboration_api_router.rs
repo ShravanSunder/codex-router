@@ -41,8 +41,12 @@ pub const COLLABORATION_API_PATH: &str = "/mcp";
 pub const DEFAULT_CONCURRENT_REQUESTS: usize = 64;
 /// How long shutdown waits for cancelled tool calls to release the Router's stores.
 const CALL_SETTLE_TIMEOUT: Duration = Duration::from_secs(10);
-/// The most bytes of a shed request read to name it in the overload answer.
-const SHED_REQUEST_READ_LIMIT: usize = 4 * 1024 * 1024;
+/// The largest request body a listener reads. The biggest tool arguments, message text and
+/// a schedule package, are bounded at `MAX_CONTROL_FRAME_BYTES` (1 MiB) before their JSON
+/// envelope and escaping, so 4 MiB leaves room without letting one request hold an
+/// unbounded buffer. A shed request is read up to the same bound to name it in the overload
+/// answer.
+const MAX_REQUEST_BODY_BYTES: usize = 4 * 1024 * 1024;
 
 /// What every listener's copy of the collaboration API serves from.
 #[derive(Clone)]
@@ -93,6 +97,7 @@ pub fn collaboration_api_router(
     let mut service_config = StreamableHttpServerConfig::default()
         .with_legacy_session_mode(false)
         .with_json_response(true)
+        .with_max_request_body_bytes(MAX_REQUEST_BODY_BYTES)
         .with_cancellation_token(config.shutdown.child_token());
     service_config = match listener {
         CollaborationApiListener::LoopbackTcp(address) => service_config
@@ -194,7 +199,7 @@ async fn shed_past_capacity(
         return Response::from_parts(parts, body);
     }
     let (parts, body) = request.into_parts();
-    let Ok(bytes) = axum::body::to_bytes(body, SHED_REQUEST_READ_LIMIT).await else {
+    let Ok(bytes) = axum::body::to_bytes(body, MAX_REQUEST_BODY_BYTES).await else {
         return overloaded_http_response();
     };
     match serde_json::from_slice::<ClientJsonRpcMessage>(&bytes) {
