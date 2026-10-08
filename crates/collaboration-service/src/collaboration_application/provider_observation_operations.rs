@@ -72,12 +72,15 @@ async fn collect(
         observed,
     };
     if request.epoch.is_some_and(|epoch| epoch != current_epoch) {
-        let _ = events.append_resync_marker(json!({"kind":"resyncRequired"}), &request)?;
+        // The marker is this call's whole answer, so the event and byte budgets do not apply
+        // to it: it is always returned and streamed.
+        let marker = json!({"kind":"resyncRequired"});
+        events.stream(ObservationEventNotification::resync_marker(marker.clone()));
         return Ok(BoundedObservationResult {
             target: request.target,
             generation,
             attached: true,
-            events: events.events,
+            events: vec![marker],
             end_reason: ObservationEndReason::ResyncRequired,
             continuation_gap: true,
             epoch: Some(current_epoch),
@@ -187,12 +190,17 @@ impl CollectedEvents {
             return Ok(false);
         }
         self.bytes += encoded.len();
-        if let Some(observed) = &self.observed {
-            // A caller that stopped listening still gets every event in the result.
-            let _streamed = observed.send(streamed);
-        }
+        self.stream(streamed);
         self.events.push(event);
         Ok(true)
+    }
+
+    /// Hands one event to the caller's stream. A caller that stopped listening still gets
+    /// every event in the result.
+    fn stream(&self, notification: ObservationEventNotification) {
+        if let Some(observed) = &self.observed {
+            let _streamed = observed.send(notification);
+        }
     }
 }
 

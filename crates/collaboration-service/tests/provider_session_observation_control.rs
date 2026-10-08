@@ -191,6 +191,56 @@ async fn a_stale_epoch_streams_its_resync_marker_without_a_cursor() {
 }
 
 #[tokio::test]
+async fn a_stale_epoch_answers_its_resync_marker_even_when_the_budget_cannot_hold_it() {
+    // Arrange: a call naming an older epoch, with the smallest valid event and byte budget.
+    let fixture = provider_fixture().await.expect("provider fixture");
+    let served = served_api::ServedApi::start(fixture.identity)
+        .await
+        .expect("serve the API");
+    let client = served
+        .client("small-budget-observer")
+        .await
+        .expect("observing client");
+    let (_, epoch) = single_event(&client, &fixture.target, None, None)
+        .await
+        .expect("current epoch");
+    let (observed, mut streamed) = tokio::sync::mpsc::unbounded_channel();
+
+    // Act
+    let result = client
+        .observe_provider_session_streaming(
+            BoundedObservationRequest {
+                target: fixture.target.clone(),
+                timeout_seconds: 1,
+                max_events: 1,
+                max_bytes: 1,
+                after_sequence: Some(1),
+                epoch: Some(epoch.expect("provider epoch") + 1),
+            },
+            Some(observed),
+        )
+        .await
+        .expect("stale epoch response");
+
+    // Assert: the marker is the answer itself, so the budget does not apply to it.
+    assert_eq!(result.events, vec![json!({"kind":"resyncRequired"})]);
+    assert_eq!(result.end_reason, ObservationEndReason::ResyncRequired);
+    let marker = streamed.try_recv().expect("the resync marker was streamed");
+    assert_eq!(
+        marker,
+        collaboration_protocol::ObservationEventNotification {
+            event: json!({"kind":"resyncRequired"}),
+            cursor: None,
+        }
+    );
+    assert!(
+        streamed.try_recv().is_err(),
+        "one notification carries the marker"
+    );
+    served.stop().await.expect("API stops");
+}
+
+#[tokio::test]
 async fn a_reset_during_an_open_call_streams_its_resync_marker_without_a_cursor() {
     // Arrange: an open call that has streamed the retained event.
     let fixture = provider_fixture().await.expect("provider fixture");
