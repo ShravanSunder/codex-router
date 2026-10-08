@@ -38,13 +38,7 @@ use rmcp::{
     schemars, tool, tool_router,
 };
 use serde::Deserialize;
-use std::{
-    sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
-    },
-    time::Duration,
-};
+use std::{sync::Arc, time::Duration};
 
 mod application_tool_results;
 mod board_argument_classification;
@@ -114,8 +108,8 @@ impl ToolSurface {
     }
 }
 
-/// The handler rmcp builds for each request. It holds the Router's application, so the
-/// listener counts live copies to know when cancelled calls have released the stores.
+/// The handler rmcp builds for each request. It holds the Router's application; its tool
+/// calls run through the listener's registry, so shutdown can stop and join them.
 #[derive(Clone)]
 pub(crate) struct CollaborationMcpServer {
     surface: Arc<ToolSurface>,
@@ -124,43 +118,22 @@ pub(crate) struct CollaborationMcpServer {
     /// service directory.
     carrier_access: collaboration_client::CollaborationAccess,
     router_executable_relation: tokio::sync::watch::Receiver<RouterExecutableRelation>,
-    _active_call: ActiveCallGuard,
-}
-
-#[derive(Debug)]
-struct ActiveCallGuard(Arc<AtomicUsize>);
-
-impl ActiveCallGuard {
-    fn new(counter: Arc<AtomicUsize>) -> Self {
-        counter.fetch_add(1, Ordering::SeqCst);
-        Self(counter)
-    }
-}
-
-impl Clone for ActiveCallGuard {
-    fn clone(&self) -> Self {
-        Self::new(Arc::clone(&self.0))
-    }
-}
-
-impl Drop for ActiveCallGuard {
-    fn drop(&mut self) {
-        self.0.fetch_sub(1, Ordering::SeqCst);
-    }
+    /// The listener's running calls, which its shutdown aborts and joins.
+    tool_calls: crate::tool_call_registry::ToolCallRegistry,
 }
 
 impl CollaborationMcpServer {
     pub(crate) fn new(
         config: &CollaborationApiConfig,
         surface: Arc<ToolSurface>,
-        active_calls: Arc<AtomicUsize>,
+        tool_calls: crate::tool_call_registry::ToolCallRegistry,
     ) -> Self {
         Self {
             surface,
             application: config.application.clone(),
             carrier_access: carrier_access(&config.application, &config.service_directory),
             router_executable_relation: config.router_executable_relation.clone(),
-            _active_call: ActiveCallGuard::new(active_calls),
+            tool_calls,
         }
     }
 
@@ -175,7 +148,7 @@ impl CollaborationMcpServer {
             carrier_access: carrier_access(&application, &service_directory),
             application,
             router_executable_relation: relation,
-            _active_call: ActiveCallGuard::new(Arc::new(AtomicUsize::new(0))),
+            tool_calls: crate::tool_call_registry::ToolCallRegistry::default(),
         }
     }
 
@@ -335,9 +308,14 @@ impl ServerHandler for CollaborationMcpServer {
         request: CallToolRequestParams,
         context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
     ) -> Result<CallToolResponse, rmcp::ErrorData> {
-        self.surface
+        let routed = self
+            .surface
             .router
-            .call(ToolCallContext::new(self, request, context))
+            .call(ToolCallContext::new(self, request, context));
+        self.tool_calls
+            .run(routed, || {
+                Ok(CallToolResponse::Complete(call_abandoned_at_shutdown()))
+            })
             .await
     }
 

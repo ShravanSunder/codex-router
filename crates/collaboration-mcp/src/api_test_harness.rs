@@ -1,5 +1,6 @@
 //! Serves the real collaboration API on real listeners for tests, and calls it the way models
 //! do over localhost TCP and the CLIs will over the Unix socket.
+use crate::tool_call_registry::ToolCallRegistry;
 use crate::{
     COLLABORATION_API_PATH, CollaborationApiConfig, CollaborationApiListener,
     DEFAULT_CONCURRENT_REQUESTS, collaboration_api_router, serve_collaboration_api,
@@ -24,10 +25,6 @@ use std::{
     io,
     net::SocketAddr,
     path::{Path, PathBuf},
-    sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
-    },
     time::Duration,
 };
 use tokio::{
@@ -98,7 +95,7 @@ enum ServedEndpoint {
 pub(crate) struct ServedApi {
     endpoint: ServedEndpoint,
     shutdown: CancellationToken,
-    active_calls: Arc<AtomicUsize>,
+    tool_calls: ToolCallRegistry,
     task: JoinHandle<io::Result<()>>,
     publication: Option<ManifestPublication>,
 }
@@ -109,10 +106,30 @@ impl ServedApi {
     }
 
     pub(crate) async fn tcp_at(config: &CollaborationApiConfig, address: &str) -> Self {
+        Self::tcp_with(config, address, None).await
+    }
+
+    /// Serves on loopback TCP with a shutdown grace period short enough for a test.
+    pub(crate) async fn tcp_with_call_grace(
+        config: &CollaborationApiConfig,
+        grace: Duration,
+    ) -> Self {
+        Self::tcp_with(config, "127.0.0.1:0", Some(grace)).await
+    }
+
+    async fn tcp_with(
+        config: &CollaborationApiConfig,
+        address: &str,
+        grace: Option<Duration>,
+    ) -> Self {
         let listener = TcpListener::bind(address).await.expect("bind loopback TCP");
         let address = listener.local_addr().expect("loopback address");
-        let api = collaboration_api_router(config, CollaborationApiListener::LoopbackTcp(address));
-        let active_calls = api.active_calls();
+        let mut api =
+            collaboration_api_router(config, CollaborationApiListener::LoopbackTcp(address));
+        if let Some(grace) = grace {
+            api = api.with_call_grace(grace);
+        }
+        let tool_calls = api.tool_calls();
         let task = tokio::spawn(serve_collaboration_api(
             listener,
             api,
@@ -121,7 +138,7 @@ impl ServedApi {
         Self {
             endpoint: ServedEndpoint::LoopbackTcp(address),
             shutdown: config.shutdown.clone(),
-            active_calls,
+            tool_calls,
             task,
             publication: None,
         }
@@ -130,7 +147,7 @@ impl ServedApi {
     pub(crate) async fn unix(config: &CollaborationApiConfig, socket: &Path) -> Self {
         let listener = UnixListener::bind(socket).expect("bind Unix socket");
         let api = collaboration_api_router(config, CollaborationApiListener::UnixSocket);
-        let active_calls = api.active_calls();
+        let tool_calls = api.tool_calls();
         let task = tokio::spawn(serve_collaboration_api(
             listener,
             api,
@@ -139,7 +156,7 @@ impl ServedApi {
         Self {
             endpoint: ServedEndpoint::UnixSocket(socket.to_owned()),
             shutdown: config.shutdown.clone(),
-            active_calls,
+            tool_calls,
             task,
             publication: None,
         }
@@ -243,19 +260,19 @@ impl ServedApi {
                 let mut stream = tokio::net::TcpStream::connect(address)
                     .await
                     .expect("connect TCP");
-                send_and_abandon(&mut stream, head.as_bytes(), &body, &self.active_calls).await;
+                send_and_abandon(&mut stream, head.as_bytes(), &body, &self.tool_calls).await;
             }
             ServedEndpoint::UnixSocket(socket) => {
                 let mut stream = tokio::net::UnixStream::connect(socket)
                     .await
                     .expect("connect Unix socket");
-                send_and_abandon(&mut stream, head.as_bytes(), &body, &self.active_calls).await;
+                send_and_abandon(&mut stream, head.as_bytes(), &body, &self.tool_calls).await;
             }
         }
     }
 
     pub(crate) fn active_calls(&self) -> usize {
-        self.active_calls.load(Ordering::SeqCst)
+        self.tool_calls.running()
     }
 
     /// Waits until the number of handlers in flight is `expected`, or fails at `deadline`.
@@ -275,12 +292,17 @@ impl ServedApi {
     }
 
     pub(crate) async fn stop(self) {
-        self.shutdown.cancel();
-        self.task
+        self.stop_reporting()
             .await
-            .expect("API task join")
             .expect("API stops and its calls settle");
+    }
+
+    /// Cancels the API and answers what the listener reported when it stopped.
+    pub(crate) async fn stop_reporting(self) -> io::Result<()> {
+        self.shutdown.cancel();
+        let stopped = self.task.await.expect("API task join");
         drop(self.publication);
+        stopped
     }
 }
 
@@ -288,7 +310,7 @@ async fn send_and_abandon<TStream>(
     stream: &mut TStream,
     head: &[u8],
     body: &[u8],
-    active_calls: &AtomicUsize,
+    tool_calls: &ToolCallRegistry,
 ) where
     TStream: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
@@ -296,7 +318,7 @@ async fn send_and_abandon<TStream>(
     stream.write_all(body).await.expect("write request body");
     stream.flush().await.expect("flush request");
     tokio::time::timeout(Duration::from_secs(5), async {
-        while active_calls.load(Ordering::SeqCst) == 0 {
+        while tool_calls.running() == 0 {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })

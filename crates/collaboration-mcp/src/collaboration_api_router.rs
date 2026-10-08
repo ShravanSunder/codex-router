@@ -3,6 +3,7 @@
 //! manager and no connection state, and each listener sheds load past its own request limit.
 use crate::mcp_server::{CollaborationMcpServer, ToolSurface};
 use crate::native_schema_definitions::NativeSchemaDefinitions;
+use crate::tool_call_registry::ToolCallRegistry;
 use axum::{
     Router,
     body::{Body, Bytes},
@@ -22,16 +23,7 @@ use rmcp::{
         StreamableHttpServerConfig, StreamableHttpService, session::never::NeverSessionManager,
     },
 };
-use std::{
-    io,
-    net::SocketAddr,
-    path::PathBuf,
-    sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
-    },
-    time::Duration,
-};
+use std::{io, net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
 use tokio::sync::{Semaphore, watch};
 use tokio_util::sync::CancellationToken;
 
@@ -39,8 +31,10 @@ use tokio_util::sync::CancellationToken;
 pub const COLLABORATION_API_PATH: &str = "/mcp";
 /// How many requests one listener runs at once before shedding the rest.
 pub const DEFAULT_CONCURRENT_REQUESTS: usize = 64;
-/// How long shutdown waits for cancelled tool calls to release the Router's stores.
-const CALL_SETTLE_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long shutdown lets running tool calls finish on their own after it cancels them.
+const CALL_GRACE: Duration = Duration::from_secs(10);
+/// How long shutdown waits for aborted calls' connections and tasks to end.
+const ABORTED_CALL_DRAIN: Duration = Duration::from_secs(2);
 /// The largest request body a listener reads. The biggest tool arguments, message text and
 /// a schedule package, are bounded at `MAX_CONTROL_FRAME_BYTES` (1 MiB) before their JSON
 /// envelope and escaping, so 4 MiB leaves room without letting one request hold an
@@ -76,14 +70,22 @@ pub enum CollaborationApiListener {
 /// One listener's copy of the collaboration API, ready to serve.
 pub struct CollaborationApiRouter {
     router: Router,
-    active_calls: Arc<AtomicUsize>,
+    tool_calls: ToolCallRegistry,
+    call_grace: Duration,
 }
 
 impl CollaborationApiRouter {
-    /// Tool handlers this copy has in flight.
+    /// The tool calls this copy runs, to count them.
     #[cfg(test)]
-    pub(crate) fn active_calls(&self) -> Arc<AtomicUsize> {
-        Arc::clone(&self.active_calls)
+    pub(crate) fn tool_calls(&self) -> ToolCallRegistry {
+        self.tool_calls.clone()
+    }
+
+    /// The same copy with a shorter shutdown grace period.
+    #[cfg(test)]
+    pub(crate) fn with_call_grace(mut self, grace: Duration) -> Self {
+        self.call_grace = grace;
+        self
     }
 }
 
@@ -93,7 +95,6 @@ pub fn collaboration_api_router(
     config: &CollaborationApiConfig,
     listener: CollaborationApiListener,
 ) -> CollaborationApiRouter {
-    let active_calls = Arc::new(AtomicUsize::new(0));
     let mut service_config = StreamableHttpServerConfig::default()
         .with_legacy_session_mode(false)
         .with_json_response(true)
@@ -110,7 +111,8 @@ pub fn collaboration_api_router(
         CollaborationApiListener::UnixSocket => service_config.enforce_origin_validation(),
     };
     let server_config = config.clone();
-    let server_calls = Arc::clone(&active_calls);
+    let tool_calls = ToolCallRegistry::default();
+    let server_tool_calls = tool_calls.clone();
     let surface = Arc::new(ToolSurface::new(config.native_definitions.as_ref()));
     let service: StreamableHttpService<CollaborationMcpServer, NeverSessionManager> =
         StreamableHttpService::new(
@@ -118,7 +120,7 @@ pub fn collaboration_api_router(
                 Ok(CollaborationMcpServer::new(
                     &server_config,
                     Arc::clone(&surface),
-                    Arc::clone(&server_calls),
+                    server_tool_calls.clone(),
                 ))
             },
             Arc::new(NeverSessionManager::default()),
@@ -133,12 +135,14 @@ pub fn collaboration_api_router(
         ));
     CollaborationApiRouter {
         router,
-        active_calls,
+        tool_calls,
+        call_grace: CALL_GRACE,
     }
 }
 
-/// Serves one listener's copy until `shutdown` is cancelled, then waits for its cancelled
-/// calls to finish so the Router's stores are released.
+/// Serves one listener's copy until `shutdown` is cancelled, then stops its calls: they see
+/// the cancellation and get a grace period to finish, the rest are aborted, and the listener
+/// returns only once no call is running, so no call outlives it.
 pub async fn serve_collaboration_api<TListener>(
     listener: TListener,
     api: CollaborationApiRouter,
@@ -150,23 +154,46 @@ where
 {
     let CollaborationApiRouter {
         router,
-        active_calls,
+        tool_calls,
+        call_grace,
+        ..
     } = api;
-    axum::serve(listener, router)
-        .with_graceful_shutdown(shutdown.cancelled_owned())
-        .await?;
-    let settled = tokio::time::timeout(CALL_SETTLE_TIMEOUT, async {
-        while active_calls.load(Ordering::SeqCst) != 0 {
-            tokio::time::sleep(Duration::from_millis(10)).await;
+    let serving = axum::serve(listener, router)
+        .with_graceful_shutdown(shutdown.clone().cancelled_owned())
+        .into_future();
+    let mut serving = std::pin::pin!(serving);
+    let served = tokio::select! {
+        served = &mut serving => served,
+        () = shutdown.cancelled() => {
+            match tokio::time::timeout(call_grace, &mut serving).await {
+                Ok(served) => served,
+                Err(_) => {
+                    tool_calls.abort_all();
+                    tokio::time::timeout(ABORTED_CALL_DRAIN, &mut serving)
+                        .await
+                        .unwrap_or_else(|_| Err(not_stopped("connections")))
+                }
+            }
         }
-    })
-    .await;
-    settled.map_err(|_| {
-        io::Error::new(
-            io::ErrorKind::TimedOut,
-            "collaboration API calls did not settle after shutdown",
-        )
-    })
+    };
+    // A call whose caller has gone can still be running after its connection closed.
+    if tokio::time::timeout(call_grace, tool_calls.ended())
+        .await
+        .is_err()
+    {
+        tool_calls.abort_all();
+        tokio::time::timeout(ABORTED_CALL_DRAIN, tool_calls.ended())
+            .await
+            .map_err(|_| not_stopped("tool calls"))?;
+    }
+    served
+}
+
+fn not_stopped(what: &str) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::TimedOut,
+        format!("collaboration API {what} did not stop after their calls were aborted"),
+    )
 }
 
 /// Admits a request if this listener has capacity; otherwise answers it as `overloaded`

@@ -6,6 +6,7 @@ mod local_collaboration;
 mod loopback_bind_address;
 mod mcp_server;
 mod native_schema_definitions;
+mod tool_call_registry;
 
 pub use collaboration_api_router::{
     COLLABORATION_API_PATH, CollaborationApiConfig, CollaborationApiListener,

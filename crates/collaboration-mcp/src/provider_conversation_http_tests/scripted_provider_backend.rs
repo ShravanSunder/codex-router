@@ -13,7 +13,10 @@ use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use std::{
     collections::{HashMap, VecDeque},
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
 };
 
 /// One recorded provider operation: its name and the request it received, as JSON.
@@ -24,6 +27,17 @@ pub(super) struct ScriptedProviderBackend {
     binding: ProviderBindingIdentity,
     answers: Arc<Mutex<HashMap<&'static str, VecDeque<Value>>>>,
     calls: Arc<Mutex<Vec<RecordedCall>>>,
+    /// Operations answered `{"hold": true}`: started, and dropped before they answered.
+    held: Arc<(AtomicUsize, AtomicUsize)>,
+}
+
+/// Counts a held operation as dropped when the Router stops waiting for it.
+struct HeldOperation(Arc<(AtomicUsize, AtomicUsize)>);
+
+impl Drop for HeldOperation {
+    fn drop(&mut self) {
+        self.0.1.fetch_add(1, Ordering::SeqCst);
+    }
 }
 
 impl ScriptedProviderBackend {
@@ -32,10 +46,20 @@ impl ScriptedProviderBackend {
             binding: serde_json::from_value(super::provider_binding()).expect("provider binding"),
             answers: Arc::default(),
             calls: Arc::default(),
+            held: Arc::default(),
         }
     }
 
-    /// Queues the next answer for `operation`: `{"result": ...}` or `{"error": <failure>}`.
+    /// Held operations that started, and those dropped without an answer.
+    pub(super) fn held_operations(&self) -> (usize, usize) {
+        (
+            self.held.0.load(Ordering::SeqCst),
+            self.held.1.load(Ordering::SeqCst),
+        )
+    }
+
+    /// Queues the next answer for `operation`: `{"result": ...}`, `{"error": <failure>}`, or
+    /// `{"hold": true}` for an operation that never answers.
     pub(super) fn answer(self, operation: &'static str, answer: Value) -> Self {
         self.answers
             .lock()
@@ -71,6 +95,15 @@ impl ScriptedProviderBackend {
                     "message":format!("unscripted provider {operation}")
                 }})
             });
+        if answer.get("hold").is_some() {
+            // Never answers and ignores cancellation, like a provider that stopped replying.
+            self.held.0.fetch_add(1, Ordering::SeqCst);
+            let held = HeldOperation(Arc::clone(&self.held));
+            return Box::pin(async move {
+                let _held = held;
+                std::future::pending().await
+            });
+        }
         let answered =
             match answer.get("error") {
                 Some(failure) => {

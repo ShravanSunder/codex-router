@@ -543,3 +543,95 @@ fn protocol_body_json(body: &str) -> Value {
         .unwrap_or(body);
     serde_json::from_str(encoded).unwrap_or_else(|error| panic!("MCP JSON: {error}; body={body:?}"))
 }
+
+#[tokio::test]
+async fn cancelling_provider_operation_wait_detaches_without_backend_cancel() {
+    // Arrange: the provider never settles the operation being waited on.
+    let temporary = tempfile::tempdir().expect("temporary service directory");
+    let backend = ScriptedProviderBackend::new().answer("wait", json!({"hold": true}));
+    let listener = start_listener(temporary.path(), &backend).await;
+
+    // Act: the caller stops waiting by going away mid-call.
+    listener
+        .abandon_tool_call(
+            "conversation_operation_wait",
+            json!({"operationId":PENDING_OPERATION,"timeoutSeconds":60}),
+        )
+        .await;
+    listener
+        .await_active_calls(0, std::time::Duration::from_secs(5))
+        .await;
+
+    // Assert: the wait detached; the provider operation itself was never cancelled.
+    assert_eq!(backend.held_operations(), (1, 1));
+    let calls = backend.calls();
+    assert_eq!(calls.len(), 1, "{calls:?}");
+    assert_eq!(calls[0].0, "wait");
+    assert_eq!(calls[0].1["operationId"], PENDING_OPERATION);
+    listener.stop().await;
+}
+
+#[tokio::test]
+async fn shutdown_aborts_a_call_that_ignores_cancellation_and_joins_it() {
+    // Arrange: a close submission the provider never answers; the close tool does not watch
+    // its cancellation, so only the shutdown abort can stop it.
+    let temporary = tempfile::tempdir().expect("temporary service directory");
+    let backend = ScriptedProviderBackend::new().answer("close", json!({"hold": true}));
+    let identity = test_identity()
+        .with_endpoints(vec![
+            serde_json::from_value(provider_endpoint()).expect("provider endpoint"),
+        ])
+        .expect("endpoint directory")
+        .with_provider_conversation_backend(Arc::new(backend.clone()));
+    let config = api_config(CollaborationApplication::new(identity), temporary.path());
+    let listener =
+        ServedApi::tcp_with_call_grace(&config, std::time::Duration::from_millis(200)).await;
+    let client = reqwest::Client::new();
+    let url = listener.url();
+    let closing = tokio::spawn(async move {
+        client
+            .post(url)
+            .header(CONTENT_TYPE, "application/json")
+            .header(ACCEPT, "application/json, text/event-stream")
+            .header("mcp-protocol-version", "2025-11-25")
+            .json(&json!({"jsonrpc":"2.0","id":7,"method":"tools/call","params":{
+                "name":"conversation_close",
+                "arguments":{
+                    "operationId":CANCEL_OPERATION,
+                    "target":{"endpoint":{"serviceId":SERVICE_ID,"endpointId":"claude-code"},"sessionId":"provider-thread"},
+                    "requestedBy":{"humanId":"close-owner"},
+                    "approver":{"humanId":"close-owner"}
+                }
+            }}))
+            .send()
+            .await
+    });
+    listener
+        .await_active_calls(1, std::time::Duration::from_secs(5))
+        .await;
+    assert_eq!(
+        backend.held_operations(),
+        (1, 0),
+        "the close never reached the provider"
+    );
+
+    // Act
+    let stopped =
+        tokio::time::timeout(std::time::Duration::from_secs(5), listener.stop_reporting())
+            .await
+            .expect("shutdown is bounded by the grace period");
+
+    // Assert: the listener stopped cleanly only after dropping the call it aborted, and the
+    // caller's request ended without a success. (rmcp, cancelled with the listener, may answer
+    // before the abandoned-call result is written.)
+    assert!(stopped.is_ok(), "{stopped:?}");
+    assert_eq!(backend.held_operations(), (1, 1));
+    let answer = closing
+        .await
+        .expect("close request join")
+        .expect("close response")
+        .text()
+        .await
+        .expect("close response body");
+    assert!(!answer.contains("\"isError\":false"), "{answer}");
+}

@@ -129,6 +129,17 @@ pub(super) fn operation_failure_result(failure: &AdapterOperationFailure) -> Cal
         .unwrap_or_else(|_| validation_failure("collaboration error encoding failed"))
 }
 
+/// The tool error for a call the Router abandoned because it was still running when the
+/// listener's shutdown grace period ended. It may have taken effect.
+pub(super) fn call_abandoned_at_shutdown() -> CallToolResult {
+    structured_tool_error(serde_json::json!({
+        "kind": "unavailable",
+        "stage": "shutdown",
+        "effect": "unknown",
+        "message": "The Router stopped before this call finished and abandoned it; inspect the affected resource before retrying."
+    }))
+}
+
 /// The tool error for a call whose caller went away before it finished. Nothing reads it; it
 /// exists so a cancelled handler returns promptly and releases what it holds.
 pub(super) fn caller_cancelled(possible_effect: OperationEffect) -> CallToolResult {
