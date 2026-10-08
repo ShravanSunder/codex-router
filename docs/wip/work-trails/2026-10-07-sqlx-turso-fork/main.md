@@ -183,3 +183,45 @@ CI cache; Sync over TLS (tests use loopback HTTP); nextest's intermittent "leaky
 to the signing runner, not proven.
 
 Next: apply the independent design review's findings when they arrive.
+
+### 2026-10-08 — Second independent review (Sol): F1–F3 confirmed and fixed; owner approvals
+
+The first review round (Opus, F1–F16) is recorded in program design §12.3. This round's review
+judged PR #137 not ready on three findings; each was checked against source and confirmed.
+
+- **Owner approved:** the one production `expect` in `to_url_lossy`, and the CI download of
+  the pinned `tursodb` release. Both leave the open list. Still open for spec 2: the rustls
+  provider when Router links Sync, and the engine's inline blocking IO.
+- **F2 (row lookahead):** confirmed; the stream returned the next row's error in place of the
+  row it held. Lookahead removed; test fails before, passes after.
+- **F1 (cached statements keep obsolete columns):** confirmed. The engine reprepares only on
+  the first step, after the column list was taken. Fix: compare `PRAGMA schema_version` before
+  reusing the cache; empty it on change. Add and rename tests failed before (`["id"]`; old
+  name), pass after.
+- **Break in my model, found while fixing F1:** I assumed the cookie check would see a Sync
+  pull on the reader. It read the old cookie: the reader's cached `SELECT *`, abandoned by
+  `fetch_one` after one row, was never reset (the engine resets on drop; the cache kept it
+  alive), so the connection stayed on its old snapshot. Proven by a fully consumed warm-up
+  passing. The same cause left `INSERT … RETURNING` read with `fetch_one` uncommitted
+  (another connection counted 0 of 2 rows); it predates this round for multi-row RETURNING, and
+  removing the lookahead would have extended it to single-row. Fix: the row stream resets its
+  statement when it ends or is dropped, inside `Drop` so the SDK's operation guard is still held,
+  skipped while panicking. Tests for another connection's `ADD COLUMN`, the pulled column and
+  RETURNING failed before and pass after.
+- **F3 (version prefix):** confirmed (`contains`); exact trimmed match. Test fails with
+  `contains`, passes with the fix.
+
+Decisions without asking: the pragma statement is held on the connection, outside the evictable
+cache, so the check adds one step, not a parse, per persistent query; the running query is boxed
+(clippy `large_enum_variant`).
+
+Commits (signed): `a2e6bd8a` driver, `b16ad0bd` harness, `4da1b8be` design, this checkpoint.
+
+Proof (worktree `target/`, every command exit 0): `cargo fmt --all -- --check`;
+`check-rust-file-size.py` (1,758 files); clippy on the three crates, all targets, all features;
+`cargo nextest run --profile ci` on the three crates with all features, 99/99 (core 71, facade
+28 incl. Sync against `tursodb` 0.8.1); core without Sync, 61/61;
+`prepare-sqlx-turso.py --check`.
+
+Unverified: CI on the pushed head; the per-query cost of the schema-cookie step (not
+measured); a reset failure in `Drop` is logged, not surfaced.
