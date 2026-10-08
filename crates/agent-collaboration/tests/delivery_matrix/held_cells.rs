@@ -242,7 +242,7 @@ async fn load_codex_target(
                 target: target.clone(),
                 working_directory: proof.workspace.clone(),
                 requested_by: requested_by.clone(),
-                approver: Some(requested_by.clone()),
+                approver: Some(requested_by.clone().into()),
                 access: RouterAccess::WorkspaceWrite,
                 generation: None,
             },

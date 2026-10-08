@@ -529,7 +529,7 @@ pub(super) fn run_existing_prompt(args: PromptArguments) -> i32 {
             target: target.clone(),
             working_directory: args.cwd,
             requested_by: sender,
-            approver,
+            approver: approver.map(Into::into),
             message,
             effort: args.effort,
             generation,
@@ -630,7 +630,7 @@ pub(super) fn run_load(args: LoadArguments) -> i32 {
             target: target.clone(),
             working_directory: args.cwd,
             requested_by: sender,
-            approver,
+            approver: approver.map(Into::into),
             access: match args.access {
                 ConversationAccess::WriteRestricted => RouterAccess::WriteRestricted,
                 ConversationAccess::WorkspaceWrite => RouterAccess::WorkspaceWrite,
@@ -711,7 +711,7 @@ pub(super) fn run_cancel(args: CancelArguments) -> i32 {
             target_operation_id,
             target: target.clone(),
             requested_by: sender,
-            approver,
+            approver: approver.map(Into::into),
             generation,
         };
         let client = match ConversationClient::connect(

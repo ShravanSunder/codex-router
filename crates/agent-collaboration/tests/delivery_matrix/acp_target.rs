@@ -123,7 +123,7 @@ pub(super) async fn exercise_acp_target_matrix(config_guard: &ConfigHashGuard) -
                     target: target_for_prompt,
                     working_directory: None,
                     requested_by: sender_for_prompt.clone(),
-                    approver: Some(sender_for_prompt.clone()),
+                    approver: Some(sender_for_prompt.clone().into()),
                     message: PublicPromptContent::Agent {
                         sender: sender_for_prompt,
                         text: hold_text,
@@ -264,7 +264,7 @@ async fn deliver_pending_approval(
                     target: requester_for_prompt,
                     working_directory: None,
                     requested_by: creator_for_prompt.clone(),
-                    approver: Some(approver_for_prompt),
+                    approver: Some(approver_for_prompt.into()),
                     message: PublicPromptContent::Agent {
                         sender: creator_for_prompt,
                         text: prompt_text,

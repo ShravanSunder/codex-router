@@ -8,6 +8,7 @@ use crate::{
     AcpConversation, ClientError, CollaborationAccess, CollaborationClient,
     ConversationCreatePromptOutcome, PublicPromptContent,
 };
+use collaboration_protocol::ProviderIdentity;
 use collaboration_protocol::{
     ChannelDescription, CodexGeneration, ConversationCreateOutcome, ConversationOperationFailure,
     ConversationOperationFailureKind, ConversationOperationFailureStage,
@@ -62,7 +63,7 @@ pub struct ConversationLoadInput {
     pub working_directory: PathBuf,
     pub requested_by: SessionRef,
     #[serde(default)]
-    pub approver: Option<SessionRef>,
+    pub approver: Option<ProviderIdentity>,
     pub access: RouterAccess,
     #[serde(default)]
     pub generation: Option<CodexGeneration>,
@@ -78,7 +79,7 @@ pub struct ConversationPromptInput {
     pub working_directory: Option<PathBuf>,
     pub requested_by: SessionRef,
     #[serde(default)]
-    pub approver: Option<SessionRef>,
+    pub approver: Option<ProviderIdentity>,
     pub message: PublicPromptContent,
     #[serde(default)]
     pub effort: Option<String>,
@@ -94,7 +95,7 @@ pub struct ConversationCancelInput {
     pub target: SessionRef,
     pub requested_by: SessionRef,
     #[serde(default)]
-    pub approver: Option<SessionRef>,
+    pub approver: Option<ProviderIdentity>,
     #[serde(default)]
     pub generation: Option<CodexGeneration>,
 }
@@ -271,7 +272,7 @@ impl ConversationClient {
             target: target.clone(),
             working_directory: native.then_some(working_directory),
             requested_by,
-            approver,
+            approver: approver.map(ProviderIdentity::from),
             message: input.message,
             effort: input.prompt_effort,
             generation: None,

@@ -455,6 +455,8 @@ async fn provider_resume_close_and_operation_reads_reach_the_scripted_provider()
             move |request| {
                 assert_eq!(request["operationId"], operation_id);
                 assert_eq!(request["target"], target());
+                // The CLI's Human `--approver` reaches the provider operation unchanged.
+                assert_eq!(request["approver"], json!({"humanId":"lifecycle-owner"}));
             },
             ScriptedAnswer::Answer(
                 json!({"admission":"admitted","operation":operation_snapshot(
@@ -510,6 +512,8 @@ async fn provider_resume_close_and_operation_reads_reach_the_scripted_provider()
             generation().to_string(),
             "--from".to_owned(),
             actor(),
+            "--approver".to_owned(),
+            json!({"humanId":"lifecycle-owner"}).to_string(),
             "--json".to_owned(),
         ];
         if command == "resume" {

@@ -95,7 +95,7 @@ pub(crate) async fn submit_provider_load(
         target: request.target.clone(),
         working_directory: PathBuf::from(String::from(request.working_directory)),
         requested_by: session_actor(&request.requested_by, "load requester must be a Session")?,
-        approver: request.approver.session().cloned(),
+        approver: Some(request.approver.clone()),
         access: request.requested_policy.access,
         generation: request.generation,
     };
@@ -116,7 +116,7 @@ fn prompt_input(
         target: request.target,
         working_directory: None,
         requested_by: session_actor(&request.requested_by, "prompt requester must be a Session")?,
-        approver: request.approver.session().cloned(),
+        approver: Some(request.approver.clone()),
         message,
         effort: None,
         generation: request.generation,
@@ -155,7 +155,7 @@ pub(crate) async fn submit_provider_cancel(
         target_operation_id: request.target_operation_id,
         target: request.target.clone(),
         requested_by: session_actor(&request.requested_by, "cancel requester must be a Session")?,
-        approver: request.approver.session().cloned(),
+        approver: Some(request.approver.clone()),
         generation: request.generation,
     };
     conversation_client(client, &request.target.endpoint)

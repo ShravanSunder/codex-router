@@ -19,7 +19,7 @@ use collaboration_protocol::{
     ConversationOperationSettlement, ConversationOperationSubmission,
     ConversationOperationWaitOutput, ConversationOperationWaitRequest,
     ConversationPromptRequest as ProviderPromptRequest, NonEmptyText, OperationId, PositiveSeconds,
-    ProviderOperationEffect, ProviderOperationStage, ProviderPromptStopReason,
+    ProviderIdentity, ProviderOperationEffect, ProviderOperationStage, ProviderPromptStopReason,
     ProviderRequestedPolicy, ProviderWorkingDirectory, SessionRef,
 };
 use std::{path::Path, time::Duration};
@@ -95,7 +95,9 @@ impl ConversationClient {
                     generation: input.generation,
                     working_directory,
                     requested_by: input.requested_by.clone().into(),
-                    approver: input.approver.unwrap_or(input.requested_by).into(),
+                    approver: input
+                        .approver
+                        .unwrap_or_else(|| ProviderIdentity::from(input.requested_by)),
                     requested_policy: ProviderRequestedPolicy {
                         access: input.access,
                     },
@@ -248,7 +250,9 @@ impl ConversationClient {
                     target: target.clone(),
                     generation: input.generation,
                     requested_by: input.requested_by.clone().into(),
-                    approver: input.approver.unwrap_or(input.requested_by).into(),
+                    approver: input
+                        .approver
+                        .unwrap_or_else(|| ProviderIdentity::from(input.requested_by)),
                     prompt: input.message.into(),
                 };
                 let wait_seconds = provider_wait_seconds(timeout)?;
@@ -342,7 +346,9 @@ impl ConversationClient {
                         target: input.target,
                         generation: input.generation,
                         requested_by: input.requested_by.clone().into(),
-                        approver: input.approver.unwrap_or(input.requested_by).into(),
+                        approver: input
+                            .approver
+                            .unwrap_or_else(|| ProviderIdentity::from(input.requested_by)),
                     })
                     .await?)
             }
@@ -500,13 +506,16 @@ fn operation_settlement_failure(
     }))
 }
 
+/// A Session requester or approver must belong to the target's service; a Human approver
+/// belongs to no service.
 fn validate_target_operation(
     target: &SessionRef,
     requested_by: &SessionRef,
-    approver: Option<&SessionRef>,
+    approver: Option<&ProviderIdentity>,
 ) -> Result<(), ConversationClientError> {
     if requested_by.endpoint.service_id != target.endpoint.service_id
         || approver
+            .and_then(ProviderIdentity::session)
             .is_some_and(|approver| approver.endpoint.service_id != target.endpoint.service_id)
     {
         return Err(ConversationClientError::InvalidInput(

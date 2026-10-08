@@ -357,12 +357,7 @@ async fn provider_exit_resolves_pending_approval_before_lost_turn() -> TestResul
     let root = tempfile::tempdir()?;
     let runtime = start_host(root.path()).await?;
     let client = CollaborationClient::connect(root.path(), "exit-control", "1").await?;
-    let (target, actor, _, generation) = create_session(&client, root.path()).await?;
-    // The approver is another provider Session: the API's prompt names Session approvers,
-    // and this one's approval notice waits behind the blocked prompt, so the approval stays
-    // pending.
-    let (approver_session, _, _, _) = create_session(&client, root.path()).await?;
-    let approver = ProviderIdentity::from(approver_session);
+    let (target, actor, approver, generation) = create_session(&client, root.path()).await?;
     let mut observer = HubEventFollow::new(&client, &target);
     let _prompt = prompt(&client, &target, &actor, &approver, &generation)?;
     let (request_id, initial_events) = wait_for_pending(&client, &mut observer).await?;
@@ -394,11 +389,8 @@ async fn explicit_cancel_settles_approval_and_keeps_peer_session_usable() -> Tes
     let root = tempfile::tempdir()?;
     let runtime = start_host(root.path()).await?;
     let client = CollaborationClient::connect(root.path(), "cancel-control", "1").await?;
-    let (target, actor, _, generation) = create_session(&client, root.path()).await?;
+    let (target, actor, approver, generation) = create_session(&client, root.path()).await?;
     let (peer, _, _, _) = create_session(&client, root.path()).await?;
-    // The peer provider Session approves: the API's prompt names Session approvers, and its
-    // approval notice waits behind the blocked prompt, so the approval stays pending.
-    let approver = ProviderIdentity::from(peer.clone());
     let mut observer = HubEventFollow::new(&client, &target);
     let (prompt_id, _prompt) = prompt(&client, &target, &actor, &approver, &generation)?;
     let (request_id, initial_events) = wait_for_pending(&client, &mut observer).await?;

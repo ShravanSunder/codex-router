@@ -85,7 +85,7 @@ pub(super) async fn deliver_approval_notice(
                     target: requester_for_prompt,
                     working_directory: None,
                     requested_by: creator_for_prompt.clone(),
-                    approver: Some(approver_for_prompt),
+                    approver: Some(approver_for_prompt.into()),
                     message: PublicPromptContent::Agent {
                         sender: creator_for_prompt,
                         text: prompt.try_into().map_err(|_| {
