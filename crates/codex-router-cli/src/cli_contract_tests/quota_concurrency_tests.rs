@@ -76,7 +76,7 @@ async fn served_router_http_uses_persisted_quota_while_background_refresh_is_blo
         local_token.clone(),
     )
     .with_quota_clock(1_030, 60);
-    let runtime = must_ok(LoopbackRouterRuntime::start(runtime_config, secrets).await);
+    let runtime = must_ok(LoopbackRouterRuntime::start(runtime_config, secrets.clone()).await);
     let runtime_address = runtime.local_addr();
     assert_eq!(runtime_address.port(), router_port);
     let router_task = tokio::spawn(async move {
@@ -85,43 +85,48 @@ async fn served_router_http_uses_persisted_quota_while_background_refresh_is_blo
         }
     });
 
-    let resolver_state_path = state_path.clone();
-    let resolver_secret_root = secret_root.clone();
-    let resolver = tokio::task::spawn_blocking(move || {
-        CliCredentialResolver::open_with_refresh_client(
-            &resolver_state_path,
-            &resolver_secret_root,
+    let resolver = must_ok(
+        crate::credential_runtime::AsyncCliCredentialResolver::open_with_refresh_client(
+            &state_path,
+            secrets,
             NoopCredentialRefreshClient,
         )
-    })
-    .await
-    .unwrap_or_else(|error| panic!("quota resolver open task should join: {error}"));
-    let resolver = must_ok(resolver);
-    let (refresh_started_sender, refresh_started_receiver) = mpsc::channel();
-    let (release_refresh_sender, release_refresh_receiver) = mpsc::channel();
+        .await,
+    );
+    let (refresh_started_sender, refresh_started_receiver) = tokio::sync::oneshot::channel();
+    let (release_refresh_sender, release_refresh_receiver) = tokio::sync::oneshot::channel();
     let provider =
         BlockingQuotaRefreshProvider::new(13, refresh_started_sender, release_refresh_receiver);
-    let worker = start_background_quota_refresh_worker_with_dependencies(
+    let mut worker = start_background_quota_refresh_worker_with_dependencies(
         state_path,
         secret_root,
         "https://chatgpt.com/backend-api".to_owned(),
         resolver,
         provider,
         Duration::from_secs(0),
-    );
-    if let Err(error) = refresh_started_receiver.recv_timeout(Duration::from_secs(2)) {
-        panic!("background refresh should start and block in provider: {error}");
-    }
+    )
+    .await;
+    tokio::time::timeout(Duration::from_secs(2), refresh_started_receiver)
+        .await
+        .unwrap_or_else(|error| {
+            panic!("background refresh should start and block in provider: {error}")
+        })
+        .unwrap_or_else(|error| panic!("background refresh start signal should send: {error}"));
 
     let http_response = send_loopback_request_with_retry(
         router_port,
         local_token.token().expose_secret(),
         br#"{"model":"gpt-5","served_http":true}"#,
     );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), worker.shutdown())
+            .await
+            .is_err()
+    );
     if let Err(error) = release_refresh_sender.send(()) {
-        panic!("test should release blocked quota refresh: {error}");
+        panic!("test should release blocked quota refresh: {error:?}");
     }
-    drop(worker);
+    worker.shutdown().await;
     let (kind, http_request) = match upstream_receiver.recv_timeout(Duration::from_secs(2)) {
         Ok(recorded) => recorded,
         Err(error) => panic!("HTTP upstream request should be recorded: {error}"),
@@ -238,7 +243,7 @@ async fn served_router_websocket_uses_persisted_quota_while_background_refresh_i
         local_token.clone(),
     )
     .with_quota_clock(1_030, 60);
-    let runtime = must_ok(LoopbackRouterRuntime::start(runtime_config, secrets).await);
+    let runtime = must_ok(LoopbackRouterRuntime::start(runtime_config, secrets.clone()).await);
     assert_eq!(runtime.local_addr().port(), router_port);
     let router_task = tokio::spawn(async move {
         if let Err(error) = runtime.serve_protocol_connections(1).await {
@@ -246,33 +251,33 @@ async fn served_router_websocket_uses_persisted_quota_while_background_refresh_i
         }
     });
 
-    let resolver_state_path = state_path.clone();
-    let resolver_secret_root = secret_root.clone();
-    let resolver = tokio::task::spawn_blocking(move || {
-        CliCredentialResolver::open_with_refresh_client(
-            &resolver_state_path,
-            &resolver_secret_root,
+    let resolver = must_ok(
+        crate::credential_runtime::AsyncCliCredentialResolver::open_with_refresh_client(
+            &state_path,
+            secrets,
             NoopCredentialRefreshClient,
         )
-    })
-    .await
-    .unwrap_or_else(|error| panic!("quota resolver open task should join: {error}"));
-    let resolver = must_ok(resolver);
-    let (refresh_started_sender, refresh_started_receiver) = mpsc::channel();
-    let (release_refresh_sender, release_refresh_receiver) = mpsc::channel();
+        .await,
+    );
+    let (refresh_started_sender, refresh_started_receiver) = tokio::sync::oneshot::channel();
+    let (release_refresh_sender, release_refresh_receiver) = tokio::sync::oneshot::channel();
     let provider =
         BlockingQuotaRefreshProvider::new(13, refresh_started_sender, release_refresh_receiver);
-    let worker = start_background_quota_refresh_worker_with_dependencies(
+    let mut worker = start_background_quota_refresh_worker_with_dependencies(
         state_path,
         secret_root,
         "https://chatgpt.com/backend-api".to_owned(),
         resolver,
         provider,
         Duration::from_secs(0),
-    );
-    if let Err(error) = refresh_started_receiver.recv_timeout(Duration::from_secs(2)) {
-        panic!("background refresh should start and block in provider: {error}");
-    }
+    )
+    .await;
+    tokio::time::timeout(Duration::from_secs(2), refresh_started_receiver)
+        .await
+        .unwrap_or_else(|error| {
+            panic!("background refresh should start and block in provider: {error}")
+        })
+        .unwrap_or_else(|error| panic!("background refresh start signal should send: {error}"));
 
     let mut client = connect_websocket_with_retry(router_port, local_token.token().expose_secret());
     let first_frame = r#"{"type":"response.create","served_ws":true}"#;
@@ -285,10 +290,15 @@ async fn served_router_websocket_uses_persisted_quota_while_background_refresh_i
     };
     assert_eq!(websocket_response, r#"{"type":"response.completed"}"#);
 
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), worker.shutdown())
+            .await
+            .is_err()
+    );
     if let Err(error) = release_refresh_sender.send(()) {
-        panic!("test should release blocked quota refresh: {error}");
+        panic!("test should release blocked quota refresh: {error:?}");
     }
-    drop(worker);
+    worker.shutdown().await;
     assert_eq!(
         upstream_receiver
             .recv_timeout(Duration::from_secs(2))

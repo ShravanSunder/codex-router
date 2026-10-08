@@ -1,9 +1,11 @@
 use super::*;
+use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 
 /// Stoppable background quota refresh worker.
 pub(crate) struct BackgroundQuotaRefreshWorker {
-    stop: Arc<AtomicBool>,
-    thread: Option<JoinHandle<()>>,
+    stop_requested: CancellationToken,
+    task: Option<JoinHandle<()>>,
 }
 
 pub(crate) struct BackgroundQuotaRefreshRuntime<C, D> {
@@ -32,17 +34,28 @@ impl<C, D> BackgroundQuotaRefreshRuntime<C, D> {
     }
 }
 
-impl Drop for BackgroundQuotaRefreshWorker {
-    fn drop(&mut self) {
-        self.stop.store(true, Ordering::SeqCst);
-        if let Some(thread) = self.thread.take() {
-            let _result = thread.join();
+impl BackgroundQuotaRefreshWorker {
+    fn request_stop(&self) {
+        self.stop_requested.cancel();
+    }
+
+    pub(crate) async fn shutdown(&mut self) {
+        self.request_stop();
+        if let Some(task) = self.task.as_mut() {
+            let _result = task.await;
+            self.task = None;
         }
     }
 }
 
+impl Drop for BackgroundQuotaRefreshWorker {
+    fn drop(&mut self) {
+        self.request_stop();
+    }
+}
+
 #[cfg(test)]
-pub(crate) fn start_background_quota_refresh_worker_with_dependencies<R, P>(
+pub(crate) async fn start_background_quota_refresh_worker_with_dependencies<R, P>(
     state_db: PathBuf,
     secret_root: PathBuf,
     base_url: String,
@@ -51,8 +64,8 @@ pub(crate) fn start_background_quota_refresh_worker_with_dependencies<R, P>(
     interval: Duration,
 ) -> BackgroundQuotaRefreshWorker
 where
-    R: AsyncProviderCredentialResolver + Send + 'static,
-    P: QuotaRefreshProvider + Send + 'static,
+    R: AsyncProviderCredentialResolver + Send + Sync + 'static,
+    P: QuotaRefreshProvider + Send + Sync + 'static,
 {
     start_background_quota_refresh_worker_with_clock(
         state_db,
@@ -63,10 +76,11 @@ where
         current_unix_seconds,
         interval,
     )
+    .await
 }
 
 #[cfg(test)]
-pub(crate) fn start_background_quota_refresh_worker_with_clock<R, P, C>(
+pub(crate) async fn start_background_quota_refresh_worker_with_clock<R, P, C>(
     state_db: PathBuf,
     secret_root: PathBuf,
     base_url: String,
@@ -76,8 +90,8 @@ pub(crate) fn start_background_quota_refresh_worker_with_clock<R, P, C>(
     interval: Duration,
 ) -> BackgroundQuotaRefreshWorker
 where
-    R: AsyncProviderCredentialResolver + Send + 'static,
-    P: QuotaRefreshProvider + Send + 'static,
+    R: AsyncProviderCredentialResolver + Send + Sync + 'static,
+    P: QuotaRefreshProvider + Send + Sync + 'static,
     C: FnMut() -> u64 + Send + 'static,
 {
     start_background_quota_refresh_worker_with_reporter(
@@ -88,9 +102,10 @@ where
         quota_provider,
         BackgroundQuotaRefreshRuntime::new(observed_clock, |_diagnostic| {}, interval),
     )
+    .await
 }
 
-pub(crate) fn start_background_quota_refresh_worker_with_reporter<R, P, C, D>(
+pub(crate) async fn start_background_quota_refresh_worker_with_reporter<R, P, C, D>(
     state_db: PathBuf,
     secret_root: PathBuf,
     base_url: String,
@@ -99,8 +114,8 @@ pub(crate) fn start_background_quota_refresh_worker_with_reporter<R, P, C, D>(
     runtime: BackgroundQuotaRefreshRuntime<C, D>,
 ) -> BackgroundQuotaRefreshWorker
 where
-    R: AsyncProviderCredentialResolver + Send + 'static,
-    P: QuotaRefreshProvider + Send + 'static,
+    R: AsyncProviderCredentialResolver + Send + Sync + 'static,
+    P: QuotaRefreshProvider + Send + Sync + 'static,
     C: FnMut() -> u64 + Send + 'static,
     D: FnMut(String) + Send + 'static,
 {
@@ -110,36 +125,29 @@ where
         interval,
         quota_floor_notifier,
     } = runtime;
-    let stop = Arc::new(AtomicBool::new(false));
-    let stop_for_thread = Arc::clone(&stop);
-    let thread = thread::spawn(move || {
+    let stop_requested = CancellationToken::new();
+    let worker_stop = stop_requested.clone();
+    let task = tokio::spawn(async move {
         loop {
             let cycle_started_at = Instant::now();
             let mut sink = Vec::new();
             let observed_unix_seconds = observed_clock();
-            let result = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .map_err(QuotaCommandError::BackgroundWorkerInitialization)
-                .and_then(|refresh_runtime| {
-                    refresh_runtime.block_on(
-                        refresh_quota_store_paths_with_dependencies_and_floor_notifier(
-                            &mut sink,
-                            &state_db,
-                            &secret_root,
-                            base_url.clone(),
-                            &credential_resolver,
-                            &quota_provider,
-                            QuotaRefreshObservationContext {
-                                observed_unix_seconds,
-                                schedule: QuotaRefreshSchedule::Background {
-                                    interval_seconds: interval.as_secs(),
-                                },
-                                weekly_floor_observer: quota_floor_notifier.as_deref(),
-                            },
-                        ),
-                    )
-                });
+            let result = refresh_quota_store_paths_with_dependencies_and_floor_notifier(
+                &mut sink,
+                &state_db,
+                &secret_root,
+                base_url.clone(),
+                &credential_resolver,
+                &quota_provider,
+                QuotaRefreshObservationContext {
+                    observed_unix_seconds,
+                    schedule: QuotaRefreshSchedule::Background {
+                        interval_seconds: interval.as_secs(),
+                    },
+                    weekly_floor_observer: quota_floor_notifier.as_deref(),
+                },
+            )
+            .await;
             let diagnostic_output = String::from_utf8_lossy(&sink).into_owned();
             if diagnostic_output
                 .lines()
@@ -150,20 +158,25 @@ where
             if let Err(error) = result {
                 diagnostic_reporter(format!("background quota refresh failed: {error}"));
             }
-            let delay = refresh_cycle_delay(interval, cycle_started_at.elapsed());
-            if interval.is_zero() || !sleep_interruptibly(&stop_for_thread, delay) {
+            if interval.is_zero() {
                 break;
+            }
+            let delay = refresh_cycle_delay(interval, cycle_started_at.elapsed());
+            tokio::select! {
+                biased;
+                _ = worker_stop.cancelled() => break,
+                _ = tokio::time::sleep(delay) => {}
             }
         }
     });
 
     BackgroundQuotaRefreshWorker {
-        stop,
-        thread: Some(thread),
+        stop_requested,
+        task: Some(task),
     }
 }
 
-pub(crate) fn start_background_quota_refresh_worker(
+pub(crate) async fn start_background_quota_refresh_worker(
     state_db: PathBuf,
     secret_root: PathBuf,
     credential_store: crate::secret_store_factory::CliRuntimeSecretStore,
@@ -171,7 +184,8 @@ pub(crate) fn start_background_quota_refresh_worker(
     interval: Duration,
     quota_floor_notifier: WebSocketQuotaFloorNotifier,
 ) -> Result<BackgroundQuotaRefreshWorker, QuotaCommandError> {
-    let resolver = CliCredentialResolver::open_with_secret_store(&state_db, credential_store)?;
+    let resolver =
+        AsyncCliCredentialResolver::open_with_secret_store(&state_db, credential_store).await?;
     let provider = HttpQuotaRefreshProvider::new()?;
     Ok(start_background_quota_refresh_worker_with_reporter(
         state_db,
@@ -185,23 +199,10 @@ pub(crate) fn start_background_quota_refresh_worker(
             interval,
         )
         .with_quota_floor_notifier(quota_floor_notifier),
-    ))
+    )
+    .await)
 }
 
 pub(crate) fn refresh_cycle_delay(interval: Duration, elapsed: Duration) -> Duration {
     interval.saturating_sub(elapsed)
-}
-
-fn sleep_interruptibly(stop: &AtomicBool, interval: Duration) -> bool {
-    let mut remaining = interval;
-    while !stop.load(Ordering::SeqCst) {
-        if remaining.is_zero() {
-            return true;
-        }
-        let step = remaining.min(Duration::from_millis(50));
-        thread::sleep(step);
-        remaining = remaining.saturating_sub(step);
-    }
-
-    false
 }

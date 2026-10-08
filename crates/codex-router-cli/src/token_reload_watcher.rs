@@ -2,14 +2,13 @@
 use crate::token::LocalRouterTokenService;
 use codex_router_core::local_auth::LocalRouterAuth;
 use codex_router_secret_store::file_backend::FileSecretStore;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::thread::{self, JoinHandle};
 use std::time::Duration;
+use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 
 pub(super) struct LocalTokenReloadWatcher {
-    stop: Arc<AtomicBool>,
-    thread: Option<JoinHandle<()>>,
+    stop_requested: CancellationToken,
+    task: Option<JoinHandle<()>>,
 }
 
 impl LocalTokenReloadWatcher {
@@ -18,16 +17,26 @@ impl LocalTokenReloadWatcher {
         initial_generation: codex_router_core::ids::TokenGeneration,
         reload_auth: impl Fn(LocalRouterAuth) + Send + 'static,
     ) -> Self {
-        let stop = Arc::new(AtomicBool::new(false));
-        let stop_for_thread = Arc::clone(&stop);
-        let thread = thread::spawn(move || {
-            let token_service = LocalRouterTokenService::new(secret_store);
+        let stop_requested = CancellationToken::new();
+        let worker_stop = stop_requested.clone();
+        let task = tokio::spawn(async move {
             let mut last_generation = initial_generation;
-            while !stop_for_thread.load(Ordering::Relaxed) {
-                thread::sleep(Duration::from_millis(50));
-                let auth = match token_service.load_auth() {
-                    Ok(auth) => auth,
-                    Err(_error) => continue,
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = worker_stop.cancelled() => break,
+                    _ = tokio::time::sleep(Duration::from_millis(50)) => {}
+                }
+                let read_store = secret_store.clone();
+                let loaded_auth = tokio::task::spawn_blocking(move || {
+                    LocalRouterTokenService::new(read_store).load_auth()
+                })
+                .await;
+                if worker_stop.is_cancelled() {
+                    break;
+                }
+                let Ok(Ok(auth)) = loaded_auth else {
+                    continue;
                 };
                 let current_generation = auth.current_generation();
                 if current_generation != last_generation {
@@ -38,17 +47,26 @@ impl LocalTokenReloadWatcher {
         });
 
         Self {
-            stop,
-            thread: Some(thread),
+            stop_requested,
+            task: Some(task),
+        }
+    }
+
+    fn request_stop(&self) {
+        self.stop_requested.cancel();
+    }
+
+    pub(super) async fn shutdown(&mut self) {
+        self.request_stop();
+        if let Some(task) = self.task.as_mut() {
+            let _result = task.await;
+            self.task = None;
         }
     }
 }
 
 impl Drop for LocalTokenReloadWatcher {
     fn drop(&mut self) {
-        self.stop.store(true, Ordering::Relaxed);
-        if let Some(thread) = self.thread.take() {
-            let _result = thread.join();
-        }
+        self.request_stop();
     }
 }

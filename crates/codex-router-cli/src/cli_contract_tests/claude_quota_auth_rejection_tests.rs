@@ -11,7 +11,6 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::mpsc;
 use tracing::Event;
 use tracing::Subscriber;
 use tracing::field::Field;
@@ -117,7 +116,7 @@ impl QuotaRefreshProvider for AlwaysUnauthorizedClaudeQuotaProvider {
 
 #[derive(Clone)]
 struct RecordingClaudeUpkeepRefreshClient {
-    observed_account_ids: mpsc::Sender<AccountId>,
+    observed_account_ids: tokio::sync::mpsc::UnboundedSender<AccountId>,
 }
 
 impl CredentialRefreshClient for RecordingClaudeUpkeepRefreshClient {
@@ -349,20 +348,27 @@ fn claude_usage_401_after_renewal_preserves_account_for_upkeep_and_records_failu
     assert!(!captured_fields.contains("claude-recovered-access-canary"));
     must_ok(runtime.block_on(read_state.close()));
 
-    let (observed_sender, observed_receiver) = mpsc::channel();
-    let upkeep_worker = must_ok(
-        crate::credential_upkeep_worker::start_background_credential_upkeep_worker_with_client_and_clock(
-            &state_path,
-            secrets,
-            RecordingClaudeUpkeepRefreshClient {
-                observed_account_ids: observed_sender,
-            },
-            || 2_000,
-        ),
-    );
-    assert_eq!(
-        must_ok(observed_receiver.recv_timeout(std::time::Duration::from_secs(2))),
-        account_id
-    );
-    drop(upkeep_worker);
+    let (observed_sender, mut observed_receiver) = tokio::sync::mpsc::unbounded_channel();
+    runtime.block_on(async {
+        let mut upkeep_worker = must_ok(
+            crate::credential_upkeep_worker::start_background_credential_upkeep_worker_with_client_and_clock(
+                state_path.clone(),
+                secrets,
+                RecordingClaudeUpkeepRefreshClient {
+                    observed_account_ids: observed_sender,
+                },
+                || 2_000,
+            )
+            .await,
+        );
+        let observed_account = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            observed_receiver.recv(),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("upkeep should observe the renewed account: {error}"))
+        .expect("upkeep refresh should report its account");
+        upkeep_worker.shutdown().await;
+        assert_eq!(observed_account, account_id);
+    });
 }

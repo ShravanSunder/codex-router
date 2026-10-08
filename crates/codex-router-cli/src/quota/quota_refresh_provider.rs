@@ -1,6 +1,7 @@
 use super::claude_quota_fetcher::ClaudeQuotaFetcher;
 use super::*;
 use codex_router_core::provider::Provider;
+use std::future::Future;
 
 /// Quota provider request after provider credentials have been resolved.
 pub(crate) struct QuotaRefreshProviderRequest {
@@ -167,10 +168,10 @@ impl QuotaWindowHeadroom {
 /// Provider egress dependency for quota refresh.
 pub(crate) trait QuotaRefreshProvider {
     /// Fetches one route-band quota snapshot using resolved provider auth.
-    async fn fetch_quota(
+    fn fetch_quota(
         &self,
         request: QuotaRefreshProviderRequest,
-    ) -> Result<QuotaRefreshProviderResponse, QuotaCommandError>;
+    ) -> impl Future<Output = Result<QuotaRefreshProviderResponse, QuotaCommandError>> + Send;
 }
 
 /// HTTP quota refresh provider for ChatGPT/Codex usage endpoints.

@@ -1,7 +1,7 @@
 use super::*;
 
-#[test]
-fn background_quota_refresh_worker_runs_immediate_cycle_without_waiting_for_interval() {
+#[tokio::test]
+async fn background_quota_refresh_worker_runs_immediate_cycle_without_waiting_for_interval() {
     let test_root = TestRoot::new("background-quota-refresh-immediate");
     must_ok(fs::create_dir(test_root.path()));
     let state_path = test_root.path().join("state.sqlite");
@@ -32,29 +32,33 @@ fn background_quota_refresh_worker_runs_immediate_cycle_without_waiting_for_inte
             ),
         ),
     );
-    let resolver = must_ok(CliCredentialResolver::open_with_refresh_client(
-        &state_path,
-        &secret_root,
-        NoopCredentialRefreshClient,
-    ));
-    let (refresh_sender, refresh_receiver) = mpsc::channel();
+    let resolver = must_ok(
+        crate::credential_runtime::AsyncCliCredentialResolver::open_with_refresh_client(
+            &state_path,
+            secrets.clone(),
+            NoopCredentialRefreshClient,
+        )
+        .await,
+    );
+    let (refresh_sender, mut refresh_receiver) = tokio::sync::mpsc::unbounded_channel();
     let provider = SignalingQuotaRefreshProvider::new(58, refresh_sender);
 
-    let worker = start_background_quota_refresh_worker_with_dependencies(
+    let mut worker = start_background_quota_refresh_worker_with_dependencies(
         state_path,
         secret_root,
         "https://chatgpt.com/backend-api".to_owned(),
         resolver,
         provider,
         Duration::from_secs(3_600),
-    );
+    )
+    .await;
 
-    let observed_route_band = match refresh_receiver.recv_timeout(Duration::from_secs(2)) {
-        Ok(route_band) => route_band,
-        Err(error) => panic!("background refresh should run immediately: {error}"),
-    };
+    let observed_route_band = tokio::time::timeout(Duration::from_secs(2), refresh_receiver.recv())
+        .await
+        .unwrap_or_else(|error| panic!("background refresh should run immediately: {error}"))
+        .expect("background refresh route band should be reported");
     assert_eq!(observed_route_band, "responses");
-    drop(worker);
+    worker.shutdown().await;
     let snapshot = must_ok(QuotaSnapshotRepository::load_snapshot_for_route_band(
         &state,
         &account_id,
@@ -65,8 +69,8 @@ fn background_quota_refresh_worker_runs_immediate_cycle_without_waiting_for_inte
     assert!(snapshot.observed_unix_seconds() > 0);
 }
 
-#[test]
-fn background_quota_refresh_worker_start_does_not_wait_for_slow_provider() {
+#[tokio::test]
+async fn background_quota_refresh_worker_start_does_not_wait_for_slow_provider() {
     let test_root = TestRoot::new("background-quota-refresh-slow-provider");
     must_ok(fs::create_dir(test_root.path()));
     let state_path = test_root.path().join("state.sqlite");
@@ -97,33 +101,58 @@ fn background_quota_refresh_worker_start_does_not_wait_for_slow_provider() {
             ),
         ),
     );
-    let resolver = must_ok(CliCredentialResolver::open_with_refresh_client(
-        &state_path,
-        &secret_root,
-        NoopCredentialRefreshClient,
-    ));
+    let resolver = must_ok(
+        crate::credential_runtime::AsyncCliCredentialResolver::open_with_refresh_client(
+            &state_path,
+            secrets.clone(),
+            NoopCredentialRefreshClient,
+        )
+        .await,
+    );
     let provider = SlowQuotaRefreshProvider::new(Duration::from_millis(500), 72);
+    let cycle_count = Arc::new(AtomicUsize::new(0));
+    let observed_cycle_count = Arc::clone(&cycle_count);
+    let worker_runtime = BackgroundQuotaRefreshRuntime::new(
+        move || {
+            observed_cycle_count.fetch_add(1, Ordering::SeqCst);
+            1_300
+        },
+        |_diagnostic| {},
+        Duration::ZERO,
+    );
 
     let start = Instant::now();
-    let worker = start_background_quota_refresh_worker_with_dependencies(
+    let mut worker = start_background_quota_refresh_worker_with_reporter(
         state_path,
         secret_root,
         "https://chatgpt.com/backend-api".to_owned(),
         resolver,
         provider,
-        Duration::from_secs(0),
-    );
+        worker_runtime,
+    )
+    .await;
     let elapsed = start.elapsed();
 
     assert!(
         elapsed < Duration::from_millis(250),
         "background worker startup waited for provider: {elapsed:?}"
     );
-    drop(worker);
+    worker.shutdown().await;
+    assert_eq!(
+        cycle_count.load(Ordering::SeqCst),
+        1,
+        "a zero background interval performs exactly one immediate cycle"
+    );
+    tokio::time::timeout(
+        Duration::from_secs(1),
+        tokio::time::sleep(Duration::from_millis(1)),
+    )
+    .await
+    .expect("caller runtime should still schedule after quota-worker shutdown");
 }
 
-#[test]
-fn background_quota_refresh_worker_uses_fresh_time_for_each_cycle() {
+#[tokio::test]
+async fn background_quota_refresh_worker_uses_fresh_time_for_each_cycle() {
     let test_root = TestRoot::new("background-quota-refresh-fresh-time");
     must_ok(fs::create_dir(test_root.path()));
     let state_path = test_root.path().join("state.sqlite");
@@ -154,17 +183,20 @@ fn background_quota_refresh_worker_uses_fresh_time_for_each_cycle() {
             ),
         ),
     );
-    let resolver = must_ok(CliCredentialResolver::open_with_refresh_client(
-        &state_path,
-        &secret_root,
-        NoopCredentialRefreshClient,
-    ));
-    let (refresh_sender, refresh_receiver) = mpsc::channel();
+    let resolver = must_ok(
+        crate::credential_runtime::AsyncCliCredentialResolver::open_with_refresh_client(
+            &state_path,
+            secrets.clone(),
+            NoopCredentialRefreshClient,
+        )
+        .await,
+    );
+    let (refresh_sender, mut refresh_receiver) = tokio::sync::mpsc::unbounded_channel();
     let provider = SignalingQuotaRefreshProvider::new(64, refresh_sender);
     let clock = Arc::new(AtomicU64::new(1_300));
     let worker_clock = Arc::clone(&clock);
 
-    let worker = start_background_quota_refresh_worker_with_clock(
+    let mut worker = start_background_quota_refresh_worker_with_clock(
         state_path,
         secret_root,
         "https://chatgpt.com/backend-api".to_owned(),
@@ -172,14 +204,18 @@ fn background_quota_refresh_worker_uses_fresh_time_for_each_cycle() {
         provider,
         move || worker_clock.fetch_add(5, Ordering::SeqCst),
         Duration::from_millis(1),
-    );
+    )
+    .await;
 
     for _call_index in 0..4 {
-        if let Err(error) = refresh_receiver.recv_timeout(Duration::from_secs(2)) {
-            panic!("background refresh should run multiple cycles: {error}");
-        }
+        tokio::time::timeout(Duration::from_secs(2), refresh_receiver.recv())
+            .await
+            .unwrap_or_else(|error| {
+                panic!("background refresh should run multiple cycles: {error}")
+            })
+            .expect("background refresh cycle should report its route band");
     }
-    drop(worker);
+    worker.shutdown().await;
     let snapshot = must_ok(QuotaSnapshotRepository::load_snapshot_for_route_band(
         &state,
         &account_id,
@@ -202,8 +238,8 @@ fn background_quota_refresh_cycle_delay_subtracts_elapsed_work() {
     );
 }
 
-#[test]
-fn background_quota_refresh_worker_reports_refresh_failures() {
+#[tokio::test]
+async fn background_quota_refresh_worker_reports_refresh_failures() {
     let test_root = TestRoot::new("background-quota-refresh-diagnostics");
     must_ok(fs::create_dir(test_root.path()));
     let state_path = test_root.path().join("state.sqlite");
@@ -235,15 +271,18 @@ fn background_quota_refresh_worker_reports_refresh_failures() {
             ),
         ),
     );
-    let resolver = must_ok(CliCredentialResolver::open_with_refresh_client(
-        &state_path,
-        &secret_root,
-        NoopCredentialRefreshClient,
-    ));
+    let resolver = must_ok(
+        crate::credential_runtime::AsyncCliCredentialResolver::open_with_refresh_client(
+            &state_path,
+            secrets.clone(),
+            NoopCredentialRefreshClient,
+        )
+        .await,
+    );
     let provider = AccountFailingQuotaRefreshProvider::new(unsafe_account_label, 429, 0);
-    let (diagnostic_sender, diagnostic_receiver) = mpsc::channel();
+    let (diagnostic_sender, mut diagnostic_receiver) = tokio::sync::mpsc::unbounded_channel();
 
-    let worker = start_background_quota_refresh_worker_with_reporter(
+    let mut worker = start_background_quota_refresh_worker_with_reporter(
         state_path,
         secret_root,
         "https://chatgpt.com/backend-api".to_owned(),
@@ -258,17 +297,21 @@ fn background_quota_refresh_worker_reports_refresh_failures() {
             },
             Duration::from_secs(0),
         ),
-    );
+    )
+    .await;
 
-    let first_diagnostic = match diagnostic_receiver.recv_timeout(Duration::from_secs(2)) {
-        Ok(diagnostic) => diagnostic,
-        Err(error) => panic!("background refresh should report route failures: {error}"),
-    };
-    let second_diagnostic = match diagnostic_receiver.recv_timeout(Duration::from_secs(2)) {
-        Ok(diagnostic) => diagnostic,
-        Err(error) => panic!("background refresh should report command failure: {error}"),
-    };
-    drop(worker);
+    let first_diagnostic = tokio::time::timeout(Duration::from_secs(2), diagnostic_receiver.recv())
+        .await
+        .unwrap_or_else(|error| panic!("background refresh should report route failures: {error}"))
+        .expect("route failure diagnostic should send");
+    let second_diagnostic =
+        tokio::time::timeout(Duration::from_secs(2), diagnostic_receiver.recv())
+            .await
+            .unwrap_or_else(|error| {
+                panic!("background refresh should report command failure: {error}")
+            })
+            .expect("command failure diagnostic should send");
+    worker.shutdown().await;
     let diagnostics = format!("{first_diagnostic}\n{second_diagnostic}");
     assert!(diagnostics.contains("refresh failed: account=acct-"));
     assert!(!diagnostics.contains(unsafe_account_label));

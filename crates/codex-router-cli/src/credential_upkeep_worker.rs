@@ -1,11 +1,8 @@
 //! Long-lived enabled-account OAuth upkeep, independent of quota observation.
 
-use std::path::Path;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::OnceLock;
-use std::sync::mpsc;
-use std::thread;
-use std::thread::JoinHandle;
 use std::time::Duration;
 use std::time::Instant;
 
@@ -17,12 +14,13 @@ use codex_router_auth::resolver::NoopCredentialRefreshClient;
 use codex_router_auth::resolver::ProviderCredentialRefreshClients;
 use codex_router_auth::resolver::current_unix_seconds;
 use codex_router_secret_store::encrypted_credential_store::EncryptedCredentialStore;
-use codex_router_secret_store::model::SecretStoreError;
 use codex_router_state::account::AccountStatus;
 use codex_router_state::credential_maintenance::CredentialMaintenanceState;
 use codex_router_state::sqlite::AsyncSqliteStateStore;
 use codex_router_state::sqlite::StateStoreError;
 use thiserror::Error;
+use tokio::sync::mpsc::UnboundedSender;
+use tokio::task::JoinHandle;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
@@ -37,27 +35,32 @@ const SHUTDOWN_DRAIN_SECONDS: u64 = 30;
 
 /// A running OAuth upkeep loop with a bounded shutdown drain.
 pub(crate) struct CredentialUpkeepWorker {
-    control_sender: mpsc::Sender<WorkerControl>,
-    stopped_receiver: mpsc::Receiver<()>,
+    control_sender: UnboundedSender<WorkerControl>,
     stop_requested: CancellationToken,
     shutdown_deadline: Arc<OnceLock<Instant>>,
-    thread: Option<JoinHandle<()>>,
+    task: Option<JoinHandle<()>>,
 }
 
-impl Drop for CredentialUpkeepWorker {
-    fn drop(&mut self) {
+impl CredentialUpkeepWorker {
+    fn request_stop(&self) {
         let deadline = Instant::now() + Duration::from_secs(SHUTDOWN_DRAIN_SECONDS);
         let _ = self.shutdown_deadline.set(deadline);
         self.stop_requested.cancel();
         let _ = self.control_sender.send(WorkerControl::Stop);
-        if self
-            .stopped_receiver
-            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
-            .is_ok()
-            && let Some(thread) = self.thread.take()
-        {
-            let _ = thread.join();
+    }
+
+    pub(crate) async fn shutdown(&mut self) {
+        self.request_stop();
+        if let Some(task) = self.task.as_mut() {
+            let _result = task.await;
+            self.task = None;
         }
+    }
+}
+
+impl Drop for CredentialUpkeepWorker {
+    fn drop(&mut self) {
+        self.request_stop();
     }
 }
 
@@ -84,7 +87,7 @@ impl CredentialUpkeepWorker {
 
 #[cfg(test)]
 pub(crate) struct CredentialUpkeepWakeHandle {
-    control_sender: mpsc::Sender<WorkerControl>,
+    control_sender: UnboundedSender<WorkerControl>,
 }
 
 #[cfg(test)]
@@ -98,18 +101,12 @@ impl CredentialUpkeepWakeHandle {
 
 #[derive(Debug, Error)]
 pub enum CredentialUpkeepStartError {
-    #[error("credential upkeep runtime unavailable")]
-    Runtime(#[source] std::io::Error),
     #[error("credential upkeep state unavailable")]
-    State(#[source] StateStoreError),
-    #[error("credential upkeep secret store unavailable")]
-    Secret(#[source] SecretStoreError),
-    #[error("credential upkeep thread unavailable")]
-    Thread(#[source] std::io::Error),
+    State(#[from] StateStoreError),
 }
 
-pub(crate) fn start_background_credential_upkeep_worker(
-    state_db_path: &Path,
+pub(crate) async fn start_background_credential_upkeep_worker(
+    state_db_path: PathBuf,
     secret_store: EncryptedCredentialStore,
 ) -> Result<CredentialUpkeepWorker, CredentialUpkeepStartError> {
     #[cfg(test)]
@@ -118,7 +115,8 @@ pub(crate) fn start_background_credential_upkeep_worker(
         secret_store,
         NoopCredentialRefreshClient,
         || current_unix_seconds().unwrap_or(0),
-    );
+    )
+    .await;
     #[cfg(not(test))]
     start_background_credential_upkeep_worker_with_client_and_clock(
         state_db_path,
@@ -126,10 +124,11 @@ pub(crate) fn start_background_credential_upkeep_worker(
         ProviderCredentialRefreshClients::new(),
         || current_unix_seconds().unwrap_or(0),
     )
+    .await
 }
 
-pub(crate) fn start_background_credential_upkeep_worker_with_client_and_clock<C, F>(
-    state_db_path: &Path,
+pub(crate) async fn start_background_credential_upkeep_worker_with_client_and_clock<C, F>(
+    state_db_path: PathBuf,
     secrets: EncryptedCredentialStore,
     refresh_client: C,
     observed_clock: F,
@@ -138,69 +137,58 @@ where
     C: CredentialRefreshClient + Clone + Send + Sync + 'static,
     F: Fn() -> u64 + Send + Sync + 'static,
 {
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(MAX_CONCURRENT_ACCOUNTS)
-        .enable_all()
-        .build()
-        .map_err(CredentialUpkeepStartError::Runtime)?;
-    let state = runtime
-        .block_on(AsyncSqliteStateStore::open(state_db_path))
-        .map_err(CredentialUpkeepStartError::State)?;
-    let (control_sender, control_receiver) = mpsc::channel();
-    let (stopped_sender, stopped_receiver) = mpsc::channel();
+    let state = AsyncSqliteStateStore::open(&state_db_path).await?;
+    let (control_sender, mut control_receiver) = tokio::sync::mpsc::unbounded_channel();
     let stop_requested = CancellationToken::new();
     let worker_stop = stop_requested.clone();
     let shutdown_deadline = Arc::new(OnceLock::new());
     let worker_deadline = Arc::clone(&shutdown_deadline);
-    let thread = thread::Builder::new()
-        .name("router-credential-upkeep".to_owned())
-        .spawn(move || {
-            loop {
-                if worker_stop.is_cancelled() {
-                    break;
-                }
-                let cycle_started = Instant::now();
-                let observed_now = observed_clock();
-                let cycle_result = runtime.block_on(run_upkeep_cycle_until_stop(
-                    &state,
-                    &secrets,
-                    refresh_client.clone(),
-                    observed_now,
-                    &worker_stop,
-                    &worker_deadline,
-                ));
-                if worker_stop.is_cancelled() {
-                    break;
-                }
-                let remaining =
-                    bounded_upkeep_wait(cycle_result, observed_now, cycle_started.elapsed());
-                match control_receiver.recv_timeout(remaining) {
-                    Ok(WorkerControl::Stop) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
+    let task = tokio::spawn(async move {
+        loop {
+            if worker_stop.is_cancelled() {
+                break;
+            }
+            let cycle_started = Instant::now();
+            let observed_now = observed_clock();
+            let cycle_result = run_upkeep_cycle_until_stop(
+                &state,
+                &secrets,
+                refresh_client.clone(),
+                observed_now,
+                &worker_stop,
+                &worker_deadline,
+            )
+            .await;
+            if worker_stop.is_cancelled() {
+                break;
+            }
+            let remaining =
+                bounded_upkeep_wait(cycle_result, observed_now, cycle_started.elapsed());
+            tokio::select! {
+                biased;
+                _ = worker_stop.cancelled() => break,
+                control = control_receiver.recv() => match control {
+                    Some(WorkerControl::Stop) | None => break,
                     #[cfg(test)]
-                    Ok(WorkerControl::Wake) => {}
-                    Err(mpsc::RecvTimeoutError::Timeout) => {}
-                }
+                    Some(WorkerControl::Wake) => {}
+                },
+                _ = tokio::time::sleep(remaining) => {}
             }
-            let close_budget = remaining_shutdown_time(&worker_deadline);
-            if !close_budget.is_zero() {
-                match runtime
-                    .block_on(async { tokio::time::timeout(close_budget, state.close()).await })
-                {
-                    Ok(Ok(())) => {}
-                    Ok(Err(error)) => eprintln!("credential upkeep state close failed: {error}"),
-                    Err(_) => eprintln!("credential upkeep state close exceeded drain bound"),
-                }
+        }
+        let close_budget = remaining_shutdown_time(&worker_deadline);
+        if !close_budget.is_zero() {
+            match tokio::time::timeout(close_budget, state.close()).await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => eprintln!("credential upkeep state close failed: {error}"),
+                Err(_) => eprintln!("credential upkeep state close exceeded drain bound"),
             }
-            runtime.shutdown_timeout(remaining_shutdown_time(&worker_deadline));
-            let _ = stopped_sender.send(());
-        })
-        .map_err(CredentialUpkeepStartError::Thread)?;
+        }
+    });
     Ok(CredentialUpkeepWorker {
         control_sender,
-        stopped_receiver,
         stop_requested,
         shutdown_deadline,
-        thread: Some(thread),
+        task: Some(task),
     })
 }
 

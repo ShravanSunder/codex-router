@@ -2,6 +2,7 @@
 #![cfg_attr(test, allow(clippy::panic_in_result_fn))]
 
 use std::ffi::OsString;
+use std::future::Future;
 use std::io::IsTerminal;
 use std::io::Write;
 use std::path::Path;
@@ -31,6 +32,7 @@ pub mod profile;
 pub mod quota;
 mod quota_reset;
 mod secret_store_factory;
+mod serve_command;
 mod telemetry;
 pub mod token;
 
@@ -62,6 +64,13 @@ pub use cli_command_errors::CliError;
 mod cli_argument_parsing;
 pub(crate) use cli_argument_parsing::ArgumentParser;
 use cli_argument_parsing::{CliCommand, ProfileCommand, TokenCommand};
+pub(crate) use serve_command::run_serve_command_with_upkeep_start;
+#[cfg(test)]
+pub(crate) use serve_command::{
+    base_serve_runtime_config, configure_serve_claude_edge_runtime,
+    run_serve_command_with_upkeep_start_and_token_reload_observer,
+    run_serve_command_with_worker_starts_and_token_reload_observer,
+};
 
 const DEFAULT_PROFILE_PORT: u16 = 8787;
 const DEFAULT_MAX_SNAPSHOT_AGE_SECONDS: u64 = 300;
@@ -236,161 +245,6 @@ where
         }
         _ => run_with_io(args, context, stdout, stderr),
     }
-}
-
-async fn run_serve_command_with_upkeep_start(
-    stdout: &mut impl Write,
-    command: cli_argument_parsing::ServeCommand,
-    credential_store: EncryptedCredentialStore,
-    upkeep_start: impl FnOnce(
-        &Path,
-        EncryptedCredentialStore,
-    ) -> Result<
-        credential_upkeep_worker::CredentialUpkeepWorker,
-        credential_upkeep_worker::CredentialUpkeepStartError,
-    > + Send
-    + 'static,
-) -> Result<(), CliError> {
-    run_serve_command_with_upkeep_start_and_token_reload_observer(
-        stdout,
-        command,
-        credential_store,
-        upkeep_start,
-        |_generation| {},
-    )
-    .await
-}
-
-async fn run_serve_command_with_upkeep_start_and_token_reload_observer(
-    stdout: &mut impl Write,
-    command: cli_argument_parsing::ServeCommand,
-    credential_store: EncryptedCredentialStore,
-    upkeep_start: impl FnOnce(
-        &Path,
-        EncryptedCredentialStore,
-    ) -> Result<
-        credential_upkeep_worker::CredentialUpkeepWorker,
-        credential_upkeep_worker::CredentialUpkeepStartError,
-    > + Send
-    + 'static,
-    token_reload_observer: impl Fn(codex_router_core::ids::TokenGeneration) + Send + 'static,
-) -> Result<(), CliError> {
-    let mut runtime_config = base_serve_runtime_config(&command)?;
-    let state_db = command.state_db.clone();
-    let secret_root = command.secret_root.clone();
-    if let Some(audit_file) = command.audit_file.clone() {
-        runtime_config = runtime_config.with_audit_file(audit_file);
-    }
-    if let Some(report_file) = command.websocket_registry_report_file.clone() {
-        validate_websocket_registry_report_file(&report_file)?;
-        runtime_config = runtime_config.with_websocket_registry_report_file(report_file);
-    }
-    let local_token_store =
-        FileSecretStore::open(&secret_root).map_err(TokenCommandError::SecretStore)?;
-    let token_service = LocalRouterTokenService::new(local_token_store.clone());
-    let local_token = token_service.ensure_local_token(&secret_root)?;
-    let initial_token_generation = local_token.generation();
-    let (mut runtime_config, quota_refresh_interval) =
-        configure_serve_claude_edge_runtime(runtime_config, &command, local_token.clone());
-    if command.require_local_token {
-        runtime_config = runtime_config.with_required_local_token(local_token);
-    }
-    if let Some(now_unix_seconds) = command.now_unix_seconds {
-        runtime_config =
-            runtime_config.with_quota_clock(now_unix_seconds, command.max_snapshot_age_seconds);
-    }
-    let runtime = LoopbackRouterRuntime::start(runtime_config, credential_store.clone()).await?;
-    let local_auth_reloader = runtime.local_auth_reloader();
-    let _token_reload_watcher =
-        LocalTokenReloadWatcher::start(local_token_store, initial_token_generation, move |auth| {
-            let current_generation = auth.current_generation();
-            local_auth_reloader.reload_auth(auth);
-            token_reload_observer(current_generation);
-        });
-
-    crate::presentation::host::render_progress_event(
-        stdout,
-        codex_router_host::HostProgress::RouterReady,
-    )
-    .map_err(CliError::Stdout)?;
-    writeln!(stdout, "listening: {}", runtime.local_addr()).map_err(CliError::Stdout)?;
-    let upkeep_start_state_db = state_db.clone();
-    let upkeep_start_credential_store = credential_store.clone();
-    let _credential_upkeep_worker = tokio::task::spawn_blocking(move || {
-        upkeep_start(&upkeep_start_state_db, upkeep_start_credential_store)
-    })
-    .await
-    .map_err(|error| {
-        credential_upkeep_worker::CredentialUpkeepStartError::Thread(std::io::Error::other(error))
-    })??;
-    let _quota_refresh_worker = if command.background_quota_refresh_enabled {
-        let quota_state_db = state_db.clone();
-        let quota_secret_root = secret_root.clone();
-        let quota_credential_store = credential_store.clone();
-        let quota_floor_notifier = runtime.websocket_quota_floor_notifier();
-        let quota_refresh_worker = tokio::task::spawn_blocking(move || {
-            quota::start_background_quota_refresh_worker(
-                quota_state_db,
-                quota_secret_root,
-                quota_credential_store,
-                DEFAULT_CHATGPT_BACKEND_BASE_URL.to_owned(),
-                quota_refresh_interval,
-                quota_floor_notifier,
-            )
-        })
-        .await
-        .map_err(|error| {
-            QuotaCommandError::BackgroundWorkerInitialization(std::io::Error::other(error))
-        })??;
-        Some(quota_refresh_worker)
-    } else {
-        None
-    };
-    let handled_connections = runtime
-        .serve_protocol_connections(command.max_connections)
-        .await?;
-    if let Some(report_file) = command.websocket_registry_report_file {
-        write_websocket_registry_report_file(&report_file, handled_connections, &runtime)?;
-    }
-    Ok(())
-}
-
-fn base_serve_runtime_config(
-    command: &cli_argument_parsing::ServeCommand,
-) -> Result<LoopbackRouterRuntimeConfig, CliError> {
-    let bind_address = LoopbackBindAddress::new(&command.listen_host, command.port)?;
-    let upstream_endpoint = UpstreamEndpoint::new(command.upstream_base_url.clone())?;
-    let runtime_config = LoopbackRouterRuntimeConfig::new_tokenless(
-        bind_address,
-        upstream_endpoint,
-        command.state_db.clone(),
-        command.secret_root.clone(),
-    )
-    .with_session_pin_idle_ttl(Duration::from_secs(command.session_pin_idle_ttl_seconds))
-    .with_claude_five_hour_reserve_percent(command.claude_five_hour_reserve_percent);
-    #[cfg(debug_assertions)]
-    let runtime_config = if let Some(base_url) = &command.debug_claude_upstream_base_url {
-        let endpoint = ClaudeUpstreamEndpoint::isolated_debug_override(
-            base_url.clone(),
-            command.require_debug_isolation,
-        )?;
-        runtime_config.with_debug_claude_upstream_endpoint(endpoint)
-    } else {
-        runtime_config
-    };
-    Ok(runtime_config)
-}
-
-fn configure_serve_claude_edge_runtime(
-    runtime_config: LoopbackRouterRuntimeConfig,
-    command: &cli_argument_parsing::ServeCommand,
-    local_token: LocalRouterTokenRecord,
-) -> (LoopbackRouterRuntimeConfig, Duration) {
-    let quota_refresh_interval = Duration::from_secs(command.quota_refresh_interval_seconds);
-    (
-        runtime_config.with_claude_edge_local_token(local_token, quota_refresh_interval),
-        quota_refresh_interval,
-    )
 }
 
 #[cfg(test)]

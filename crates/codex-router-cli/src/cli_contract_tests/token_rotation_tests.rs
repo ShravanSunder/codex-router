@@ -1,26 +1,33 @@
 use super::*;
 
-#[test]
-fn local_token_reload_watcher_reports_generation_changes() {
+#[tokio::test]
+async fn local_token_reload_watcher_reports_generation_changes() {
     let test_root = TestRoot::new("local-token-reload-watcher");
     must_ok(fs::create_dir(test_root.path()));
     let secret_root = test_root.path().join("secrets");
     let secret_store = must_ok(FileSecretStore::open(&secret_root));
     let token_service = LocalRouterTokenService::new(secret_store.clone());
     let initial_token = must_ok(token_service.rotate_with_token("watch-token-a"));
-    let (reload_sender, reload_receiver) = std::sync::mpsc::channel();
-    let _watcher =
+    let (reload_sender, mut reload_receiver) = tokio::sync::mpsc::unbounded_channel();
+    let mut watcher =
         LocalTokenReloadWatcher::start(secret_store, initial_token.generation(), move |auth| {
             let _send_result = reload_sender.send(auth.current_generation());
         });
 
     let rotated_token = must_ok(token_service.rotate_with_token("watch-token-b"));
-    let observed_generation = match reload_receiver.recv_timeout(Duration::from_secs(2)) {
-        Ok(generation) => generation,
-        Err(error) => panic!("watcher should report the new token generation: {error}"),
-    };
+    let observed_generation = tokio::time::timeout(Duration::from_secs(2), reload_receiver.recv())
+        .await
+        .unwrap_or_else(|error| panic!("watcher should report the new token generation: {error}"))
+        .expect("token watcher should send its changed generation");
 
     assert_eq!(observed_generation, rotated_token.generation());
+    watcher.shutdown().await;
+    tokio::time::timeout(
+        Duration::from_secs(1),
+        tokio::time::sleep(Duration::from_millis(1)),
+    )
+    .await
+    .expect("caller runtime should still schedule after token-watcher shutdown");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -106,20 +113,21 @@ async fn serve_scopes_claude_token_rotation_and_keeps_codex_optional() {
     };
     assert!(!command.require_local_token);
 
-    let (serve_ready_sender, serve_ready_receiver) = mpsc::channel();
-    let (token_reload_sender, token_reload_receiver) = mpsc::channel();
+    let (serve_ready_sender, mut serve_ready_receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (token_reload_sender, mut token_reload_receiver) = tokio::sync::mpsc::unbounded_channel();
     let serve_task = tokio::spawn(async move {
         let mut stdout = Vec::new();
         let result = run_serve_command_with_upkeep_start_and_token_reload_observer(
             &mut stdout,
             command,
             secrets,
-            move |state_database_path, credential_store| {
+            move |state_database_path, credential_store| async move {
                 let _send_result = serve_ready_sender.send(());
                 credential_upkeep_worker::start_background_credential_upkeep_worker(
                     state_database_path,
                     credential_store,
                 )
+                .await
             },
             move |generation| {
                 let _send_result = token_reload_sender.send(generation);
@@ -128,10 +136,10 @@ async fn serve_scopes_claude_token_rotation_and_keeps_codex_optional() {
         .await;
         (result, stdout)
     });
-    match serve_ready_receiver.recv_timeout(Duration::from_secs(2)) {
-        Ok(()) => {}
-        Err(error) => panic!("serve should signal readiness before requests: {error}"),
-    }
+    tokio::time::timeout(Duration::from_secs(2), serve_ready_receiver.recv())
+        .await
+        .unwrap_or_else(|error| panic!("serve should signal readiness before requests: {error}"))
+        .expect("serve should send readiness before requests");
 
     let token_store = must_ok(FileSecretStore::open(&secret_root));
     let token_service = LocalRouterTokenService::new(token_store);
@@ -161,10 +169,13 @@ async fn serve_scopes_claude_token_rotation_and_keeps_codex_optional() {
         &mut rotate_stderr,
     ));
     let token_b = must_ok(token_service.load_current());
-    let reload_observation = token_reload_receiver.recv_timeout(Duration::from_secs(2));
+    let reload_observation =
+        tokio::time::timeout(Duration::from_secs(2), token_reload_receiver.recv())
+            .await
+            .unwrap_or_else(|error| panic!("token reload observer should run: {error}"));
     assert_eq!(
         reload_observation,
-        Ok(token_b.generation()),
+        Some(token_b.generation()),
         "wait for the bounded token-reload event before checking either token"
     );
     let stale_claude_token_response = send_claude_messages_request(

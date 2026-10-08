@@ -1,5 +1,7 @@
 use super::*;
 use crate::quota::QuotaWindowHeadroom;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 
 pub(super) struct JoinedFloorCrossingProvider {
     pub(super) floor_account_id: AccountId,
@@ -132,16 +134,18 @@ where
     S: SecretStore,
     C: CredentialRefreshClient,
 {
-    async fn resolve_provider_credentials_async(
+    fn resolve_provider_credentials_async(
         &self,
         account_id: &AccountId,
         expected_provider: codex_router_core::provider::Provider,
-    ) -> Result<ResolvedProviderCredential, CredentialResolverError> {
-        ProviderCredentialResolver::resolve_provider_credentials(
+    ) -> impl std::future::Future<
+        Output = Result<ResolvedProviderCredential, CredentialResolverError>,
+    > + Send {
+        std::future::ready(ProviderCredentialResolver::resolve_provider_credentials(
             self,
             account_id,
             expected_provider,
-        )
+        ))
     }
 }
 
@@ -207,10 +211,12 @@ impl RecordingQuotaRefreshProvider {
 }
 
 impl QuotaRefreshProvider for RecordingQuotaRefreshProvider {
-    async fn fetch_quota(
+    fn fetch_quota(
         &self,
         request: QuotaRefreshProviderRequest,
-    ) -> Result<QuotaRefreshProviderResponse, crate::quota::QuotaCommandError> {
+    ) -> impl std::future::Future<
+        Output = Result<QuotaRefreshProviderResponse, crate::quota::QuotaCommandError>,
+    > + Send {
         self.recorded.borrow_mut().push((
             request.account_id().as_str().to_owned(),
             request.account_label().to_owned(),
@@ -218,11 +224,11 @@ impl QuotaRefreshProvider for RecordingQuotaRefreshProvider {
             request.base_url().to_owned(),
             request.access_token().expose_secret().to_owned(),
         ));
-        Ok(QuotaRefreshProviderResponse {
+        std::future::ready(Ok(QuotaRefreshProviderResponse {
             windows: verified_quota_windows(self.remaining_headroom),
             reset_credits_available: None,
             ..Default::default()
-        })
+        }))
     }
 }
 
@@ -363,7 +369,7 @@ impl QuotaRefreshProvider for SlowQuotaRefreshProvider {
         &self,
         _request: QuotaRefreshProviderRequest,
     ) -> Result<QuotaRefreshProviderResponse, crate::quota::QuotaCommandError> {
-        thread::sleep(self.delay);
+        tokio::time::sleep(self.delay).await;
         Ok(QuotaRefreshProviderResponse {
             windows: verified_quota_windows(self.remaining_headroom),
             reset_credits_available: None,
@@ -375,21 +381,21 @@ impl QuotaRefreshProvider for SlowQuotaRefreshProvider {
 pub(super) struct BlockingQuotaRefreshProvider {
     pub(super) remaining_headroom: u32,
     pub(super) blocked_once: AtomicBool,
-    pub(super) started_sender: Mutex<Option<mpsc::Sender<()>>>,
-    pub(super) release_receiver: Mutex<mpsc::Receiver<()>>,
+    pub(super) started_sender: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    pub(super) release_receiver: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
 }
 
 impl BlockingQuotaRefreshProvider {
     pub(super) fn new(
         remaining_headroom: u32,
-        started_sender: mpsc::Sender<()>,
-        release_receiver: mpsc::Receiver<()>,
+        started_sender: tokio::sync::oneshot::Sender<()>,
+        release_receiver: tokio::sync::oneshot::Receiver<()>,
     ) -> Self {
         Self {
             remaining_headroom,
             blocked_once: AtomicBool::new(false),
             started_sender: Mutex::new(Some(started_sender)),
-            release_receiver: Mutex::new(release_receiver),
+            release_receiver: Mutex::new(Some(release_receiver)),
         }
     }
 }
@@ -405,12 +411,14 @@ impl QuotaRefreshProvider for BlockingQuotaRefreshProvider {
             if let Some(started_sender) = maybe_started_sender
                 && let Err(error) = started_sender.send(())
             {
-                panic!("background refresh started signal should send: {error}");
+                panic!("background refresh started signal should send: {error:?}");
             }
-            let receive_result = lock_test_mutex(&self.release_receiver, "release receiver").recv();
-            if let Err(error) = receive_result {
-                panic!("test should release blocked quota refresh: {error}");
-            }
+            let release_receiver = lock_test_mutex(&self.release_receiver, "release receiver")
+                .take()
+                .expect("release receiver should remain available");
+            release_receiver.await.unwrap_or_else(|error| {
+                panic!("test should release blocked quota refresh: {error:?}")
+            });
         }
         Ok(QuotaRefreshProviderResponse {
             windows: verified_quota_windows(self.remaining_headroom),
@@ -422,11 +430,14 @@ impl QuotaRefreshProvider for BlockingQuotaRefreshProvider {
 
 pub(super) struct SignalingQuotaRefreshProvider {
     pub(super) remaining_headroom: u32,
-    pub(super) sender: mpsc::Sender<String>,
+    pub(super) sender: tokio::sync::mpsc::UnboundedSender<String>,
 }
 
 impl SignalingQuotaRefreshProvider {
-    pub(super) fn new(remaining_headroom: u32, sender: mpsc::Sender<String>) -> Self {
+    pub(super) fn new(
+        remaining_headroom: u32,
+        sender: tokio::sync::mpsc::UnboundedSender<String>,
+    ) -> Self {
         Self {
             remaining_headroom,
             sender,

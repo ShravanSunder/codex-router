@@ -74,7 +74,7 @@ fn interactive_quota_component_uses_the_process_async_runtime() {
 }
 
 #[test]
-fn quota_command_modules_keep_runtime_wrappers_in_background_worker_only() {
+fn quota_command_call_graph_uses_the_process_async_runtime() {
     let quota_command_sources = concat!(
         include_str!("quota_command_dispatch.rs"),
         include_str!("quota_refresh_command.rs"),
@@ -93,6 +93,28 @@ fn quota_command_modules_keep_runtime_wrappers_in_background_worker_only() {
         assert!(
             !quota_command_sources.contains(forbidden_runtime_owner),
             "quota command call graph must not own {forbidden_runtime_owner}"
+        );
+    }
+}
+
+#[test]
+fn background_producers_do_not_own_a_runtime_or_thread_scheduler() {
+    let worker_sources = concat!(
+        include_str!("../credential_upkeep_worker.rs"),
+        include_str!("quota_background_refresh_worker.rs"),
+        include_str!("../token_reload_watcher.rs"),
+    );
+
+    for forbidden_runtime_owner in [
+        "tokio::runtime::Builder",
+        ".block_on(",
+        "std::thread::spawn",
+        "thread::Builder",
+        "thread::spawn",
+    ] {
+        assert!(
+            !worker_sources.contains(forbidden_runtime_owner),
+            "background producers must not own {forbidden_runtime_owner}"
         );
     }
 }
@@ -129,6 +151,19 @@ fn quota_refresh_composition_uses_only_the_async_credential_resolver() {
             "native-async resolver must not own {forbidden_runtime_owner}"
         );
     }
+
+    let background_worker_source = include_str!("quota_background_refresh_worker.rs");
+    assert!(
+        background_worker_source.contains("AsyncCliCredentialResolver::open_with_secret_store"),
+        "Serve quota refresh must reuse the already-open encrypted-store handle"
+    );
+    let background_worker_without_async_resolver_name =
+        background_worker_source.replace("AsyncCliCredentialResolver", "");
+    assert!(
+        !background_worker_without_async_resolver_name
+            .contains("CliCredentialResolver::open_with_secret_store"),
+        "Serve quota refresh must not construct the synchronous resolver"
+    );
 }
 
 #[test]

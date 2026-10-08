@@ -656,7 +656,7 @@ async fn serve_startup_maintains_idle_enabled_oauth_account_across_simulated_day
     let oauth_listener = must_ok(TcpListener::bind("127.0.0.1:0"));
     must_ok(oauth_listener.set_nonblocking(true));
     let oauth_address = must_ok(oauth_listener.local_addr());
-    let (oauth_call_sender, oauth_call_receiver) = mpsc::channel();
+    let (oauth_call_sender, mut oauth_call_receiver) = tokio::sync::mpsc::unbounded_channel();
     let oauth_thread = thread::spawn(move || {
         for (call, expected_refresh) in
             [(1, "initial-refresh-canary"), (2, "rotated-refresh-canary")]
@@ -724,7 +724,7 @@ async fn serve_startup_maintains_idle_enabled_oauth_account_across_simulated_day
     };
     let clock = Arc::new(AtomicU64::new(1_000));
     let worker_clock = Arc::clone(&clock);
-    let (wake_sender, wake_receiver) = mpsc::channel();
+    let (wake_sender, mut wake_receiver) = tokio::sync::mpsc::unbounded_channel();
     let oauth_client = LoopbackUpkeepOAuthClient {
         token_endpoint: format!("http://{oauth_address}/oauth/token"),
     };
@@ -737,14 +737,15 @@ async fn serve_startup_maintains_idle_enabled_oauth_account_across_simulated_day
             &mut stdout,
             command,
             credential_store,
-            move |state_path, credential_store| {
+            move |state_path, credential_store| async move {
                 let clock = Arc::clone(&worker_clock);
                 let worker = start_background_credential_upkeep_worker_with_client_and_clock(
                     state_path,
                     credential_store,
                     oauth_client,
                     move || clock.load(Ordering::SeqCst),
-                )?;
+                )
+                .await?;
                 must_ok(wake_sender.send(worker.wake_handle_for_test()));
                 Ok(worker)
             },
@@ -752,16 +753,25 @@ async fn serve_startup_maintains_idle_enabled_oauth_account_across_simulated_day
         .await;
         (result, stdout)
     });
-    let wake_handle = must_ok(wake_receiver.recv_timeout(Duration::from_secs(2)));
+    let wake_handle = tokio::time::timeout(Duration::from_secs(2), wake_receiver.recv())
+        .await
+        .unwrap_or_else(|error| panic!("upkeep worker wake handle should be sent: {error}"))
+        .expect("upkeep worker wake handle should arrive");
     assert_eq!(
-        must_ok(oauth_call_receiver.recv_timeout(Duration::from_secs(2))),
+        tokio::time::timeout(Duration::from_secs(2), oauth_call_receiver.recv())
+            .await
+            .unwrap_or_else(|error| panic!("first OAuth call should arrive: {error}"))
+            .expect("first OAuth call should send"),
         1
     );
     wait_for_upkeep_generation_async(&state_path, &enabled_id, 2).await;
     clock.store(1_000 + 2 * 86_400, Ordering::SeqCst);
     wake_handle.wake();
     assert_eq!(
-        must_ok(oauth_call_receiver.recv_timeout(Duration::from_secs(2))),
+        tokio::time::timeout(Duration::from_secs(2), oauth_call_receiver.recv())
+            .await
+            .unwrap_or_else(|error| panic!("second OAuth call should arrive: {error}"))
+            .expect("second OAuth call should send"),
         2
     );
     wait_for_upkeep_generation_async(&state_path, &enabled_id, 3).await;

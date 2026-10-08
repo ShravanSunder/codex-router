@@ -15,7 +15,6 @@ use std::process::Command as ProcessCommand;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::MutexGuard;
-use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
@@ -180,6 +179,9 @@ mod account_policy_tests;
 
 #[path = "cli_contract_tests/router_startup_tests.rs"]
 mod router_startup_tests;
+
+#[path = "cli_contract_tests/serve_worker_lifecycle_tests.rs"]
+mod serve_worker_lifecycle_tests;
 
 #[path = "cli_contract_tests/quota_concurrency_tests.rs"]
 mod quota_concurrency_tests;
