@@ -4,7 +4,7 @@ use collaboration_client::protocol::{
     InstructionCreateParams, InstructionShowParams, InstructionSnapshot, InstructionText,
     InstructionUpdateParams, OperationId,
 };
-use collaboration_client::{ControlClient, InstructionClientError};
+use collaboration_client::{CollaborationClient, InstructionClientError};
 use serde_json::json;
 use std::{
     ffi::OsString,
@@ -148,24 +148,22 @@ pub fn run_instruction_command(arguments: Vec<OsString>) -> i32 {
     };
     let mut dispatched = false;
     let result: Result<InstructionSnapshot, InstructionClientError> = runtime.block_on(async {
-        let mut client = ControlClient::connect(
+        let client = CollaborationClient::connect(
             &directory,
             "agent-collaboration-instructions",
             env!("CARGO_PKG_VERSION"),
         )
         .await?;
         dispatched = true;
-        let result = match prepared {
+        match prepared {
             PreparedInstruction::Create(p) => client.create_instruction(p).await,
             PreparedInstruction::Update(p) => client.update_instruction(p).await,
             PreparedInstruction::Show(p) => client.read_instruction(p).await,
-        };
-        let _ = client.close().await;
-        result
+        }
     });
     if !dispatched
         && let Err(InstructionClientError::Connection(error)) = &result
-        && let Some(code) = crate::permission_diagnostic_reporting::report_permission_error(
+        && let Some(code) = crate::permission_diagnostic_reporting::report_actionable_client_error(
             error,
             crate::permission_diagnostic_reporting::PermissionDiagnosticRendering::Operation(
                 operation_id.as_ref(),

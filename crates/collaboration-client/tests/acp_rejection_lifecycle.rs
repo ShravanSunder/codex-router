@@ -1,10 +1,12 @@
 //! Failed ACP setup cannot authorize a later prompt or erase protocol error data.
 #[cfg(test)]
 mod tests {
+    use collaboration_client::CollaborationAccess;
     use collaboration_client::{
         AcpConversation, ClientError, ConversationCreateRequest, ConversationEvent,
     };
-    use collaboration_service::{LocalControlService, ManifestPublication, ServiceIdentity};
+    use collaboration_mcp::test_support::ServedCollaborationApi;
+    use collaboration_service::{CollaborationApplication, ServiceIdentity};
     use serde_json::{Value, json};
     use std::{os::unix::fs::DirBuilderExt, path::PathBuf, time::Duration};
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -65,7 +67,6 @@ mod tests {
             .create(&root)
             .unwrap_or_else(|error| panic!("fixture directory: {error}"));
         let service_id = "00000000-0000-4000-8000-000000000001";
-        let digest = format!("sha256:{}", "a".repeat(64));
         let endpoint = serde_json::from_value(json!({
             "endpoint":{"serviceId":service_id,"endpointId":"codex-local"},
             "label":"ACP rejection fixture",
@@ -74,19 +75,12 @@ mod tests {
                 "schemaDigest":format!("sha256:{}",collaboration_protocol::ACP_SCHEMA_DIGEST)}]
         }))
         .unwrap_or_else(|error| panic!("fixture endpoint: {error}"));
-        let identity = ServiceIdentity::new(service_id, service_id, &digest)
+        let identity = ServiceIdentity::new(service_id, service_id)
             .and_then(|identity| identity.with_endpoints(vec![endpoint]))
             .unwrap_or_else(|error| panic!("fixture identity: {error}"));
-        let listener = LocalControlService::bind(&root.join("control.sock"), identity)
-            .unwrap_or_else(|error| panic!("fixture listener: {error}"));
-        let manifest = serde_json::from_value(json!({"version":2,"serviceId":service_id,
-        "serviceEpoch":service_id,"machineLabel":"fixture-host","control":{"transport":"unixJsonLines","path":"control.sock"},
-        "controlSchemaDigest":digest,"mcp":{"transport":"streamableHttp","url":"http://127.0.0.1:0/mcp"}}))
-        .unwrap_or_else(|error| panic!("fixture manifest: {error}"));
-        let publication = ManifestPublication::publish(&root, &manifest)
-            .unwrap_or_else(|error| panic!("fixture publication: {error}"));
-        let stop = CancellationToken::new();
-        let service = tokio::spawn(listener.run(stop.clone()));
+        let served = ServedCollaborationApi::start(&root, CollaborationApplication::new(identity))
+            .await
+            .unwrap_or_else(|error| panic!("serve: {error}"));
         let listener = tokio::net::UnixListener::bind(root.join("acp.sock"))
             .unwrap_or_else(|error| panic!("ACP socket: {error}"));
         let peer = tokio::spawn(async move {
@@ -135,7 +129,7 @@ mod tests {
             Some(extra)
         });
         let mut client = AcpConversation::connect(
-            &root,
+            &CollaborationAccess::api(&root),
             "codex-local"
                 .to_owned()
                 .try_into()
@@ -207,12 +201,10 @@ mod tests {
             .await
             .unwrap_or_else(|error| panic!("peer deadline: {error}"))
             .unwrap_or_else(|error| panic!("peer join: {error}"));
-        stop.cancel();
-        service
+        served
+            .stop()
             .await
-            .unwrap_or_else(|error| panic!("service join: {error}"))
             .unwrap_or_else(|error| panic!("service: {error}"));
-        drop(publication);
         std::fs::remove_file(root.join("acp.sock"))
             .unwrap_or_else(|error| panic!("socket cleanup: {error}"));
         std::fs::remove_dir(root).unwrap_or_else(|error| panic!("directory cleanup: {error}"));

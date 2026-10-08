@@ -1,5 +1,5 @@
 //! ACP, peer, wake, subscription, and approval fixtures for Host composition proof.
-use collaboration_client::{ControlClient, MessageSendRequest, PublicMessageContent};
+use collaboration_client::{CollaborationClient, MessageSendRequest, PublicMessageContent};
 use collaboration_protocol::{
     ConversationCreateRequest, ConversationLoadRequest, ConversationOperationSettlement,
     ConversationOperationWaitOutput, ConversationOperationWaitRequest, DeliveryDisposition,
@@ -143,7 +143,7 @@ pub(super) async fn wait_for_completed_provider_prompts(path: &Path, expected_co
 }
 
 pub(super) async fn post_thread_activity_for_sessions(
-    client: &mut ControlClient,
+    client: &CollaborationClient,
     readers: [SessionRef; 2],
 ) {
     let owner = Identity::Human {
@@ -270,7 +270,7 @@ pub(super) fn publish_peer(registry: &Path, session_id: &SessionId, protocol: u6
 }
 
 pub(super) async fn create_provider_target(
-    client: &mut ControlClient,
+    client: &CollaborationClient,
     endpoint: EndpointRef,
     actor: SessionRef,
     working_directory: &Path,
@@ -294,8 +294,9 @@ pub(super) async fn create_provider_target(
         })
         .expect("binding generation");
     let operation_id = OperationId::generate();
-    client
-        .create_provider_conversation(ConversationCreateRequest {
+    submit_provider_create(
+        client,
+        ConversationCreateRequest {
             settings: None,
             operation_id: operation_id.clone(),
             endpoint,
@@ -312,9 +313,10 @@ pub(super) async fn create_provider_target(
             requested_policy: ProviderRequestedPolicy {
                 access: RouterAccess::WriteRestricted,
             },
-        })
-        .await
-        .expect("create admitted");
+        },
+    )
+    .await
+    .expect("create admitted");
     let waited = client
         .wait_for_provider_conversation_operation(ConversationOperationWaitRequest {
             operation_id,
@@ -331,7 +333,7 @@ pub(super) async fn create_provider_target(
 }
 
 pub(super) async fn load_provider_target(
-    client: &mut ControlClient,
+    client: &CollaborationClient,
     target: SessionRef,
     actor: SessionRef,
     working_directory: &Path,
@@ -355,8 +357,9 @@ pub(super) async fn load_provider_target(
         })
         .expect("binding generation");
     let operation_id = OperationId::generate();
-    client
-        .load_provider_conversation(ConversationLoadRequest {
+    submit_provider_load(
+        client,
+        ConversationLoadRequest {
             operation_id: operation_id.clone(),
             target,
             generation: Some(collaboration_protocol::CodexGeneration {
@@ -372,9 +375,10 @@ pub(super) async fn load_provider_target(
             requested_policy: ProviderRequestedPolicy {
                 access: RouterAccess::WriteRestricted,
             },
-        })
-        .await
-        .expect("explicit provider load admitted");
+        },
+    )
+    .await
+    .expect("explicit provider load admitted");
     let waited = client
         .wait_for_provider_conversation_operation(ConversationOperationWaitRequest {
             operation_id,
@@ -390,7 +394,7 @@ pub(super) async fn load_provider_target(
     ));
 }
 
-pub(super) async fn send_and_wait_wake(client: &mut ControlClient, target: SessionRef) {
+pub(super) async fn send_and_wait_wake(client: &CollaborationClient, target: SessionRef) {
     let request: WakeSendRequest = serde_json::from_value(json!({
         "operationId": OperationId::generate(),
         "message": {
@@ -441,6 +445,13 @@ pub(super) async fn send_and_wait_wake(client: &mut ControlClient, target: Sessi
     .await
     .expect("wake delivery deadline");
 }
+
+#[path = "provider_conversation_submission.rs"]
+#[allow(dead_code)]
+mod provider_conversation_submission;
+use provider_conversation_submission::{
+    spawn_provider_prompt, submit_provider_create, submit_provider_load,
+};
 
 #[path = "session_message_approval_fixture.rs"]
 mod approval_fixture;

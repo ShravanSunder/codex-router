@@ -1,107 +1,76 @@
-//! Typed Control calls for Host-owned external ACP conversations.
+//! Typed calls for Host-owned external provider conversations: inspection, settings,
+//! resume, close and operation inspection. Create, load, prompt and cancel run as composite
+//! tools (`ProviderConversations`).
 
-use crate::{ClientError, ControlClient};
+use crate::{ClientError, CollaborationClient};
 use collaboration_protocol::{
-    ConversationCancelRequest, ConversationCloseRequest, ConversationCreateRequest,
-    ConversationLoadRequest, ConversationOperationReconcileRequest,
+    ConversationCloseRequest, ConversationOperationReconcileRequest,
     ConversationOperationShowRequest, ConversationOperationSnapshot,
     ConversationOperationSubmission, ConversationOperationWaitRequest,
-    ConversationOperationWaitResult, ConversationPromptRequest, ConversationResumeRequest,
-    OperationId, ProviderSessionInspectRequest, ProviderSessionInspectResult,
-    ProviderSettingsAcceptRequest, ProviderSettingsResult, ProviderSettingsSetRequest,
+    ConversationOperationWaitResult, ConversationResumeRequest, OperationId,
+    ProviderSessionInspectRequest, ProviderSessionInspectResult, ProviderSettingsAcceptRequest,
+    ProviderSettingsResult, ProviderSettingsSetRequest,
 };
 use serde::{Serialize, de::DeserializeOwned};
 use std::time::Duration;
 
 const PROVIDER_WAIT_TRANSPORT_ALLOWANCE: Duration = Duration::from_secs(5);
 
-impl ControlClient {
+impl CollaborationClient {
     pub async fn inspect_provider_session(
-        &mut self,
+        &self,
         request: ProviderSessionInspectRequest,
     ) -> Result<ProviderSessionInspectResult, ClientError> {
-        self.call_provider_operation("provider/sessionInspect", request)
+        self.call_provider_operation("provider_session_inspect", request)
             .await
     }
 
     pub async fn set_provider_conversation_setting(
-        &mut self,
+        &self,
         request: ProviderSettingsSetRequest,
     ) -> Result<ProviderSettingsResult, ClientError> {
-        self.call_provider_operation("conversation/settingsSet", request)
+        self.call_provider_operation("conversation_settings_set", request)
             .await
     }
 
     pub async fn accept_provider_conversation_settings(
-        &mut self,
+        &self,
         request: ProviderSettingsAcceptRequest,
     ) -> Result<ProviderSettingsResult, ClientError> {
-        self.call_provider_operation("conversation/settingsAccept", request)
-            .await
-    }
-
-    pub async fn create_provider_conversation(
-        &mut self,
-        request: ConversationCreateRequest,
-    ) -> Result<ConversationOperationSubmission, ClientError> {
-        self.submit_provider_operation("conversation/create", request.operation_id.clone(), request)
-            .await
-    }
-
-    pub async fn load_provider_conversation(
-        &mut self,
-        request: ConversationLoadRequest,
-    ) -> Result<ConversationOperationSubmission, ClientError> {
-        self.submit_provider_operation("conversation/load", request.operation_id.clone(), request)
+        self.call_provider_operation("conversation_settings_accept", request)
             .await
     }
 
     pub async fn resume_provider_conversation(
-        &mut self,
+        &self,
         request: ConversationResumeRequest,
     ) -> Result<ConversationOperationSubmission, ClientError> {
-        self.submit_provider_operation("conversation/resume", request.operation_id.clone(), request)
+        self.submit_provider_operation("conversation_resume", request.operation_id.clone(), request)
             .await
     }
 
     pub async fn close_provider_conversation(
-        &mut self,
+        &self,
         request: ConversationCloseRequest,
     ) -> Result<ConversationOperationSubmission, ClientError> {
-        self.submit_provider_operation("conversation/close", request.operation_id.clone(), request)
-            .await
-    }
-
-    pub async fn prompt_provider_conversation(
-        &mut self,
-        request: ConversationPromptRequest,
-    ) -> Result<ConversationOperationSubmission, ClientError> {
-        self.submit_provider_operation("conversation/prompt", request.operation_id.clone(), request)
-            .await
-    }
-
-    pub async fn cancel_provider_conversation_operation(
-        &mut self,
-        request: ConversationCancelRequest,
-    ) -> Result<ConversationOperationSubmission, ClientError> {
-        self.submit_provider_operation("conversation/cancel", request.operation_id.clone(), request)
+        self.submit_provider_operation("conversation_close", request.operation_id.clone(), request)
             .await
     }
 
     pub async fn show_provider_conversation_operation(
-        &mut self,
+        &self,
         request: ConversationOperationShowRequest,
     ) -> Result<ConversationOperationSnapshot, ClientError> {
         let operation_id = request.operation_id.clone();
         let snapshot = self
-            .call_provider_operation("conversation/operationShow", request)
+            .call_provider_operation("conversation_operation_show", request)
             .await?;
         self.validate_provider_operation_id(&operation_id, &snapshot)?;
         Ok(snapshot)
     }
 
     pub async fn wait_for_provider_conversation_operation(
-        &mut self,
+        &self,
         request: ConversationOperationWaitRequest,
     ) -> Result<ConversationOperationWaitResult, ClientError> {
         let operation_id = request.operation_id.clone();
@@ -113,31 +82,28 @@ impl ControlClient {
             .map_err(|_| ClientError::InvalidRequest("invalid provider conversation request"))?;
         let response = self
             .connection
-            .call_with_timeout("conversation/operationWait", params, transport_timeout)
+            .call_with_timeout("conversation_operation_wait", params, transport_timeout)
             .await?;
-        let result: ConversationOperationWaitResult =
-            serde_json::from_value(response).map_err(|_| {
-                self.connection.failed = true;
-                ClientError::Protocol("invalid provider conversation response")
-            })?;
+        let result: ConversationOperationWaitResult = serde_json::from_value(response)
+            .map_err(|_| ClientError::Protocol("invalid provider conversation response"))?;
         self.validate_provider_operation_id(&operation_id, &result.operation)?;
         Ok(result)
     }
 
     pub async fn reconcile_provider_conversation_operation(
-        &mut self,
+        &self,
         request: ConversationOperationReconcileRequest,
     ) -> Result<ConversationOperationSnapshot, ClientError> {
         let operation_id = request.operation_id.clone();
         let snapshot = self
-            .call_provider_operation("conversation/operationReconcile", request)
+            .call_provider_operation("conversation_operation_reconcile", request)
             .await?;
         self.validate_provider_operation_id(&operation_id, &snapshot)?;
         Ok(snapshot)
     }
 
     async fn submit_provider_operation<Request>(
-        &mut self,
+        &self,
         method: &'static str,
         operation_id: OperationId,
         request: Request,
@@ -152,7 +118,7 @@ impl ControlClient {
     }
 
     async fn call_provider_operation<Request, Response>(
-        &mut self,
+        &self,
         method: &'static str,
         request: Request,
     ) -> Result<Response, ClientError>
@@ -163,21 +129,18 @@ impl ControlClient {
         let params = serde_json::to_value(request)
             .map_err(|_| ClientError::InvalidRequest("invalid provider conversation request"))?;
         let response = self.connection.call(method, params).await?;
-        serde_json::from_value(response).map_err(|_| {
-            self.connection.failed = true;
-            ClientError::Protocol("invalid provider conversation response")
-        })
+        serde_json::from_value(response)
+            .map_err(|_| ClientError::Protocol("invalid provider conversation response"))
     }
 
     fn validate_provider_operation_id(
-        &mut self,
+        &self,
         requested: &OperationId,
         snapshot: &ConversationOperationSnapshot,
     ) -> Result<(), ClientError> {
         if &snapshot.operation_id == requested {
             return Ok(());
         }
-        self.connection.failed = true;
         Err(ClientError::Protocol(
             "provider conversation operation identity changed",
         ))

@@ -43,6 +43,7 @@ tokio-util.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+collaboration-mcp = { path = "../collaboration-mcp", version = "0.1.30", features = ["test-support"] }
 acp-client-runtime = { path = "../acp-client-runtime", version = "0.1.40", features = ["test-observation"] }
 codex-router-secret-store = { path = "../codex-router-secret-store", version = "0.1.4", features = ["keychain-test-guard", "test-support"] }
 agent-client-protocol.workspace = true

@@ -1,9 +1,14 @@
 //! One conversation connection selected from the endpoint's advertised channel.
 use crate::conversation_create_actor::{ConversationCreateActor, codex_create_actors};
-use crate::{
-    AcpConversation, ClientError, ControlClient, ConversationCreatePromptOutcome,
-    PublicPromptContent,
+use crate::provider_conversations::{
+    CompositeAnswer, LocalProviderOperations, ProviderConversations, composite_arguments,
+    composite_call,
 };
+use crate::{
+    AcpConversation, ClientError, CollaborationAccess, CollaborationClient,
+    ConversationCreatePromptOutcome, PublicPromptContent,
+};
+use collaboration_protocol::ProviderIdentity;
 use collaboration_protocol::{
     ChannelDescription, CodexGeneration, ConversationCreateOutcome, ConversationOperationFailure,
     ConversationOperationFailureKind, ConversationOperationFailureStage,
@@ -15,10 +20,7 @@ use collaboration_protocol::{
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use std::{
-    path::{Path, PathBuf},
-    time::Duration,
-};
+use std::{path::PathBuf, time::Duration};
 use tokio_util::sync::CancellationToken;
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
@@ -61,7 +63,7 @@ pub struct ConversationLoadInput {
     pub working_directory: PathBuf,
     pub requested_by: SessionRef,
     #[serde(default)]
-    pub approver: Option<SessionRef>,
+    pub approver: Option<ProviderIdentity>,
     pub access: RouterAccess,
     #[serde(default)]
     pub generation: Option<CodexGeneration>,
@@ -77,7 +79,7 @@ pub struct ConversationPromptInput {
     pub working_directory: Option<PathBuf>,
     pub requested_by: SessionRef,
     #[serde(default)]
-    pub approver: Option<SessionRef>,
+    pub approver: Option<ProviderIdentity>,
     pub message: PublicPromptContent,
     #[serde(default)]
     pub effort: Option<String>,
@@ -93,7 +95,7 @@ pub struct ConversationCancelInput {
     pub target: SessionRef,
     pub requested_by: SessionRef,
     #[serde(default)]
-    pub approver: Option<SessionRef>,
+    pub approver: Option<ProviderIdentity>,
     #[serde(default)]
     pub generation: Option<CodexGeneration>,
 }
@@ -154,8 +156,8 @@ impl From<crate::OperationError> for ConversationClientError {
 }
 
 pub enum ConversationClient {
-    CodexAcp(AcpConversation),
-    ExternalProvider(ControlClient),
+    CodexAcp(Box<AcpConversation>),
+    ExternalProvider(ProviderConversations),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -191,7 +193,7 @@ impl ConversationClient {
     }
 
     pub async fn create_and_prompt(
-        directory: &Path,
+        access: &CollaborationAccess,
         input: ConversationCreatePromptInput,
         timeout: Duration,
         cancel: CancellationToken,
@@ -226,7 +228,7 @@ impl ConversationClient {
             })
             .transpose()?;
         let working_directory = input.create.working_directory.clone();
-        let create_client = Self::connect(directory, &endpoint).await?;
+        let create_client = Self::connect(access, &endpoint).await?;
         create_client.validate_operation_id(
             &endpoint,
             input.prompt_operation_id.as_ref(),
@@ -257,20 +259,20 @@ impl ConversationClient {
                 return Ok(ConversationCreatePromptOutcome::CreatePending { operation_id });
             }
         };
-        let client = Self::connect(directory, &endpoint)
-            .await
-            .map_err(|source| ConversationClientError::AfterCreate {
+        let client = Self::connect(access, &endpoint).await.map_err(|source| {
+            ConversationClientError::AfterCreate {
                 create_operation_id: create_operation_id.clone(),
                 target: target.clone(),
                 source: Box::new(source),
-            })?;
+            }
+        })?;
         let native = matches!(client, Self::CodexAcp(_));
         let prompt_input = ConversationPromptInput {
             operation_id: input.prompt_operation_id,
             target: target.clone(),
             working_directory: native.then_some(working_directory),
             requested_by,
-            approver,
+            approver: approver.map(ProviderIdentity::from),
             message: input.message,
             effort: input.prompt_effort,
             generation: None,
@@ -327,19 +329,17 @@ impl ConversationClient {
     }
 
     pub async fn connect(
-        directory: &Path,
+        access: &CollaborationAccess,
         target: &EndpointRef,
     ) -> Result<Self, ConversationClientError> {
-        let mut control =
-            ControlClient::connect(directory, "conversation-client", env!("CARGO_PKG_VERSION"))
-                .await?;
-        if target.service_id != control.identity().service_id {
+        let endpoints = access.endpoint_directory("conversation-client").await?;
+        if target.service_id != endpoints.service_id() {
             return Err(
                 ClientError::Protocol("conversation endpoint belongs to another service").into(),
             );
         }
-        let endpoint = control
-            .list_endpoints()
+        let endpoint = endpoints
+            .endpoints()
             .await?
             .endpoints
             .into_iter()
@@ -359,20 +359,30 @@ impl ConversationClient {
         }
         match advertised_conversation_transport(&endpoint)? {
             ConversationTransport::CodexAcp => {
-                control.close().await?;
-                let acp =
-                    AcpConversation::connect_with_context(directory, target.endpoint_id.clone())
-                        .await
-                        .map_err(ConversationClientError::from)?;
+                let acp = AcpConversation::connect_with_context(access, target.endpoint_id.clone())
+                    .await
+                    .map_err(ConversationClientError::from)?;
                 if acp.endpoint() != target {
                     return Err(ClientError::Protocol(
                         "conversation endpoint changed during connect",
                     )
                     .into());
                 }
-                Ok(Self::CodexAcp(acp))
+                Ok(Self::CodexAcp(Box::new(acp)))
             }
-            ConversationTransport::ExternalProvider => Ok(Self::ExternalProvider(control)),
+            ConversationTransport::ExternalProvider => Ok(Self::ExternalProvider(match access {
+                CollaborationAccess::Local { router, .. } => {
+                    ProviderConversations::Local(std::sync::Arc::clone(router))
+                }
+                CollaborationAccess::Api { .. } => match endpoints {
+                    crate::collaboration_access::EndpointDirectoryReader::Api(client) => {
+                        ProviderConversations::Api(Box::new(client))
+                    }
+                    crate::collaboration_access::EndpointDirectoryReader::Local(router) => {
+                        ProviderConversations::Local(router)
+                    }
+                },
+            })),
         }
     }
 
@@ -449,12 +459,13 @@ impl ConversationClient {
                     Err(_) => Ok(ConversationCreateOutcome::Pending { operation_id }),
                 }
             }
-            Self::ExternalProvider(control) => {
-                if control.identity().service_id != input.endpoint.service_id {
+            Self::ExternalProvider(provider) => {
+                if provider.service_id() != input.endpoint.service_id {
                     return Err(ConversationClientError::InvalidInput(
                         "provider endpoint belongs to another service",
                     ));
                 }
+                let api_arguments = composite_arguments(&input, timeout)?;
                 for (field, present) in [
                     ("fork", input.fork.is_some()),
                     ("rootMessageId", input.root_message_id.is_some()),
@@ -510,9 +521,17 @@ impl ConversationClient {
                     .ok_or(ConversationClientError::InvalidInput(
                         "create timeout must be whole seconds within the supported range",
                     ))?;
+                let router = match provider {
+                    ProviderConversations::Api(client) => {
+                        return create_through_api(client, api_arguments, timeout, operation_id)
+                            .await;
+                    }
+                    ProviderConversations::Local(router) => router,
+                };
+                let operations = LocalProviderOperations(router.as_ref());
                 let submitted = tokio::time::timeout(timeout, async {
-                    control.create_provider_conversation(request).await?;
-                    let settled = control
+                    operations.create_provider_conversation(request).await?;
+                    let settled = operations
                         .wait_for_provider_conversation_operation(
                             ConversationOperationWaitRequest {
                                 operation_id: operation_id.clone(),
@@ -596,6 +615,19 @@ impl ConversationClient {
                 }
             }
         }
+    }
+}
+
+/// Creates a provider conversation with one composite call to the collaboration API.
+async fn create_through_api(
+    client: &CollaborationClient,
+    arguments: serde_json::Value,
+    timeout: Duration,
+    operation_id: OperationId,
+) -> Result<ConversationCreateOutcome, ConversationClientError> {
+    match composite_call(client, "conversation_create", arguments, timeout, None).await? {
+        CompositeAnswer::Settled(outcome) => Ok(outcome),
+        CompositeAnswer::StillRunning => Ok(ConversationCreateOutcome::Pending { operation_id }),
     }
 }
 

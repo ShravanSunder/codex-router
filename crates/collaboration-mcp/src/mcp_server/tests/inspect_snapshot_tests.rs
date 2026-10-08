@@ -1,189 +1,44 @@
 use super::*;
 
-#[tokio::test]
-async fn inspect_tool_rejects_well_shaped_wrong_target_response_like_typed_sdk() {
-    use rmcp::handler::server::wrapper::Parameters;
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-    let temporary = tempfile::tempdir().expect("temporary directory");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(temporary.path(), std::fs::Permissions::from_mode(0o700))
-            .expect("private directory");
-    }
-    let digest = format!("sha256:{}", "a".repeat(64));
-    std::fs::write(
-        temporary.path().join("service.json"),
-        serde_json::to_vec(&serde_json::json!({
-            "version":2,
-            "serviceId":"00000000-0000-4000-8000-000000000001",
-            "serviceEpoch":"00000000-0000-4000-8000-000000000002",
-            "machineLabel":"fixture-host","control":{"transport":"unixJsonLines","path":"control.sock"},
-            "controlSchemaDigest":digest,
-            "mcp":{"transport":"streamableHttp","url":"http://127.0.0.1:0/mcp"}
-        }))
-        .expect("manifest JSON"),
-    )
-    .expect("manifest write");
-    let listener = tokio::net::UnixListener::bind(temporary.path().join("control.sock"))
-        .expect("Control bind");
-    let peer = tokio::spawn(async move {
-        let (stream, _) = listener.accept().await.expect("Control accept");
-        let (read, mut write) = stream.into_split();
-        let mut lines = BufReader::new(read).lines();
-        let initialize: serde_json::Value = serde_json::from_str(
-            &lines
-                .next_line()
-                .await
-                .expect("read init")
-                .expect("init frame"),
-        )
-        .expect("init JSON");
-        let initialized = serde_json::json!({"jsonrpc":"2.0","id":initialize["id"],"result":{
-            "version":{"major":1,"minor":0},"serviceId":"00000000-0000-4000-8000-000000000001",
-            "serviceEpoch":"00000000-0000-4000-8000-000000000002","controlSchemaDigest":format!("sha256:{}", "a".repeat(64))
-        }});
-        write
-            .write_all(format!("{initialized}\n").as_bytes())
-            .await
-            .expect("write init");
-        let inspect: serde_json::Value = serde_json::from_str(
-            &lines
-                .next_line()
-                .await
-                .expect("read inspect")
-                .expect("inspect frame"),
-        )
-        .expect("inspect JSON");
-        let wrong_target = serde_json::json!({"endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"codex-local"},"sessionId":"other-thread"});
-        let response = serde_json::json!({"jsonrpc":"2.0","id":inspect["id"],"result":{
-            "target":wrong_target,"generation":{"serviceEpoch":"00000000-0000-4000-8000-000000000002","generation":1},
-            "effectiveAccess":null,"settingsObservation":{"kind":"unavailable","reason":"threadReadOmitsSettings"},"thread":{"id":"other-thread"}
-        }});
-        write
-            .write_all(format!("{response}\n").as_bytes())
-            .await
-            .expect("write inspect");
-    });
-    let target: collaboration_protocol::SessionRef = serde_json::from_value(serde_json::json!({
-            "endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"codex-local"},"sessionId":"requested-thread"
-        }))
-        .expect("target");
-    let server = CollaborationMcpServer::new(temporary.path().to_owned());
-    let result = server
-        .session_inspect(Parameters(collaboration_protocol::NativeInspectParams {
-            target,
-        }))
-        .await;
-    assert_eq!(result.is_error, Some(true));
-    assert_eq!(
-        result
-            .structured_content
-            .as_ref()
-            .and_then(|value| value.get("kind")),
-        Some(&serde_json::json!("protocolViolation"))
+#[test]
+fn inspect_tool_exposes_native_rejection_message() {
+    let message = "native thread is unreadable: fixture refusal";
+    let rejection: Result<collaboration_protocol::NativeInspectResult, _> = Err(
+        collaboration_service::collaboration_application::NativeSessionFailure::NativeRejected {
+            stage: collaboration_service::collaboration_application::NativeSessionStage::Inspect,
+            message: message.to_owned(),
+            reason: "unknown",
+            next_action: "inspectTarget",
+            native_code: Some(-32600),
+        },
     );
-    tokio::time::timeout(std::time::Duration::from_secs(2), peer)
-        .await
-        .expect("Control fixture traffic deadline")
-        .expect("peer join");
+
+    let result = super::super::application_result(rejection, OperationEffect::None);
+
+    assert_eq!(result.is_error, Some(true));
+    let structured = result.structured_content.expect("structured rejection");
+    assert_eq!(structured["message"], message);
+    assert_eq!(structured["data"]["message"], message);
+    assert_eq!(structured["serviceKind"], "nativeRejected");
+    assert_eq!(structured["effect"], "none");
 }
 
 #[tokio::test]
-async fn inspect_tool_exposes_native_rejection_message() {
-    use rmcp::handler::server::wrapper::Parameters;
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-    let temporary = tempfile::tempdir().expect("temporary directory");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(temporary.path(), std::fs::Permissions::from_mode(0o700))
-            .expect("private directory");
-    }
-    let digest = format!("sha256:{}", "a".repeat(64));
-    std::fs::write(
-        temporary.path().join("service.json"),
-        serde_json::to_vec(&serde_json::json!({
-            "version":2,
-            "serviceId":"00000000-0000-4000-8000-000000000001",
-            "serviceEpoch":"00000000-0000-4000-8000-000000000002",
-            "machineLabel":"fixture-host","control":{"transport":"unixJsonLines","path":"control.sock"},
-            "controlSchemaDigest":digest,
-            "mcp":{"transport":"streamableHttp","url":"http://127.0.0.1:0/mcp"}
-        }))
-        .expect("manifest JSON"),
-    )
-    .expect("manifest write");
-    let listener = tokio::net::UnixListener::bind(temporary.path().join("control.sock"))
-        .expect("Control bind");
-    let peer = tokio::spawn(async move {
-        let (stream, _) = listener.accept().await.expect("Control accept");
-        let (read, mut write) = stream.into_split();
-        let mut lines = BufReader::new(read).lines();
-        let initialize: serde_json::Value = serde_json::from_str(
-            &lines
-                .next_line()
-                .await
-                .expect("read init")
-                .expect("init frame"),
-        )
-        .expect("init JSON");
-        let initialized = serde_json::json!({"jsonrpc":"2.0","id":initialize["id"],"result":{
-            "version":{"major":1,"minor":0},"serviceId":"00000000-0000-4000-8000-000000000001",
-            "serviceEpoch":"00000000-0000-4000-8000-000000000002","controlSchemaDigest":format!("sha256:{}", "a".repeat(64))
-        }});
-        write
-            .write_all(format!("{initialized}\n").as_bytes())
-            .await
-            .expect("write init");
-        let inspect: serde_json::Value = serde_json::from_str(
-            &lines
-                .next_line()
-                .await
-                .expect("read inspect")
-                .expect("inspect frame"),
-        )
-        .expect("inspect JSON");
-        assert_eq!(inspect["method"], "codex/sessionInspect");
-        let message = "native thread is unreadable: fixture refusal";
-        let response = serde_json::json!({"jsonrpc":"2.0","id":inspect["id"],"error":{
-            "code":-32050,"message":message,"data":{
-                "kind":"nativeRejected","stage":"inspect","message":message,
-                "reason":"unknown","nextAction":"inspectTarget","nativeCode":-32600
-            }
-        }});
-        write
-            .write_all(format!("{response}\n").as_bytes())
-            .await
-            .expect("write rejection");
-    });
-    let target: collaboration_protocol::SessionRef = serde_json::from_value(serde_json::json!({
-        "endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"codex-local"},
-        "sessionId":"unreadable-thread"
-    }))
-    .expect("target");
-    let server = CollaborationMcpServer::new(temporary.path().to_owned());
+async fn inspect_without_a_codex_backend_is_a_typed_unavailable_error() {
+    let server = CollaborationMcpServer::catalog_only();
+    let target: collaboration_protocol::SessionRef =
+        serde_json::from_value(fixture_session("codex-local", "requested-thread")).expect("target");
 
     let result = server
-        .session_inspect(Parameters(collaboration_protocol::NativeInspectParams {
-            target,
-        }))
+        .session_inspect(super::super::Parameters(
+            collaboration_protocol::NativeInspectParams { target },
+        ))
         .await;
 
     assert_eq!(result.is_error, Some(true));
     let structured = result.structured_content.expect("structured rejection");
-    assert_eq!(
-        structured["message"],
-        "native thread is unreadable: fixture refusal"
-    );
-    assert_eq!(
-        structured["data"]["message"],
-        "native thread is unreadable: fixture refusal"
-    );
-    tokio::time::timeout(std::time::Duration::from_secs(2), peer)
-        .await
-        .expect("Control fixture traffic deadline")
-        .expect("peer join");
+    assert_eq!(structured["kind"], "rejected");
+    assert_eq!(structured["effect"], "none");
 }
 
 #[test]
@@ -192,8 +47,7 @@ fn success_schema_branches_match_main_golden_snapshot() {
     let expected: std::collections::BTreeMap<String, Value> =
         serde_json::from_str(include_str!("../snapshots/main_success_schemas.json"))
             .expect("main success schema snapshot");
-    let temporary = tempfile::tempdir().expect("temporary directory");
-    let server = CollaborationMcpServer::new(temporary.path().to_owned());
+    let server = CollaborationMcpServer::catalog_only();
     let actual = server
         .resolved_tools()
         .into_iter()

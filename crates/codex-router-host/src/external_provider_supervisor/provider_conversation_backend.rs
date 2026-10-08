@@ -330,7 +330,7 @@ impl ProviderConversationBackend for ExternalProviderSupervisor {
     ) -> ProviderConversationFuture<'_, ConversationOperationSubmission> {
         let operation_id = request.operation_id.clone();
         let target = Some(request.target.clone());
-        match ProviderPromptContentsRequest::from_control(request) {
+        match ProviderPromptContentsRequest::from_prompt_request(request) {
             Ok(contents_request) => self.prompt_contents(contents_request),
             Err(error) => retain_operation(operation_id, target, async move { Err(*error) }),
         }

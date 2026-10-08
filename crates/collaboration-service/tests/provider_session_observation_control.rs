@@ -1,39 +1,44 @@
-//! Provider observers attach through Control to one ordered Session hub.
+//! Provider observers read one ordered Session hub through bounded observation on the API.
 
 use std::sync::Arc;
 
-use collaboration_client::ControlClient;
+use collaboration_client::CollaborationClient;
 use collaboration_protocol::{
     BoundedObservationRequest, EndpointDescription, ObservationEndReason, ProviderRequestedPolicy,
-    ProviderSessionListenRequest, ProviderWorkingDirectory, RouterAccess, SessionRef,
+    ProviderWorkingDirectory, RouterAccess, SessionRef,
 };
 use collaboration_service::{
     ProviderOperationStore, ProviderSessionEventHub, ProviderSessionRecord, ServiceIdentity,
-    serve_control_connection,
 };
 use serde_json::{Value, json};
 use session_event_model::{SessionEvent, SessionItem, SessionItemKind};
 use tokio::sync::Mutex;
+#[path = "support/served_api.rs"]
+mod served_api;
 
-#[tokio::test]
-async fn provider_observers_share_snapshot_and_live_order() {
-    let root = tempfile::tempdir().expect("service root");
+/// A Router whose provider endpoint's Session hub has one retained event.
+struct ProviderFixture {
+    _root: tempfile::TempDir,
+    target: SessionRef,
+    board_target: message_board::SessionRef,
+    hub: Arc<ProviderSessionEventHub>,
+    identity: ServiceIdentity,
+}
+
+async fn provider_fixture() -> Result<ProviderFixture, Box<dyn std::error::Error>> {
+    let root = tempfile::tempdir()?;
     let service_id = "00000000-0000-4000-8000-000000000001";
     let epoch = "00000000-0000-4000-8000-000000000002";
     let target: SessionRef = serde_json::from_value(json!({
         "endpoint":{"serviceId":service_id,"endpointId":"claude-local"},
         "sessionId":"provider-session"
-    }))
-    .expect("provider target");
+    }))?;
     let owner: SessionRef = serde_json::from_value(json!({
         "endpoint":{"serviceId":service_id,"endpointId":"codex-local"},
         "sessionId":"owner"
-    }))
-    .expect("owner");
+    }))?;
     let store = Arc::new(Mutex::new(
-        ProviderOperationStore::open(&root.path().join("operations.sqlite"))
-            .await
-            .expect("store"),
+        ProviderOperationStore::open(&root.path().join("operations.sqlite")).await?,
     ));
     store
         .lock()
@@ -42,8 +47,7 @@ async fn provider_observers_share_snapshot_and_live_order() {
             target: target.clone(),
             working_directory: ProviderWorkingDirectory::try_from(
                 root.path().display().to_string(),
-            )
-            .expect("cwd"),
+            )?,
             requested_policy: ProviderRequestedPolicy {
                 access: RouterAccess::WriteRestricted,
             },
@@ -51,15 +55,12 @@ async fn provider_observers_share_snapshot_and_live_order() {
             approver: owner.into(),
             updated_at_ms: 1,
         })
-        .await
-        .expect("session row");
+        .await?;
     let hub = Arc::new(ProviderSessionEventHub::with_capacity(store, 2));
     let board_target: message_board::SessionRef =
-        serde_json::from_value(serde_json::to_value(&target).expect("target JSON"))
-            .expect("board target");
+        serde_json::from_value(serde_json::to_value(&target)?)?;
     hub.publish(board_target.clone(), item("item-1", "first"))
-        .await
-        .expect("first item");
+        .await?;
     let description: EndpointDescription = serde_json::from_value(json!({
         "endpoint":target.endpoint,"label":"Claude fixture",
         "availability":{"state":"available","observedAt":"2026-09-26T00:00:00Z"},
@@ -67,50 +68,111 @@ async fn provider_observers_share_snapshot_and_live_order() {
             "bindingId":"fixture-binding","bindingGeneration":7,
             "runtime":{"provider":"claudeCode","runtimeName":"fixture"},
             "capabilities":[{"name":"create","status":"supported","evidence":"advertised"}]}]
-    }))
-    .expect("endpoint");
-    let identity = ServiceIdentity::new(service_id, epoch, &format!("sha256:{}", "a".repeat(64)))
-        .expect("identity")
-        .with_provider_session_hub(hub.clone());
-    identity
-        .endpoint_directory()
-        .publish(description)
-        .expect("endpoint publication");
+    }))?;
+    let identity = ServiceIdentity::new(service_id, epoch)?.with_provider_session_hub(hub.clone());
+    identity.endpoint_directory().publish(description)?;
+    Ok(ProviderFixture {
+        _root: root,
+        target,
+        board_target,
+        hub,
+        identity,
+    })
+}
 
-    let (mut first, first_server) = client(&identity).await.expect("first client");
-    let (mut second, second_server) = client(&identity).await.expect("second client");
-    let first_ready = first
-        .listen_provider_session(ProviderSessionListenRequest {
-            target: target.clone(),
-        })
+#[tokio::test]
+async fn the_client_hands_on_each_streamed_event_before_the_call_returns() {
+    // Arrange: one retained event; the call is bounded at two events and thirty seconds.
+    let fixture = provider_fixture().await.expect("provider fixture");
+    let served = served_api::ServedApi::start(fixture.identity)
         .await
-        .expect("first attach");
-    let second_ready = second
-        .listen_provider_session(ProviderSessionListenRequest {
-            target: target.clone(),
-        })
+        .expect("serve the API");
+    let client = served
+        .client("streaming-observer")
         .await
-        .expect("second attach");
-    assert_eq!(first_ready.generation, second_ready.generation);
-    assert_eq!(u64::from(first_ready.generation.generation), 7);
-    let first_snapshot = next(&mut first).await.expect("first snapshot");
-    assert_eq!(
-        first_snapshot,
-        next(&mut second).await.expect("second snapshot")
+        .expect("observing client");
+    let (observed, mut streamed) = tokio::sync::mpsc::unbounded_channel();
+    let request = BoundedObservationRequest {
+        target: fixture.target.clone(),
+        timeout_seconds: 30,
+        max_events: 2,
+        max_bytes: 262_144,
+        after_sequence: None,
+        epoch: None,
+    };
+
+    // Act
+    let call = tokio::spawn(async move {
+        client
+            .observe_provider_session_streaming(request, Some(observed))
+            .await
+    });
+    let retained = tokio::time::timeout(std::time::Duration::from_secs(5), streamed.recv())
+        .await
+        .expect("the retained event streamed while the call was open")
+        .expect("streamed event");
+    let still_open = !call.is_finished();
+    fixture
+        .hub
+        .publish(fixture.board_target.clone(), item("item-2", "second"))
+        .await
+        .expect("live item");
+    let result = call
+        .await
+        .expect("call joins")
+        .expect("bounded observation");
+    let live = streamed.recv().await.expect("live event streamed");
+
+    // Assert
+    assert!(
+        still_open,
+        "the call ended before its first event was handed on"
     );
+    assert_eq!(retained.event["sequence"], 1);
+    let epoch = result.epoch.expect("provider epoch");
+    assert_eq!(
+        retained.cursor,
+        Some(collaboration_protocol::ObservationCursor {
+            epoch,
+            after_sequence: 1
+        })
+    );
+    assert_eq!(live.event["sequence"], 2);
+    assert_eq!(result.events, vec![retained.event, live.event]);
+    assert_eq!(result.end_reason, ObservationEndReason::ResultLimitReached);
+    served.stop().await.expect("API stops");
+}
+
+#[tokio::test]
+async fn provider_observers_read_snapshot_and_live_order() {
+    let ProviderFixture {
+        _root,
+        target,
+        board_target,
+        hub,
+        identity,
+    } = provider_fixture().await.expect("provider fixture");
+
+    let served = served_api::ServedApi::start(identity)
+        .await
+        .expect("serve the API");
+    let bounded = served
+        .client("provider-observer")
+        .await
+        .expect("bounded client");
+    let (first_snapshot, epoch) = single_event(&bounded, &target, None, None)
+        .await
+        .expect("first snapshot");
     assert_eq!(first_snapshot["sequence"], 1);
 
     hub.publish(board_target, item("item-2", "second"))
         .await
         .expect("live item");
-    let first_live = next(&mut first).await.expect("first live event");
-    assert_eq!(
-        first_live,
-        next(&mut second).await.expect("second live event")
-    );
+    let (first_live, _) = single_event(&bounded, &target, Some(1), epoch)
+        .await
+        .expect("first live event");
     assert_eq!(first_live["sequence"], 2);
 
-    let (mut bounded, bounded_server) = client(&identity).await.expect("bounded client");
     let observed = bounded
         .observe_provider_session(BoundedObservationRequest {
             target,
@@ -163,14 +225,6 @@ async fn provider_observers_share_snapshot_and_live_order() {
         .await
         .expect("overflow event");
     }
-    assert_eq!(
-        next(&mut first).await.expect("first lag"),
-        json!({"kind":"resyncRequired"})
-    );
-    assert_eq!(
-        next(&mut second).await.expect("second lag"),
-        json!({"kind":"resyncRequired"})
-    );
     let large_text = format!("{}{}", "a".repeat(900_000), "\"".repeat(50_000));
     hub.publish(
         serde_json::from_value(serde_json::to_value(&observed.target).expect("target JSON"))
@@ -179,8 +233,7 @@ async fn provider_observers_share_snapshot_and_live_order() {
     )
     .await
     .expect("large item");
-    let (mut oversized, oversized_server) = client(&identity).await.expect("oversized client");
-    let oversized_page = oversized
+    let oversized_page = bounded
         .observe_provider_session(BoundedObservationRequest {
             target: observed.target.clone(),
             timeout_seconds: 1,
@@ -194,19 +247,18 @@ async fn provider_observers_share_snapshot_and_live_order() {
     assert!(oversized_page.events.iter().any(|event| {
         event == &json!({"kind":"eventTooLarge","sequence":6,"itemId":"oversized"})
     }));
-    let (mut large_listener, large_listener_server) =
-        client(&identity).await.expect("large listener");
-    large_listener
-        .listen_provider_session(ProviderSessionListenRequest {
+    let replay = bounded
+        .observe_provider_session(BoundedObservationRequest {
             target: observed.target.clone(),
+            timeout_seconds: 1,
+            max_events: 10,
+            max_bytes: 1_048_576,
+            after_sequence: Some(5),
+            epoch: observed.epoch,
         })
         .await
-        .expect("attach after large item");
-    let mut snapshot = Vec::new();
-    for _ in 0..6 {
-        snapshot.push(next(&mut large_listener).await.expect("replayed event"));
-    }
-    assert!(snapshot.iter().any(|event| {
+        .expect("replay after the large item");
+    assert!(replay.events.iter().any(|event| {
         event == &json!({"kind":"eventTooLarge","sequence":6,"itemId":"oversized"})
     }));
     hub.publish(
@@ -217,34 +269,14 @@ async fn provider_observers_share_snapshot_and_live_order() {
     .await
     .expect("later item");
     assert_eq!(
-        next(&mut large_listener).await.expect("later delivery")["sequence"],
+        single_event(&bounded, &observed.target, Some(6), observed.epoch)
+            .await
+            .expect("later delivery")
+            .0["sequence"],
         7
     );
-    large_listener.close().await.expect("listener close");
-    large_listener_server
-        .await
-        .expect("listener service")
-        .expect("listener IO");
-    oversized.close().await.expect("oversized close");
-    oversized_server
-        .await
-        .expect("oversized service")
-        .expect("oversized IO");
-    first.close().await.expect("first close");
-    second.close().await.expect("second close");
-    bounded.close().await.expect("bounded close");
-    first_server
-        .await
-        .expect("first service")
-        .expect("first service IO");
-    second_server
-        .await
-        .expect("second service")
-        .expect("second service IO");
-    bounded_server
-        .await
-        .expect("bounded service")
-        .expect("bounded service IO");
+    drop(bounded);
+    served.stop().await.expect("API stops");
 }
 
 fn item(item_id: &str, text: &str) -> SessionEvent {
@@ -257,20 +289,28 @@ fn item(item_id: &str, text: &str) -> SessionEvent {
     }
 }
 
-async fn client(
-    identity: &ServiceIdentity,
-) -> Result<(ControlClient, tokio::task::JoinHandle<std::io::Result<()>>), Box<dyn std::error::Error>>
-{
-    let (client_stream, server_stream) = tokio::net::UnixStream::pair()?;
-    let server = tokio::spawn(serve_control_connection(server_stream, identity.clone()));
-    let client = ControlClient::initialize(client_stream, "provider-observer", "1").await?;
-    Ok((client, server))
-}
-
-async fn next(client: &mut ControlClient) -> Result<Value, Box<dyn std::error::Error>> {
-    Ok(tokio::time::timeout(
-        std::time::Duration::from_secs(2),
-        client.next_provider_session_notification(),
-    )
-    .await??)
+/// The next event after `after_sequence` in `epoch`, waiting up to two seconds for it, with the
+/// hub's epoch.
+async fn single_event(
+    client: &CollaborationClient,
+    target: &SessionRef,
+    after_sequence: Option<u64>,
+    epoch: Option<u64>,
+) -> Result<(Value, Option<u64>), Box<dyn std::error::Error>> {
+    let observed = client
+        .observe_provider_session(BoundedObservationRequest {
+            target: target.clone(),
+            timeout_seconds: 2,
+            max_events: 1,
+            max_bytes: 262_144,
+            after_sequence,
+            epoch,
+        })
+        .await?;
+    let event = observed
+        .events
+        .into_iter()
+        .next()
+        .ok_or("no event arrived")?;
+    Ok((event, observed.epoch))
 }

@@ -25,11 +25,7 @@ pub(crate) fn report_client_failure(
     may_have_dispatched: bool,
     json_output: bool,
 ) -> i32 {
-    if let ClientError::Rejected {
-        data: Some(data), ..
-    } = &error
-        && let Ok(failure) = serde_json::from_value::<ConversationOperationFailure>(data.clone())
-    {
+    if let Some(failure) = error.conversation_failure() {
         return report_typed_failure(&failure, json_output);
     }
     let (kind, stage, effect, exit) = if may_have_dispatched {

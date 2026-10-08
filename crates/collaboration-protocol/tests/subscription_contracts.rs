@@ -1,7 +1,7 @@
 use collaboration_protocol::{
     SubscriptionWaitBatch, ThreadSubscribeRequest, ThreadSubscriptionView,
     ThreadSubscriptionWaitRequest, ThreadSubscriptionWaitResult, ThreadSubscriptionsRequest,
-    ThreadSubscriptionsResult, ThreadUnsubscribeRequest, control_schema_document,
+    ThreadSubscriptionsResult, ThreadUnsubscribeRequest,
 };
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
@@ -217,19 +217,7 @@ fn subscription_view_round_trips_optional_observations() -> TestResult {
 }
 
 #[test]
-fn control_schema_advertises_subscription_methods_and_staged_wait_has_bound() -> TestResult {
-    let schema = control_schema_document(None)?;
-    for method in [
-        "board/threadSubscribe",
-        "board/threadUnsubscribe",
-        "board/threadSubscriptions",
-    ] {
-        ensure(
-            schema["x-methods"][method].is_object(),
-            "contract assertion failed",
-        )?;
-    }
-    // S2d changes the live wait binding together with listen removal.
+fn the_subscription_wait_schema_bounds_the_wait() -> TestResult {
     let request_schema =
         serde_json::to_value(schemars::schema_for!(ThreadSubscriptionWaitRequest))?;
     let validator = jsonschema::validator_for(&request_schema)?;

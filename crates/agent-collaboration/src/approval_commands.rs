@@ -2,7 +2,7 @@
 use clap::{Args, Parser, Subcommand};
 use collaboration_client::protocol::{ApprovalDecideParams, ApprovalDecision};
 use collaboration_client::{
-    ClientError, ControlClient, OperationEffect, OperationFailure, OperationFailureKind,
+    ClientError, CollaborationClient, OperationEffect, OperationFailure, OperationFailureKind,
     operation_failure_from_client_error,
 };
 use message_board::Identity;
@@ -168,10 +168,13 @@ pub fn run_approval_command(arguments: Vec<OsString>) -> i32 {
         Err(_) => return 3,
     };
     let result = runtime.block_on(async {
-        let mut client =
-            ControlClient::connect(&directory, "agent-collaboration", env!("CARGO_PKG_VERSION"))
-                .await
-                .map_err(ApprovalCommandError::Client)?;
+        let client = CollaborationClient::connect(
+            &directory,
+            "agent-collaboration",
+            env!("CARGO_PKG_VERSION"),
+        )
+        .await
+        .map_err(ApprovalCommandError::Client)?;
         let value = match request {
             Some(request) => serde_json::to_value(
                 client
@@ -195,7 +198,6 @@ pub fn run_approval_command(arguments: Vec<OsString>) -> i32 {
         .map_err(|_| {
             ApprovalCommandError::Client(ClientError::Protocol("approval output encoding failed"))
         })?;
-        let _ = client.close().await;
         Ok::<_, ApprovalCommandError>(value)
     });
     match result {
@@ -223,7 +225,7 @@ pub fn run_approval_command(arguments: Vec<OsString>) -> i32 {
             exit
         }
         Err(ApprovalCommandError::Client(error)) => {
-            crate::permission_diagnostic_reporting::report_permission_error(
+            crate::permission_diagnostic_reporting::report_actionable_client_error(
                 &error,
                 crate::permission_diagnostic_reporting::PermissionDiagnosticRendering::Command,
                 output.json,

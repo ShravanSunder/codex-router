@@ -199,7 +199,7 @@ impl ClaudeLaunchTarget {
     }
 
     async fn active_session_records(&self, limit: usize) -> Result<Vec<serde_json::Value>, String> {
-        let mut client = collaboration_client::ControlClient::connect(
+        let client = collaboration_client::CollaborationClient::connect(
             &self.service_directory,
             "agent-sessions-claude-list",
             env!("CARGO_PKG_VERSION"),
@@ -245,7 +245,6 @@ impl ClaudeLaunchTarget {
             }
             cursor = Some(next_cursor);
         }
-        let _closed = client.close().await;
         Ok(records)
     }
 }

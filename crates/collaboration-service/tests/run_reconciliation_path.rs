@@ -4,15 +4,14 @@ use agent_automation::{
     ScheduleDefinition, TimingRule,
 };
 use automation_storage::{AutomationStore, RunDispatchIntent, ScheduleCreate};
-use collaboration_client::ControlClient;
 use collaboration_protocol::{CodexGeneration, EndpointRef, NativeSendReceipt, SessionRef};
-use collaboration_service::{
-    NativeControlBackend, NativeGenerationGate, ServiceIdentity, serve_control_connection,
-};
+use collaboration_service::{NativeControlBackend, NativeGenerationGate, ServiceIdentity};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, os::unix::fs::DirBuilderExt, sync::Arc, time::Duration};
 use tokio_tungstenite::tungstenite::Message;
+#[path = "support/served_api.rs"]
+mod served_api;
 
 #[tokio::test]
 async fn completed_exact_turn_reconciles_after_deadline_and_generation_replacement()
@@ -173,22 +172,17 @@ async fn exercise(
         gate,
         codex_home: root.clone(),
     };
-    let identity = ServiceIdentity::new(
-        service_id,
-        service_id,
-        &format!("sha256:{}", "a".repeat(64)),
-    )?
-    .with_automation_store(store.clone())
-    .with_scheduled_run_execution(Arc::new(
-        collaboration_service::CodexAppServerScheduledRuns::new(
-            native_backend.clone(),
-            Arc::new(collaboration_service::UnmaterializedThreadHolder::new()),
-        ),
-    ))
-    .with_native_backend(native_backend)?;
-    let (socket, server) = tokio::net::UnixStream::pair()?;
-    let service = tokio::spawn(serve_control_connection(server, identity));
-    let mut client = ControlClient::initialize(socket, "run-reconcile-fixture", "1").await?;
+    let identity = ServiceIdentity::new(service_id, service_id)?
+        .with_automation_store(store.clone())
+        .with_scheduled_run_execution(Arc::new(
+            collaboration_service::CodexAppServerScheduledRuns::new(
+                native_backend.clone(),
+                Arc::new(collaboration_service::UnmaterializedThreadHolder::new()),
+            ),
+        ))
+        .with_native_backend(native_backend)?;
+    let served = served_api::ServedApi::start(identity).await?;
+    let client = served.client("run-reconcile-fixture").await?;
     let status = status.to_owned();
     let observed_id = observed_id.to_owned();
     let backend = tokio::spawn(async move {
@@ -275,8 +269,7 @@ async fn exercise(
     {
         return Err("observation replaced original dispatch generation".into());
     }
-    client.close().await?;
-    service.await??;
+    served.stop().await?;
     tokio::time::timeout(Duration::from_secs(2), backend).await???;
     drop(store);
     for entry in std::fs::read_dir(&root)? {

@@ -34,6 +34,7 @@ tracing.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+collaboration-mcp = { path = "../collaboration-mcp", version = "0.1.30", features = ["test-support"] }
 tempfile = "3.27.0"
 collaboration-client = { path = "../collaboration-client", version = "0.1.14" }
 tokio = { workspace = true, features = ["test-util"] }

@@ -1,10 +1,10 @@
-//! Descriptive stored/loaded/active inventory through the public Control client.
+//! Descriptive stored/loaded/active inventory through the collaboration API client.
 use clap::{Parser, Subcommand, ValueEnum};
 use collaboration_client::protocol::{
     ChannelDescription, EndpointDescription, EndpointRef, NativeSessionListParams,
     NativeSessionScope, NativeSessionSource, NativeSessionView, ProviderSessionListParams,
 };
-use collaboration_client::{ClientError, ControlClient};
+use collaboration_client::{ClientError, CollaborationClient};
 use serde_json::json;
 use std::{
     ffi::OsString,
@@ -162,8 +162,8 @@ pub fn run_session_inventory_command(arguments: Vec<OsString>) -> i32 {
         Err(_) => return 3,
     };
     let result = runtime.block_on(async {
-        let mut client =
-            ControlClient::connect(&directory, "sessions-inventory", env!("CARGO_PKG_VERSION"))
+        let client =
+            CollaborationClient::connect(&directory, "sessions-inventory", env!("CARGO_PKG_VERSION"))
                 .await?;
         let endpoint = EndpointRef {
             service_id: client.identity().service_id.clone(),
@@ -207,7 +207,7 @@ pub fn run_session_inventory_command(arguments: Vec<OsString>) -> i32 {
                 code: -32050,
                 data: Some(json!({"kind":"endpointNotFound","stage":"discovery","message":"Endpoint not found"})),
             })?;
-        let result = match endpoint_kind {
+        match endpoint_kind {
             InventoryEndpointKind::Codex => {
                 let source = source.ok_or(ClientError::InvalidRequest("--source is required for Codex sessions"))?;
                 serde_json::to_value(client.list_sessions(NativeSessionListParams {
@@ -222,9 +222,7 @@ pub fn run_session_inventory_command(arguments: Vec<OsString>) -> i32 {
                 code: -32050,
                 data: Some(json!({"kind":"unsupportedCapability","stage":"discovery","message":"Session inventory unsupported on this endpoint"})),
             }),
-        };
-        let _closed = client.close().await;
-        result
+        }
     });
     match result {
         Ok(result) => {
@@ -267,7 +265,7 @@ pub fn run_session_inventory_command(arguments: Vec<OsString>) -> i32 {
         Err(ClientError::InvalidRequest(message)) => {
             crate::endpoint_commands::report_failure("invalidUsage", message, 2, machine)
         }
-        Err(error) => crate::permission_diagnostic_reporting::report_permission_error(
+        Err(error) => crate::permission_diagnostic_reporting::report_actionable_client_error(
             &error,
             crate::permission_diagnostic_reporting::PermissionDiagnosticRendering::Command,
             machine,

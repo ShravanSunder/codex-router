@@ -1,7 +1,7 @@
-//! Public Control views must expose the owner's durable hold and retry facts.
+//! The public subscriptions view must expose the owner's durable hold and retry facts.
 use super::super::SubscriptionClock;
 use super::owner_fixture::*;
-use crate::control_service_context::subscription_delivery::subscription_service::OwnerObservation;
+use crate::service_identity::subscription_delivery::subscription_service::OwnerObservation;
 use collaboration_protocol::{DeliveryOutcome, ThreadSubscriptionsRequest};
 use message_board::SubscriptionDeliveryOutcome;
 
@@ -10,25 +10,18 @@ async fn control_subscriptions_view_reports_pending_held_outcome_and_retry_deadl
     let fixture = OwnerFixture::new().await;
     *fixture.presence.0.lock().unwrap() = crate::TargetPresence::Wakeable;
     let runtime = fixture.runtime().await;
-    let identity = crate::ServiceIdentity::new(
-        SERVICE_ID,
-        "00000000-0000-4000-8000-000000000002",
-        &format!("sha256:{}", "a".repeat(64)),
-    )
-    .unwrap()
-    .with_board_store(fixture.store.clone())
-    .with_subscription_delivery_service(runtime.service.clone(), fixture.presence.clone());
-    let (socket, server) = tokio::net::UnixStream::pair().unwrap();
-    let serving = tokio::spawn(crate::serve_control_connection(server, identity));
-    let mut client = collaboration_client::ControlClient::initialize(socket, "view-proof", "1")
-        .await
-        .unwrap();
+    let identity = crate::ServiceIdentity::new(SERVICE_ID, "00000000-0000-4000-8000-000000000002")
+        .unwrap()
+        .with_board_store(fixture.store.clone())
+        .with_subscription_delivery_service(runtime.service.clone(), fixture.presence.clone());
+    let application = crate::CollaborationApplication::new(identity);
     fixture.post(&fixture.root, "Pending view activity").await;
     runtime
         .observe(|event| matches!(event, OwnerObservation::Held))
         .await;
-    let held = client
-        .board_thread_subscriptions(ThreadSubscriptionsRequest {
+    let held = application
+        .board()
+        .thread_subscriptions(ThreadSubscriptionsRequest {
             actor: fixture.reader.clone(),
         })
         .await
@@ -63,8 +56,9 @@ async fn control_subscriptions_view_reports_pending_held_outcome_and_retry_deadl
     runtime
         .observe(|event| matches!(event, OwnerObservation::RetryScheduled))
         .await;
-    let retry = client
-        .board_thread_subscriptions(ThreadSubscriptionsRequest {
+    let retry = application
+        .board()
+        .thread_subscriptions(ThreadSubscriptionsRequest {
             actor: fixture.reader.clone(),
         })
         .await
@@ -88,7 +82,6 @@ async fn control_subscriptions_view_reports_pending_held_outcome_and_retry_deadl
         retry[0].presence,
         collaboration_protocol::ThreadSubscriptionPresence::Running {}
     );
-    drop(client);
-    serving.await.unwrap().unwrap();
+    drop(application);
     runtime.close().await;
 }

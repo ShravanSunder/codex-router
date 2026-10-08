@@ -1,9 +1,9 @@
-use collaboration_client::ControlClient;
-use collaboration_service::{ServiceIdentity, serve_control_connection};
+use collaboration_service::ServiceIdentity;
 use message_board::*;
 use message_board_storage::BoardStore;
 use std::sync::Arc;
 mod board_control_support;
+use board_control_support::served_api;
 
 #[tokio::test]
 async fn oversized_repository_locators_return_field_and_numeric_bound()
@@ -16,7 +16,6 @@ async fn oversized_repository_locators_return_field_and_numeric_bound()
     let identity = ServiceIdentity::new(
         "00000000-0000-4000-8000-000000000001",
         "00000000-0000-4000-8000-000000000002",
-        &format!("sha256:{}", "a".repeat(64)),
     )
     .map_err(std::io::Error::other)?
     .with_board_store(store.clone());
@@ -52,13 +51,11 @@ async fn oversized_repository_locators_return_field_and_numeric_bound()
     let identity = ServiceIdentity::new(
         "00000000-0000-4000-8000-000000000001",
         "00000000-0000-4000-8000-000000000002",
-        &format!("sha256:{}", "a".repeat(64)),
     )
     .map_err(std::io::Error::other)?
     .with_board_store(store.clone());
-    let (socket, server) = tokio::net::UnixStream::pair()?;
-    let task = tokio::spawn(serve_control_connection(server, identity));
-    let mut client = ControlClient::initialize(socket, "repository-boundary-test", "1").await?;
+    let served = served_api::ServedApi::start(identity).await?;
+    let client = served.client("repository-boundary-test").await?;
     let actor = Identity::Human {
         human_id: HumanId::try_from("owner".to_owned())?,
     };
@@ -114,8 +111,7 @@ async fn oversized_repository_locators_return_field_and_numeric_bound()
     {
         return Err("second max-bound repository page exceeded the frame or did not finish".into());
     }
-    drop(client);
-    task.await??;
+    served.stop().await?;
     drop(store);
     std::fs::remove_file(path)?;
     Ok(())

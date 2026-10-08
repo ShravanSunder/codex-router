@@ -291,9 +291,9 @@ mod tests {
     use super::*;
     use acp_client_runtime::{ApprovalPortOutcome, InteractionPort, SessionEventSink};
     use collaboration_protocol::{
-        CodexGeneration, EndpointId as ControlEndpointId, EndpointRef as ControlEndpointRef,
-        GenerationNumber, OperationId, ProviderIdentity, SessionId as ControlSessionId,
-        SessionRef as ControlSessionRef, UuidIdentity,
+        CodexGeneration, EndpointId as ProtocolEndpointId, EndpointRef as ProtocolEndpointRef,
+        GenerationNumber, OperationId, ProviderIdentity, SessionId as ProtocolSessionId,
+        SessionRef as ProtocolSessionRef, UuidIdentity,
     };
     use collaboration_service::{
         NativeControlBackend, NativeGenerationGate, ProviderOperationStore,
@@ -309,23 +309,23 @@ mod tests {
         let root = tempfile::tempdir().expect("temporary store");
         let service_id = UuidIdentity::try_from("00000000-0000-4000-8000-000000000001".to_owned())
             .expect("service ID");
-        let provider_endpoint = ControlEndpointRef {
+        let provider_endpoint = ProtocolEndpointRef {
             service_id: service_id.clone(),
-            endpoint_id: ControlEndpointId::try_from("fixture-provider".to_owned())
+            endpoint_id: ProtocolEndpointId::try_from("fixture-provider".to_owned())
                 .expect("provider endpoint"),
         };
-        let approver_endpoint = ControlEndpointRef {
+        let approver_endpoint = ProtocolEndpointRef {
             service_id: service_id.clone(),
-            endpoint_id: ControlEndpointId::try_from("codex-local".to_owned())
+            endpoint_id: ProtocolEndpointId::try_from("codex-local".to_owned())
                 .expect("approver endpoint"),
         };
-        let target = ControlSessionRef {
+        let target = ProtocolSessionRef {
             endpoint: provider_endpoint,
-            session_id: ControlSessionId::try_from("session-one".to_owned()).expect("session"),
+            session_id: ProtocolSessionId::try_from("session-one".to_owned()).expect("session"),
         };
-        let requester = ControlSessionRef {
+        let requester = ProtocolSessionRef {
             endpoint: approver_endpoint.clone(),
-            session_id: ControlSessionId::try_from("requester".to_owned()).expect("requester"),
+            session_id: ProtocolSessionId::try_from("requester".to_owned()).expect("requester"),
         };
         let approver = ProviderIdentity::Human {
             human_id: "owner".to_owned().try_into().expect("human ID"),

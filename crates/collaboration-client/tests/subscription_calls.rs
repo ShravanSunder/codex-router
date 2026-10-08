@@ -1,4 +1,4 @@
-use collaboration_client::{BoardClientError, ClientError, ControlClient};
+use collaboration_client::{BoardClientError, CollaborationClient};
 use collaboration_protocol::{
     SubscriptionWaitBatch, ThreadSubscribeRequest, ThreadSubscriptionState,
     ThreadSubscriptionWaitFilter, ThreadSubscriptionWaitRequest, ThreadSubscriptionsRequest,
@@ -7,9 +7,11 @@ use collaboration_protocol::{
 use message_board::{Identity, ResourceIdentity, SubscriptionScope};
 use serde_json::{Value, json};
 use std::time::Duration;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::UnixStream;
 use tokio::sync::oneshot;
+
+#[path = "support/scripted_api.rs"]
+mod scripted_api;
+use scripted_api::{ScriptedApi, ScriptedCalls};
 
 type TestError = Box<dyn std::error::Error + Send + Sync>;
 type TestResult = Result<(), TestError>;
@@ -39,51 +41,52 @@ fn view() -> Value {
 
 #[tokio::test]
 async fn subscription_methods_exchange_typed_requests_and_views() -> TestResult {
-    let (mut client, mut peer) = initialized_client().await?;
+    let (_api, client, mut peer) = connected_client().await?;
     let server = tokio::spawn(async move {
-        let subscribe = read_request(&mut peer).await?;
+        let subscribe = peer.next().await?;
         ensure(
-            subscribe["method"] == "board/threadSubscribe",
+            subscribe.tool == "board_thread_subscribe",
             "wrong subscribe method",
         )?;
         ensure(
-            subscribe["params"]["actor"] == actor(),
+            subscribe.arguments["actor"] == actor(),
             "subscribe actor changed",
         )?;
         ensure(
-            subscribe["params"]["scope"] == scope(),
+            subscribe.arguments["scope"] == scope(),
             "subscribe scope changed",
         )?;
         ensure(
-            subscribe["params"]["policy"]["quietSeconds"] == 0,
+            subscribe.arguments["policy"]["quietSeconds"] == 0,
             "policy units changed",
         )?;
-        respond(&mut peer, &subscribe, view()).await?;
+        subscribe.succeed(view());
 
-        let list = read_request(&mut peer).await?;
+        let list = peer.next().await?;
         ensure(
-            list["method"] == "board/threadSubscriptions",
+            list.tool == "board_thread_subscriptions",
             "wrong subscriptions method",
         )?;
         ensure(
-            list["params"] == json!({"actor":actor()}),
+            list.arguments == json!({"actor":actor()}),
             "list request changed",
         )?;
-        respond(&mut peer, &list, json!({"subscriptions":[view()]})).await?;
+        list.succeed(json!({"subscriptions":[view()]}));
 
-        let unsubscribe = read_request(&mut peer).await?;
+        let unsubscribe = peer.next().await?;
         ensure(
-            unsubscribe["method"] == "board/threadUnsubscribe",
+            unsubscribe.tool == "board_thread_unsubscribe",
             "wrong unsubscribe method",
         )?;
         ensure(
-            unsubscribe["params"] == json!({"actor":actor(),"scope":scope()}),
+            unsubscribe.arguments == json!({"actor":actor(),"scope":scope()}),
             "unsubscribe request changed",
         )?;
         let mut ended = view();
         ended["state"] = json!("ended");
         ended["endReason"] = json!({"kind":"cancelled"});
-        respond(&mut peer, &unsubscribe, ended).await
+        unsubscribe.succeed(ended);
+        Ok::<(), TestError>(())
     });
 
     let subscribed = client
@@ -123,10 +126,10 @@ async fn invalid_mutation_results_preserve_thread_or_topic_inspection_identity()
         scope(),
         json!({"kind":"topic","topicId":"01900000-0000-7000-8000-000000000002"}),
     ] {
-        let (mut client, mut peer) = initialized_client().await?;
+        let (_api, client, mut peer) = connected_client().await?;
         let server = tokio::spawn(async move {
-            let request = read_request(&mut peer).await?;
-            respond(&mut peer, &request, json!({"invalid":true})).await
+            peer.next().await?.succeed(json!({"invalid":true}));
+            Ok::<(), TestError>(())
         });
         let scope: SubscriptionScope = serde_json::from_value(subscription_scope)?;
         let expected_resource = match &scope {
@@ -159,7 +162,7 @@ async fn invalid_mutation_results_preserve_thread_or_topic_inspection_identity()
 
 #[tokio::test]
 async fn subscription_wait_uses_the_rebound_method_and_decodes_notice_ranges() -> TestResult {
-    let (mut client, mut peer) = initialized_client().await?;
+    let (_api, client, mut peer) = connected_client().await?;
     let root_id = "01900000-0000-7000-8000-000000000011";
     let topic_id = "01900000-0000-7000-8000-000000000012";
     let request: ThreadSubscriptionWaitRequest = serde_json::from_value(json!({
@@ -177,37 +180,33 @@ async fn subscription_wait_uses_the_rebound_method_and_decodes_notice_ranges() -
         "maxWaitSeconds":30
     }))?;
     let server = tokio::spawn(async move {
-        let wait = read_request(&mut peer).await?;
-        ensure(wait["method"] == "board/threadWait", "wrong wait method")?;
+        let wait = peer.next().await?;
+        ensure(wait.tool == "board_thread_wait", "wrong wait method")?;
         ensure(
-            wait["params"]["filter"] == json!({"kind":"roots","rootMessageIds":[root_id]}),
+            wait.arguments["filter"] == json!({"kind":"roots","rootMessageIds":[root_id]}),
             "wait filter changed",
         )?;
         ensure(
-            wait["params"]["maxWaitSeconds"] == 30,
+            wait.arguments["maxWaitSeconds"] == 30,
             "wait duration changed",
         )?;
-        respond(
-            &mut peer,
-            &wait,
-            json!({
-                "batch":{
-                    "kind":"notice",
-                    "pushId":"01900000-0000-7000-8000-000000000013",
-                    "line":"thread subscription notice",
-                    "held":false,
-                    "draining":false,
-                    "roots":[{
-                        "rootId":root_id,
-                        "topicId":topic_id,
-                        "fromSequence":1,
-                        "throughSequence":2,
-                        "messageCount":2
-                    }]
-                }
-            }),
-        )
-        .await
+        wait.succeed(json!({
+            "batch":{
+                "kind":"notice",
+                "pushId":"01900000-0000-7000-8000-000000000013",
+                "line":"thread subscription notice",
+                "held":false,
+                "draining":false,
+                "roots":[{
+                    "rootId":root_id,
+                    "topicId":topic_id,
+                    "fromSequence":1,
+                    "throughSequence":2,
+                    "messageCount":2
+                }]
+            }
+        }));
+        Ok::<(), TestError>(())
     });
 
     let result = client
@@ -227,8 +226,8 @@ async fn subscription_wait_uses_the_rebound_method_and_decodes_notice_ranges() -
 }
 
 #[tokio::test]
-async fn subscription_wait_timeout_retires_the_exchange_without_replay() -> TestResult {
-    let (mut client, mut peer) = initialized_client().await?;
+async fn subscription_wait_timeout_is_unknown_and_never_replayed() -> TestResult {
+    let (_api, client, mut peer) = connected_client().await?;
     let request: ThreadSubscriptionWaitRequest = serde_json::from_value(json!({
         "actor":actor(),
         "filter":{"kind":"all"},
@@ -239,14 +238,19 @@ async fn subscription_wait_timeout_retires_the_exchange_without_replay() -> Test
     let (observed_request_sender, observed_request_receiver) = oneshot::channel();
     let (release_server_sender, release_server_receiver) = oneshot::channel();
     let server = tokio::spawn(async move {
-        let _request = read_request(&mut peer).await?;
+        let request = peer.next().await?;
         observed_request_sender
             .send(())
             .map_err(|_| "wait request observer dropped")?;
         release_server_receiver
             .await
             .map_err(|_| "wait server release dropped")?;
-        Ok::<(), TestError>(())
+        drop(request);
+        // The timed-out wait is not resubmitted.
+        ensure(
+            peer.none_within(Duration::from_millis(200)).await,
+            "timed-out wait was replayed",
+        )
     });
 
     let timeout = client
@@ -266,19 +270,12 @@ async fn subscription_wait_timeout_retires_the_exchange_without_replay() -> Test
         .send(())
         .map_err(|_| "wait server ended before release")?;
     server.await??;
-
-    match client
-        .board_thread_wait(request, Duration::from_secs(1))
-        .await
-    {
-        Err(BoardClientError::Connection(ClientError::Protocol("connection is retired"))) => Ok(()),
-        _ => Err("timed-out wait exchange was retried on the connection".into()),
-    }
+    Ok(())
 }
 
 #[tokio::test]
 async fn subscription_wait_rejects_invalid_request_before_transmission() -> TestResult {
-    let (mut client, mut peer) = initialized_client().await?;
+    let (_api, client, mut peer) = connected_client().await?;
     let request = ThreadSubscriptionWaitRequest {
         actor: serde_json::from_value(actor())?,
         filter: ThreadSubscriptionWaitFilter::All {},
@@ -289,23 +286,21 @@ async fn subscription_wait_rejects_invalid_request_before_transmission() -> Test
         .board_thread_wait(request, Duration::from_secs(1))
         .await
     {
-        Err(BoardClientError::Connection(ClientError::InvalidRequest(
+        Err(BoardClientError::Connection(collaboration_client::ClientError::InvalidRequest(
             "invalid Thread Wait request",
         ))) => {}
         _ => return Err("invalid wait request was not rejected before transmission".into()),
     }
 
-    let mut line = String::new();
-    match tokio::time::timeout(Duration::from_millis(25), peer.read_line(&mut line)).await {
-        Err(_) => Ok(()),
-        Ok(Ok(_)) => Err("invalid wait request reached Control".into()),
-        Ok(Err(error)) => Err(error.into()),
-    }
+    ensure(
+        peer.none_within(Duration::from_millis(25)).await,
+        "invalid wait request reached the API",
+    )
 }
 
 #[tokio::test]
 async fn subscription_wait_malformed_success_preserves_inspection_identity() -> TestResult {
-    let (mut client, mut peer) = initialized_client().await?;
+    let (_api, client, mut peer) = connected_client().await?;
     let request: ThreadSubscriptionWaitRequest = serde_json::from_value(json!({
         "actor":actor(),
         "filter":{"kind":"all"},
@@ -314,22 +309,18 @@ async fn subscription_wait_malformed_success_preserves_inspection_identity() -> 
     let expected_actor = request.actor.clone();
     let expected_filter = request.filter.clone();
     let server = tokio::spawn(async move {
-        let wait = read_request(&mut peer).await?;
-        ensure(wait["method"] == "board/threadWait", "wrong wait method")?;
-        respond(
-            &mut peer,
-            &wait,
-            json!({
-                "batch":{
-                    "kind":"notice",
-                    "pushId":"01900000-0000-7000-8000-000000000013",
-                    "line":"thread subscription notice",
-                    "held":false,
-                    "draining":false
-                }
-            }),
-        )
-        .await
+        let wait = peer.next().await?;
+        ensure(wait.tool == "board_thread_wait", "wrong wait method")?;
+        wait.succeed(json!({
+            "batch":{
+                "kind":"notice",
+                "pushId":"01900000-0000-7000-8000-000000000013",
+                "line":"thread subscription notice",
+                "held":false,
+                "draining":false
+            }
+        }));
+        Ok::<(), TestError>(())
     });
 
     match client
@@ -352,35 +343,10 @@ async fn subscription_wait_malformed_success_preserves_inspection_identity() -> 
     Ok(())
 }
 
-async fn initialized_client() -> Result<(ControlClient, BufReader<UnixStream>), TestError> {
-    let (client_stream, peer_stream) = UnixStream::pair()?;
-    let initialize = tokio::spawn(async move {
-        ControlClient::initialize(client_stream, "subscription-client-test", "1").await
-    });
-    let mut peer = BufReader::new(peer_stream);
-    let request = read_request(&mut peer).await?;
-    respond(
-        &mut peer,
-        &request,
-        json!({"version":{"major":1,"minor":0},
-        "serviceId":"00000000-0000-4000-8000-000000000001",
-        "serviceEpoch":"00000000-0000-4000-8000-000000000002",
-        "controlSchemaDigest":format!("sha256:{}", "a".repeat(64))}),
-    )
-    .await?;
-    Ok((initialize.await??, peer))
-}
-
-async fn read_request(peer: &mut BufReader<UnixStream>) -> Result<Value, TestError> {
-    let mut line = String::new();
-    tokio::time::timeout(Duration::from_secs(5), peer.read_line(&mut line)).await??;
-    Ok(serde_json::from_str(&line)?)
-}
-
-async fn respond(peer: &mut BufReader<UnixStream>, request: &Value, result: Value) -> TestResult {
-    let response = json!({"jsonrpc":"2.0","id":request["id"],"result":result});
-    peer.get_mut()
-        .write_all(format!("{response}\n").as_bytes())
-        .await?;
-    Ok(())
+async fn connected_client() -> Result<(ScriptedApi, CollaborationClient, ScriptedCalls), TestError>
+{
+    let (api, calls) = ScriptedApi::start().await?;
+    let client =
+        CollaborationClient::connect(api.directory(), "subscription-client-test", "1").await?;
+    Ok((api, client, calls))
 }

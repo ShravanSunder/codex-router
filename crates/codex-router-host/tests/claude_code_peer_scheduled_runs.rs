@@ -8,7 +8,7 @@ use claude_code_peer_messaging::{ClaudeCodePeerSocket, ClaudeCodeSessionRegistry
 use codex_router_host::{
     ClaudeCodePeerDeliveryRoute, CollaborationRuntime, CollaborationRuntimeInputs,
 };
-use collaboration_client::ControlClient;
+use collaboration_client::CollaborationClient;
 use collaboration_protocol::{
     AutomationConfigureRequest, CodexGeneration, DeliveryOutcome, EndpointId, EndpointRef,
     InstructionCreateParams, InstructionText, MachineId, MachineLabel, MessageText, OperationId,
@@ -387,9 +387,9 @@ async fn host_worker_finalizes_peer_run_as_written() {
         },
         session_id,
     };
-    let mut client = ControlClient::connect(root.path(), "peer-run-host-proof", "1")
+    let client = CollaborationClient::connect(root.path(), "peer-run-host-proof", "1")
         .await
-        .expect("Control client");
+        .expect("collaboration API client");
     client
         .configure_automation(AutomationConfigureRequest {
             operation_id: OperationId::generate(),
@@ -508,6 +508,5 @@ async fn host_worker_finalizes_peer_run_as_written() {
             .expect("peer content")
             .contains("Check peer work")
     );
-    client.close().await.expect("Control close");
     runtime.shutdown().await.expect("Host shutdown");
 }

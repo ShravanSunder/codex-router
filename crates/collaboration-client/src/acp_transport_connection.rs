@@ -1,5 +1,5 @@
 //! Owner-local ACP carrier selection; the caller owns negotiation, requests and callbacks.
-use crate::{ClientError, ControlClient};
+use crate::{ClientError, CollaborationAccess};
 use collaboration_protocol::{
     ChannelDescription, EndpointAvailability, EndpointId, EndpointRef, SchemaDigest,
 };
@@ -13,17 +13,21 @@ pub struct AcpTransportConnection {
 }
 impl AcpTransportConnection {
     /// Opens only the advertised transport. It sends no ACP initialization or agent input.
-    pub async fn connect(directory: &Path, endpoint_id: EndpointId) -> Result<Self, ClientError> {
-        let mut control =
-            ControlClient::connect(directory, "acp-transport", env!("CARGO_PKG_VERSION")).await?;
-        let endpoint = control
-            .list_endpoints()
+    pub async fn connect(
+        access: &CollaborationAccess,
+        endpoint_id: EndpointId,
+    ) -> Result<Self, ClientError> {
+        let directory = access.directory();
+        let endpoints = access.endpoint_directory("acp-transport").await?;
+        let service_id = endpoints.service_id();
+        let endpoint = endpoints
+            .endpoints()
             .await?
             .endpoints
             .into_iter()
             .find(|endpoint| {
                 endpoint.endpoint.endpoint_id == endpoint_id
-                    && endpoint.endpoint.service_id == control.identity().service_id
+                    && endpoint.endpoint.service_id == service_id
             })
             .ok_or(ClientError::Protocol("ACP endpoint missing"))?;
         if !matches!(
@@ -60,7 +64,6 @@ impl AcpTransportConnection {
         let stream = tokio::time::timeout(Duration::from_secs(30), UnixStream::connect(socket))
             .await
             .map_err(|_| ClientError::Timeout)??;
-        control.close().await?;
         Ok(Self {
             endpoint: endpoint.endpoint,
             schema_digest,

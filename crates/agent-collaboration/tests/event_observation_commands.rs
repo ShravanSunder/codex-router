@@ -1,13 +1,12 @@
-//! Executable observation proof over real Control and native Unix carriers.
+//! Executable observation proof over the real collaboration API and native Unix carriers.
 #[cfg(test)]
 mod tests {
-    use collaboration_client::protocol::{EndpointDescription, ServiceManifest};
-    use collaboration_service::{LocalControlService, ManifestPublication, ServiceIdentity};
+    use collaboration_client::protocol::EndpointDescription;
+    use collaboration_service::ServiceIdentity;
     use futures_util::{SinkExt, StreamExt};
     use serde_json::{Value, json};
     use std::{os::unix::fs::DirBuilderExt, path::PathBuf, time::Duration};
     use tokio_tungstenite::tungstenite::Message;
-    use tokio_util::sync::CancellationToken;
 
     const SERVICE_ID: &str = "00000000-0000-4000-8000-000000000001";
     const SERVICE_EPOCH: &str = "00000000-0000-4000-8000-000000000002";
@@ -108,6 +107,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn bounded_cli_observe_streams_each_event_before_its_result() {
+        // Arrange and act: two buffered native events, observed with --stream.
+        let output = run_observation_case_with(
+            AttachmentCase::BufferedEvents,
+            "streamed",
+            true,
+            &["--stream"],
+        )
+        .await;
+
+        // Assert: each event is its own line before the unchanged result; native events
+        // have no cursor.
+        assert!(output.status.success());
+        let records = output_records(&output);
+        let [first, second, result] = records.as_slice() else {
+            panic!("expected two streamed events and the result: {records:?}");
+        };
+        for streamed in [first, second] {
+            assert_eq!(streamed["kind"], "observationEvent", "{streamed}");
+            assert_eq!(streamed["cursor"], Value::Null, "{streamed}");
+        }
+        assert_eq!(result["target"]["sessionId"], "observed-thread");
+        assert_eq!(result["events"], json!([first["event"], second["event"]]));
+    }
+
+    #[tokio::test]
     async fn bounded_cli_observe_distinguishes_malformed_frame_from_clean_eof() {
         let malformed =
             run_observation_case(AttachmentCase::MalformedFrame, "malformed", true).await;
@@ -182,30 +207,31 @@ mod tests {
         suffix: &str,
         bounded: bool,
     ) -> std::process::Output {
+        run_observation_case_with(case, suffix, bounded, &[]).await
+    }
+
+    async fn run_observation_case_with(
+        case: AttachmentCase,
+        suffix: &str,
+        bounded: bool,
+        extra_arguments: &[&str],
+    ) -> std::process::Output {
         let root = PathBuf::from(format!("/tmp/event-cli-{}-{suffix}", std::process::id()));
         std::fs::DirBuilder::new()
             .mode(0o700)
             .create(&root)
             .unwrap_or_else(|error| panic!("observation fixture: {error}"));
-        let digest = format!("sha256:{}", "a".repeat(64));
-        let identity = ServiceIdentity::new(SERVICE_ID, SERVICE_EPOCH, &digest)
+        let identity = ServiceIdentity::new(SERVICE_ID, SERVICE_EPOCH)
             .unwrap_or_else(|error| panic!("observation fixture: {error}"))
             .with_endpoints(vec![endpoint_description(1)])
             .unwrap_or_else(|error| panic!("observation fixture: {error}"));
         let directory = identity.endpoint_directory();
-        let control = LocalControlService::bind(&root.join("control.sock"), identity)
-            .unwrap_or_else(|error| panic!("observation fixture: {error}"));
-        let manifest: ServiceManifest = serde_json::from_value(json!({
-            "version":2,"serviceId":SERVICE_ID,"serviceEpoch":SERVICE_EPOCH,
-            "machineLabel":"fixture-host","control":{"transport":"unixJsonLines","path":"control.sock"},
-            "controlSchemaDigest":digest,
-            "mcp":{"transport":"streamableHttp","url":"http://127.0.0.1:0/mcp"}
-        }))
-        .unwrap_or_else(|error| panic!("observation fixture: {error}"));
-        let publication = ManifestPublication::publish(&root, &manifest)
-            .unwrap_or_else(|error| panic!("observation fixture: {error}"));
-        let stop = CancellationToken::new();
-        let service = tokio::spawn(control.run(stop.clone()));
+        let served = collaboration_mcp::test_support::ServedCollaborationApi::start(
+            &root,
+            collaboration_service::CollaborationApplication::new(identity),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("serve: {e}"));
         let native = tokio::net::UnixListener::bind(root.join("codex-native.sock"))
             .unwrap_or_else(|error| panic!("observation fixture: {error}"));
         let peer = tokio::spawn(async move {
@@ -307,14 +333,13 @@ mod tests {
         if matches!(case, AttachmentCase::ByteSaturation) {
             command.args(["--max-events", "64", "--max-bytes", "128"]);
         }
+        command.args(extra_arguments);
         let output = tokio::time::timeout(Duration::from_secs(5), command.output()).await;
-        stop.cancel();
-        service
+        served
+            .stop()
             .await
-            .unwrap_or_else(|error| panic!("observation fixture: {error}"))
-            .unwrap_or_else(|error| panic!("observation fixture: {error}"));
+            .unwrap_or_else(|e| panic!("listener: {e}"));
         let peer_result = tokio::time::timeout(Duration::from_secs(2), peer).await;
-        drop(publication);
         std::fs::remove_file(root.join("codex-native.sock"))
             .unwrap_or_else(|error| panic!("observation fixture: {error}"));
         std::fs::remove_dir(root).unwrap_or_else(|error| panic!("observation fixture: {error}"));

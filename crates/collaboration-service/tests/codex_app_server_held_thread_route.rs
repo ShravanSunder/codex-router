@@ -21,6 +21,8 @@ use std::{
     time::Duration,
 };
 use tokio_tungstenite::tungstenite::Message;
+#[path = "support/served_api.rs"]
+mod served_api;
 
 struct AcceptingConversationRecorder;
 
@@ -586,7 +588,6 @@ async fn exercise_held_empty_thread(
     let identity = collaboration_service::ServiceIdentity::new(
         "00000000-0000-4000-8000-000000000001",
         "00000000-0000-4000-8000-000000000001",
-        &format!("sha256:{}", "a".repeat(64)),
     )
     .map_err(std::io::Error::other)?
     .with_automation_store(Arc::clone(&automation_store))
@@ -594,14 +595,8 @@ async fn exercise_held_empty_thread(
     .map_err(std::io::Error::other)?
     .with_session_delivery(delivery)
     .with_subscription_delivery_service(subscription_delivery.clone(), presence);
-    let (control_socket, control_server) = tokio::net::UnixStream::pair()?;
-    let control_task = tokio::spawn(collaboration_service::serve_control_connection(
-        control_server,
-        identity,
-    ));
-    let mut control =
-        collaboration_client::ControlClient::initialize(control_socket, "held-thread-message", "1")
-            .await?;
+    let served = served_api::ServedApi::start(identity).await?;
+    let control = served.client("held-thread-message").await?;
     let started = control
         .send_message(collaboration_client::MessageSendRequest {
             target: target.clone(),
@@ -621,8 +616,7 @@ async fn exercise_held_empty_thread(
     {
         return Err("first message did not start through the held connection".into());
     }
-    control.close().await?;
-    control_task.await??;
+    served.stop().await?;
     subscription_delivery.shutdown().await;
     drop(subscription_delivery);
     backend.await??;

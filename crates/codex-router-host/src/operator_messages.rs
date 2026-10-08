@@ -1,4 +1,11 @@
 //! Bounded versioned operator messages and codecs.
+//!
+//! The operator socket stays separate from the collaboration MCP server on
+//! purpose. It is the Host lifecycle channel (status, Host restart, app-server
+//! and Router restarts, Codex update): a newly installed CLI uses it to make
+//! the still-running older Host replace itself, so its wire must stay
+//! compatible across releases. Host lifecycle controls are not part of the
+//! collaboration API cutover; separate Host work owns them.
 
 use std::path::PathBuf;
 
