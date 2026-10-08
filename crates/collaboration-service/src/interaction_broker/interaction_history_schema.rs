@@ -53,7 +53,7 @@ pub(super) async fn inspect_schema(
     connection: &mut SqliteConnection,
 ) -> Result<SchemaAdmission, HistoryStorageFailure> {
     let objects = sqlx::query_as!(SchemaObjectRow,
-        "SELECT name AS \"name!\", type AS \"object_type!\", sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' ORDER BY name")
+        "SELECT name AS \"name!\", type AS \"object_type!\", sql FROM sqlite_schema WHERE name NOT GLOB 'sqlite_*' ORDER BY name")
         .fetch_all(&mut *connection).await.map_err(|_| HistoryStorageFailure::InvalidSchema)?;
     let user_version: i64 = sqlx::query_scalar("PRAGMA user_version")
         .fetch_one(&mut *connection)

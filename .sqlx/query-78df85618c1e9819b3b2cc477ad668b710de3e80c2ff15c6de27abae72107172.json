@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT name AS \"name!\", type AS \"object_type!\", sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' ORDER BY name",
+  "query": "SELECT name AS \"name!\", type AS \"object_type!\", sql FROM sqlite_schema WHERE name NOT GLOB 'sqlite_*' ORDER BY name",
   "describe": {
     "columns": [
       {
@@ -46,5 +46,5 @@
       true
     ]
   },
-  "hash": "edc066c500c91a38ab3d1363471cfa1b777760e7ba67f3f7c31794f1722e63c7"
+  "hash": "78df85618c1e9819b3b2cc477ad668b710de3e80c2ff15c6de27abae72107172"
 }
