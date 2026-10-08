@@ -128,7 +128,9 @@ pub use session_event_hub::{
     SessionEventHubError,
 };
 mod service_identity_storage;
-pub use service_identity_storage::{load_service_identity, new_service_uuid};
+pub use service_identity_storage::{
+    load_service_identity, new_service_uuid, read_existing_service_identity,
+};
 mod manifest_publication;
 pub use manifest_publication::ManifestPublication;
 mod native_control_backend;
