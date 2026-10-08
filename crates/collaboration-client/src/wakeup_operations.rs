@@ -59,6 +59,7 @@ impl CollaborationClient {
     ) -> Result<TResponse, WakeClientError> {
         let params = serde_json::to_value(request)
             .map_err(|_| ClientError::Protocol("invalid wake request"))?;
+        let shed = crate::admission_overload::ShedRequest::of(&params);
         let value = match self.connection.call(method, params).await {
             Ok(value) => value,
             Err(ClientError::Rejected {
@@ -68,6 +69,11 @@ impl CollaborationClient {
                 let failure = serde_json::from_value(data)
                     .map_err(|_| ClientError::Protocol("invalid wake failure"))?;
                 return Err(WakeClientError::Rejected(failure));
+            }
+            Err(ClientError::Overloaded { message }) => {
+                return Err(WakeClientError::Rejected(
+                    crate::admission_overload::wake(message, &shed).into(),
+                ));
             }
             Err(error) => return Err(error.into()),
         };

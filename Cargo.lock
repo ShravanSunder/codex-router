@@ -1052,6 +1052,7 @@ dependencies = [
 name = "collaboration-client"
 version = "0.1.63"
 dependencies = [
+ "automation-storage",
  "codex-acp-adapter",
  "codex-native-integration",
  "collaboration-mcp",
@@ -1060,6 +1061,7 @@ dependencies = [
  "futures-util",
  "http",
  "message-board",
+ "message-board-storage",
  "rmcp",
  "schemars 1.2.2",
  "serde",

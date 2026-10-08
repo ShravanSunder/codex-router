@@ -225,7 +225,7 @@ pub fn run_approval_command(arguments: Vec<OsString>) -> i32 {
             exit
         }
         Err(ApprovalCommandError::Client(error)) => {
-            crate::permission_diagnostic_reporting::report_permission_error(
+            crate::permission_diagnostic_reporting::report_actionable_client_error(
                 &error,
                 crate::permission_diagnostic_reporting::PermissionDiagnosticRendering::Command,
                 output.json,

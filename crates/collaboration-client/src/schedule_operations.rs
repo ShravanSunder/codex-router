@@ -67,6 +67,7 @@ impl CollaborationClient {
     ) -> Result<TResult, ScheduleClientError> {
         let params = serde_json::to_value(request)
             .map_err(|_| ClientError::Protocol("invalid schedule request"))?;
+        let shed = crate::admission_overload::ShedRequest::of(&params);
         if method == "schedule_import" {
             let encoded_bytes = serde_json::to_vec(&params)
                 .map(|bytes| bytes.len())
@@ -90,6 +91,11 @@ impl CollaborationClient {
                 return Err(ScheduleClientError::Rejected(
                     serde_json::from_value(data)
                         .map_err(|_| ClientError::Protocol("invalid schedule failure"))?,
+                ));
+            }
+            Err(ClientError::Overloaded { message }) => {
+                return Err(ScheduleClientError::Rejected(
+                    crate::admission_overload::schedule(message, &shed).into(),
                 ));
             }
             Err(error) => return Err(error.into()),

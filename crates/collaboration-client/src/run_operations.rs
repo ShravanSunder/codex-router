@@ -31,6 +31,7 @@ impl CollaborationClient {
     ) -> Result<RunSnapshot, RunClientError> {
         let params = serde_json::to_value(request)
             .map_err(|_| ClientError::Protocol("invalid Run request"))?;
+        let shed = crate::admission_overload::ShedRequest::of(&params);
         let result = match self.connection.call(method, params).await {
             Ok(result) => result,
             Err(ClientError::Rejected {
@@ -40,6 +41,11 @@ impl CollaborationClient {
                 return Err(RunClientError::Rejected(
                     serde_json::from_value(data)
                         .map_err(|_| ClientError::Protocol("invalid Run failure"))?,
+                ));
+            }
+            Err(ClientError::Overloaded { message }) => {
+                return Err(RunClientError::Rejected(
+                    crate::admission_overload::run(message, &shed).into(),
                 ));
             }
             Err(error) => return Err(error.into()),

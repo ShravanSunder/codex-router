@@ -174,11 +174,13 @@ async fn listen(
     let mut observation = match attached {
         Ok(value) => value,
         Err(error) => {
-            if let Some(exit) = crate::permission_diagnostic_reporting::report_permission_error(
-                error.source(),
-                crate::permission_diagnostic_reporting::PermissionDiagnosticRendering::Command,
-                true,
-            ) {
+            if let Some(exit) =
+                crate::permission_diagnostic_reporting::report_actionable_client_error(
+                    error.source(),
+                    crate::permission_diagnostic_reporting::PermissionDiagnosticRendering::Command,
+                    true,
+                )
+            {
                 return exit;
             }
             return report_observation_error(error);
@@ -295,7 +297,7 @@ async fn observe(directory: &std::path::Path, input: ObserveInput) -> i32 {
     {
         Ok(value) => value,
         Err(error) => {
-            return crate::permission_diagnostic_reporting::report_permission_error(
+            return crate::permission_diagnostic_reporting::report_actionable_client_error(
                 &error,
                 crate::permission_diagnostic_reporting::PermissionDiagnosticRendering::Command,
                 true,

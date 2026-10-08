@@ -230,7 +230,7 @@ fn report(
     machine: bool,
 ) -> i32 {
     if let Err(MessageSendError::Preparation(error)) = &result
-        && let Some(code) = crate::permission_diagnostic_reporting::report_permission_error(
+        && let Some(code) = crate::permission_diagnostic_reporting::report_actionable_client_error(
             error,
             crate::permission_diagnostic_reporting::PermissionDiagnosticRendering::Command,
             machine,

@@ -163,6 +163,9 @@ impl ApiConnection {
 /// A rejection the tool reports as an operation failure keeps the code and payload the Router
 /// published; any other tool error is the family's typed failure itself.
 pub(crate) fn rejection_from_tool_failure(mut failure: Value) -> ClientError {
+    if let Some(overload) = crate::admission_overload::admission_overload(&failure) {
+        return overload;
+    }
     if let Some(fields) = failure.as_object_mut() {
         fields.remove("mcpResult");
         if fields.get("kind").and_then(Value::as_str) == Some("rejected")

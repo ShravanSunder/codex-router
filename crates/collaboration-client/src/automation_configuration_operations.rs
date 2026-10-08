@@ -30,6 +30,7 @@ impl CollaborationClient {
     ) -> Result<TResponse, ConfigurationClientError> {
         let params = serde_json::to_value(request)
             .map_err(|_| ClientError::Protocol("invalid configuration request"))?;
+        let shed = crate::admission_overload::ShedRequest::of(&params);
         let result = match self.connection.call(method, params).await {
             Ok(result) => result,
             Err(ClientError::Rejected {
@@ -39,6 +40,11 @@ impl CollaborationClient {
                 return Err(ConfigurationClientError::Rejected(
                     serde_json::from_value(data)
                         .map_err(|_| ClientError::Protocol("invalid configuration error"))?,
+                ));
+            }
+            Err(ClientError::Overloaded { message }) => {
+                return Err(ConfigurationClientError::Rejected(
+                    crate::admission_overload::configuration(message, &shed).into(),
                 ));
             }
             Err(error) => return Err(error.into()),

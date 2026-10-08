@@ -265,7 +265,7 @@ pub fn run_session_inventory_command(arguments: Vec<OsString>) -> i32 {
         Err(ClientError::InvalidRequest(message)) => {
             crate::endpoint_commands::report_failure("invalidUsage", message, 2, machine)
         }
-        Err(error) => crate::permission_diagnostic_reporting::report_permission_error(
+        Err(error) => crate::permission_diagnostic_reporting::report_actionable_client_error(
             &error,
             crate::permission_diagnostic_reporting::PermissionDiagnosticRendering::Command,
             machine,

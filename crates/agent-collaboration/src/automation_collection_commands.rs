@@ -223,7 +223,7 @@ pub(crate) fn run_collection_command(
         }
     });
     if let Err(ReadCommandError::Client(error)) = &result
-        && let Some(code) = crate::permission_diagnostic_reporting::report_permission_error(
+        && let Some(code) = crate::permission_diagnostic_reporting::report_actionable_client_error(
             error,
             crate::permission_diagnostic_reporting::PermissionDiagnosticRendering::Command,
             context.json,

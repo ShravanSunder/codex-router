@@ -272,7 +272,7 @@ pub fn run_native_session_command(arguments: Vec<OsString>) -> i32 {
                 machine_output,
             )
         }
-        Err(error) => crate::permission_diagnostic_reporting::report_permission_error(
+        Err(error) => crate::permission_diagnostic_reporting::report_actionable_client_error(
             &error,
             crate::permission_diagnostic_reporting::PermissionDiagnosticRendering::Command,
             machine_output,

@@ -60,7 +60,7 @@ pub fn run_acp_command(arguments: Vec<OsString>) -> i32 {
                 return 2;
             }
             Err(error) => {
-                if let Some(code) = crate::permission_diagnostic_reporting::report_permission_error(
+                if let Some(code) = crate::permission_diagnostic_reporting::report_actionable_client_error(
                     &error,
                     crate::permission_diagnostic_reporting::PermissionDiagnosticRendering::Command,
                     false,

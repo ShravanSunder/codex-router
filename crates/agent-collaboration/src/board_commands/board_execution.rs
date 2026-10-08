@@ -424,7 +424,7 @@ fn report(result: Result<CommandExecutionResult, CommandExecutionError>, machine
             crate::endpoint_commands::report_failure("invalidField", &message, 2, machine)
         }
         Err(CommandExecutionError::ConnectionBeforeRequest(error)) => {
-            crate::permission_diagnostic_reporting::report_permission_error(
+            crate::permission_diagnostic_reporting::report_actionable_client_error(
                 &error,
                 crate::permission_diagnostic_reporting::PermissionDiagnosticRendering::Command,
                 machine,

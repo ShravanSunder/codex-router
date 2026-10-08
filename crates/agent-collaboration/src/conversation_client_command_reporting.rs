@@ -101,7 +101,7 @@ pub(super) fn report_create_client_error(
     match error {
         ConversationClientError::Codex(error) => report_create_failure(*error, json_output),
         ConversationClientError::Client(error) => {
-            if let Some(exit) = crate::permission_diagnostic_reporting::report_permission_error(
+            if let Some(exit) = crate::permission_diagnostic_reporting::report_actionable_client_error(
                 &error,
                 crate::permission_diagnostic_reporting::PermissionDiagnosticRendering::Operation(
                     Some(operation_id),
@@ -110,12 +110,7 @@ pub(super) fn report_create_client_error(
             ) {
                 return exit;
             }
-            if let ClientError::Rejected {
-                data: Some(data), ..
-            } = &error
-                && let Ok(failure) =
-                    serde_json::from_value::<ConversationOperationFailure>(data.clone())
-            {
+            if let Some(failure) = error.conversation_failure() {
                 return report_create_operation_failure(&failure, json_output);
             }
             report_conversation_failure(
@@ -204,6 +199,10 @@ pub(super) fn report_create_client_error(
                 ConversationClientError::Client(ClientError::Rejected {
                     data: Some(data), ..
                 }) => (data, 4),
+                // The prompt was shed at the API's request limit: not run, safe to retry.
+                ConversationClientError::Client(error @ ClientError::Overloaded { .. }) => {
+                    (serde_json::json!(error.conversation_failure()), 3)
+                }
                 ConversationClientError::OperationFailure(failure) => {
                     (serde_json::json!(failure), 4)
                 }

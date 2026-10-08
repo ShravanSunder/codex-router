@@ -39,6 +39,7 @@ impl CollaborationClient {
     ) -> Result<InstructionSnapshot, InstructionClientError> {
         let params = serde_json::to_value(params)
             .map_err(|_| ClientError::Protocol("invalid instruction request"))?;
+        let shed = crate::admission_overload::ShedRequest::of(&params);
         let value = match self.connection.call(method, params).await {
             Ok(value) => value,
             Err(ClientError::Rejected {
@@ -48,6 +49,11 @@ impl CollaborationClient {
                 let failure = serde_json::from_value(data)
                     .map_err(|_| ClientError::Protocol("invalid instruction error"))?;
                 return Err(InstructionClientError::Rejected(failure));
+            }
+            Err(ClientError::Overloaded { message }) => {
+                return Err(InstructionClientError::Rejected(
+                    crate::admission_overload::instruction(message, &shed),
+                ));
             }
             Err(error) => return Err(error.into()),
         };

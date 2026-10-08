@@ -163,7 +163,7 @@ pub fn run_instruction_command(arguments: Vec<OsString>) -> i32 {
     });
     if !dispatched
         && let Err(InstructionClientError::Connection(error)) = &result
-        && let Some(code) = crate::permission_diagnostic_reporting::report_permission_error(
+        && let Some(code) = crate::permission_diagnostic_reporting::report_actionable_client_error(
             error,
             crate::permission_diagnostic_reporting::PermissionDiagnosticRendering::Operation(
                 operation_id.as_ref(),

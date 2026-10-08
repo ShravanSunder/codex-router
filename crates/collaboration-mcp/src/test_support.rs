@@ -36,10 +36,13 @@ use std::{
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-/// What the published manifest says beyond the application's own identity.
+/// How the test API differs from a default Host: what its manifest adds beyond the
+/// application's identity, and how many requests its socket runs at once.
 #[derive(Clone, Debug, Default)]
-pub struct TestManifestOptions {
+pub struct TestServeOptions {
     pub router_proxy_endpoint: Option<SocketAddr>,
+    /// Requests the socket runs at once before shedding; the Host's default when absent.
+    pub concurrent_requests: Option<usize>,
 }
 
 /// The API served on `<directory>/control.sock`, with its manifest published beside it.
@@ -58,13 +61,13 @@ impl ServedCollaborationApi {
         directory: &Path,
         application: CollaborationApplication,
     ) -> io::Result<Self> {
-        Self::start_with(directory, application, TestManifestOptions::default()).await
+        Self::start_with(directory, application, TestServeOptions::default()).await
     }
 
     pub async fn start_with(
         directory: &Path,
         application: CollaborationApplication,
-        options: TestManifestOptions,
+        options: TestServeOptions,
     ) -> io::Result<Self> {
         let socket_path = directory.join(ApiSocketPath::ServiceSocket.file_name());
         let (listener, socket_cleanup) = OwnerOnlySocket::bind(&socket_path)?.into_parts();
@@ -93,7 +96,9 @@ impl ServedCollaborationApi {
             service_directory: directory.to_owned(),
             native_definitions: None,
             router_executable_relation: relation,
-            concurrent_requests: DEFAULT_CONCURRENT_REQUESTS,
+            concurrent_requests: options
+                .concurrent_requests
+                .unwrap_or(DEFAULT_CONCURRENT_REQUESTS),
             shutdown: shutdown.clone(),
         };
         let api = collaboration_api_router(&config, CollaborationApiListener::UnixSocket);

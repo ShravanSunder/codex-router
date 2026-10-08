@@ -346,6 +346,11 @@ impl CollaborationClient {
                         .map_err(|_| ClientError::Protocol("invalid board failure"))?,
                 )));
             }
+            Err(ClientError::Overloaded { message }) => {
+                return Err(BoardClientError::Rejected(Box::new(
+                    crate::admission_overload::board(message),
+                )));
+            }
             Err(ClientError::Timeout)
             | Err(ClientError::Transport(_))
             | Err(ClientError::Protocol(_)) => {
@@ -422,6 +427,11 @@ impl CollaborationClient {
                         .map_err(|_| ClientError::Protocol("invalid board failure"))?,
                 )));
             }
+            Err(ClientError::Overloaded { message }) => {
+                return Err(BoardClientError::Rejected(Box::new(
+                    crate::admission_overload::board(message),
+                )));
+            }
             Err(error @ ClientError::Rejected { .. }) => return Err(error.into()),
             Err(_) => return Err(outcome_unknown(resource)),
         };
@@ -443,6 +453,11 @@ impl CollaborationClient {
                 return Err(BoardClientError::Rejected(Box::new(
                     serde_json::from_value(data)
                         .map_err(|_| ClientError::Protocol("invalid board failure"))?,
+                )));
+            }
+            Err(ClientError::Overloaded { message }) => {
+                return Err(BoardClientError::Rejected(Box::new(
+                    crate::admission_overload::board(message),
                 )));
             }
             Err(error) => return Err(error.into()),

@@ -159,7 +159,7 @@ pub fn run_journal_command(arguments: Vec<OsString>) -> i32 {
                 )
             }
         }
-        Err(error) => crate::permission_diagnostic_reporting::report_permission_error(
+        Err(error) => crate::permission_diagnostic_reporting::report_actionable_client_error(
             &error,
             crate::permission_diagnostic_reporting::PermissionDiagnosticRendering::Command,
             args.json,

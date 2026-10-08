@@ -322,6 +322,12 @@ fn subscribe_failure(id: &WakeupId, failure: WakeFailure) -> WakeWaitError {
 
 /// The wait error a refused wait reports.
 fn wait_failure(id: &WakeupId, mut failure: Value) -> WakeWaitError {
+    // A wait the API shed at its request limit can be started again, as Control's was.
+    if crate::admission_overload::admission_overload(&failure).is_some() {
+        return WakeWaitError::Unavailable {
+            wakeup_id: id.clone(),
+        };
+    }
     if let Some(fields) = failure.as_object_mut() {
         fields.remove("mcpResult");
     }

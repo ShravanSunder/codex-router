@@ -152,6 +152,11 @@ impl CollaborationClient {
                         .map_err(|_| ClientError::Protocol("invalid inspection error"))?,
                 ));
             }
+            Err(ClientError::Overloaded { message }) => {
+                return Err(AutomationInspectionClientError::Rejected(
+                    crate::admission_overload::inspection(message).into(),
+                ));
+            }
             Err(error) => return Err(error.into()),
         };
         match serde_json::from_value(result) {

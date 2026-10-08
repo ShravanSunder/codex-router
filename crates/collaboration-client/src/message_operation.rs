@@ -221,7 +221,7 @@ impl CollaborationClient {
 
 fn is_reply_pre_dispatch_rejection(error: &ClientError) -> bool {
     match error {
-        ClientError::InvalidRequest(_) => true,
+        ClientError::InvalidRequest(_) | ClientError::Overloaded { .. } => true,
         ClientError::Rejected {
             data: Some(data), ..
         } => matches!(

@@ -37,9 +37,27 @@ pub enum ClientError {
     Timeout,
     #[error("collaboration API request rejected with code {code}")]
     Rejected { code: i64, data: Option<Value> },
+    /// The API was at its request limit: the request was not run and is safe to retry.
+    #[error("collaboration API at capacity; the request was not run and is safe to retry")]
+    Overloaded { message: String },
 }
 
 impl ClientError {
+    /// The provider conversation failure this error carries: a conversation tool's typed
+    /// rejection, or the API's admission overload in the conversation family's shape.
+    #[must_use]
+    pub fn conversation_failure(
+        &self,
+    ) -> Option<collaboration_protocol::ConversationOperationFailure> {
+        match self {
+            Self::Rejected {
+                data: Some(data), ..
+            } => serde_json::from_value(data.clone()).ok(),
+            Self::Overloaded { message } => crate::admission_overload::conversation(message),
+            _ => None,
+        }
+    }
+
     #[must_use]
     pub fn permission_diagnostic(&self) -> Option<collaboration_protocol::PermissionDiagnostic> {
         let Self::Discovery { stage, source } = self else {

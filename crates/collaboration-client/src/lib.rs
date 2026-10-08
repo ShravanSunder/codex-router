@@ -3,6 +3,7 @@
 pub use collaboration_protocol as protocol;
 /// Message-board request, result and validated domain types.
 pub use message_board as board;
+mod admission_overload;
 mod api_connection;
 mod collaboration_access;
 mod collaboration_client;
