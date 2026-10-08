@@ -2,9 +2,12 @@
 mod pipe_frame;
 pub use pipe_frame::{JsonMessage, MAX_FRAME_BYTES, PipeFrameReader, PipeFrameWriter};
 
+mod child_grant;
+pub use child_grant::{ChildGrantFrame, ChildGrantFrameError, ChildLaunchContext};
+
 mod descriptor_grant;
 pub use descriptor_grant::{
-    DescriptorSpec, GrantEnvelope, GrantPhase, GrantReceiver, GrantSender, ValidatedGrant,
+    ChildGrantExpectation, DescriptorSpec, GrantReceiver, GrantSender, ReceivedChildGrant,
 };
 
 mod listener_kind;
