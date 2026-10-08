@@ -1,7 +1,10 @@
 //! A bounded observation streams each event to its caller while the call is still open, on
 //! both listeners, then ends at its bound with every event in its result and the cursor a
 //! later call resumes from without losing an event.
-use crate::api_test_harness::{ServedApi, TEST_SERVICE_ID, api_config, test_identity};
+use crate::COLLABORATION_API_PATH;
+use crate::api_test_harness::{
+    ServedApi, TEST_PROTOCOL_VERSION, TEST_SERVICE_ID, api_config, test_identity,
+};
 use collaboration_protocol::{
     EndpointDescription, OBSERVATION_EVENT_NOTIFICATION, ProviderRequestedPolicy,
     ProviderWorkingDirectory, RouterAccess, SessionRef,
@@ -106,14 +109,39 @@ async fn provider_router(
 }
 
 async fn publish(hub: &ProviderSessionEventHub, target: &SessionRef, item_id: &str) {
+    publish_text(hub, target, item_id, item_id).await;
+}
+
+async fn publish_text(
+    hub: &ProviderSessionEventHub,
+    target: &SessionRef,
+    item_id: &str,
+    text: &str,
+) {
     let session = serde_json::from_value(serde_json::to_value(target).expect("target JSON"))
         .expect("hub target");
     let event = serde_json::from_value(json!({
         "kind": "itemStarted",
-        "item": {"itemId": item_id, "kind": {"kind": "agentMessage"}, "text": item_id}
+        "item": {"itemId": item_id, "kind": {"kind": "agentMessage"}, "text": text}
     }))
     .expect("session event");
     hub.publish(session, event).await.expect("hub event");
+}
+
+/// One raw tool call over the Unix socket, as written by an HTTP client.
+fn raw_tool_call(name: &str, arguments: &Value, connection: &str) -> Vec<u8> {
+    let body = serde_json::to_vec(&json!({
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": {"name": name, "arguments": arguments}
+    }))
+    .expect("tool call JSON");
+    let mut request = format!(
+        "POST {COLLABORATION_API_PATH} HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nAccept: application/json, text/event-stream\r\nMCP-Protocol-Version: {TEST_PROTOCOL_VERSION}\r\nConnection: {connection}\r\nContent-Length: {}\r\n\r\n",
+        body.len()
+    )
+    .into_bytes();
+    request.extend_from_slice(&body);
+    request
 }
 
 async fn next_streamed(streamed: &mut mpsc::UnboundedReceiver<Value>) -> Value {
@@ -212,4 +240,58 @@ async fn a_bounded_observation_streams_each_event_while_the_call_is_open_on_both
     }
     tcp.stop().await;
     unix.stop().await;
+}
+
+#[tokio::test]
+async fn a_reader_that_stops_reading_neither_keeps_the_call_past_its_bound_nor_holds_its_slot() {
+    // Arrange: one request slot on the Unix listener, and far more retained event bytes than
+    // the notification channel, the HTTP writer and the socket buffers can hold.
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    let directory = private_directory();
+    let target = provider_target("observed-by-a-stalled-reader");
+    let (identity, hub) = provider_router(directory.path(), &[&target]).await;
+    for index in 0..130 {
+        publish_text(&hub, &target, &format!("item-{index}"), &"x".repeat(7_000)).await;
+    }
+    let mut config = api_config(CollaborationApplication::new(identity), directory.path());
+    config.concurrent_requests = 1;
+    let socket = directory.path().join("api.sock");
+    let api = ServedApi::unix(&config, &socket).await;
+    let observation = json!({
+        "target": target, "timeoutSeconds": 1, "maxEvents": 4096, "maxBytes": 1_048_576
+    });
+
+    // Act: the reader sends the call and then reads nothing.
+    let mut stalled_reader = tokio::net::UnixStream::connect(&socket)
+        .await
+        .expect("connect the stalled reader");
+    stalled_reader
+        .write_all(&raw_tool_call("events_observe", &observation, "keep-alive"))
+        .await
+        .expect("send the observation");
+    api.await_active_calls(1, Duration::from_secs(5)).await;
+
+    // Assert: the call ends at its bound although the reader still has not read.
+    api.await_active_calls(0, Duration::from_secs(5)).await;
+    // Assert: the listener's only slot is free for the next caller meanwhile.
+    let mut next_caller = tokio::net::UnixStream::connect(&socket)
+        .await
+        .expect("connect the next caller");
+    next_caller
+        .write_all(&raw_tool_call("endpoints_list", &json!({}), "close"))
+        .await
+        .expect("send the next call");
+    let mut answer = Vec::new();
+    tokio::time::timeout(Duration::from_secs(5), next_caller.read_to_end(&mut answer))
+        .await
+        .expect("the next call is answered")
+        .expect("read the next answer");
+    let answer = String::from_utf8_lossy(&answer);
+    assert!(answer.contains("\"endpoints\""), "{answer}");
+    assert!(
+        !answer.contains("overloaded"),
+        "the slot was still held: {answer}"
+    );
+    drop(stalled_reader);
+    api.stop().await;
 }
