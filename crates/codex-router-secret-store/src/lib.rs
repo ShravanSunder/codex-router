@@ -235,6 +235,51 @@ mod tests {
             if relative_path == Path::new("keychain_data_key.rs") {
                 continue;
             }
+            if relative_path == Path::new("keychain_data_key/noninteractive_read.rs") {
+                let keychain_module = fs::read_to_string(source_root.join("keychain_data_key.rs"))
+                    .unwrap_or_else(|error| panic!("Keychain module should read: {error}"));
+                assert!(keychain_module.contains(
+                    "#[cfg(all(target_os = \"macos\", not(any(test, feature = \"keychain-test-guard\"))))]\nmod noninteractive_read;"
+                ));
+                let source = fs::read_to_string(&source_path).unwrap_or_else(|error| {
+                    panic!("noninteractive read module should read: {error}")
+                });
+                for required_query in [
+                    "ensure_router_keychain_service(service)?;",
+                    "SecKeychain::default_for_domain(SecPreferencesDomain::User)",
+                    ".keychains(&[user_keychain])",
+                    ".class(ItemClass::generic_password())",
+                    ".service(service)",
+                    ".account(account)",
+                    ".load_data(true)",
+                    ".skip_authenticated_items(true)",
+                ] {
+                    assert!(
+                        source.contains(required_query),
+                        "noninteractive Keychain query lost required scope or no-UI behavior: {required_query}"
+                    );
+                }
+                assert_eq!(
+                    source.matches(".search()").count(),
+                    1,
+                    "noninteractive Keychain module must keep exactly one scoped item search"
+                );
+                for forbidden_mutation in [
+                    "SecItemAdd",
+                    "SecItemUpdate",
+                    "SecItemDelete",
+                    "add_secret(",
+                    "update_secret(",
+                    "delete_secret(",
+                    "write_secret(",
+                ] {
+                    assert!(
+                        !source.contains(forbidden_mutation),
+                        "noninteractive Keychain module contains a mutation path: {forbidden_mutation}"
+                    );
+                }
+                continue;
+            }
             if relative_path == Path::new("keychain_data_key/temporary_keychain_tests.rs") {
                 let keychain_module = fs::read_to_string(source_root.join("keychain_data_key.rs"))
                     .unwrap_or_else(|error| panic!("Keychain module should read: {error}"));

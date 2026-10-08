@@ -23,6 +23,24 @@ where
     Ok(())
 }
 
+fn assert_literal_json_semantic_round_trip<TValue>(value: &TValue, literal: &str) -> TestResult
+where
+    TValue: Serialize + DeserializeOwned + std::fmt::Debug + PartialEq,
+{
+    let actual_json = serde_json::to_value(value)?;
+    let expected_json = serde_json::from_str::<serde_json::Value>(literal)?;
+    if actual_json != expected_json {
+        return Err(format!(
+            "serialized JSON value mismatch: expected {expected_json}, got {actual_json}"
+        )
+        .into());
+    }
+    if serde_json::from_str::<TValue>(literal)? != *value {
+        return Err(format!("literal did not recover value: {literal}").into());
+    }
+    Ok(())
+}
+
 #[test]
 fn lifecycle_unit_variants_match_literal_camel_case_contracts() -> TestResult {
     for (value, literal) in [
@@ -245,7 +263,7 @@ fn role_handover_body_stays_an_opaque_json_value() -> TestResult {
             "unrecognizedOwnerShape": {"nested": [1, 2, 3]}
         }),
     };
-    assert_literal_round_trip(
+    assert_literal_json_semantic_round_trip(
         &handover,
         r#"{"role":"agentCollaborationServices","version":2,"body":{"owners":[{"opaque":[null,false,{"v":"owner-defined"}],"turn":7}],"unrecognizedOwnerShape":{"nested":[1,2,3]}}}"#,
     )?;
@@ -259,7 +277,7 @@ fn role_handover_body_stays_an_opaque_json_value() -> TestResult {
         r#"{"role":"agentCollaborationServices","version":2,"body":null}"#,
     )?;
     assert_literal_round_trip::<Option<RoleHandover>>(&None, "null")?;
-    assert_literal_round_trip(
+    assert_literal_json_semantic_round_trip(
         &Some(handover),
         r#"{"role":"agentCollaborationServices","version":2,"body":{"owners":[{"opaque":[null,false,{"v":"owner-defined"}],"turn":7}],"unrecognizedOwnerShape":{"nested":[1,2,3]}}}"#,
     )?;
