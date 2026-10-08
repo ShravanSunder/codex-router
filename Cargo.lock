@@ -168,7 +168,7 @@ dependencies = [
 
 [[package]]
 name = "agent-proxy-services"
-version = "0.1.66"
+version = "0.1.72"
 dependencies = [
  "chrono",
  "codex-router-auth",
