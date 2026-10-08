@@ -30,6 +30,22 @@ mod component_fingerprint;
 pub use component_fingerprint::{ComponentFingerprint, FingerprintError};
 mod component_kind;
 pub use component_kind::ComponentKind;
+
+mod child_lifecycle;
+pub use child_lifecycle::{
+    ChildComponent, ChildDegradation, ChildPhase, DeactivateReason, DeactivateRefusal,
+    EvidenceRejection, MigrationHistoryDefect, NoGenerationReason, PrepareFailure, PrepareMode,
+    StoreKind,
+};
+mod child_snapshot;
+pub use child_snapshot::{ChildSnapshot, ChildSnapshotError};
+mod role_handover;
+pub use role_handover::{RoleHandover, RoleHandoverVersion, RoleHandoverVersionError};
+mod preparation_contract;
+pub use preparation_contract::{
+    MigrationVersion, MigrationVersionError, PreparedStoreSchema, PreparedStoreSchemaError,
+};
+
 mod build_info;
 pub use build_info::{BuildInfo, ComponentFingerprints};
 mod slot_image;
