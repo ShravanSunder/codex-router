@@ -3383,6 +3383,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "provider-link-protocol"
+version = "0.1.74"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "uuid",
+]
+
+[[package]]
 name = "quick-error"
 version = "1.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"

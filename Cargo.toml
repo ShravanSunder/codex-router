@@ -21,6 +21,7 @@ members = [
     "crates/codex-native-integration",
     "crates/codex-router-descriptor-boundary",
     "crates/codex-router-keeper-protocol",
+    "crates/provider-link-protocol",
     "crates/codex-router-keeper",
     "crates/codex-router-core",
     "crates/codex-router-host",
