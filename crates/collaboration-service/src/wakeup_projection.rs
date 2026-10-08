@@ -66,3 +66,25 @@ pub(crate) fn timestamp(value: i64) -> Result<ObservationTimestamp, ()> {
         .try_into()
         .map_err(|_| ())
 }
+
+/// Projects a lifecycle mutation with the deliveries it retained or discarded.
+pub(crate) fn project_mutation(
+    result: automation_storage::WakeMutationResult<collaboration_protocol::SavedMessage>,
+    service_id: &collaboration_protocol::UuidIdentity,
+) -> Result<collaboration_protocol::WakeMutationResult, ()> {
+    let wakeup = snapshot(result.wake, service_id, result.observed_at_ms)?;
+    let dispatched_deliveries = result
+        .retained
+        .into_iter()
+        .map(|record| {
+            let typed = serde_json::from_value(serde_json::to_value(record).map_err(|_| ())?)
+                .map_err(|_| ())?;
+            crate::delivery_projection::snapshot(typed)
+        })
+        .collect::<Result<Vec<_>, ()>>()?;
+    Ok(collaboration_protocol::WakeMutationResult {
+        wakeup,
+        discarded_delivery_ids: result.discarded,
+        dispatched_deliveries,
+    })
+}

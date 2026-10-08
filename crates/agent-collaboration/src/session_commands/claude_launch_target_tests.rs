@@ -11,12 +11,12 @@ const SESSION_ID: &str = "018f47d2-24d5-7a68-b9ec-6f759c39458f";
 
 fn service_manifest(router_proxy_endpoint: Option<&str>) -> serde_json::Value {
     let mut manifest = serde_json::json!({
-        "version": 2,
+        "version": 3,
         "serviceId": "00000000-0000-4000-8000-000000000001",
         "machineLabel": "fixture-machine",
         "serviceEpoch": "00000000-0000-4000-8000-000000000002",
-        "control": {"transport": "unixJsonLines", "path": "control.sock"},
-        "controlSchemaDigest": format!("sha256:{}", "a".repeat(64)),
+        "serviceVersion": env!("CARGO_PKG_VERSION"),
+        "api": {"transport": "streamableHttpUnix", "path": "control.sock"},
         "mcp": {
             "transport": "streamableHttp",
             "url": "http://127.0.0.1:18788/mcp"
@@ -91,7 +91,7 @@ fn unsupported_service_manifest_version_fails_as_invalid_discovery() {
     let directory = tempfile::tempdir().expect("service directory");
     let manifest_path = directory.path().join("service.json");
     let mut manifest = service_manifest(Some("127.0.0.1:18787"));
-    manifest["version"] = serde_json::json!(1);
+    manifest["version"] = serde_json::json!(2);
     fs::write(&manifest_path, manifest.to_string()).expect("service manifest");
 
     let error = parse_router_proxy_endpoint(&manifest_path)

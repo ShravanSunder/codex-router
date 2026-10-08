@@ -25,6 +25,10 @@ codex mcp get codex-router --json
 codex mcp list
 ```
 
+`service.json` is manifest version 3. `mcp.url` is the loopback Streamable HTTP
+endpoint for models; `api.path` names `control.sock`, the owner-only Unix socket
+where the CLIs and SDK reach the same tools. Older manifest versions are refused.
+
 `codex mcp add` writes the Codex MCP registration. `get` and `list` verify that
 registration; they do not prove a live server call or agent behavior. If the
 selected current manifest is absent or has no `mcp.url`, report missing setup.
@@ -239,8 +243,8 @@ its unattended permission handler cancels requests. `agent-collaboration acp` an
 protocols and their callbacks. Use each command's `--help` for its parameters.
 
 Use `--service-directory` to select an explicitly supplied owner-private service.
-Running the CLI does not confer socket access. The caller's sandbox must permit
-that exact service's `control.sock`; the default network-disabled Codex workspace
+Running the CLI does not confer socket access. The CLI reaches the collaboration
+API over that exact service's `control.sock`, so the caller's sandbox must permit it; the default network-disabled Codex workspace
 sandbox does not. A pre-dispatch `permissionDenied` diagnostic with
 `nextAction: requestApproval` asks the agent to request its host tool's automated
 approval review for the exact authorized command or selected socket access. If
@@ -249,5 +253,7 @@ only after a grant; repeated denial is not a Router outage. Receiving a message
 does not prove outgoing socket access. The [debug testing guide](../testing/automation-debug-testing.md)
 shows a scoped native permission profile and its positive/negative proof. These
 instructions do not grant permissions or install tools. The supported interfaces
-are the local Rust SDK, CLI, and the Host's loopback Streamable HTTP MCP endpoint.
+are the local Rust SDK and CLI, which call the collaboration tools over
+`control.sock`, and the Host's loopback Streamable HTTP MCP endpoint, which serves
+the same tools.
 Remote MCP exposure and other language SDK implementations follow separately.

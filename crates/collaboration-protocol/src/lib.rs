@@ -86,17 +86,11 @@ pub use question_contract::{
     QuestionListParams, QuestionListResult, QuestionRecord, QuestionResponse, QuestionState,
 };
 pub use session_observation_contract::{
-    BoundedObservationRequest, BoundedObservationResult, ObservationEndReason,
+    BoundedObservationRequest, BoundedObservationResult, OBSERVATION_EVENT_NOTIFICATION,
+    ObservationCursor, ObservationEndReason, ObservationEventNotification,
     ProviderObservationEventTooLarge, ProviderObservationEventTooLargeKind,
-    ProviderSessionListenReady, ProviderSessionListenRequest,
 };
 mod backend_generation;
-mod control_error_validation;
-mod control_schema_document;
-pub use control_error_validation::control_error_is_valid;
-pub use control_schema_document::control_schema_document;
-mod control_schema_identity;
-pub use control_schema_identity::{ControlSchema, ControlSchemaError};
 mod delivery_rejection;
 mod delivery_route_evidence;
 mod message_content;
@@ -149,12 +143,8 @@ pub use push_record::{
     PushRecordValidationError,
 };
 pub use router_origin_ref::{InteractionId, InteractionPresentationId, RouterOriginRef};
-mod control_initialization;
 mod endpoint_inventory;
-pub use control_initialization::{
-    ControlClientInfo, ControlInitializationParams, ControlInitializationResult, ProtocolVersion,
-};
-pub use endpoint_inventory::{EndpointChange, EndpointInventory};
+pub use endpoint_inventory::EndpointInventory;
 mod identity_schemas;
 mod protocol_type_schemas;
 pub use protocol_type_schemas::protocol_type_schemas;
@@ -168,10 +158,8 @@ pub use backend_generation::{CodexGeneration, GenerationNumber};
 pub use endpoint_identity::{
     EndpointId, EndpointRef, IdentityError, SessionId, SessionRef, UuidIdentity,
 };
-mod control_frame_decoder;
-pub use control_frame_decoder::{ControlFrameDecoder, FrameError, MAX_CONTROL_FRAME_BYTES};
-mod request_admission;
-pub use request_admission::{AdmissionError, ControlAdmission};
+mod message_frame_limit;
+pub use message_frame_limit::MAX_CONTROL_FRAME_BYTES;
 mod router_executable_relation;
 pub use router_executable_relation::{RouterExecutableRelation, router_build_warning};
 
@@ -185,7 +173,7 @@ pub use endpoint_description::NonEmptyText;
 
 mod service_manifest;
 pub use service_manifest::{
-    ControlSelector, ControlSocketPath, ControlTransport, McpSelector, McpTransport,
+    ApiSelector, ApiSocketPath, ApiTransport, McpSelector, McpTransport, SERVICE_MANIFEST_VERSION,
     ServiceManifest,
 };
 mod lifecycle_observation;
@@ -243,7 +231,8 @@ pub use delivery_inspection_contract::{
 mod wakeup_subscription_contract;
 pub use wakeup_subscription_contract::{
     NoMutation, UnknownFire, WaitNextAction, WaitStage, WaitUnavailable, WaitUnavailableEffects,
-    WaitUnavailableKind, WakeChange, WakeChanged, WakeSubscription,
+    WaitUnavailableKind, WakeChange, WakeChanged, WakeSubscription, WakeWaitOutcome,
+    WakeWaitRequest, WakeWaitResult,
 };
 
 pub use wakeup_subscription_contract::{

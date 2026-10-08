@@ -1,8 +1,15 @@
+//! The collaboration MCP server: one stateless handler per request over the typed application.
+//!
+//! Tools call `CollaborationApplication` in process. The conversation tools that open carrier
+//! sessions (create, load, prompt, cancel, create-and-prompt and bounded observation) run the
+//! carrier clients in the Host over the same application.
+use crate::collaboration_api_router::CollaborationApiConfig;
+use crate::native_schema_definitions::NativeSchemaDefinitions;
+use crate::tool_call_registry::CallEndedEarly;
 use collaboration_client::{
-    BoundedObservationRequest, BoundedObservationResult, ClientError, ControlClient,
-    ConversationCancelInput, ConversationClient, ConversationClientError,
-    ConversationCreatePromptOutcome, ConversationOperationResult, MessageReplyError,
-    MessageReplyRequest, MessageSendError, MessageSendRequest, OperationEffect,
+    BoundedObservationRequest, BoundedObservationResult, ClientError, ConversationCancelInput,
+    ConversationClient, ConversationClientError, ConversationCreatePromptOutcome,
+    ConversationOperationResult, MessageReplyRequest, MessageSendRequest, OperationEffect,
     operation_failure_from_client_error,
 };
 use collaboration_protocol::{
@@ -19,6 +26,8 @@ use collaboration_protocol::{
     PushRecordShowResult, RouterExecutableRelation, SessionMessageReplyResult,
     ThreadSubscriptionWaitRequest, ThreadSubscriptionWaitResult, router_build_warning,
 };
+use collaboration_service::CollaborationApplication;
+use collaboration_service::collaboration_application::API_RESULT_BUDGET;
 use rmcp::{
     ServerHandler,
     handler::server::router::tool::ToolRoute,
@@ -30,23 +39,24 @@ use rmcp::{
     schemars, tool, tool_router,
 };
 use serde::Deserialize;
-use std::{
-    path::PathBuf,
-    sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
-    },
-    time::Duration,
-};
+use std::{sync::Arc, time::Duration};
 
+mod application_tool_results;
+mod board_argument_classification;
+mod carrier_tools;
 mod catalog_descriptions;
 mod catalog_tools;
 mod conversation_operation_tools;
 mod conversation_tool_requests;
 mod conversation_tool_results;
+mod interaction_tools;
+mod message_tools;
 mod result_converters;
 mod schema_binding;
+mod session_tools;
 mod tool_output_contract;
+mod wait_tools;
+use application_tool_results::*;
 use catalog_descriptions::operation_description;
 use catalog_tools::{
     EmptyToolInput, register_automation_inspection_tools, register_automation_mutation_tools,
@@ -62,115 +72,162 @@ use conversation_tool_results::common_prompt_tool_result;
 use conversation_tool_results::{
     conversation_call_cancelled, conversation_create_tool_result, conversation_tool_result,
 };
+#[cfg(test)]
+use message_tools::message_failure_result;
+pub(crate) use result_converters::structured_tool_error;
 use result_converters::*;
-use schema_binding::{bind_native_schema_refs, load_advertised_native_definitions};
+use schema_binding::bind_native_schema_refs;
 use tool_output_contract::{McpToolError, McpToolOutput};
 
-#[derive(Clone, Debug)]
+/// The tools every server copy offers, routed and with their schemas bound once.
+pub(crate) struct ToolSurface {
+    router: ToolRouter<CollaborationMcpServer>,
+    tools: Vec<Tool>,
+}
+
+impl ToolSurface {
+    pub(crate) fn new(native_definitions: Option<&NativeSchemaDefinitions>) -> Self {
+        let mut router = CollaborationMcpServer::session_tool_router()
+            + CollaborationMcpServer::message_tool_router()
+            + CollaborationMcpServer::interaction_tool_router()
+            + CollaborationMcpServer::wait_tool_router()
+            + CollaborationMcpServer::carrier_tool_router();
+        register_board_tools(&mut router);
+        register_automation_inspection_tools(&mut router);
+        register_automation_mutation_tools(&mut router);
+        register_conversation_operation_tools(&mut router);
+        let tools = resolve_tool_schemas(
+            &router,
+            native_definitions.map(NativeSchemaDefinitions::definitions),
+        );
+        Self { router, tools }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn tools(&self) -> &[Tool] {
+        &self.tools
+    }
+}
+
+/// The handler rmcp builds for each request. It holds the Router's application; its tool
+/// calls run through the listener's registry, so shutdown can stop and join them.
+#[derive(Clone)]
 pub(crate) struct CollaborationMcpServer {
-    service_directory: PathBuf,
-    tool_router: ToolRouter<Self>,
-    _lifecycle: ActiveServiceGuard,
+    surface: Arc<ToolSurface>,
+    application: CollaborationApplication,
+    /// How the carrier tools reach the Router: in process, with carrier sockets in this
+    /// service directory.
+    carrier_access: collaboration_client::CollaborationAccess,
     router_executable_relation: tokio::sync::watch::Receiver<RouterExecutableRelation>,
-}
-
-#[derive(Debug)]
-struct ActiveServiceGuard(Arc<AtomicUsize>);
-
-impl ActiveServiceGuard {
-    fn new(counter: Arc<AtomicUsize>) -> Self {
-        counter.fetch_add(1, Ordering::SeqCst);
-        Self(counter)
-    }
-}
-
-impl Clone for ActiveServiceGuard {
-    fn clone(&self) -> Self {
-        Self::new(Arc::clone(&self.0))
-    }
-}
-
-impl Drop for ActiveServiceGuard {
-    fn drop(&mut self) {
-        self.0.fetch_sub(1, Ordering::SeqCst);
-    }
+    /// The listener's running calls, which its shutdown aborts and joins.
+    tool_calls: crate::tool_call_registry::ToolCallRegistry,
 }
 
 impl CollaborationMcpServer {
-    #[cfg(test)]
-    pub(crate) fn new(service_directory: PathBuf) -> Self {
-        let (_sender, relation_receiver) =
-            tokio::sync::watch::channel(RouterExecutableRelation::Match);
-        Self::with_lifecycle(
-            service_directory,
-            Arc::new(AtomicUsize::new(0)),
-            relation_receiver,
-        )
-    }
-
-    pub(crate) fn with_lifecycle(
-        service_directory: PathBuf,
-        active_services: Arc<AtomicUsize>,
-        router_executable_relation: tokio::sync::watch::Receiver<RouterExecutableRelation>,
+    pub(crate) fn new(
+        config: &CollaborationApiConfig,
+        surface: Arc<ToolSurface>,
+        tool_calls: crate::tool_call_registry::ToolCallRegistry,
     ) -> Self {
-        let mut tool_router = Self::tool_router();
-        register_board_tools(&mut tool_router);
-        register_automation_inspection_tools(&mut tool_router);
-        register_automation_mutation_tools(&mut tool_router);
-        register_conversation_operation_tools(&mut tool_router);
         Self {
-            service_directory,
-            tool_router,
-            _lifecycle: ActiveServiceGuard::new(active_services),
-            router_executable_relation,
+            surface,
+            application: config.application.clone(),
+            carrier_access: carrier_access(&config.application, &config.service_directory),
+            router_executable_relation: config.router_executable_relation.clone(),
+            tool_calls,
         }
     }
 
-    async fn connect(&self) -> Result<ControlClient, ClientError> {
-        ControlClient::connect(
-            &self.service_directory,
-            "collaboration-mcp",
-            env!("CARGO_PKG_VERSION"),
-        )
-        .await
+    #[cfg(test)]
+    pub(crate) fn for_application(
+        application: CollaborationApplication,
+        service_directory: std::path::PathBuf,
+    ) -> Self {
+        let (_sender, relation) = tokio::sync::watch::channel(RouterExecutableRelation::Match);
+        Self {
+            surface: Arc::new(ToolSurface::new(None)),
+            carrier_access: carrier_access(&application, &service_directory),
+            application,
+            router_executable_relation: relation,
+            tool_calls: crate::tool_call_registry::ToolCallRegistry::new(
+                tokio_util::sync::CancellationToken::new(),
+            ),
+        }
     }
 
-    pub(crate) fn resolved_tools(&self) -> Vec<Tool> {
-        let native_definitions = load_advertised_native_definitions(&self.service_directory);
-        self.tool_router
-            .list_all()
-            .into_iter()
-            .map(|mut tool| {
-                let mut input = serde_json::Value::Object((*tool.input_schema).clone());
-                bind_native_schema_refs(&mut input, native_definitions.as_ref());
-                if let serde_json::Value::Object(fields) = input {
-                    tool.input_schema = std::sync::Arc::new(fields);
-                }
-                if let Some(schema) = &tool.output_schema {
-                    let mut output = serde_json::Value::Object((**schema).clone());
-                    bind_native_schema_refs(&mut output, native_definitions.as_ref());
-                    normalize_boolean_json_schemas(&mut output);
-                    let success_description = output
-                        .pointer("/anyOf/0/$ref")
-                        .and_then(serde_json::Value::as_str)
-                        .and_then(|reference| reference.strip_prefix('#'))
-                        .and_then(|pointer| output.pointer(pointer))
-                        .and_then(|success| success.get("description"))
-                        .cloned();
-                    if let serde_json::Value::Object(mut fields) = output {
-                        if let Some(description) = success_description {
-                            fields.insert("description".to_owned(), description);
-                        }
-                        fields
-                            .entry("type".to_owned())
-                            .or_insert_with(|| serde_json::Value::String("object".to_owned()));
-                        tool.output_schema = Some(std::sync::Arc::new(fields));
-                    }
-                }
-                tool
-            })
-            .collect()
+    /// A server over a Router with no stores, for tests that read its tool catalog.
+    #[cfg(test)]
+    pub(crate) fn catalog_only() -> Self {
+        Self::for_application(
+            CollaborationApplication::new(crate::api_test_harness::test_identity()),
+            std::env::temp_dir(),
+        )
     }
+
+    #[cfg(test)]
+    pub(crate) fn resolved_tools(&self) -> Vec<Tool> {
+        self.surface.tools.clone()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_router_relation(
+        mut self,
+        relation: tokio::sync::watch::Receiver<RouterExecutableRelation>,
+    ) -> Self {
+        self.router_executable_relation = relation;
+        self
+    }
+}
+
+fn carrier_access(
+    application: &CollaborationApplication,
+    service_directory: &std::path::Path,
+) -> collaboration_client::CollaborationAccess {
+    collaboration_client::CollaborationAccess::local(
+        service_directory,
+        Arc::new(crate::local_collaboration::ApplicationCollaboration::new(
+            application.clone(),
+        )),
+    )
+}
+
+fn resolve_tool_schemas(
+    router: &ToolRouter<CollaborationMcpServer>,
+    native_definitions: Option<&serde_json::Map<String, serde_json::Value>>,
+) -> Vec<Tool> {
+    router
+        .list_all()
+        .into_iter()
+        .map(|mut tool| {
+            let mut input = serde_json::Value::Object((*tool.input_schema).clone());
+            bind_native_schema_refs(&mut input, native_definitions);
+            if let serde_json::Value::Object(fields) = input {
+                tool.input_schema = Arc::new(fields);
+            }
+            if let Some(schema) = &tool.output_schema {
+                let mut output = serde_json::Value::Object((**schema).clone());
+                bind_native_schema_refs(&mut output, native_definitions);
+                normalize_boolean_json_schemas(&mut output);
+                let success_description = output
+                    .pointer("/anyOf/0/$ref")
+                    .and_then(serde_json::Value::as_str)
+                    .and_then(|reference| reference.strip_prefix('#'))
+                    .and_then(|pointer| output.pointer(pointer))
+                    .and_then(|success| success.get("description"))
+                    .cloned();
+                if let serde_json::Value::Object(mut fields) = output {
+                    if let Some(description) = success_description {
+                        fields.insert("description".to_owned(), description);
+                    }
+                    fields
+                        .entry("type".to_owned())
+                        .or_insert_with(|| serde_json::Value::String("object".to_owned()));
+                    tool.output_schema = Some(Arc::new(fields));
+                }
+            }
+            tool
+        })
+        .collect()
 }
 
 fn normalize_boolean_json_schemas(schema: &mut serde_json::Value) {
@@ -235,678 +292,6 @@ fn normalize_schema_or_schema_array(schema: &mut serde_json::Value) {
     }
 }
 
-#[tool_router]
-impl CollaborationMcpServer {
-    #[tool(name = "endpoints_list", description = "Lists collaboration endpoints. Read-only; successful discovery is not evidence that an agent assignment completed.", output_schema = rmcp::handler::server::tool::schema_for_type::<McpToolOutput<EndpointInventory>>())]
-    async fn endpoints_list(
-        &self,
-        Parameters(EmptyToolInput {}): Parameters<EmptyToolInput>,
-    ) -> CallToolResult {
-        let mut client = match self.connect().await {
-            Ok(value) => value,
-            Err(error) => return failure(error, OperationEffect::None),
-        };
-        let result = client.list_endpoints().await;
-        let _closed = client.close().await;
-        structured_result(result, OperationEffect::None)
-    }
-
-    #[tool(name = "sessions_list", description = "Lists stored, loaded, or active Codex conversations using the selected scope. Claude Code sessions use provider_sessions_list. Read-only and never resumes a conversation.", output_schema = rmcp::handler::server::tool::schema_for_type::<McpToolOutput<NativeSessionListResult>>())]
-    async fn sessions_list(
-        &self,
-        Parameters(request): Parameters<NativeSessionListParams>,
-    ) -> CallToolResult {
-        if String::from(request.endpoint.endpoint_id.clone()) == "claude-local" {
-            return failure(
-                ClientError::Rejected {
-                    code: -32050,
-                    data: Some(serde_json::json!({
-                        "kind": "unsupportedCapability",
-                        "stage": "discovery",
-                        "message": "Use provider_sessions_list for Claude Code sessions"
-                    })),
-                },
-                OperationEffect::None,
-            );
-        }
-        let mut client = match self.connect().await {
-            Ok(value) => value,
-            Err(error) => return failure(error, OperationEffect::None),
-        };
-        let result = client.list_sessions(request).await;
-        let _closed = client.close().await;
-        structured_result(result, OperationEffect::None)
-    }
-
-    #[tool(name = "provider_sessions_list", description = "Lists Router-hosted provider Sessions and live Claude Code terminal sessions. Claude terminal discovery supports active or loaded views; stored applies only to hosted Sessions. Live pages are not snapshots, so sessions may move between pages.", output_schema = rmcp::handler::server::tool::schema_for_type::<McpToolOutput<ProviderSessionListResult>>())]
-    async fn provider_sessions_list(
-        &self,
-        Parameters(request): Parameters<ProviderSessionListParams>,
-    ) -> CallToolResult {
-        let mut client = match self.connect().await {
-            Ok(value) => value,
-            Err(error) => return failure(error, OperationEffect::None),
-        };
-        let result = client.list_provider_sessions(request).await;
-        let _closed = client.close().await;
-        structured_result(result, OperationEffect::None)
-    }
-
-    #[tool(name = "provider_session_inspect", description = "Inspects one Router-owned provider Session, including live state, capability report, authentication status, and last advertised settings options.", output_schema = rmcp::handler::server::tool::schema_for_type::<McpToolOutput<ProviderSessionInspectResult>>())]
-    async fn provider_session_inspect(
-        &self,
-        Parameters(request): Parameters<ProviderSessionInspectRequest>,
-    ) -> CallToolResult {
-        let mut client = match self.connect().await {
-            Ok(value) => value,
-            Err(error) => return failure(error, OperationEffect::None),
-        };
-        let result = client.inspect_provider_session(request).await;
-        let _closed = client.close().await;
-        match result {
-            Ok(value) => structured_result(Ok(value), OperationEffect::None),
-            Err(error @ ClientError::Rejected { .. }) => {
-                let typed = match &error {
-                    ClientError::Rejected {
-                        data: Some(data), ..
-                    } => serde_json::from_value::<ProviderInspectFailure>(data.clone()).ok(),
-                    _ => None,
-                };
-                typed
-                    .and_then(|value| serde_json::to_value(value).ok())
-                    .map(structured_tool_error)
-                    .unwrap_or_else(|| failure(error, OperationEffect::None))
-            }
-            Err(error) => failure(error, OperationEffect::None),
-        }
-    }
-
-    #[tool(name = "session_inspect", description = "Inspects one exact conversation target without changing its identity. Attachment or backend failures retain structured target/effect evidence.", output_schema = rmcp::handler::server::tool::schema_for_type::<McpToolOutput<NativeInspectResult>>())]
-    async fn session_inspect(
-        &self,
-        Parameters(request): Parameters<NativeInspectParams>,
-    ) -> CallToolResult {
-        let mut client = match self.connect().await {
-            Ok(value) => value,
-            Err(error) => return failure(error, OperationEffect::None),
-        };
-        let result = client.inspect_session(&request.target).await;
-        let _closed = client.close().await;
-        structured_result(result, OperationEffect::None)
-    }
-
-    #[tool(name = "session_rename", description = "Renames one exact conversation. Dispatches once and never automatically replays an uncertain mutation.", output_schema = rmcp::handler::server::tool::schema_for_type::<McpToolOutput<NativeRenameResult>>())]
-    async fn session_rename(
-        &self,
-        Parameters(request): Parameters<NativeRenameParams>,
-    ) -> CallToolResult {
-        let mut client = match self.connect().await {
-            Ok(value) => value,
-            Err(error) => return failure(error, OperationEffect::None),
-        };
-        let result = client.rename_session(request).await;
-        let _closed = client.close().await;
-        structured_result(result, OperationEffect::Unknown)
-    }
-
-    #[tool(name = "turn_interrupt", description = "Interrupts only the supplied exact turn with its generation guard. A receipt does not assert assignment success or observed cessation.", output_schema = rmcp::handler::server::tool::schema_for_type::<McpToolOutput<NativeInterruptResult>>())]
-    async fn turn_interrupt(
-        &self,
-        Parameters(request): Parameters<NativeInterruptParams>,
-    ) -> CallToolResult {
-        let mut client = match self.connect().await {
-            Ok(value) => value,
-            Err(error) => return failure(error, OperationEffect::None),
-        };
-        let result = client
-            .interrupt_turn(
-                &request.target,
-                &request.generation,
-                &String::from(request.turn_id.clone()),
-            )
-            .await;
-        let _closed = client.close().await;
-        structured_result(result, OperationEffect::Unknown)
-    }
-
-    #[tool(name = "message_send", description = "Submits one agent-authored or explicit human message with exact auto, queue, or steer semantics. Agent sender identity is reported by the request's client, not authenticated. The result includes the stored push id, link, target and delivery receipt; accepted input or a peer write does not prove completion or an agent reply. Router-authored content is not a public caller input, and uncertain dispatch is never replayed automatically.", output_schema = rmcp::handler::server::tool::schema_for_type::<McpToolOutput<PushMessageSendResult>>())]
-    async fn message_send(
-        &self,
-        Parameters(request): Parameters<MessageSendRequest>,
-    ) -> CallToolResult {
-        let mut client = match self.connect().await {
-            Ok(value) => value,
-            Err(error) => return failure(error, OperationEffect::None),
-        };
-        let result = client.send_message(request).await;
-        let _closed = client.close().await;
-        message_tool_result(result)
-    }
-
-    #[tool(name = "router_show", description = "Shows one stored Router push by id or router link, including its full body or expanded thread activity. The caller is reported by the MCP request, not authenticated; the service uses it as a confusion guard. A direct-message show by its target marks the message read.", output_schema = rmcp::handler::server::tool::schema_for_type::<McpToolOutput<PushRecordShowResult>>())]
-    async fn router_show(
-        &self,
-        Parameters(request): Parameters<PushRecordShowParams>,
-    ) -> CallToolResult {
-        let mut client = match self.connect().await {
-            Ok(value) => value,
-            Err(error) => return failure(error, OperationEffect::None),
-        };
-        let result = client.router_show(request).await;
-        let _closed = client.close().await;
-        structured_result(result, OperationEffect::None)
-    }
-
-    #[tool(name = "message_inbox", description = "Lists retained unread direct messages for the reported caller session. Caller identity is supplied by the MCP request and is not authenticated; the service uses it as a confusion guard.", output_schema = rmcp::handler::server::tool::schema_for_type::<McpToolOutput<PushRecordListResult>>())]
-    async fn message_inbox(
-        &self,
-        Parameters(request): Parameters<PushRecordListParams>,
-    ) -> CallToolResult {
-        let mut client = match self.connect().await {
-            Ok(value) => value,
-            Err(error) => return failure(error, OperationEffect::None),
-        };
-        let result = client.message_inbox(request).await;
-        let _closed = client.close().await;
-        structured_result(result, OperationEffect::None)
-    }
-
-    #[tool(name = "message_history", description = "Lists retained direct messages between the reported caller session and the explicit with session. Caller identity is supplied by the MCP request and is not authenticated; the service uses it as a confusion guard.", output_schema = rmcp::handler::server::tool::schema_for_type::<McpToolOutput<PushRecordListResult>>())]
-    async fn message_history(
-        &self,
-        Parameters(request): Parameters<PushRecordHistoryParams>,
-    ) -> CallToolResult {
-        let mut client = match self.connect().await {
-            Ok(value) => value,
-            Err(error) => return failure(error, OperationEffect::None),
-        };
-        let result = client.message_history(request).await;
-        let _closed = client.close().await;
-        structured_result(result, OperationEffect::None)
-    }
-
-    #[tool(name = "message_reply", description = "Replies to one direct message by its stored push id or router link, and records that reference on the reply. Caller identity is reported by the MCP request, not authenticated; the service uses it as a confusion guard. The result names the selected recipient.", output_schema = rmcp::handler::server::tool::schema_for_type::<McpToolOutput<SessionMessageReplyResult>>())]
-    async fn message_reply(
-        &self,
-        Parameters(request): Parameters<MessageReplyRequest>,
-    ) -> CallToolResult {
-        let mut client = match self.connect().await {
-            Ok(value) => value,
-            Err(error) => return failure(error, OperationEffect::None),
-        };
-        let result = client.reply_to_push(request).await;
-        let _closed = client.close().await;
-        message_reply_tool_result(result)
-    }
-
-    #[tool(name = "approval_list", description = "Lists approval requests. Set includeOptions for offered choices and persistent effects. Read-only.", output_schema = rmcp::handler::server::tool::schema_for_type::<McpToolOutput<ApprovalListResponse>>())]
-    async fn approval_list(
-        &self,
-        Parameters(request): Parameters<ApprovalListParams>,
-    ) -> CallToolResult {
-        let mut client = match self.connect().await {
-            Ok(value) => value,
-            Err(error) => return failure(error, OperationEffect::None),
-        };
-        let result = if request.include_options {
-            client
-                .list_approvals_with_options(request.pending)
-                .await
-                .map(ApprovalListResponse::Detailed)
-        } else {
-            client
-                .list_pending_approvals(request.pending)
-                .await
-                .map(ApprovalListResponse::Legacy)
-        };
-        let _closed = client.close().await;
-        structured_result(result, OperationEffect::None)
-    }
-
-    #[tool(name = "approval_decide", description = "Records one approval decision through the existing authorization checks. MCP never auto-approves.", output_schema = rmcp::handler::server::tool::schema_for_type::<McpToolOutput<ApprovalDecideResult>>())]
-    async fn approval_decide(
-        &self,
-        Parameters(request): Parameters<ApprovalDecideParams>,
-    ) -> CallToolResult {
-        let mut client = match self.connect().await {
-            Ok(value) => value,
-            Err(error) => return failure(error, OperationEffect::None),
-        };
-        let result = client.decide_approval(request).await;
-        let _closed = client.close().await;
-        match result {
-            Ok(value) => structured_result(Ok(value), OperationEffect::None),
-            Err(error) => {
-                let (failure, target, turn_id) = error.into_parts();
-                operation_error_result(failure, target, turn_id)
-            }
-        }
-    }
-
-    #[tool(name = "question_list", description = "Lists questions with their typed fields and current state. Read-only.", output_schema = rmcp::handler::server::tool::schema_for_type::<McpToolOutput<collaboration_protocol::QuestionListResult>>())]
-    async fn question_list(
-        &self,
-        Parameters(request): Parameters<collaboration_protocol::QuestionListParams>,
-    ) -> CallToolResult {
-        let mut client = match self.connect().await {
-            Ok(value) => value,
-            Err(error) => return failure(error, OperationEffect::None),
-        };
-        let result = client.list_questions(request.pending).await;
-        let _closed = client.close().await;
-        structured_result(result, OperationEffect::None)
-    }
-
-    #[tool(name = "question_answer", description = "Answers, declines, or cancels one question as its Approver. Choice answers carry selectedOptionIds from the offered options; labels are display text.", output_schema = rmcp::handler::server::tool::schema_for_type::<McpToolOutput<collaboration_protocol::QuestionAnswerResult>>())]
-    async fn question_answer(
-        &self,
-        Parameters(request): Parameters<collaboration_protocol::QuestionAnswerParams>,
-    ) -> CallToolResult {
-        let mut client = match self.connect().await {
-            Ok(value) => value,
-            Err(error) => return failure(error, OperationEffect::None),
-        };
-        let result = client.answer_question(request).await;
-        let _closed = client.close().await;
-        match result {
-            Ok(value) => structured_result(Ok(value), OperationEffect::None),
-            Err(error) => {
-                let (failure, target, turn_id) = error.into_parts();
-                operation_error_result(failure, target, turn_id)
-            }
-        }
-    }
-
-    #[tool(name = "conversation_settings_set", description = "Sets one advertised provider Session mode, model, or effort as its creator or Approver. An ambiguous provider response leaves settings gated.", output_schema = rmcp::handler::server::tool::schema_for_type::<McpToolOutput<ProviderSettingsResult>>())]
-    async fn conversation_settings_set(
-        &self,
-        Parameters(request): Parameters<ProviderSettingsSetRequest>,
-    ) -> CallToolResult {
-        let mut client = match self.connect().await {
-            Ok(value) => value,
-            Err(error) => return failure(error, OperationEffect::None),
-        };
-        let result = client.set_provider_conversation_setting(request).await;
-        let _ = client.close().await;
-        provider_settings_tool_result(result, OperationEffect::Unknown)
-    }
-
-    #[tool(name = "conversation_settings_accept", description = "Accepts the provider Session's currently reported settings as its creator or Approver and clears the prompt gate without an agent RPC.", output_schema = rmcp::handler::server::tool::schema_for_type::<McpToolOutput<ProviderSettingsResult>>())]
-    async fn conversation_settings_accept(
-        &self,
-        Parameters(request): Parameters<ProviderSettingsAcceptRequest>,
-    ) -> CallToolResult {
-        let mut client = match self.connect().await {
-            Ok(value) => value,
-            Err(error) => return failure(error, OperationEffect::None),
-        };
-        let result = client.accept_provider_conversation_settings(request).await;
-        let _ = client.close().await;
-        provider_settings_tool_result(result, OperationEffect::None)
-    }
-
-    #[tool(name = "conversation_resume", description = "Resumes one advertised provider Session as an inspectable operation. The agent supplies no history replay; inspect the operation ID after an uncertain response.", output_schema = rmcp::handler::server::tool::schema_for_type::<McpToolOutput<ConversationOperationSubmission>>())]
-    async fn conversation_resume(
-        &self,
-        Parameters(request): Parameters<ConversationResumeRequest>,
-    ) -> CallToolResult {
-        let mut client = match self.connect().await {
-            Ok(value) => value,
-            Err(error) => return failure(error, OperationEffect::None),
-        };
-        let result = client.resume_provider_conversation(request).await;
-        let _ = client.close().await;
-        structured_result(result, OperationEffect::Unknown)
-    }
-
-    #[tool(name = "conversation_close", description = "Closes one provider Session after its running Turn settles. The operation ID remains inspectable after an uncertain response.", output_schema = rmcp::handler::server::tool::schema_for_type::<McpToolOutput<ConversationOperationSubmission>>())]
-    async fn conversation_close(
-        &self,
-        Parameters(request): Parameters<ConversationCloseRequest>,
-    ) -> CallToolResult {
-        let mut client = match self.connect().await {
-            Ok(value) => value,
-            Err(error) => return failure(error, OperationEffect::None),
-        };
-        let result = client.close_provider_conversation(request).await;
-        let _ = client.close().await;
-        structured_result(result, OperationEffect::Unknown)
-    }
-
-    #[tool(name = "journal_status", description = "Reads lifecycle-journal availability and bounds without mutating state.", output_schema = rmcp::handler::server::tool::schema_for_type::<McpToolOutput<JournalStatus>>())]
-    async fn journal_status(
-        &self,
-        Parameters(EmptyToolInput {}): Parameters<EmptyToolInput>,
-    ) -> CallToolResult {
-        let mut client = match self.connect().await {
-            Ok(value) => value,
-            Err(error) => return failure(error, OperationEffect::None),
-        };
-        let result = client.journal_status().await;
-        let _closed = client.close().await;
-        structured_result(result, OperationEffect::None)
-    }
-
-    #[tool(name = "journal_read", description = "Reads a bounded lifecycle-journal page. Read-only and not a durable conversation transcript.", output_schema = rmcp::handler::server::tool::schema_for_type::<McpToolOutput<JournalPage>>())]
-    async fn journal_read(
-        &self,
-        Parameters(request): Parameters<JournalReadParams>,
-    ) -> CallToolResult {
-        let mut client = match self.connect().await {
-            Ok(value) => value,
-            Err(error) => return failure(error, OperationEffect::None),
-        };
-        let result = client
-            .read_journal(
-                &request.endpoint,
-                request.after,
-                request.page_size,
-                request.wait_milliseconds,
-            )
-            .await;
-        let _closed = client.close().await;
-        structured_result(result, OperationEffect::None)
-    }
-
-    #[tool(name = "addresses_list", description = "Lists known conversation addresses and their observed lifecycle coverage. Read-only.", output_schema = rmcp::handler::server::tool::schema_for_type::<McpToolOutput<AddressPage>>())]
-    async fn addresses_list(
-        &self,
-        Parameters(request): Parameters<AddressListParams>,
-    ) -> CallToolResult {
-        let mut client = match self.connect().await {
-            Ok(value) => value,
-            Err(error) => return failure(error, OperationEffect::None),
-        };
-        let result = client
-            .list_addresses(
-                &request.endpoint,
-                request.page_size,
-                request.cursor.as_deref(),
-            )
-            .await;
-        let _closed = client.close().await;
-        structured_result(result, OperationEffect::None)
-    }
-
-    #[tool(name = "automation_status", description = "Reads automation readiness and configured attempt budgets without mutating them.", output_schema = rmcp::handler::server::tool::schema_for_type::<McpToolOutput<collaboration_protocol::AutomationStatus>>())]
-    async fn automation_status(
-        &self,
-        Parameters(EmptyToolInput {}): Parameters<EmptyToolInput>,
-    ) -> CallToolResult {
-        let mut client = match self.connect().await {
-            Ok(value) => value,
-            Err(error) => return failure(error, OperationEffect::None),
-        };
-        let result = client.automation_status().await;
-        let _closed = client.close().await;
-        configuration_result(result, false)
-    }
-
-    #[tool(
-        name = "board_thread_wait",
-        description = "Waits for one due batch from the supplied reader's poll-mode subscriptions, filtered to all scopes, selected roots or one topic. Returns an empty batch at maxWaitSeconds when nothing is due. A handed batch remains unread until the reader acknowledges it.",
-        output_schema = rmcp::handler::server::tool::schema_for_type::<
-            McpToolOutput<ThreadSubscriptionWaitResult>,
-        >()
-    )]
-    async fn board_thread_wait(
-        &self,
-        Parameters(request): Parameters<ThreadSubscriptionWaitRequest>,
-    ) -> CallToolResult {
-        let mut client = match self.connect().await {
-            Ok(value) => value,
-            Err(error) => return failure(error, OperationEffect::None),
-        };
-        let timeout =
-            Duration::from_secs(request.max_wait_seconds).saturating_add(Duration::from_secs(5));
-        let result = client.board_thread_wait(request, timeout).await;
-        let _closed = client.close().await;
-        board_result(result, true)
-    }
-
-    #[tool(name = "wake_wait_until_first_fire", description = "Subscribes on one call-local Control connection and waits for the selected wake-up's first fire. Cancellation closes only this wait; it never recreates or replays the wake-up.", output_schema = rmcp::handler::server::tool::schema_for_type::<McpToolOutput<collaboration_protocol::FireReceipt>>())]
-    async fn wake_wait_until_first_fire(
-        &self,
-        Parameters(request): Parameters<collaboration_protocol::WakeShowRequest>,
-        context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
-    ) -> CallToolResult {
-        let wakeup_id = request.wakeup_id.clone();
-        let client = match tokio::select! {
-            _ = context.ct.cancelled() => {
-                return wake_wait_failure(collaboration_client::WakeWaitError::CallerCancelled { wakeup_id: wakeup_id.clone() });
-            }
-            result = self.connect() => result,
-        } {
-            Ok(value) => value,
-            Err(error) => {
-                return wake_wait_failure(collaboration_client::WakeWaitError::Connection(error));
-            }
-        };
-        let wait = match tokio::select! {
-            _ = context.ct.cancelled() => {
-                return wake_wait_failure(collaboration_client::WakeWaitError::CallerCancelled { wakeup_id });
-            }
-            result = client.subscribe_wakeup(request) => result,
-        } {
-            Ok(value) => value,
-            Err(error) => return wake_wait_failure(error),
-        };
-        match wait
-            .wait_until_first_fire_with_cancellation(context.ct)
-            .await
-        {
-            Ok(value) => structured_result(Ok(value), OperationEffect::None),
-            Err(error) => wake_wait_failure(error),
-        }
-    }
-
-    #[tool(name = "conversation_create", description = "Creates one conversation through its advertised client. Requires a caller UUIDv7 operationId and exact endpoint, working directory, access, and creator; approver defaults to creator. model and effort are required for Codex endpoints; provider endpoints accept advertised mode, model and effort values. fork and rootMessageId are Codex-only and rejected for provider endpoints. Returns created with target or pending with the inspectable operation ID.", output_schema = rmcp::handler::server::tool::schema_for_type::<McpToolOutput<ConversationCreateOutcome>>())]
-    async fn conversation_create(
-        &self,
-        Parameters(mut request): Parameters<ConversationCreateToolRequest>,
-        context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
-    ) -> CallToolResult {
-        request.create.default_approver();
-        let operation_id = request.create.operation_id.clone();
-        let endpoint = request.create.endpoint.clone();
-        let timeout_seconds = request.timeout_seconds.map_or(300, u32::from);
-        if let Err(error) = ConversationClient::validate_create_input(
-            &request.create,
-            Duration::from_secs(u64::from(timeout_seconds)),
-        ) {
-            return conversation_create_tool_result(Err(error), operation_id);
-        }
-        let connected = tokio::select! {
-            _ = context.ct.cancelled() => {
-                return conversation_call_cancelled(OperationEffect::None, Some(&operation_id));
-            }
-            connected = ConversationClient::connect(&self.service_directory, &endpoint) => connected,
-        };
-        let result = match connected {
-            Ok(client) => {
-                tokio::select! {
-                    _ = context.ct.cancelled() => {
-                        return conversation_call_cancelled(OperationEffect::Unknown, Some(&operation_id));
-                    }
-                    result = client
-                    .create(
-                        request.create,
-                        Duration::from_secs(u64::from(timeout_seconds)),
-                    )
-                    => result,
-                }
-            }
-            Err(ConversationClientError::Client(error)) => {
-                return failure(error, OperationEffect::None);
-            }
-            Err(error) => Err(error),
-        };
-        conversation_create_tool_result(result, operation_id)
-    }
-
-    #[tool(name = "conversation_load", description = "Loads one conversation through its advertised client using an exact target, working directory, access and requester. External providers require a caller UUIDv7 operation ID; Codex load must omit it because it is not inspectable. Returns a completed settlement or an inspectable provider operation when pending; uncertain work is never replayed.", output_schema = rmcp::handler::server::tool::schema_for_type::<McpToolOutput<ConversationOperationResult>>())]
-    async fn conversation_load(
-        &self,
-        Parameters(request): Parameters<ConversationLoadToolRequest>,
-        context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
-    ) -> CallToolResult {
-        let operation_id = request.load.operation_id.clone();
-        let endpoint = request.load.target.endpoint.clone();
-        let timeout =
-            Duration::from_secs(u64::from(request.timeout_seconds.map_or(300, u32::from)));
-        let connected = tokio::select! {
-            _ = context.ct.cancelled() => {
-                return conversation_call_cancelled(OperationEffect::None, operation_id.as_ref());
-            }
-            connected = ConversationClient::connect(&self.service_directory, &endpoint) => connected,
-        };
-        let result = match connected {
-            Ok(client) => {
-                if let Err(error) =
-                    client.validate_operation_id(&endpoint, operation_id.as_ref(), "load")
-                {
-                    return conversation_tool_result::<ConversationOperationResult>(
-                        Err(error),
-                        operation_id,
-                    );
-                }
-                tokio::select! {
-                _ = context.ct.cancelled() => {
-                    return conversation_call_cancelled(OperationEffect::Unknown, operation_id.as_ref());
-                }
-                result = client.load(request.load, timeout) => result,
-                }
-            }
-            Err(ConversationClientError::Client(error)) => {
-                return failure(error, OperationEffect::None);
-            }
-            Err(error) => Err(error),
-        };
-        conversation_tool_result(result, operation_id)
-    }
-
-    #[tool(name = "conversation_prompt", description = "Prompts one conversation through its advertised client. External providers require a caller UUIDv7 operation ID; Codex prompt must omit it because it is not inspectable. A wait deadline or caller cancellation detaches from a running Codex turn without interrupting it. The result records a completed turn, a running Codex turn, or a pending provider operation.", output_schema = rmcp::handler::server::tool::schema_for_type::<McpToolOutput<ConversationOperationResult>>())]
-    async fn conversation_prompt(
-        &self,
-        Parameters(request): Parameters<ConversationPromptToolRequest>,
-        context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
-    ) -> CallToolResult {
-        let operation_id = request.prompt.operation_id.clone();
-        let endpoint = request.prompt.target.endpoint.clone();
-        let timeout =
-            Duration::from_secs(u64::from(request.timeout_seconds.map_or(300, u32::from)));
-        let connected = tokio::select! {
-            _ = context.ct.cancelled() => {
-                return conversation_call_cancelled(OperationEffect::None, operation_id.as_ref());
-            }
-            connected = ConversationClient::connect(&self.service_directory, &endpoint) => connected,
-        };
-        let client = match connected {
-            Ok(client) => client,
-            Err(ConversationClientError::Client(error)) => {
-                return failure(error, OperationEffect::None);
-            }
-            Err(error) => {
-                return conversation_tool_result::<ConversationOperationResult>(
-                    Err(error),
-                    operation_id,
-                );
-            }
-        };
-        if let Err(error) = client.validate_operation_id(&endpoint, operation_id.as_ref(), "prompt")
-        {
-            return conversation_tool_result::<ConversationOperationResult>(
-                Err(error),
-                operation_id,
-            );
-        }
-        let result = if matches!(&client, ConversationClient::ExternalProvider(_)) {
-            tokio::select! {
-                _ = context.ct.cancelled() => {
-                    return conversation_call_cancelled(OperationEffect::Unknown, operation_id.as_ref());
-                }
-                result = client.prompt(request.prompt, timeout, context.ct.clone()) => result,
-            }
-        } else {
-            client.prompt(request.prompt, timeout, context.ct).await
-        };
-        conversation_tool_result(result, operation_id)
-    }
-
-    #[tool(name = "conversation_cancel", description = "Requests cancellation of one exact conversation operation. Requires a new operation ID and the target operation, conversation, and requester; accepted cancellation is distinct from confirmed cessation. Codex ACP reports unsupportedCapability with a turn interrupt fix.", output_schema = rmcp::handler::server::tool::schema_for_type::<McpToolOutput<ConversationOperationSubmission>>())]
-    async fn conversation_cancel(
-        &self,
-        Parameters(request): Parameters<ConversationCancelInput>,
-        context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
-    ) -> CallToolResult {
-        let operation_id = request.operation_id.clone();
-        let endpoint = request.target.endpoint.clone();
-        let connected = tokio::select! {
-            _ = context.ct.cancelled() => {
-                return conversation_call_cancelled(OperationEffect::None, Some(&operation_id));
-            }
-            connected = ConversationClient::connect(&self.service_directory, &endpoint) => connected,
-        };
-        let result = match connected {
-            Ok(client) if matches!(&client, ConversationClient::ExternalProvider(_)) => {
-                tokio::select! {
-                    _ = context.ct.cancelled() => {
-                        return conversation_call_cancelled(OperationEffect::Unknown, Some(&operation_id));
-                    }
-                    result = client.cancel(request) => result,
-                }
-            }
-            Ok(client) => client.cancel(request).await,
-            Err(ConversationClientError::Client(error)) => {
-                return failure(error, OperationEffect::None);
-            }
-            Err(error) => Err(error),
-        };
-        conversation_tool_result(result, Some(operation_id))
-    }
-
-    #[tool(name = "conversation_create_and_prompt", description = "Creates a fresh conversation and prompts it through the advertised client. model and effort are required for Codex endpoints; provider endpoints accept advertised mode, model and effort values. fork and rootMessageId are Codex-only and rejected for provider endpoints. The create operation ID is inspectable; provider prompt requires a second caller UUIDv7 ID, while Codex prompt omits it because it is not inspectable. The result names a pending create or the prompt settlement. A completed turn is not an assignment verdict or peer reply; cancellation never silently replays a submission.", output_schema = rmcp::handler::server::tool::schema_for_type::<McpToolOutput<ConversationCreatePromptOutcome>>())]
-    async fn conversation_create_and_prompt(
-        &self,
-        Parameters(mut request): Parameters<ConversationCreatePromptToolRequest>,
-        context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
-    ) -> CallToolResult {
-        request.input.create.default_approver();
-        let operation_id = request.input.create.operation_id.clone();
-        let timeout =
-            Duration::from_secs(u64::from(request.timeout_seconds.map_or(300, u32::from)));
-        let result = ConversationClient::create_and_prompt(
-            &self.service_directory,
-            request.input,
-            timeout,
-            context.ct,
-        )
-        .await;
-        conversation_tool_result(result, Some(operation_id))
-    }
-
-    #[tool(name = "events_observe", description = "Explicitly attaches to one conversation and returns bounded call-local events. Use afterSequence with the returned epoch to continue loaded Session history; an epoch mismatch requires resync. Concurrent sends have no ordering guarantee relative to attachment.", output_schema = rmcp::handler::server::tool::schema_for_type::<McpToolOutput<BoundedObservationResult>>())]
-    async fn events_observe(
-        &self,
-        Parameters(request): Parameters<BoundedObservationRequest>,
-        context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
-    ) -> CallToolResult {
-        match collaboration_client::SessionObservation::observe_bounded(
-            &self.service_directory,
-            request,
-            context.ct,
-        )
-        .await
-        {
-            Ok(value) => structured_result(Ok(value), OperationEffect::None),
-            Err(error) => {
-                let (failure, target, turn_id) = error.into_parts();
-                operation_error_result(failure, target, turn_id)
-            }
-        }
-    }
-}
-
 impl ServerHandler for CollaborationMcpServer {
     fn get_info(&self) -> ServerConfig {
         let mut config = ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
@@ -926,9 +311,22 @@ impl ServerHandler for CollaborationMcpServer {
         request: CallToolRequestParams,
         context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
     ) -> Result<CallToolResponse, rmcp::ErrorData> {
-        self.tool_router
-            .call(ToolCallContext::new(self, request, context))
+        let caller = context.ct.clone();
+        let routed = self
+            .surface
+            .router
+            .call(ToolCallContext::new(self, request, context));
+        self.tool_calls
+            .run(routed, caller, |ended| {
+                Ok(CallToolResponse::Complete(match ended {
+                    CallEndedEarly::CallerDisconnected => {
+                        caller_cancelled(OperationEffect::Unknown)
+                    }
+                    CallEndedEarly::AbortedAtShutdown => call_abandoned_at_shutdown(),
+                }))
+            })
             .await
+            .map(structured_argument_refusal)
     }
 
     async fn list_tools(
@@ -936,16 +334,17 @@ impl ServerHandler for CollaborationMcpServer {
         _request: Option<PaginatedRequestParams>,
         _context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
     ) -> Result<ListToolsResult, rmcp::ErrorData> {
-        let tools = self.resolved_tools();
-        Ok(ListToolsResult::with_all_items(tools)
+        Ok(ListToolsResult::with_all_items(self.surface.tools.clone())
             .with_ttl_ms(0)
             .with_cache_scope(CacheScope::Private))
     }
 
     fn get_tool(&self, name: &str) -> Option<Tool> {
-        self.resolved_tools()
-            .into_iter()
+        self.surface
+            .tools
+            .iter()
             .find(|tool| tool.name == name)
+            .cloned()
     }
 }
 

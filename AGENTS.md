@@ -108,3 +108,14 @@
 - Keep evolving domain rules out of table definitions to avoid unnecessary
   SQLite table rebuilds. This rule does not authorize removing existing
   constraints or rewriting migrations outside the requested scope.
+
+## Servers And HTTP
+
+- `codex-router-proxy` uses hyper and tungstenite directly (`hyper`,
+  `hyper-util`, `hyper-rustls`, `hyper-tungstenite`, `tokio-tungstenite`) for
+  fast pass-through of model traffic and websockets. The harness connections
+  (Codex app-server and native control, ACP providers, Claude Code peer
+  messaging) also use `tokio-tungstenite` directly. Work on other surfaces
+  does not change the proxy or the harness connections.
+- Every other server uses axum, HTTP clients use reqwest, and MCP uses rmcp
+  mounted on axum.

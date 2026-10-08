@@ -1,4 +1,4 @@
-//! Parse subscription scopes and partial policies before opening the Control client.
+//! Parse subscription scopes and partial policies before calling the collaboration API.
 use super::board_preparation::{
     self, ActorInput, CommandContext, PreparedBoardCommand, placeholder_identity,
 };

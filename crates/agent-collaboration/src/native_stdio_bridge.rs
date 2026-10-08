@@ -56,17 +56,26 @@ pub fn run_native_command(arguments: Vec<OsString>) -> i32 {
     runtime.shutdown_background();
     match result {
         Ok(()) => 0,
-        Err(NativeBridgeError::Transport(error)) => match error.permission_diagnostic() {
-            Some(diagnostic) => crate::permission_diagnostic_reporting::report_diagnostic(
-                diagnostic,
-                crate::permission_diagnostic_reporting::PermissionDiagnosticRendering::Command,
-                false,
-            ),
-            None => {
-                eprintln!("{error}");
-                3
+        Err(NativeBridgeError::Transport(error)) => {
+            if let Some(message) = error.overload_message() {
+                return crate::permission_diagnostic_reporting::report_overload(
+                    message,
+                    crate::permission_diagnostic_reporting::PermissionDiagnosticRendering::Command,
+                    false,
+                );
             }
-        },
+            match error.permission_diagnostic() {
+                Some(diagnostic) => crate::permission_diagnostic_reporting::report_diagnostic(
+                    diagnostic,
+                    crate::permission_diagnostic_reporting::PermissionDiagnosticRendering::Command,
+                    false,
+                ),
+                None => {
+                    eprintln!("{error}");
+                    3
+                }
+            }
+        }
         Err(error) => {
             eprintln!("{error}");
             3
@@ -82,7 +91,11 @@ enum NativeBridgeError {
 }
 
 async fn bridge(directory: PathBuf, endpoint: EndpointId) -> Result<(), NativeBridgeError> {
-    let connection = NativeTransportConnection::connect(&directory, endpoint).await?;
+    let connection = NativeTransportConnection::connect(
+        &collaboration_client::CollaborationAccess::api(&directory),
+        endpoint,
+    )
+    .await?;
     let socket = connection.stream;
     let (mut writer, mut reader) = socket.split();
     let input = async {

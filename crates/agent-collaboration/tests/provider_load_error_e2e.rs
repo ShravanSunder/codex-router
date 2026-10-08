@@ -211,10 +211,13 @@ async fn acp_load_failure_correlation_matches_cli_show_and_stored_outcome() {
     connection.close().await.expect("close database connection");
     assert_eq!(delivery_state, "rejected");
 
-    let mut client =
-        collaboration_client::ControlClient::connect(root.path(), "provider-error-proof", "1")
-            .await
-            .expect("Control connection for the stored link");
+    let client = collaboration_client::CollaborationClient::connect(
+        root.path(),
+        "provider-error-proof",
+        "1",
+    )
+    .await
+    .expect("API client for the stored link");
     let stored = client
         .router_show(collaboration_protocol::PushRecordShowParams {
             caller: target.clone(),
@@ -223,7 +226,6 @@ async fn acp_load_failure_correlation_matches_cli_show_and_stored_outcome() {
         .await
         .expect("stored wake push inspection");
     let link = stored.link;
-    client.close().await.expect("close Control connection");
 
     let show = tokio::process::Command::new(env!("CARGO_BIN_EXE_agent-collaboration"))
         .args([

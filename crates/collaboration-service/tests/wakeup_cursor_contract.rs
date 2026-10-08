@@ -1,9 +1,10 @@
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
-use collaboration_client::ControlClient;
 use collaboration_protocol::{AutomationPageRequest, OperationId, WakeSendRequest};
-use collaboration_service::{ServiceIdentity, serve_control_connection};
+use collaboration_service::ServiceIdentity;
 use serde_json::{Value, json};
 use std::sync::Arc;
+#[path = "support/served_api.rs"]
+mod served_api;
 #[tokio::test]
 async fn wake_cursor_uses_closed_scoped_base64url_contract()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -28,13 +29,11 @@ async fn exercise_cursor(
     let identity = ServiceIdentity::new(
         "00000000-0000-4000-8000-000000000001",
         "00000000-0000-4000-8000-000000000002",
-        &format!("sha256:{}", "a".repeat(64)),
     )
     .map_err(std::io::Error::other)?
     .with_automation_store(store.clone());
-    let (socket, server) = tokio::net::UnixStream::pair()?;
-    let task = tokio::spawn(serve_control_connection(server, identity));
-    let mut client = ControlClient::initialize(socket, "cursor-test", "1").await?;
+    let served = served_api::ServedApi::start(identity).await?;
+    let client = served.client("cursor-test").await?;
     for _ in 0..2 {
         let request: WakeSendRequest = serde_json::from_value(
             json!({"operationId":OperationId::generate(),"message":{"target":{"endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"codex-local"},"sessionId":"fixture"},"content":{"kind":"humanUser","text":"x".repeat(text_bytes)},"delivery":"auto","generationGuard":null},"timing":{"kind":"after","seconds":60},"expiry":{"kind":"none"}}),
@@ -107,8 +106,7 @@ async fn exercise_cursor(
     {
         return Err("foreign service cursor was accepted".into());
     }
-    client.close().await?;
-    task.await??;
+    served.stop().await?;
     drop(store);
     std::fs::remove_file(path)?;
     Ok(())

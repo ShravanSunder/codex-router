@@ -1,10 +1,11 @@
-use collaboration_client::ControlClient;
 use collaboration_protocol::{
     InstructionCreateParams, InstructionText, OperationId, ScheduleCreateRequest,
 };
-use collaboration_service::{ServiceIdentity, serve_control_connection};
+use collaboration_service::ServiceIdentity;
 use serde_json::json;
 use std::sync::Arc;
+#[path = "support/served_api.rs"]
+mod served_api;
 #[tokio::test]
 async fn enabled_schedule_requires_available_native_capabilities()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -18,13 +19,11 @@ async fn enabled_schedule_requires_available_native_capabilities()
     let identity = ServiceIdentity::new(
         "00000000-0000-4000-8000-000000000001",
         "00000000-0000-4000-8000-000000000002",
-        &format!("sha256:{}", "a".repeat(64)),
     )
     .map_err(std::io::Error::other)?
     .with_automation_store(store.clone());
-    let (socket, server) = tokio::net::UnixStream::pair()?;
-    let task = tokio::spawn(serve_control_connection(server, identity));
-    let mut client = ControlClient::initialize(socket, "schedule-activation", "1").await?;
+    let served = served_api::ServedApi::start(identity).await?;
+    let client = served.client("schedule-activation").await?;
     let instruction = client
         .create_instruction(InstructionCreateParams {
             operation_id: OperationId::generate(),
@@ -37,8 +36,7 @@ async fn enabled_schedule_requires_available_native_capabilities()
     if client.create_schedule(request).await.is_ok() {
         return Err("enabled schedule admitted without native execution capabilities".into());
     }
-    client.close().await?;
-    task.await??;
+    served.stop().await?;
     drop(store);
     std::fs::remove_file(path)?;
     Ok(())

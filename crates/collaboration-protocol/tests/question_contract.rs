@@ -48,13 +48,4 @@ fn question_answer_keeps_typed_actor_and_distinct_actions() {
         }))
         .is_err()
     );
-    assert!(collaboration_protocol::control_error_is_valid(
-        "question/answer",
-        &json!({
-            "jsonrpc":"2.0","id":"client-1","error":{"code":-32050,
-                "message":"Question response rejected","data":{
-                    "kind":"alreadySettled","stage":"inspect","message":"Question response rejected"
-                }}
-        })
-    ));
 }

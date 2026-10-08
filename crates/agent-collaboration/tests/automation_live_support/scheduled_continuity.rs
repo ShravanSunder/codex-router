@@ -142,7 +142,6 @@ pub async fn exercise() -> ProofResult<()> {
         "scheduledContinuityVerified",
         json!({"first":first,"second":second}),
     )?;
-    proof.client.close().await?;
     Ok(())
 }
 

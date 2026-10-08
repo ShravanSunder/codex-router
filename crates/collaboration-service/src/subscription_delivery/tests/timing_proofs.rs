@@ -1,6 +1,6 @@
 use super::super::SubscriptionClock;
 use super::owner_fixture::*;
-use crate::control_service_context::subscription_delivery::subscription_service::OwnerObservation;
+use crate::service_identity::subscription_delivery::subscription_service::OwnerObservation;
 use message_board::{SubscriptionMode, WhenIdle};
 
 #[tokio::test(start_paused = true)]

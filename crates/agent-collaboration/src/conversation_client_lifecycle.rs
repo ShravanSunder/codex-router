@@ -95,7 +95,7 @@ pub(crate) fn run_resume(args: LoadArguments) -> i32 {
                 );
             }
         };
-        let mut client = match ControlClient::connect(
+        let mut client = match CollaborationClient::connect(
             &directory,
             "agent-collaboration",
             env!("CARGO_PKG_VERSION"),
@@ -130,16 +130,14 @@ pub(crate) fn run_resume(args: LoadArguments) -> i32 {
                 },
             })
             .await;
-        let exit = match result {
+        match result {
             Ok(_) => report_wait(&mut client, operation_id, timeout, args.json).await,
             Err(error) => report_create_client_error(
                 ConversationClientError::Client(error),
                 &operation_id,
                 args.json,
             ),
-        };
-        let _ = client.close().await;
-        exit
+        }
     })
 }
 
@@ -198,7 +196,7 @@ pub(crate) fn run_close(args: CloseArguments) -> i32 {
                 );
             }
         };
-        let mut client = match ControlClient::connect(
+        let mut client = match CollaborationClient::connect(
             &directory,
             "agent-collaboration",
             env!("CARGO_PKG_VERSION"),
@@ -226,7 +224,7 @@ pub(crate) fn run_close(args: CloseArguments) -> i32 {
                 approver,
             })
             .await;
-        let exit = match result {
+        match result {
             Ok(_) => {
                 report_wait(
                     &mut client,
@@ -241,14 +239,12 @@ pub(crate) fn run_close(args: CloseArguments) -> i32 {
                 &operation_id,
                 args.json,
             ),
-        };
-        let _ = client.close().await;
-        exit
+        }
     })
 }
 
 async fn report_wait(
-    client: &mut ControlClient,
+    client: &mut CollaborationClient,
     operation_id: OperationId,
     timeout_seconds: PositiveSeconds,
     json_output: bool,
