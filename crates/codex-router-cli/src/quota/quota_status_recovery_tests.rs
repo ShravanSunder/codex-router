@@ -1,5 +1,8 @@
 use super::*;
+use agent_proxy_services::credential_runtime::AsyncProviderCredentialResolver;
+use agent_proxy_services::quota::QuotaRefreshError;
 use codex_router_auth::resolver::ResolvedProviderCredential;
+use codex_router_core::redaction::SecretString;
 use codex_router_core::route_profile::WindowKind;
 use codex_router_state::quota_snapshot::QuotaRefreshStatusView;
 
@@ -35,11 +38,11 @@ impl QuotaRefreshProvider for SyntheticClaudeQuotaResponse {
     async fn fetch_quota(
         &self,
         request: QuotaRefreshProviderRequest,
-    ) -> Result<QuotaRefreshProviderResponse, QuotaCommandError> {
+    ) -> Result<QuotaRefreshProviderResponse, QuotaRefreshError> {
         if request.provider() != Provider::Claude
             || request.route_band() != RouteBand::ClaudeMessages.as_str()
         {
-            return Err(QuotaCommandError::ProviderResponse {
+            return Err(QuotaRefreshError::ProviderResponse {
                 message: format!(
                     "synthetic quota provider expected claude/claude_messages, received {}/{}",
                     request.provider().as_str(),
@@ -48,7 +51,7 @@ impl QuotaRefreshProvider for SyntheticClaudeQuotaResponse {
             });
         }
         match self {
-            Self::ParseError => Err(QuotaCommandError::ProviderResponse {
+            Self::ParseError => Err(QuotaRefreshError::ProviderResponse {
                 message: "synthetic quota parse failure".to_owned(),
             }),
             Self::Windows(windows) => Ok(QuotaRefreshProviderResponse {
@@ -149,7 +152,8 @@ impl ClaudeRefreshFixture {
             &response,
             observed_unix_seconds,
         )
-        .await;
+        .await
+        .map_err(QuotaCommandError::from);
         (result, String::from_utf8(stdout).expect("refresh output"))
     }
 

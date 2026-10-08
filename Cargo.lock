@@ -168,7 +168,7 @@ dependencies = [
 
 [[package]]
 name = "agent-proxy-services"
-version = "0.1.63"
+version = "0.1.66"
 dependencies = [
  "chrono",
  "codex-router-auth",
@@ -181,7 +181,7 @@ dependencies = [
  "codex-router-selection",
  "codex-router-state",
  "opentelemetry",
- "reqwest",
+ "reqwest 0.12.28",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -856,8 +856,8 @@ dependencies = [
  "codex-router-auth",
  "codex-router-core",
  "codex-router-descriptor-boundary",
- "codex-router-keeper-protocol",
  "codex-router-host",
+ "codex-router-keeper-protocol",
  "codex-router-proxy",
  "codex-router-secret-store",
  "codex-router-selection",

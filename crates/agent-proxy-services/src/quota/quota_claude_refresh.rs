@@ -2,6 +2,7 @@ use super::quota_account_refresh::AccountQuotaRefresh;
 use super::*;
 use codex_router_core::provider::Provider;
 use codex_router_core::route_profile::WindowKind;
+use codex_router_core::routes::RouteBand;
 use codex_router_state::window_observation::{
     WindowObservation, WindowObservationProps,
     calculate_window_observation_fresh_until_unix_seconds,
@@ -20,7 +21,6 @@ where
             base_url,
             credential_resolver,
             quota_provider,
-            observed_unix_seconds,
             refresh_interval_seconds,
             resolved,
             refreshed_count,

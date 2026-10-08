@@ -1,4 +1,7 @@
 use super::*;
+use agent_proxy_services::credential_runtime::AsyncProviderCredentialResolver;
+use agent_proxy_services::quota::QuotaRefreshError;
+use codex_router_core::redaction::SecretString;
 use std::collections::VecDeque;
 use std::sync::Mutex;
 use std::sync::atomic::AtomicUsize;
@@ -66,12 +69,12 @@ impl AsyncProviderCredentialResolver for UnauthorizedRecoveryResolver {
 }
 
 struct SequencedClaudeQuotaProvider {
-    responses: Mutex<VecDeque<Result<QuotaRefreshProviderResponse, QuotaCommandError>>>,
+    responses: Mutex<VecDeque<Result<QuotaRefreshProviderResponse, QuotaRefreshError>>>,
     calls: AtomicUsize,
 }
 
 impl SequencedClaudeQuotaProvider {
-    fn new(responses: Vec<Result<QuotaRefreshProviderResponse, QuotaCommandError>>) -> Self {
+    fn new(responses: Vec<Result<QuotaRefreshProviderResponse, QuotaRefreshError>>) -> Self {
         Self {
             responses: Mutex::new(responses.into()),
             calls: AtomicUsize::new(0),
@@ -87,7 +90,7 @@ impl QuotaRefreshProvider for SequencedClaudeQuotaProvider {
     async fn fetch_quota(
         &self,
         request: QuotaRefreshProviderRequest,
-    ) -> Result<QuotaRefreshProviderResponse, QuotaCommandError> {
+    ) -> Result<QuotaRefreshProviderResponse, QuotaRefreshError> {
         assert_eq!(request.provider(), Provider::Claude);
         assert_eq!(request.route_band(), RouteBand::ClaudeMessages.as_str());
         self.calls.fetch_add(1, Ordering::SeqCst);
@@ -134,6 +137,7 @@ where
         supplied_cycle_time,
     )
     .await
+    .map_err(QuotaCommandError::from)
 }
 
 fn assert_actual_attempt_in_bounds(attempt: Option<u64>, before: u64, after: u64) {
@@ -253,7 +257,7 @@ async fn failed_claude_401_recovery_records_auth_error_at_poll_start() {
         recovery: UnauthorizedRecovery::Fail,
     };
     let provider =
-        SequencedClaudeQuotaProvider::new(vec![Err(QuotaCommandError::ProviderStatus {
+        SequencedClaudeQuotaProvider::new(vec![Err(QuotaRefreshError::ProviderStatus {
             status: 401,
         })]);
     let poll_started_before = current_unix_seconds();
@@ -294,8 +298,8 @@ async fn final_claude_retry_error_records_rate_limit_at_poll_start() {
         recovery: UnauthorizedRecovery::Renew,
     };
     let provider = SequencedClaudeQuotaProvider::new(vec![
-        Err(QuotaCommandError::ProviderStatus { status: 401 }),
-        Err(QuotaCommandError::ProviderStatus { status: 429 }),
+        Err(QuotaRefreshError::ProviderStatus { status: 401 }),
+        Err(QuotaRefreshError::ProviderStatus { status: 429 }),
     ]);
     let poll_started_before = current_unix_seconds();
     assert!(supplied_cycle_time < poll_started_before);
