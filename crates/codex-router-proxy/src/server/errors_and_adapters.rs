@@ -3,6 +3,15 @@ use super::*;
 /// Assembled router runtime failure.
 #[derive(Debug, thiserror::Error)]
 pub enum LoopbackRouterRuntimeError {
+    #[error("failed to inspect state database path")]
+    StateInspection(#[source] std::io::Error),
+    #[error(transparent)]
+    SchemaPreparation(#[from] codex_router_state::schema_preparation::StateSchemaPreparationError),
+    #[error(transparent)]
+    ListenerGrant(#[from] codex_router_descriptor_boundary::BoundaryError),
+    #[error("granted TCP listener does not match the loopback address")]
+    ListenerAssociation,
+
     /// Binding the loopback listener failed.
     #[error(transparent)]
     Bind(#[from] ServerBindError),

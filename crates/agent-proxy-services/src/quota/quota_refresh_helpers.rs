@@ -1,4 +1,5 @@
 use super::*;
+use codex_router_core::provider::Provider;
 
 pub(super) struct SupersededResponsesFloorRead {
     pub(super) attempt_sequence: u64,
@@ -13,7 +14,7 @@ pub(super) async fn notify_weekly_floor_from_latest_committed_responses(
     now_unix_seconds: u64,
     current_read: SupersededResponsesFloorRead,
     observer: &dyn WeeklyQuotaFloorIntentObserver,
-) -> Result<(), QuotaCommandError> {
+) -> Result<(), QuotaRefreshError> {
     let selector_inputs = state
         .selector_inputs_for_route_band(USER_QUOTA_ROUTE_BAND, now_unix_seconds)
         .await?;
@@ -111,7 +112,7 @@ pub(super) async fn begin_credit_refresh_attempt_for_current_generation(
     state: &AsyncSqliteStateStore,
     account_id: &AccountId,
     credential_generation: u64,
-) -> Result<Option<CreditRefreshAttempt>, QuotaCommandError> {
+) -> Result<Option<CreditRefreshAttempt>, QuotaRefreshError> {
     match state
         .begin_credit_refresh_attempt(account_id, credential_generation)
         .await
@@ -126,14 +127,14 @@ pub(super) fn record_superseded_account_refresh(
     stdout: &mut impl Write,
     account: &AccountRecord,
     failed_count: &mut u64,
-) -> Result<(), QuotaCommandError> {
+) -> Result<(), QuotaRefreshError> {
     *failed_count = failed_count.saturating_add(DEFAULT_ROUTE_BANDS.len() as u64);
     let diagnostic_account = quota_refresh_diagnostic_account_label(account);
     writeln!(
         stdout,
         "refresh skipped: account={diagnostic_account} error=credential generation changed during refresh",
     )
-    .map_err(QuotaCommandError::Stdout)
+    .map_err(QuotaRefreshError::Stdout)
 }
 
 pub(super) fn quota_refresh_diagnostic_account_label(account: &AccountRecord) -> String {
@@ -142,38 +143,31 @@ pub(super) fn quota_refresh_diagnostic_account_label(account: &AccountRecord) ->
         .to_owned()
 }
 
-pub(super) fn quota_refresh_error_class(error: &QuotaCommandError) -> QuotaRefreshErrorClass {
+pub(super) fn quota_refresh_error_class(error: &QuotaRefreshError) -> QuotaRefreshErrorClass {
     match error {
-        QuotaCommandError::CredentialResolver(_) => QuotaRefreshErrorClass::AuthError,
-        QuotaCommandError::ProviderRequest { .. } => QuotaRefreshErrorClass::NetworkError,
-        QuotaCommandError::ProviderStatus { status } if *status == 401 || *status == 403 => {
+        QuotaRefreshError::CredentialResolver(_) => QuotaRefreshErrorClass::AuthError,
+        QuotaRefreshError::ProviderRequest { .. } => QuotaRefreshErrorClass::NetworkError,
+        QuotaRefreshError::ProviderStatus { status } if *status == 401 || *status == 403 => {
             QuotaRefreshErrorClass::AuthError
         }
-        QuotaCommandError::ProviderStatus { status } if *status == 429 => {
+        QuotaRefreshError::ProviderStatus { status } if *status == 429 => {
             QuotaRefreshErrorClass::RateLimited
         }
-        QuotaCommandError::ProviderStatus { .. } => QuotaRefreshErrorClass::ProviderError,
-        QuotaCommandError::ProviderResponse { .. } => QuotaRefreshErrorClass::ParseError,
-        QuotaCommandError::ResetComposition(_)
-        | QuotaCommandError::ResetSessionTaskFailed
-        | QuotaCommandError::AsyncDispatchRequired
-        | QuotaCommandError::InvalidFormat { .. }
-        | QuotaCommandError::DisallowedBaseUrl { .. }
-        | QuotaCommandError::RefreshNotImplemented
-        | QuotaCommandError::CredentialResolverOpen(_)
-        | QuotaCommandError::StateStore(_)
-        | QuotaCommandError::BackgroundWorkerInitialization(_)
-        | QuotaCommandError::Stdout(_) => QuotaRefreshErrorClass::ProviderError,
+        QuotaRefreshError::ProviderStatus { .. } => QuotaRefreshErrorClass::ProviderError,
+        QuotaRefreshError::ProviderResponse { .. } => QuotaRefreshErrorClass::ParseError,
+        QuotaRefreshError::CredentialResolverOpen(_)
+        | QuotaRefreshError::StateStore(_)
+        | QuotaRefreshError::BackgroundWorkerInitialization(_)
+        | QuotaRefreshError::Stdout(_) => QuotaRefreshErrorClass::ProviderError,
     }
 }
 
 #[cfg(test)]
 mod freshness_tests {
-    use super::*;
 
     #[test]
     fn active_refresh_freshness_deadline_uses_the_shared_window_policy() {
-        let deadline = calculate_window_observation_fresh_until_unix_seconds(100, 400)
+        let deadline = codex_router_state::window_observation::calculate_window_observation_fresh_until_unix_seconds(100, 400)
             .expect("active refresh deadline should fit timestamp range");
 
         assert_eq!(deadline, 620);

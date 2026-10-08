@@ -23,7 +23,28 @@ impl LoopbackConnectionErrorReporter for StderrLoopbackConnectionErrorReporter {
     }
 }
 
+#[derive(Clone, Copy)]
+pub(super) enum ConnectionFailurePolicy {
+    ReportAndContinue,
+    StopServing,
+}
 impl LoopbackRouterRuntime {
+    /// Role serving retains every connection task and keeps the existing unlimited error policy.
+    pub async fn serve_owned_protocol_connections_until_cancelled(
+        &self,
+        max_connections: usize,
+        shutdown: CancellationToken,
+    ) -> Result<usize, LoopbackRouterRuntimeError> {
+        let policy = if max_connections == usize::MAX {
+            ConnectionFailurePolicy::ReportAndContinue
+        } else {
+            ConnectionFailurePolicy::StopServing
+        };
+        self.serve_protocol_connections_owned(max_connections, Some(shutdown), policy)
+            .with_subscriber(self.caller_dispatcher.clone())
+            .await
+    }
+
     /// Serves a bounded number of HTTP/SSE connections.
     #[cfg(test)]
     pub async fn serve_http_connections(
@@ -103,6 +124,21 @@ impl LoopbackRouterRuntime {
         max_connections: usize,
         shutdown: Option<CancellationToken>,
     ) -> Result<usize, LoopbackRouterRuntimeError> {
+        let policy = if max_connections == usize::MAX && shutdown.is_none() {
+            ConnectionFailurePolicy::ReportAndContinue
+        } else {
+            ConnectionFailurePolicy::StopServing
+        };
+        self.serve_protocol_connections_owned(max_connections, shutdown, policy)
+            .await
+    }
+
+    async fn serve_protocol_connections_owned(
+        &self,
+        max_connections: usize,
+        shutdown: Option<CancellationToken>,
+        policy: ConnectionFailurePolicy,
+    ) -> Result<usize, LoopbackRouterRuntimeError> {
         let mut handled_connections = 0_usize;
         let mut handlers = JoinSet::new();
         let mut first_connection_error = None;
@@ -120,10 +156,7 @@ impl LoopbackRouterRuntime {
                     tokio::select! {
                         () = shutdown.cancelled() => break None,
                         joined = handlers.join_next(), if !handlers.is_empty() => {
-                            if store_optional_connection_join_error(
-                                &mut first_connection_error,
-                                joined,
-                            ) {
+                            if self.record_owned_connection_result(&mut first_connection_error,joined,policy) {
                                 session_shutdown.cancel();
                                 break None;
                             }
@@ -143,10 +176,7 @@ impl LoopbackRouterRuntime {
                 loop {
                     tokio::select! {
                         joined = handlers.join_next(), if !handlers.is_empty() => {
-                            if store_optional_connection_join_error(
-                                &mut first_connection_error,
-                                joined,
-                            ) {
+                            if self.record_owned_connection_result(&mut first_connection_error,joined,policy) {
                                 session_shutdown.cancel();
                                 break None;
                             }
@@ -167,22 +197,10 @@ impl LoopbackRouterRuntime {
                 break;
             };
             let handler_context = Arc::clone(&connection_handler);
-            let handler = tokio::spawn(
+            handlers.spawn(
                 async move { handler_context.handle_hyper_connection(stream).await }
                     .with_subscriber(self.caller_dispatcher.clone()),
             );
-            if max_connections == usize::MAX && shutdown.is_none() {
-                supervise_detached_connection_handler(
-                    handler,
-                    Arc::clone(&self.connection_error_reporter),
-                );
-            } else {
-                handlers.spawn(async move {
-                    handler
-                        .await
-                        .map_err(LoopbackRouterRuntimeError::ConnectionJoin)?
-                });
-            }
             handled_connections += 1;
             self.enqueue_runtime_maintenance_hints(
                 self.fixed_now_unix_seconds
@@ -197,9 +215,32 @@ impl LoopbackRouterRuntime {
             accept_error,
             session_shutdown,
             affinity_record_tasks,
+            connection_failure_policy: policy,
             caller_shutdown_requested: matches!(shutdown.as_ref(), Some(shutdown) if shutdown.is_cancelled()),
         })
         .await
+    }
+
+    pub(super) fn record_owned_connection_result(
+        &self,
+        first_error: &mut Option<LoopbackRouterRuntimeError>,
+        joined: Option<Result<Result<(), LoopbackRouterRuntimeError>, JoinError>>,
+        policy: ConnectionFailurePolicy,
+    ) -> bool {
+        match policy {
+            ConnectionFailurePolicy::StopServing => {
+                store_optional_connection_join_error(first_error, joined)
+            }
+            ConnectionFailurePolicy::ReportAndContinue => {
+                if let Some(joined) = joined
+                    && let Err(error) = handle_connection_join_result(joined)
+                {
+                    self.connection_error_reporter
+                        .report_connection_error(&loopback_connection_diagnostic(&error).render());
+                }
+                false
+            }
+        }
     }
 
     pub(super) fn protocol_connection_handler(

@@ -72,7 +72,7 @@ fn quota_status_telemetry_contract_uses_scrubbed_low_cardinality_labels() {
 
 #[test]
 fn claude_post_renewal_auth_rejection_has_a_provider_scoped_counter() {
-    let source = include_str!("quota_status_metrics.rs");
+    let source = include_str!("../../../agent-proxy-services/src/quota/refresh_telemetry.rs");
     let Some(after_metric) = source
         .split("fn record_claude_usage_auth_rejected_after_renewal")
         .nth(1)
@@ -89,7 +89,8 @@ fn claude_post_renewal_auth_rejection_has_a_provider_scoped_counter() {
 
 #[test]
 fn credential_upkeep_refresh_counter_records_provider_outcomes_and_classes() {
-    let source = include_str!("../credential_upkeep_worker/telemetry.rs");
+    let source =
+        include_str!("../../../agent-proxy-services/src/credential_upkeep_worker/telemetry.rs");
     let Some(after_metric) = source
         .split("fn record_credential_upkeep_refresh_outcome")
         .nth(1)

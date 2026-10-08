@@ -4,7 +4,7 @@ use codex_router_core::provider::Provider;
 use std::future::Future;
 
 /// Quota provider request after provider credentials have been resolved.
-pub(crate) struct QuotaRefreshProviderRequest {
+pub struct QuotaRefreshProviderRequest {
     provider: Provider,
     account_id: AccountId,
     account_label: String,
@@ -15,7 +15,7 @@ pub(crate) struct QuotaRefreshProviderRequest {
 }
 
 impl QuotaRefreshProviderRequest {
-    pub(crate) fn new(
+    pub fn new(
         account_id: AccountId,
         account_label: impl Into<String>,
         route_band: impl Into<String>,
@@ -34,7 +34,7 @@ impl QuotaRefreshProviderRequest {
         }
     }
 
-    pub(crate) fn new_for_provider(
+    pub fn new_for_provider(
         provider: Provider,
         account_id: AccountId,
         account_label: impl Into<String>,
@@ -56,53 +56,53 @@ impl QuotaRefreshProviderRequest {
     }
 
     #[must_use]
-    pub(crate) const fn provider(&self) -> Provider {
+    pub const fn provider(&self) -> Provider {
         self.provider
     }
 
     /// Returns the account id.
     #[must_use]
-    pub(crate) const fn account_id(&self) -> &AccountId {
+    pub const fn account_id(&self) -> &AccountId {
         &self.account_id
     }
 
     /// Returns the account label.
     #[must_use]
-    pub(crate) fn account_label(&self) -> &str {
+    pub fn account_label(&self) -> &str {
         &self.account_label
     }
 
     /// Returns the route band.
     #[must_use]
-    pub(crate) fn route_band(&self) -> &str {
+    pub fn route_band(&self) -> &str {
         &self.route_band
     }
 
     /// Returns the provider base URL.
     #[must_use]
-    pub(crate) fn base_url(&self) -> &str {
+    pub fn base_url(&self) -> &str {
         &self.base_url
     }
 
     /// Returns the provider bearer token.
     #[must_use]
-    pub(crate) const fn access_token(&self) -> &SecretString {
+    pub const fn access_token(&self) -> &SecretString {
         &self.access_token
     }
 
     /// Returns the ChatGPT account id header value, if known.
     #[must_use]
-    pub(crate) fn chatgpt_account_id(&self) -> Option<&str> {
+    pub fn chatgpt_account_id(&self) -> Option<&str> {
         self.chatgpt_account_id.as_deref()
     }
 }
 
 /// Quota provider response.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct QuotaRefreshProviderResponse {
-    pub(crate) windows: Vec<QuotaRefreshProviderWindow>,
-    pub(crate) reset_credits_available: Option<u32>,
-    pub(crate) credit_provider_observation: CreditProviderObservation,
+pub struct QuotaRefreshProviderResponse {
+    pub windows: Vec<QuotaRefreshProviderWindow>,
+    pub reset_credits_available: Option<u32>,
+    pub credit_provider_observation: CreditProviderObservation,
 }
 
 impl QuotaRefreshProviderResponse {
@@ -135,29 +135,29 @@ impl Default for QuotaRefreshProviderResponse {
 
 /// Quota provider response for one limit window.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct QuotaRefreshProviderWindow {
-    pub(crate) limit_window_seconds: u64,
-    pub(crate) headroom: QuotaWindowHeadroom,
-    pub(crate) reset_unix_seconds: Option<u64>,
-    pub(crate) effective: bool,
+pub struct QuotaRefreshProviderWindow {
+    pub limit_window_seconds: u64,
+    pub headroom: QuotaWindowHeadroom,
+    pub reset_unix_seconds: Option<u64>,
+    pub effective: bool,
 }
 
 /// Explicit units for the remaining usage reported by different providers.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum QuotaWindowHeadroom {
+pub enum QuotaWindowHeadroom {
     Percent(u32),
     BasisPoints(u32),
 }
 
 impl QuotaWindowHeadroom {
-    pub(crate) const fn percent(self) -> Option<u32> {
+    pub const fn percent(self) -> Option<u32> {
         match self {
             Self::Percent(value) => Some(value),
             Self::BasisPoints(_) => None,
         }
     }
 
-    pub(crate) const fn basis_points(self) -> Option<u32> {
+    pub const fn basis_points(self) -> Option<u32> {
         match self {
             Self::Percent(_) => None,
             Self::BasisPoints(value) => Some(value),
@@ -166,34 +166,34 @@ impl QuotaWindowHeadroom {
 }
 
 /// Provider egress dependency for quota refresh.
-pub(crate) trait QuotaRefreshProvider {
+pub trait QuotaRefreshProvider {
     /// Fetches one route-band quota snapshot using resolved provider auth.
     fn fetch_quota(
         &self,
         request: QuotaRefreshProviderRequest,
-    ) -> impl Future<Output = Result<QuotaRefreshProviderResponse, QuotaCommandError>> + Send;
+    ) -> impl Future<Output = Result<QuotaRefreshProviderResponse, QuotaRefreshError>> + Send;
 }
 
 /// HTTP quota refresh provider for ChatGPT/Codex usage endpoints.
 #[derive(Debug)]
-pub(crate) struct HttpQuotaRefreshProvider {
+pub struct HttpQuotaRefreshProvider {
     client: reqwest::Client,
     claude_quota_fetcher: ClaudeQuotaFetcher,
 }
 
 impl HttpQuotaRefreshProvider {
     /// Creates an HTTP quota refresh provider.
-    pub(crate) fn new() -> Result<Self, QuotaCommandError> {
+    pub fn new() -> Result<Self, QuotaRefreshError> {
         Self::new_with_timeout(Duration::from_secs(30))
     }
 
     /// Creates an HTTP quota refresh provider with a bounded request timeout.
-    pub(crate) fn new_with_timeout(timeout: Duration) -> Result<Self, QuotaCommandError> {
+    pub fn new_with_timeout(timeout: Duration) -> Result<Self, QuotaRefreshError> {
         let client = reqwest::Client::builder()
             .user_agent("codex-router-quota-refresh")
             .timeout(timeout)
             .build()
-            .map_err(|error| QuotaCommandError::ProviderRequest {
+            .map_err(|error| QuotaRefreshError::ProviderRequest {
                 message: error.to_string(),
             })?;
         Ok(Self {
@@ -202,23 +202,23 @@ impl HttpQuotaRefreshProvider {
         })
     }
 
-    #[cfg(test)]
-    pub(crate) fn new_with_claude_usage_endpoint_for_test(
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn new_with_claude_usage_endpoint_for_test(
         timeout: Duration,
         usage_endpoint: impl Into<String>,
-    ) -> Result<Self, QuotaCommandError> {
+    ) -> Result<Self, QuotaRefreshError> {
         let client = reqwest::Client::builder()
             .user_agent("codex-router-quota-refresh")
             .timeout(timeout)
             .build()
-            .map_err(|error| QuotaCommandError::ProviderRequest {
+            .map_err(|error| QuotaRefreshError::ProviderRequest {
                 message: error.to_string(),
             })?;
         Ok(Self {
             claude_quota_fetcher: ClaudeQuotaFetcher::new_with_endpoint_for_test(
                 timeout,
                 usage_endpoint,
-            ),
+            )?,
             client,
         })
     }
@@ -228,7 +228,7 @@ impl QuotaRefreshProvider for HttpQuotaRefreshProvider {
     async fn fetch_quota(
         &self,
         request: QuotaRefreshProviderRequest,
-    ) -> Result<QuotaRefreshProviderResponse, QuotaCommandError> {
+    ) -> Result<QuotaRefreshProviderResponse, QuotaRefreshError> {
         if request.provider() == Provider::Claude {
             return self.claude_quota_fetcher.fetch_quota(request).await;
         }
@@ -244,28 +244,28 @@ impl QuotaRefreshProvider for HttpQuotaRefreshProvider {
             usage_request
                 .send()
                 .await
-                .map_err(|error| QuotaCommandError::ProviderRequest {
+                .map_err(|error| QuotaRefreshError::ProviderRequest {
                     message: error.to_string(),
                 })?;
         let status = response.status();
         if !status.is_success() {
-            return Err(QuotaCommandError::ProviderStatus {
+            return Err(QuotaRefreshError::ProviderStatus {
                 status: status.as_u16(),
             });
         }
         let body = response
             .text()
             .await
-            .map_err(|error| QuotaCommandError::ProviderRequest {
+            .map_err(|error| QuotaRefreshError::ProviderRequest {
                 message: error.to_string(),
             })?;
         let usage_value = serde_json::from_str::<Value>(&body).map_err(|error| {
-            QuotaCommandError::ProviderResponse {
+            QuotaRefreshError::ProviderResponse {
                 message: error.to_string(),
             }
         })?;
         let usage = serde_json::from_value::<UsageResponse>(usage_value).map_err(|error| {
-            QuotaCommandError::ProviderResponse {
+            QuotaRefreshError::ProviderResponse {
                 message: error.to_string(),
             }
         })?;
@@ -281,7 +281,7 @@ impl HttpQuotaRefreshProvider {
     async fn fetch_reset_credits_available(
         &self,
         request: &QuotaRefreshProviderRequest,
-    ) -> Result<Option<u32>, QuotaCommandError> {
+    ) -> Result<Option<u32>, QuotaRefreshError> {
         let mut reset_request = self
             .client
             .get(reset_credits_url(request.base_url()))
@@ -293,23 +293,23 @@ impl HttpQuotaRefreshProvider {
             reset_request
                 .send()
                 .await
-                .map_err(|error| QuotaCommandError::ProviderRequest {
+                .map_err(|error| QuotaRefreshError::ProviderRequest {
                     message: error.to_string(),
                 })?;
         let status = response.status();
         if !status.is_success() {
-            return Err(QuotaCommandError::ProviderStatus {
+            return Err(QuotaRefreshError::ProviderStatus {
                 status: status.as_u16(),
             });
         }
         let body = response
             .text()
             .await
-            .map_err(|error| QuotaCommandError::ProviderRequest {
+            .map_err(|error| QuotaRefreshError::ProviderRequest {
                 message: error.to_string(),
             })?;
         let value = serde_json::from_str::<Value>(&body).map_err(|error| {
-            QuotaCommandError::ProviderResponse {
+            QuotaRefreshError::ProviderResponse {
                 message: error.to_string(),
             }
         })?;
@@ -317,13 +317,13 @@ impl HttpQuotaRefreshProvider {
     }
 }
 
-pub(super) fn quota_response_for_route_band(
+pub fn quota_response_for_route_band(
     usage: &UsageResponse,
     route_band: &str,
-) -> Result<QuotaRefreshProviderResponse, QuotaCommandError> {
+) -> Result<QuotaRefreshProviderResponse, QuotaRefreshError> {
     let mut response = if route_band == "code_review" {
         let window_pair = usage.code_review_rate_limit.as_ref().ok_or_else(|| {
-            QuotaCommandError::ProviderResponse {
+            QuotaRefreshError::ProviderResponse {
                 message: format!("missing quota window for route band {route_band}"),
             }
         })?;
@@ -333,7 +333,7 @@ pub(super) fn quota_response_for_route_band(
             usage
                 .rate_limit
                 .as_ref()
-                .ok_or_else(|| QuotaCommandError::ProviderResponse {
+                .ok_or_else(|| QuotaRefreshError::ProviderResponse {
                     message: format!("missing quota window for route band {route_band}"),
                 })?;
         quota_response_from_window_pair(window_pair, route_band)?
@@ -345,14 +345,14 @@ pub(super) fn quota_response_for_route_band(
     Ok(response)
 }
 
-pub(super) const fn stale_after_unix_seconds(observed_unix_seconds: u64) -> u64 {
+pub const fn stale_after_unix_seconds(observed_unix_seconds: u64) -> u64 {
     observed_unix_seconds.saturating_add(DEFAULT_REFRESH_STALE_AFTER_GRACE_SECONDS)
 }
 
 fn quota_response_from_window_pair(
     window_pair: &WindowPair,
     route_band: &str,
-) -> Result<QuotaRefreshProviderResponse, QuotaCommandError> {
+) -> Result<QuotaRefreshProviderResponse, QuotaRefreshError> {
     let mut windows = Vec::new();
     if let Some(primary_window) = window_pair.primary_window.as_ref() {
         windows.push(quota_provider_window_from_usage_window(
@@ -369,7 +369,7 @@ fn quota_response_from_window_pair(
         )?);
     }
     if windows.is_empty() {
-        return Err(QuotaCommandError::ProviderResponse {
+        return Err(QuotaRefreshError::ProviderResponse {
             message: format!("missing provider quota windows for route band {route_band}"),
         });
     }
@@ -444,22 +444,22 @@ fn quota_provider_window_from_usage_window(
     window: &codex_router_auth::live_quota::UsageWindow,
     route_band: &str,
     effective: bool,
-) -> Result<QuotaRefreshProviderWindow, QuotaCommandError> {
+) -> Result<QuotaRefreshProviderWindow, QuotaRefreshError> {
     let used_percent = window
         .used_percent
-        .ok_or_else(|| QuotaCommandError::ProviderResponse {
+        .ok_or_else(|| QuotaRefreshError::ProviderResponse {
             message: format!("missing used_percent for route band {route_band}"),
         })?
         .clamp(0, 100);
     let remaining_headroom = u32::try_from(100_i64 - used_percent).map_err(|_error| {
-        QuotaCommandError::ProviderResponse {
+        QuotaRefreshError::ProviderResponse {
             message: format!("invalid used_percent for route band {route_band}"),
         }
     })?;
     let limit_window_seconds = window
         .limit_window_seconds
         .and_then(|limit_window_seconds| u64::try_from(limit_window_seconds).ok())
-        .ok_or_else(|| QuotaCommandError::ProviderResponse {
+        .ok_or_else(|| QuotaRefreshError::ProviderResponse {
             message: format!("missing limit_window_seconds for route band {route_band}"),
         })?;
     let reset_unix_seconds = window

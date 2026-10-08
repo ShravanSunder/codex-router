@@ -284,7 +284,7 @@ async fn assert_compact_transport_result(
 
     let (captured_logs, (handled_connections, response)) =
         crate::test_log_capture::capture_log_output_async(async {
-            let runtime = LoopbackRouterRuntime::start(config, secrets)
+            let runtime = LoopbackRouterRuntime::start_with_credentials_for_test(config, secrets)
                 .await
                 .expect("compact loopback runtime should start");
             let router_address = runtime.local_addr();

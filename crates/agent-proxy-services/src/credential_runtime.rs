@@ -2,7 +2,7 @@
 
 use std::future::Future;
 use std::path::Path;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 use std::path::PathBuf;
 
 use codex_router_auth::resolver::AsyncRefreshLeaseRegistry;
@@ -11,7 +11,7 @@ use codex_router_auth::resolver::CredentialRefreshClient;
 use codex_router_auth::resolver::CredentialRefreshTaskSupervisor;
 use codex_router_auth::resolver::CredentialResolverError;
 use codex_router_auth::resolver::ProviderCredentialRefreshClients;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 use codex_router_auth::resolver::ProviderCredentialResolver;
 use codex_router_auth::resolver::ResolvedProviderCredential;
 use codex_router_core::ids::AccountId;
@@ -20,8 +20,8 @@ use codex_router_state::sqlite::AsyncSqliteStateStore;
 use codex_router_state::sqlite::StateStoreError;
 use thiserror::Error;
 
-use crate::secret_store_factory::CliRuntimeSecretStore;
-use crate::secret_store_factory::open_cli_secret_store;
+use crate::credential_store_open::open_role_credential_store;
+use codex_router_secret_store::encrypted_credential_store::EncryptedCredentialStore;
 
 /// CLI credential resolver open failure.
 #[derive(Debug, Error)]
@@ -33,7 +33,7 @@ pub enum CliCredentialResolverOpenError {
     #[error(transparent)]
     SecretStore(#[from] SecretStoreError),
     /// Tokio runtime failed to initialize for the test-only synchronous adapter.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     #[error(transparent)]
     Runtime(#[from] std::io::Error),
     /// Async secret-store construction task failed.
@@ -42,7 +42,7 @@ pub enum CliCredentialResolverOpenError {
 }
 
 /// CLI-owned credential resolver adapter.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[derive(Debug)]
 pub struct CliCredentialResolver<C = ProviderCredentialRefreshClients>
 where
@@ -51,13 +51,13 @@ where
     runtime: tokio::runtime::Runtime,
     state_db_path: PathBuf,
     state_store: AsyncSqliteStateStore,
-    secret_store: CliRuntimeSecretStore,
+    secret_store: EncryptedCredentialStore,
     refresh_client: C,
     refresh_leases: AsyncRefreshLeaseRegistry,
 }
 
 /// Async credential resolution used by native-async quota commands.
-pub(crate) trait AsyncProviderCredentialResolver {
+pub trait AsyncProviderCredentialResolver {
     fn resolve_provider_credentials_async(
         &self,
         account_id: &AccountId,
@@ -75,12 +75,12 @@ pub(crate) trait AsyncProviderCredentialResolver {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl<C> CliCredentialResolver<C>
 where
     C: CredentialRefreshClient + Clone,
 {
-    pub(crate) fn open_with_refresh_client(
+    pub fn open_with_refresh_client(
         state_db_path: &Path,
         secret_root: &Path,
         refresh_client: C,
@@ -102,7 +102,7 @@ where
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl<C> ProviderCredentialResolver for CliCredentialResolver<C>
 where
     C: CredentialRefreshClient + Clone + Send + Sync + 'static,
@@ -126,12 +126,12 @@ where
 
 /// CLI credential resolver owned by the process Tokio runtime.
 #[derive(Debug)]
-pub(crate) struct AsyncCliCredentialResolver<C = ProviderCredentialRefreshClients>
+pub struct AsyncCliCredentialResolver<C = ProviderCredentialRefreshClients>
 where
     C: CredentialRefreshClient + Clone,
 {
     state_store: AsyncSqliteStateStore,
-    secret_store: CliRuntimeSecretStore,
+    secret_store: EncryptedCredentialStore,
     refresh_client: C,
     refresh_leases: AsyncRefreshLeaseRegistry,
     refresh_tasks: CredentialRefreshTaskSupervisor,
@@ -139,14 +139,14 @@ where
 
 impl AsyncCliCredentialResolver<ProviderCredentialRefreshClients> {
     /// Opens credential resolver dependencies without creating a nested runtime.
-    pub(crate) async fn open(
+    pub async fn open(
         state_db_path: &Path,
         secret_root: &Path,
     ) -> Result<Self, CliCredentialResolverOpenError> {
         let state_store = AsyncSqliteStateStore::open(state_db_path).await?;
         let secret_root = secret_root.to_path_buf();
         let secret_store =
-            tokio::task::spawn_blocking(move || open_cli_secret_store(&secret_root)).await??;
+            tokio::task::spawn_blocking(move || open_role_credential_store(&secret_root)).await??;
         Ok(Self {
             state_store,
             secret_store,
@@ -157,9 +157,9 @@ impl AsyncCliCredentialResolver<ProviderCredentialRefreshClients> {
     }
 
     /// Opens resolver state while retaining the already-open secret-store handle.
-    pub(crate) async fn open_with_secret_store(
+    pub async fn open_with_secret_store(
         state_db_path: &Path,
-        secret_store: CliRuntimeSecretStore,
+        secret_store: EncryptedCredentialStore,
         refresh_tasks: CredentialRefreshTaskSupervisor,
     ) -> Result<Self, CliCredentialResolverOpenError> {
         let state_store = AsyncSqliteStateStore::open(state_db_path).await?;
@@ -173,14 +173,14 @@ impl AsyncCliCredentialResolver<ProviderCredentialRefreshClients> {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl<C> AsyncCliCredentialResolver<C>
 where
     C: CredentialRefreshClient + Clone,
 {
-    pub(crate) async fn open_with_refresh_client(
+    pub async fn open_with_refresh_client(
         state_db_path: &Path,
-        secret_store: CliRuntimeSecretStore,
+        secret_store: EncryptedCredentialStore,
         refresh_client: C,
         refresh_tasks: CredentialRefreshTaskSupervisor,
     ) -> Result<Self, CliCredentialResolverOpenError> {
@@ -237,7 +237,7 @@ where
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl<C> AsyncProviderCredentialResolver for CliCredentialResolver<C>
 where
     C: CredentialRefreshClient + Clone + Send + Sync + 'static,
@@ -281,5 +281,27 @@ where
         resolver
             .recover_unauthorized_credentials(account_id, expected_provider, rejected_generation)
             .await
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl<S, C> AsyncProviderCredentialResolver
+    for codex_router_auth::resolver::RouterCredentialResolver<'_, S, C>
+where
+    S: codex_router_secret_store::SecretStore,
+    C: CredentialRefreshClient,
+{
+    fn resolve_provider_credentials_async(
+        &self,
+        account_id: &AccountId,
+        expected_provider: codex_router_core::provider::Provider,
+    ) -> impl std::future::Future<
+        Output = Result<ResolvedProviderCredential, CredentialResolverError>,
+    > + Send {
+        std::future::ready(ProviderCredentialResolver::resolve_provider_credentials(
+            self,
+            account_id,
+            expected_provider,
+        ))
     }
 }

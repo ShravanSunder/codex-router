@@ -195,7 +195,7 @@ async fn migrate_legacy_or_fresh_database(
     preserve_legacy_version_marker(transaction).await
 }
 
-async fn apply_legacy_conversion(
+pub(crate) async fn validate_legacy_conversion_prerequisites(
     connection: &mut SqliteConnection,
     legacy_shape: &LegacyShape,
 ) -> Result<(), StateStoreError> {
@@ -214,6 +214,16 @@ async fn apply_legacy_conversion(
         if duplicate_target_keys != 0 {
             return Err(static_sqlite_error("incompatible account database schema"));
         }
+    }
+    Ok(())
+}
+
+async fn apply_legacy_conversion(
+    connection: &mut SqliteConnection,
+    legacy_shape: &LegacyShape,
+) -> Result<(), StateStoreError> {
+    validate_legacy_conversion_prerequisites(connection, legacy_shape).await?;
+    if matches!(legacy_shape.lease_shape, LeaseShape::VersionSeven) {
         sqlx::raw_sql(LEASE_V7_TO_BASELINE_SQL)
             .execute(&mut *connection)
             .await
@@ -265,7 +275,7 @@ async fn apply_legacy_conversion(
     Ok(())
 }
 
-async fn native_history_table_exists(
+pub(crate) async fn native_history_table_exists(
     connection: &mut SqliteConnection,
 ) -> Result<bool, sqlx::Error> {
     sqlx::query_scalar(
@@ -276,6 +286,23 @@ async fn native_history_table_exists(
     )
     .fetch_one(&mut *connection)
     .await
+}
+
+/// Uses only the same schema and conversion prerequisites as the existing bootstrap engine.
+pub(crate) async fn inspect_bootstrap_schema(
+    connection: &mut SqliteConnection,
+) -> Result<crate::schema_preparation::AccountBootstrapKind, StateStoreError> {
+    let version = sqlx::query_scalar::<_, i64>("PRAGMA user_version")
+        .fetch_one(&mut *connection)
+        .await
+        .map_err(crate::sqlite::sqlx_error)?;
+    let has_router_objects = router_object_count(connection).await? != 0;
+    if version == 0 && !has_router_objects {
+        return Ok(crate::schema_preparation::AccountBootstrapKind::ExistingEmpty);
+    }
+    let shape = validate_legacy_schema(connection, version).await?;
+    validate_legacy_conversion_prerequisites(connection, &shape).await?;
+    Ok(crate::schema_preparation::AccountBootstrapKind::RecognizedLegacy)
 }
 
 async fn router_object_count(connection: &mut SqliteConnection) -> Result<i64, StateStoreError> {

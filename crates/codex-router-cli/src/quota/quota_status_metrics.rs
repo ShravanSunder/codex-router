@@ -1,16 +1,6 @@
 use super::*;
 
-pub(super) fn telemetry_hash(value: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(value.as_bytes());
-    let digest = hasher.finalize();
-    digest
-        .iter()
-        .take(8)
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>()
-}
-
+use agent_proxy_services::quota::refresh_telemetry::telemetry_hash;
 pub(super) fn emit_quota_status_metrics(route_band: &str, rows: &[QuotaStatusRow]) {
     if !rows.iter().any(|row| row.preferred_next) {
         global::meter("codex-router")
@@ -107,37 +97,6 @@ pub(super) fn emit_quota_status_metrics(route_band: &str, rows: &[QuotaStatusRow
                 );
         }
     }
-}
-
-pub(super) fn record_quota_refresh_metric(
-    route_band: &str,
-    refresh_outcome: &'static str,
-    refresh_error_class: &'static str,
-) {
-    global::meter("codex-router")
-        .u64_counter("codex_router_quota_refresh_total")
-        .build()
-        .add(
-            1,
-            &[
-                KeyValue::new("route_band", route_band.to_owned()),
-                KeyValue::new("refresh.outcome", refresh_outcome),
-                KeyValue::new("refresh.error_class", refresh_error_class),
-            ],
-        );
-}
-
-pub(super) fn record_claude_usage_auth_rejected_after_renewal() {
-    global::meter("codex-router")
-        .u64_counter("codex_router_claude_usage_auth_rejected_after_renewal_total")
-        .build()
-        .add(
-            1,
-            &[
-                KeyValue::new("provider", "claude"),
-                KeyValue::new("route_band", "claude_messages"),
-            ],
-        );
 }
 
 pub(super) fn quota_remaining_bucket(remaining_headroom: u32) -> &'static str {

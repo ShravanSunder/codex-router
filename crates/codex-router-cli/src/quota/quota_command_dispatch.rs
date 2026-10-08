@@ -273,3 +273,21 @@ Quota reset moved to codex-router quota: focus an account and press Ctrl-R.
 
 const QUOTA_RESET_MIGRATION_GUIDANCE: &str =
     "Quota reset moved to codex-router quota: focus an account and press Ctrl-R.\n";
+
+impl From<agent_proxy_services::quota::QuotaRefreshError> for QuotaCommandError {
+    fn from(error: agent_proxy_services::quota::QuotaRefreshError) -> Self {
+        use agent_proxy_services::quota::QuotaRefreshError;
+        match error {
+            QuotaRefreshError::ProviderRequest { message } => Self::ProviderRequest { message },
+            QuotaRefreshError::ProviderStatus { status } => Self::ProviderStatus { status },
+            QuotaRefreshError::ProviderResponse { message } => Self::ProviderResponse { message },
+            QuotaRefreshError::CredentialResolverOpen(error) => Self::CredentialResolverOpen(error),
+            QuotaRefreshError::CredentialResolver(error) => Self::CredentialResolver(error),
+            QuotaRefreshError::StateStore(error) => Self::StateStore(error),
+            QuotaRefreshError::BackgroundWorkerInitialization(error) => {
+                Self::BackgroundWorkerInitialization(error)
+            }
+            QuotaRefreshError::Stdout(error) => Self::Stdout(error),
+        }
+    }
+}

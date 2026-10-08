@@ -10,9 +10,9 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use codex_router_auth::live_quota::DEFAULT_CHATGPT_BACKEND_BASE_URL;
+#[cfg(test)]
 use codex_router_core::local_auth::LocalRouterTokenRecord;
 use codex_router_proxy::server::LoopbackBindAddress;
-use codex_router_proxy::server::LoopbackRouterRuntime;
 use codex_router_proxy::server::LoopbackRouterRuntimeConfig;
 use codex_router_proxy::session_account_affinity_cache::DEFAULT_SESSION_PIN_IDLE_TTL;
 #[cfg(debug_assertions)]
@@ -22,8 +22,8 @@ use codex_router_secret_store::encrypted_credential_store::EncryptedCredentialSt
 use codex_router_secret_store::file_backend::FileSecretStore;
 
 pub mod account;
-mod credential_runtime;
-mod credential_upkeep_worker;
+use agent_proxy_services::credential_runtime;
+use agent_proxy_services::credential_upkeep_worker;
 pub mod doctor;
 mod host_command;
 mod live;
@@ -49,10 +49,10 @@ use token::TokenCommandError;
 use token::export_token_assignment;
 
 mod profile_preview;
-mod token_reload_watcher;
 mod websocket_reporting;
+#[cfg(test)]
+use agent_proxy_services::token_reload_watcher::LocalTokenReloadWatcher;
 use profile_preview::write_profile_preview;
-use token_reload_watcher::LocalTokenReloadWatcher;
 #[cfg(test)]
 use websocket_reporting::websocket_registry_report_value;
 use websocket_reporting::{
@@ -64,6 +64,8 @@ pub use cli_command_errors::CliError;
 mod cli_argument_parsing;
 pub(crate) use cli_argument_parsing::ArgumentParser;
 use cli_argument_parsing::{CliCommand, ProfileCommand, TokenCommand};
+use serve_command::run_serve_command;
+#[cfg(test)]
 pub(crate) use serve_command::run_serve_command_with_upkeep_start;
 #[cfg(test)]
 pub(crate) use serve_command::{
@@ -74,7 +76,7 @@ pub(crate) use serve_command::{
 
 const DEFAULT_PROFILE_PORT: u16 = 8787;
 const DEFAULT_MAX_SNAPSHOT_AGE_SECONDS: u64 = 300;
-const DEFAULT_QUOTA_REFRESH_INTERVAL_SECONDS: u64 = 180;
+use agent_proxy_services::DEFAULT_QUOTA_REFRESH_INTERVAL_SECONDS;
 const DEFAULT_SESSION_PIN_IDLE_TTL_SECONDS: u64 = DEFAULT_SESSION_PIN_IDLE_TTL.as_secs();
 const LOCAL_TOKEN_ENV_VAR: &str = "CODEX_ROUTER_TOKEN";
 const DEFAULT_ROUTER_ROOT_DIR: &str = ".codex-router";
@@ -231,16 +233,7 @@ where
             stderr.flush().map_err(CliError::Stderr)
         }
         CliCommand::Serve(command) => {
-            let credential_store =
-                secret_store_factory::open_cli_secret_store(&command.secret_root)
-                    .map_err(|_| CliError::CredentialStoreOpen)?;
-            run_serve_command_with_upkeep_start(
-                stdout,
-                command,
-                credential_store,
-                credential_upkeep_worker::start_background_credential_upkeep_worker,
-            )
-            .await?;
+            run_serve_command(stdout, command).await?;
             stderr.flush().map_err(CliError::Stderr)
         }
         _ => run_with_io(args, context, stdout, stderr),

@@ -266,7 +266,7 @@ async fn loopback_b1_credential_maintenance_refusal_excludes_account_on_next_req
         success_response,
     ]);
     let (refresh_client, issuer_thread) = start_fake_claude_refresh_refusal();
-    let runtime = LoopbackRouterRuntime::start(
+    let runtime = LoopbackRouterRuntime::start_with_credentials_for_test(
         runtime_config(&database_path, &secret_root)
             .with_quota_clock(1_100, 300)
             .with_debug_claude_upstream_endpoint(upstream_endpoint),
@@ -422,7 +422,7 @@ async fn loopback_b1_reauth_required_pin_releases_and_selects_elsewhere() {
     let success_response = fixture_json_response("200 OK", r#"{"type":"message"}"#);
     let (upstream_endpoint, upstream_thread) =
         start_fake_claude_upstream(vec![success_response.clone(), success_response]);
-    let first_runtime = LoopbackRouterRuntime::start(
+    let first_runtime = LoopbackRouterRuntime::start_with_credentials_for_test(
         runtime_config(&database_path, &secret_root)
             .with_quota_clock(1_100, 300)
             .with_debug_claude_upstream_endpoint(upstream_endpoint.clone()),
@@ -470,7 +470,7 @@ async fn loopback_b1_reauth_required_pin_releases_and_selects_elsewhere() {
     );
     state.close().await.expect("close reauth state");
 
-    let second_runtime = LoopbackRouterRuntime::start(
+    let second_runtime = LoopbackRouterRuntime::start_with_credentials_for_test(
         runtime_config(&database_path, &secret_root)
             .with_quota_clock(1_100, 300)
             .with_debug_claude_upstream_endpoint(upstream_endpoint),

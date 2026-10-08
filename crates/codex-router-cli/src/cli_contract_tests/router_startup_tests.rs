@@ -767,7 +767,7 @@ async fn serve_startup_maintains_idle_enabled_oauth_account_across_simulated_day
     );
     wait_for_upkeep_generation_async(&state_path, &enabled_id, 2).await;
     clock.store(1_000 + 2 * 86_400, Ordering::SeqCst);
-    wake_handle.wake();
+    must_ok(wake_handle.wake());
     assert_eq!(
         tokio::time::timeout(Duration::from_secs(2), oauth_call_receiver.recv())
             .await

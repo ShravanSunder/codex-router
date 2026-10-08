@@ -206,6 +206,43 @@ pub enum CliError {
     Stderr(std::io::Error),
 }
 
+impl From<agent_proxy_services::quota::QuotaRefreshError> for CliError {
+    fn from(error: agent_proxy_services::quota::QuotaRefreshError) -> Self {
+        Self::from(crate::quota::QuotaCommandError::from(error))
+    }
+}
+
+impl From<agent_proxy_services::ProxyPreparationError> for CliError {
+    fn from(error: agent_proxy_services::ProxyPreparationError) -> Self {
+        match error {
+            agent_proxy_services::ProxyPreparationError::Core(error) => Self::from(error),
+            agent_proxy_services::ProxyPreparationError::Token(error) => Self::from(error),
+            agent_proxy_services::ProxyPreparationError::Schema(error) => {
+                Self::from(LoopbackRouterRuntimeError::SchemaPreparation(error))
+            }
+            agent_proxy_services::ProxyPreparationError::StateInspection(error) => {
+                Self::from(LoopbackRouterRuntimeError::StateInspection(error))
+            }
+            _ => Self::CredentialStoreOpen,
+        }
+    }
+}
+impl From<agent_proxy_services::ProxyActivationError> for CliError {
+    fn from(error: agent_proxy_services::ProxyActivationError) -> Self {
+        match error {
+            agent_proxy_services::ProxyActivationError::Core(error) => Self::from(error),
+            agent_proxy_services::ProxyActivationError::Upkeep(error) => Self::from(error),
+            agent_proxy_services::ProxyActivationError::Quota(error) => Self::from(error),
+            agent_proxy_services::ProxyActivationError::StartupAnnouncement(error) => {
+                Self::Stdout(error)
+            }
+            agent_proxy_services::ProxyActivationError::ServingTask(error) => Self::from(
+                codex_router_proxy::server::LoopbackRouterRuntimeError::ConnectionJoin(error),
+            ),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::CliError;

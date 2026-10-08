@@ -9,9 +9,9 @@ use std::time::Instant;
 use codex_router_auth::resolver::AsyncRouterCredentialResolver;
 use codex_router_auth::resolver::CredentialRefreshClient;
 use codex_router_auth::resolver::CredentialRefreshTaskSupervisor;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 use codex_router_auth::resolver::NoopCredentialRefreshClient;
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "test-support")))]
 use codex_router_auth::resolver::ProviderCredentialRefreshClients;
 use codex_router_auth::resolver::current_unix_seconds;
 use codex_router_secret_store::encrypted_credential_store::EncryptedCredentialStore;
@@ -35,7 +35,7 @@ const MAX_CONCURRENT_ACCOUNTS: usize = 4;
 const SHUTDOWN_DRAIN_SECONDS: u64 = 30;
 
 /// A running OAuth upkeep loop with a bounded shutdown drain.
-pub(crate) struct CredentialUpkeepWorker {
+pub struct CredentialUpkeepWorker {
     control_sender: UnboundedSender<WorkerControl>,
     stop_requested: CancellationToken,
     shutdown_deadline: Arc<OnceLock<Instant>>,
@@ -50,7 +50,7 @@ impl CredentialUpkeepWorker {
         let _ = self.control_sender.send(WorkerControl::Stop);
     }
 
-    pub(crate) async fn shutdown(&mut self) {
+    pub async fn shutdown(&mut self) {
         self.request_stop();
         if let Some(task) = self.task.as_mut() {
             let _result = task.await;
@@ -67,36 +67,42 @@ impl Drop for CredentialUpkeepWorker {
 
 enum WorkerControl {
     Stop,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     Wake,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl CredentialUpkeepWorker {
-    pub(crate) fn wake_for_test(&self) {
-        self.control_sender
-            .send(WorkerControl::Wake)
-            .expect("worker control should send");
+    pub fn wake_for_test(&self) -> Result<(), std::io::Error> {
+        self.control_sender.send(WorkerControl::Wake).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "fixture worker control closed",
+            )
+        })
     }
 
-    pub(crate) fn wake_handle_for_test(&self) -> CredentialUpkeepWakeHandle {
+    pub fn wake_handle_for_test(&self) -> CredentialUpkeepWakeHandle {
         CredentialUpkeepWakeHandle {
             control_sender: self.control_sender.clone(),
         }
     }
 }
 
-#[cfg(test)]
-pub(crate) struct CredentialUpkeepWakeHandle {
+#[cfg(any(test, feature = "test-support"))]
+pub struct CredentialUpkeepWakeHandle {
     control_sender: UnboundedSender<WorkerControl>,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl CredentialUpkeepWakeHandle {
-    pub(crate) fn wake(&self) {
-        self.control_sender
-            .send(WorkerControl::Wake)
-            .expect("worker control should send");
+    pub fn wake(&self) -> Result<(), std::io::Error> {
+        self.control_sender.send(WorkerControl::Wake).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "fixture worker control closed",
+            )
+        })
     }
 }
 
@@ -106,12 +112,12 @@ pub enum CredentialUpkeepStartError {
     State(#[from] StateStoreError),
 }
 
-pub(crate) async fn start_background_credential_upkeep_worker(
+pub async fn start_background_credential_upkeep_worker(
     state_db_path: PathBuf,
     secret_store: EncryptedCredentialStore,
     refresh_tasks: CredentialRefreshTaskSupervisor,
 ) -> Result<CredentialUpkeepWorker, CredentialUpkeepStartError> {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     return start_background_credential_upkeep_worker_with_client_and_clock(
         state_db_path,
         secret_store,
@@ -120,7 +126,7 @@ pub(crate) async fn start_background_credential_upkeep_worker(
         || current_unix_seconds().unwrap_or(0),
     )
     .await;
-    #[cfg(not(test))]
+    #[cfg(not(any(test, feature = "test-support")))]
     start_background_credential_upkeep_worker_with_client_and_clock(
         state_db_path,
         secret_store,
@@ -131,7 +137,7 @@ pub(crate) async fn start_background_credential_upkeep_worker(
     .await
 }
 
-pub(crate) async fn start_background_credential_upkeep_worker_with_client_and_clock<C, F>(
+pub async fn start_background_credential_upkeep_worker_with_client_and_clock<C, F>(
     state_db_path: PathBuf,
     secrets: EncryptedCredentialStore,
     refresh_tasks: CredentialRefreshTaskSupervisor,
@@ -176,7 +182,7 @@ where
                 _ = worker_stop.cancelled() => break,
                 control = control_receiver.recv() => match control {
                     Some(WorkerControl::Stop) | None => break,
-                    #[cfg(test)]
+                    #[cfg(any(test, feature = "test-support"))]
                     Some(WorkerControl::Wake) => {}
                 },
                 _ = tokio::time::sleep(remaining) => {}

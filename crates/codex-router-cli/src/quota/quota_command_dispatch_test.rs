@@ -78,8 +78,10 @@ fn quota_command_call_graph_uses_the_process_async_runtime() {
     let quota_command_sources = concat!(
         include_str!("quota_command_dispatch.rs"),
         include_str!("quota_refresh_command.rs"),
-        include_str!("quota_refresh_history.rs"),
-        include_str!("quota_refresh_service.rs"),
+        include_str!("../../../agent-proxy-services/src/quota/quota_refresh_history.rs"),
+        include_str!("../../../agent-proxy-services/src/quota/quota_refresh_service.rs"),
+        include_str!("../../../agent-proxy-services/src/quota/quota_openai_refresh.rs"),
+        include_str!("../../../agent-proxy-services/src/quota/quota_claude_refresh.rs"),
         include_str!("quota_status_command.rs"),
         include_str!("quota_status_loader.rs"),
     );
@@ -100,9 +102,9 @@ fn quota_command_call_graph_uses_the_process_async_runtime() {
 #[test]
 fn background_producers_do_not_own_a_runtime_or_thread_scheduler() {
     let worker_sources = concat!(
-        include_str!("../credential_upkeep_worker.rs"),
-        include_str!("quota_background_refresh_worker.rs"),
-        include_str!("../token_reload_watcher.rs"),
+        include_str!("../../../agent-proxy-services/src/credential_upkeep_worker.rs"),
+        include_str!("../../../agent-proxy-services/src/quota/quota_background_refresh_worker.rs"),
+        include_str!("../../../agent-proxy-services/src/token_reload_watcher.rs"),
     );
 
     for forbidden_runtime_owner in [
@@ -132,9 +134,10 @@ fn quota_refresh_composition_uses_only_the_async_credential_resolver() {
         "production quota refresh must not regress to the sync resolver"
     );
 
-    let credential_runtime_source = include_str!("../credential_runtime.rs");
+    let credential_runtime_source =
+        include_str!("../../../agent-proxy-services/src/credential_runtime.rs");
     let async_resolver_source = credential_runtime_source
-        .split_once("pub(crate) struct AsyncCliCredentialResolver")
+        .split_once("pub struct AsyncCliCredentialResolver")
         .and_then(|(_before, source)| {
             source
                 .split_once("impl<C> AsyncProviderCredentialResolver for CliCredentialResolver")
@@ -152,7 +155,8 @@ fn quota_refresh_composition_uses_only_the_async_credential_resolver() {
         );
     }
 
-    let background_worker_source = include_str!("quota_background_refresh_worker.rs");
+    let background_worker_source =
+        include_str!("../../../agent-proxy-services/src/quota/quota_background_refresh_worker.rs");
     assert!(
         background_worker_source.contains("AsyncCliCredentialResolver::open_with_secret_store"),
         "Serve quota refresh must reuse the already-open encrypted-store handle"

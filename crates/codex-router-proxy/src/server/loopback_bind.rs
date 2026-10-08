@@ -98,6 +98,28 @@ pub struct AsyncLoopbackServerRuntime {
 }
 
 impl AsyncLoopbackServerRuntime {
+    pub(super) async fn from_granted(
+        listener: codex_router_descriptor_boundary::OwnedListener,
+        expected: LoopbackBindAddress,
+        gate: &codex_router_descriptor_boundary::DescriptorGate,
+    ) -> Result<Self, LoopbackRouterRuntimeError> {
+        let actual = listener.tcp_address()?;
+        if !actual.ip().is_loopback()
+            || actual.ip() != expected.host
+            || (expected.port != 0 && actual.port() != expected.port)
+        {
+            return Err(LoopbackRouterRuntimeError::ListenerAssociation);
+        }
+        let _creation = gate.creation().await;
+        let standard = std::net::TcpListener::from(listener.into_owned());
+        let listener =
+            TokioTcpListener::from_std(standard).map_err(LoopbackRouterRuntimeError::Accept)?;
+        Ok(Self {
+            listener,
+            local_addr: actual,
+        })
+    }
+
     /// Binds a Tokio TCP listener to a validated loopback address.
     pub async fn bind(address: LoopbackBindAddress) -> Result<Self, ServerBindError> {
         let socket_addr = address.socket_addr();

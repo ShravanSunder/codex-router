@@ -202,7 +202,9 @@ async fn saved_floor_refresh_reconnects_established_websocket_before_later_respo
         secret_root.clone(),
     )
     .with_quota_clock(1_201, 300);
-    let router = must_ok(LoopbackRouterRuntime::start(config, secrets.clone()).await);
+    let router = must_ok(
+        agent_proxy_services::test_support::activate_core_fixture(config, secrets.clone()).await,
+    );
     let router_port = router.local_addr().port();
     let floor_notifier = router.websocket_quota_floor_notifier();
     let router_task = tokio::spawn(async move {

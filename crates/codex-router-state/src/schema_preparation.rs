@@ -77,6 +77,76 @@ pub enum AccountSchemaPreparation {
     },
 }
 
+/// An existing database's validated Fresh-only bootstrap class; never a native-history claim.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AccountBootstrapKind {
+    ExistingEmpty,
+    RecognizedLegacy,
+}
+/// State-owned, nonserialized observation for a Fresh startup.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum AccountStartupSchemaPreparation {
+    Native { schema: AccountSchemaPreparation },
+    Bootstrap { kind: AccountBootstrapKind },
+}
+
+pub(crate) async fn prepare_startup_schema(
+    path: &Path,
+) -> Result<AccountStartupSchemaPreparation, StateSchemaPreparationError> {
+    let mut connection = open_preparation_connection(path).await?;
+    let preparation = match connection.begin().await {
+        Ok(mut transaction) => {
+            let inspection = inspect_startup_connection(&mut transaction).await;
+            let rollback = transaction
+                .rollback()
+                .await
+                .map_err(|source| StateSchemaPreparationError::UnreadableStore { source });
+            match inspection {
+                Ok(prepared) => rollback.map(|()| prepared),
+                Err(error) => Err(error),
+            }
+        }
+        Err(source) => Err(StateSchemaPreparationError::UnreadableStore { source }),
+    };
+    let closed = connection.close().await;
+    match preparation {
+        Ok(prepared) => {
+            closed.map_err(|source| StateSchemaPreparationError::UnreadableStore { source })?;
+            Ok(prepared)
+        }
+        Err(error) => Err(error),
+    }
+}
+async fn inspect_startup_connection(
+    connection: &mut SqliteConnection,
+) -> Result<AccountStartupSchemaPreparation, StateSchemaPreparationError> {
+    if crate::account_migrations::native_history_table_exists(connection)
+        .await
+        .map_err(|source| StateSchemaPreparationError::UnreadableStore { source })?
+    {
+        return inspect_connection(connection, || async {})
+            .await
+            .map(|schema| AccountStartupSchemaPreparation::Native { schema });
+    }
+    crate::account_migrations::inspect_bootstrap_schema(connection)
+        .await
+        .map(|kind| AccountStartupSchemaPreparation::Bootstrap { kind })
+        .map_err(|source| StateSchemaPreparationError::InvalidBootstrapSchema { source })
+}
+async fn open_preparation_connection(
+    path: &Path,
+) -> Result<SqliteConnection, StateSchemaPreparationError> {
+    let options = SqliteConnectOptions::new()
+        .filename(path)
+        .read_only(true)
+        .create_if_missing(false)
+        .busy_timeout(Duration::ZERO)
+        .pragma("query_only", "ON");
+    SqliteConnection::connect_with(&options)
+        .await
+        .map_err(|source| StateSchemaPreparationError::UnreadableStore { source })
+}
+
 pub(crate) async fn prepare_schema(
     database_path: &Path,
 ) -> Result<AccountSchemaPreparation, StateSchemaPreparationError> {
@@ -91,15 +161,7 @@ where
     FCheckpoint: FnOnce() -> FCheckpointFuture + Send,
     FCheckpointFuture: Future<Output = ()> + Send,
 {
-    let options = SqliteConnectOptions::new()
-        .filename(database_path)
-        .read_only(true)
-        .create_if_missing(false)
-        .busy_timeout(Duration::ZERO)
-        .pragma("query_only", "ON");
-    let mut connection = SqliteConnection::connect_with(&options)
-        .await
-        .map_err(|source| StateSchemaPreparationError::UnreadableStore { source })?;
+    let mut connection = open_preparation_connection(database_path).await?;
 
     let preparation = match connection.begin().await {
         Ok(mut transaction) => {

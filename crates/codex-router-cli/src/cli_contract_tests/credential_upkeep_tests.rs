@@ -114,7 +114,7 @@ async fn enabled_exhausted_idle_account_renews_across_simulated_days_without_quo
     );
     wait_for_upkeep_generation(&state_path, &enabled_id, 2).await;
     now.store(1_000 + 2 * 86_400, Ordering::SeqCst);
-    worker.wake_for_test();
+    must_ok(worker.wake_for_test());
     assert_eq!(
         tokio::time::timeout(Duration::from_secs(2), call_receiver.recv())
             .await

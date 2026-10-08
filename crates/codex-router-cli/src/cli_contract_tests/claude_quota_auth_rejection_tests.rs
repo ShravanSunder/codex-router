@@ -105,12 +105,12 @@ impl QuotaRefreshProvider for AlwaysUnauthorizedClaudeQuotaProvider {
     async fn fetch_quota(
         &self,
         request: QuotaRefreshProviderRequest,
-    ) -> Result<QuotaRefreshProviderResponse, crate::quota::QuotaCommandError> {
+    ) -> Result<QuotaRefreshProviderResponse, crate::quota::QuotaRefreshError> {
         self.access_tokens
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .push(request.access_token().expose_secret().to_owned());
-        Err(crate::quota::QuotaCommandError::ProviderStatus { status: 401 })
+        Err(crate::quota::QuotaRefreshError::ProviderStatus { status: 401 })
     }
 }
 

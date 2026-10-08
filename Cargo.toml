@@ -17,6 +17,7 @@ members = [
     "crates/agent-collaboration",
     "crates/codex-router-auth",
     "crates/codex-router-cli",
+    "crates/agent-proxy-services",
     "crates/codex-native-integration",
     "crates/codex-router-descriptor-boundary",
     "crates/codex-router-keeper-protocol",

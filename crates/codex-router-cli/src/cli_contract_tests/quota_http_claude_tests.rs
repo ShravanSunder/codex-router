@@ -71,7 +71,7 @@ impl QuotaRefreshProvider for RecordingClaudeQuotaProvider {
     async fn fetch_quota(
         &self,
         request: QuotaRefreshProviderRequest,
-    ) -> Result<QuotaRefreshProviderResponse, crate::quota::QuotaCommandError> {
+    ) -> Result<QuotaRefreshProviderResponse, crate::quota::QuotaRefreshError> {
         let call_number = {
             let mut requests = self
                 .requests
@@ -84,7 +84,7 @@ impl QuotaRefreshProvider for RecordingClaudeQuotaProvider {
             requests.len()
         };
         if self.unauthorized_once && call_number == 1 {
-            return Err(crate::quota::QuotaCommandError::ProviderStatus { status: 401 });
+            return Err(crate::quota::QuotaRefreshError::ProviderStatus { status: 401 });
         }
         Ok(QuotaRefreshProviderResponse {
             windows: vec![QuotaRefreshProviderWindow {

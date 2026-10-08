@@ -11,7 +11,6 @@ use codex_router_core::ids::TokenGeneration;
 use codex_router_core::local_auth::LocalRouterTokenRecord;
 use codex_router_core::redaction::SecretString;
 use codex_router_proxy::server::LoopbackBindAddress;
-use codex_router_proxy::server::LoopbackRouterRuntime;
 use codex_router_proxy::server::LoopbackRouterRuntimeConfig;
 use codex_router_proxy::upstream::UpstreamEndpoint;
 use codex_router_secret_store::SecretStore;
@@ -124,7 +123,7 @@ pub(super) async fn start_route_native_router(
     let credential_store =
         codex_router_secret_store::test_support::open_encrypted_credential_store(secret_root)
             .map_err(|error| format!("failed to open route-native credential store: {error}"))?;
-    let runtime = LoopbackRouterRuntime::start(
+    let runtime = agent_proxy_services::test_support::activate_core_fixture(
         LoopbackRouterRuntimeConfig::new(
             bind_address,
             upstream_endpoint,
