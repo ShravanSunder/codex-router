@@ -225,3 +225,25 @@ Proof (worktree `target/`, every command exit 0): `cargo fmt --all -- --check`;
 
 Unverified: CI on the pushed head; the per-query cost of the schema-cookie step (not
 measured); a reset failure in `Drop` is logged, not surfaced.
+
+### 2026-10-08 — Re-verification: F2, F3 and the unfinished-statement bug closed; F1 partly
+
+Sol's source re-verification found F1 partly closed: the schema cookie served as an identity,
+but a rollback restores an earlier schema and cookie, and a later change can reach the recorded
+value with a different schema. Adapter rollbacks (explicit, deferred, savepoint) left the cache
+intact, the batch path skipped the comparison, and so did unprepared single statements.
+
+- **Evidence:** the reviewer's sequence (owned `BEGIN IMMEDIATE`, savepoint, `ADD COLUMN label`,
+  fully consumed cached `SELECT *`, savepoint rollback, batch `ADD COLUMN title; UPDATE`)
+  described `[id, label]`. So did its deferred variant, a rollback written as unprepared
+  `raw_sql`, and a rollback inside the batch.
+- **Fix:** the cookie is compared before every single statement, cached or unprepared; the cache
+  and recorded cookie are forgotten after the transaction manager's rollbacks, deferred rollbacks
+  and every batch, whatever their outcome (a failed batch may have run part-way).
+- **Which test proves what:** the reviewer's sequence and its deferred variant pass with either
+  the rollback or the batch invalidation; the in-batch rollback fails without the batch
+  invalidation; the written rollback fails without the comparison on unprepared statements.
+- **Unverified:** whether a Sync pull can make the cookie go backwards with a different schema
+  (local unpushed schema changes replayed over a remote one); not reproduced, not handled
+  beyond the comparison before each statement.
+
