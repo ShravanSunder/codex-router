@@ -162,6 +162,10 @@ pub enum CliError {
     #[error("host command requires native async dispatch")]
     HostRequiresAsyncDispatch,
 
+    /// Serve uses the process's existing Tokio runtime.
+    #[error("serve command requires native async dispatch")]
+    ServeRequiresAsyncDispatch,
+
     /// Loopback bind failed.
     #[error(transparent)]
     Bind(#[from] ServerBindError),

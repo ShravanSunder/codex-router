@@ -34,7 +34,7 @@ impl CompactFixture {
         }
     }
 
-    pub(super) fn add_credit_account(
+    pub(super) async fn add_credit_account(
         &self,
         account_id_value: &str,
         label: &str,
@@ -56,11 +56,12 @@ impl CompactFixture {
             self.now_unix_seconds,
             allow_credit_usage,
             availability,
-        );
+        )
+        .await;
         account
     }
 
-    pub(super) fn assert_route(
+    pub(super) async fn assert_route(
         self,
         scenario: &str,
         expected_upstream_token: Option<&str>,
@@ -81,7 +82,8 @@ impl CompactFixture {
             now_unix_seconds,
             expected_upstream_token,
             expected_selection_reason,
-        );
+        )
+        .await;
     }
 }
 
@@ -146,95 +148,84 @@ pub(super) fn clear_selector_windows(
     .expect("empty canonical selector windows should persist");
 }
 
-pub(super) fn mark_credit_refresh_pending(database_path: &Path, account_id: &AccountId) {
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("pending-credit runtime should build");
-    runtime.block_on(async {
-        let state = AsyncSqliteStateStore::open(database_path)
-            .await
-            .expect("pending-credit state should open");
-        let attempt = state
-            .begin_credit_refresh_attempt(account_id, 1)
-            .await
-            .expect("pending-credit attempt should begin");
-        assert_eq!(attempt.sequence(), 2);
-        state
-            .close()
-            .await
-            .expect("pending-credit state should close");
-    });
+pub(super) async fn mark_credit_refresh_pending(database_path: &Path, account_id: &AccountId) {
+    let state = AsyncSqliteStateStore::open(database_path)
+        .await
+        .expect("pending-credit state should open");
+    let attempt = state
+        .begin_credit_refresh_attempt(account_id, 1)
+        .await
+        .expect("pending-credit attempt should begin");
+    assert_eq!(attempt.sequence(), 2);
+    state
+        .close()
+        .await
+        .expect("pending-credit state should close");
 }
 
-pub(super) fn set_provider_spend_control_reached(
+pub(super) async fn set_provider_spend_control_reached(
     database_path: &Path,
     account_id: &AccountId,
     observed_unix_seconds: u64,
 ) {
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("spend-control runtime should build");
-    runtime.block_on(async {
-        let state = AsyncSqliteStateStore::open(database_path)
-            .await
-            .expect("spend-control state should open");
-        let attempt = state
-            .begin_credit_refresh_attempt(account_id, 1)
-            .await
-            .expect("spend-control attempt should begin");
-        let windows = [
-            PersistedSelectorQuotaWindow::new(
+    let state = AsyncSqliteStateStore::open(database_path)
+        .await
+        .expect("spend-control state should open");
+    let attempt = state
+        .begin_credit_refresh_attempt(account_id, 1)
+        .await
+        .expect("spend-control attempt should begin");
+    let windows = [
+        PersistedSelectorQuotaWindow::new(
+            account_id.clone(),
+            "responses",
+            18_000,
+            SelectorQuotaWindowStatus::Ineligible,
+        )
+        .with_remaining_headroom(0)
+        .with_effective(true)
+        .with_observed_unix_seconds(observed_unix_seconds)
+        .with_reset_unix_seconds(observed_unix_seconds + 18_000),
+        PersistedSelectorQuotaWindow::new(
+            account_id.clone(),
+            "responses",
+            604_800,
+            SelectorQuotaWindowStatus::Ineligible,
+        )
+        .with_remaining_headroom(0)
+        .with_effective(false)
+        .with_observed_unix_seconds(observed_unix_seconds)
+        .with_reset_unix_seconds(observed_unix_seconds + 604_800),
+    ];
+    let history = windows
+        .iter()
+        .map(|window| {
+            PersistedQuotaHistoryObservation::new(
                 account_id.clone(),
+                "compact-spend-control",
                 "responses",
-                18_000,
-                SelectorQuotaWindowStatus::Ineligible,
+                window.limit_window_seconds(),
+                observed_unix_seconds,
+                window.remaining_headroom(),
             )
-            .with_remaining_headroom(0)
-            .with_effective(true)
-            .with_observed_unix_seconds(observed_unix_seconds)
-            .with_reset_unix_seconds(observed_unix_seconds + 18_000),
-            PersistedSelectorQuotaWindow::new(
-                account_id.clone(),
-                "responses",
-                604_800,
-                SelectorQuotaWindowStatus::Ineligible,
+            .with_reset_unix_seconds(
+                window
+                    .reset_unix_seconds()
+                    .expect("spend-control window should have reset time"),
             )
-            .with_remaining_headroom(0)
-            .with_effective(false)
+            .with_window_status(SelectorQuotaWindowStatus::Ineligible)
+            .with_effective(window.effective())
+            .with_refresh_source(QuotaSnapshotSource::OpenAiEndpoint)
+            .with_refresh_outcome(QuotaHistoryRefreshOutcome::Success)
+        })
+        .collect::<Vec<_>>();
+    let snapshot =
+        PersistedQuotaSnapshot::new(account_id.clone(), QuotaSnapshotSource::OpenAiEndpoint)
             .with_observed_unix_seconds(observed_unix_seconds)
-            .with_reset_unix_seconds(observed_unix_seconds + 604_800),
-        ];
-        let history = windows
-            .iter()
-            .map(|window| {
-                PersistedQuotaHistoryObservation::new(
-                    account_id.clone(),
-                    "compact-spend-control",
-                    "responses",
-                    window.limit_window_seconds(),
-                    observed_unix_seconds,
-                    window.remaining_headroom(),
-                )
-                .with_reset_unix_seconds(
-                    window
-                        .reset_unix_seconds()
-                        .expect("spend-control window should have reset time"),
-                )
-                .with_window_status(SelectorQuotaWindowStatus::Ineligible)
-                .with_effective(window.effective())
-                .with_refresh_source(QuotaSnapshotSource::OpenAiEndpoint)
-                .with_refresh_outcome(QuotaHistoryRefreshOutcome::Success)
-            })
-            .collect::<Vec<_>>();
-        let snapshot =
-            PersistedQuotaSnapshot::new(account_id.clone(), QuotaSnapshotSource::OpenAiEndpoint)
-                .with_observed_unix_seconds(observed_unix_seconds)
-                .with_route_band("responses", 0)
-                .with_reset_unix_seconds(observed_unix_seconds + 18_000)
-                .with_stale_penalty(false);
-        let provider_observation = codex_router_core::credit_usage::CreditProviderObservation::new(
+            .with_route_band("responses", 0)
+            .with_reset_unix_seconds(observed_unix_seconds + 18_000)
+            .with_stale_penalty(false);
+    let provider_observation = codex_router_core::credit_usage::CreditProviderObservation::new(
             compact_available_credits("3.25"),
             codex_router_core::credit_usage::CreditSpendControl::Reached,
             Some(
@@ -242,29 +233,28 @@ pub(super) fn set_provider_spend_control_reached(
                     WorkspaceOwnerUsageLimitReached,
             ),
         );
-        let committed = state
-            .record_responses_refresh_success(
-                codex_router_state::credit_store::ResponsesRefreshSuccessCommit {
-                    attempt: &attempt,
-                    selector_windows: &windows,
-                    observed_unix_seconds,
-                    stale_after_unix_seconds: observed_unix_seconds + 300,
-                    provider_observation: &provider_observation,
-                    history_observations: &history,
-                    snapshot: &snapshot,
-                },
-            )
-            .await
-            .expect("spend-control observation should commit");
-        assert!(committed);
-        state
-            .close()
-            .await
-            .expect("spend-control state should close");
-    });
+    let committed = state
+        .record_responses_refresh_success(
+            codex_router_state::credit_store::ResponsesRefreshSuccessCommit {
+                attempt: &attempt,
+                selector_windows: &windows,
+                observed_unix_seconds,
+                stale_after_unix_seconds: observed_unix_seconds + 300,
+                provider_observation: &provider_observation,
+                history_observations: &history,
+                snapshot: &snapshot,
+            },
+        )
+        .await
+        .expect("spend-control observation should commit");
+    assert!(committed);
+    state
+        .close()
+        .await
+        .expect("spend-control state should close");
 }
 
-fn assert_compact_transport_result(
+async fn assert_compact_transport_result(
     scenario: &str,
     database_path: &Path,
     secret_path: &Path,
@@ -292,25 +282,27 @@ fn assert_compact_transport_result(
     )
     .with_quota_clock(now_unix_seconds, 60);
 
-    let mut output = None;
-    let captured_logs = crate::test_log_capture::capture_log_output(|| {
-        let runtime = LoopbackRouterRuntime::start(config, secrets)
-            .expect("compact loopback runtime should start");
-        let router_address = runtime.local_addr();
-        let client_thread = std::thread::spawn(move || {
-            send_loopback_request(
-                router_address,
-                "POST /v1/responses/compact HTTP/1.1\r\n",
-                br#"{"model":"gpt-5","compact_credit_test":true}"#,
-            )
-        });
-        let handled_connections = runtime
-            .serve_http_connections(1)
-            .expect("compact request should be served");
-        let response = client_thread.join().expect("compact client should finish");
-        output = Some((handled_connections, response));
-    });
-    let (handled_connections, response) = output.expect("compact runtime should return output");
+    let (captured_logs, (handled_connections, response)) =
+        crate::test_log_capture::capture_log_output_async(async {
+            let runtime = LoopbackRouterRuntime::start(config, secrets)
+                .await
+                .expect("compact loopback runtime should start");
+            let router_address = runtime.local_addr();
+            let client_thread = std::thread::spawn(move || {
+                send_loopback_request(
+                    router_address,
+                    "POST /v1/responses/compact HTTP/1.1\r\n",
+                    br#"{"model":"gpt-5","compact_credit_test":true}"#,
+                )
+            });
+            let handled_connections = runtime
+                .serve_http_connections(1)
+                .await
+                .expect("compact request should be served");
+            let response = client_thread.join().expect("compact client should finish");
+            (handled_connections, response)
+        })
+        .await;
     assert_eq!(handled_connections, 1);
 
     if expected_upstream_token.is_some() {

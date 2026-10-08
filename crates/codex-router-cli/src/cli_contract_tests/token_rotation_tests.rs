@@ -23,8 +23,8 @@ fn local_token_reload_watcher_reports_generation_changes() {
     assert_eq!(observed_generation, rotated_token.generation());
 }
 
-#[test]
-fn serve_scopes_claude_token_rotation_and_keeps_codex_optional() {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn serve_scopes_claude_token_rotation_and_keeps_codex_optional() {
     let test_root = TestRoot::new("serve-claude-token-scope-rotation");
     must_ok(fs::create_dir(test_root.path()));
     let state_path = test_root.path().join("state.sqlite");
@@ -108,7 +108,7 @@ fn serve_scopes_claude_token_rotation_and_keeps_codex_optional() {
 
     let (serve_ready_sender, serve_ready_receiver) = mpsc::channel();
     let (token_reload_sender, token_reload_receiver) = mpsc::channel();
-    let serve_thread = thread::spawn(move || {
+    let serve_task = tokio::spawn(async move {
         let mut stdout = Vec::new();
         let result = run_serve_command_with_upkeep_start_and_token_reload_observer(
             &mut stdout,
@@ -124,7 +124,8 @@ fn serve_scopes_claude_token_rotation_and_keeps_codex_optional() {
             move |generation| {
                 let _send_result = token_reload_sender.send(generation);
             },
-        );
+        )
+        .await;
         (result, stdout)
     });
     match serve_ready_receiver.recv_timeout(Duration::from_secs(2)) {
@@ -143,16 +144,22 @@ fn serve_scopes_claude_token_rotation_and_keeps_codex_optional() {
         "initial-token request",
     );
 
-    let rotate_output = run_cli(
+    let mut rotate_stdout = Vec::new();
+    let mut rotate_stderr = Vec::new();
+    must_ok(run_with_io(
         [
             "codex-router",
             "token",
             "rotate",
             "--router-root",
             path_to_str(&secret_root),
-        ],
-        CliContext::new(Vec::new()),
-    );
+        ]
+        .into_iter()
+        .map(OsString::from),
+        &CliContext::new(Vec::new()),
+        &mut rotate_stdout,
+        &mut rotate_stderr,
+    ));
     let token_b = must_ok(token_service.load_current());
     let reload_observation = token_reload_receiver.recv_timeout(Duration::from_secs(2));
     assert_eq!(
@@ -183,10 +190,9 @@ fn serve_scopes_claude_token_rotation_and_keeps_codex_optional() {
             None
         }
     };
-    let (serve_result, stdout) = match serve_thread.join() {
-        Ok(result) => result,
-        Err(error) => panic!("serve thread should not panic: {error:?}"),
-    };
+    let (serve_result, stdout) = serve_task
+        .await
+        .unwrap_or_else(|error| panic!("serve task should join: {error}"));
     must_ok(serve_result);
     match upstream_thread.join() {
         Ok(()) => {}
@@ -194,8 +200,8 @@ fn serve_scopes_claude_token_rotation_and_keeps_codex_optional() {
     }
 
     assert_eq!(token_a.generation().as_u64(), 1);
-    assert_eq!(rotate_output.stdout, "generation: 2\n");
-    assert!(rotate_output.stderr.is_empty());
+    assert_eq!(String::from_utf8_lossy(&rotate_stdout), "generation: 2\n");
+    assert!(rotate_stderr.is_empty());
     assert_eq!(token_b.generation().as_u64(), 2);
     assert!(
         missing_claude_token_response.starts_with("HTTP/1.1 401 Unauthorized\r\n"),

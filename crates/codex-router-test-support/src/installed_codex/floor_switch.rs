@@ -68,12 +68,12 @@ impl FloorJourney {
 struct FloorRouter {
     pub(super) notifier: WebSocketQuotaFloorNotifier,
     pub(super) shutdown: CancellationToken,
-    pub(super) serve_thread: Option<thread::JoinHandle<Result<usize, String>>>,
+    pub(super) serve_thread: Option<tokio::task::JoinHandle<Result<usize, String>>>,
     pub(super) port: u16,
 }
 
 impl FloorRouter {
-    pub(super) fn start(
+    pub(super) async fn start(
         state_path: &Path,
         secret_root: &Path,
         upstream_address: &str,
@@ -94,19 +94,18 @@ impl FloorRouter {
             ),
             credential_store,
         )
+        .await
         .map_err(|error| format!("floor fixture router failed to start: {error}"))?;
         let port = runtime.local_addr().port();
         let notifier = runtime.websocket_quota_floor_notifier();
         let shutdown = CancellationToken::new();
         let serve_shutdown = shutdown.clone();
-        let serve_thread = thread::Builder::new()
-            .name("codex-router-installed-floor-fixture".to_owned())
-            .spawn(move || {
-                runtime
-                    .serve_protocol_connections_until_cancelled(usize::MAX, serve_shutdown)
-                    .map_err(|error| format!("floor fixture router serve failed: {error}"))
-            })
-            .map_err(|error| format!("floor fixture router thread failed: {error}"))?;
+        let serve_thread = tokio::spawn(async move {
+            runtime
+                .serve_protocol_connections_until_cancelled(usize::MAX, serve_shutdown)
+                .await
+                .map_err(|error| format!("floor fixture router serve failed: {error}"))
+        });
         Ok(Self {
             notifier,
             shutdown,
@@ -115,15 +114,15 @@ impl FloorRouter {
         })
     }
 
-    pub(super) fn stop(mut self) -> Result<(), String> {
+    pub(super) async fn stop(mut self) -> Result<(), String> {
         self.shutdown.cancel();
         let handle = self
             .serve_thread
             .take()
             .ok_or_else(|| "floor fixture router already stopped".to_owned())?;
         handle
-            .join()
-            .map_err(|_| "floor fixture router thread panicked".to_owned())??;
+            .await
+            .map_err(|error| format!("floor fixture router task failed: {error}"))??;
         Ok(())
     }
 }
@@ -131,9 +130,7 @@ impl FloorRouter {
 impl Drop for FloorRouter {
     fn drop(&mut self) {
         self.shutdown.cancel();
-        if let Some(handle) = self.serve_thread.take() {
-            let _ = handle.join();
-        }
+        let _detached_serve_task = self.serve_thread.take();
     }
 }
 
@@ -201,7 +198,9 @@ fn save_floor_observation(
     Ok(())
 }
 
-fn run_floor_journey(journey: FloorJourney) -> Result<(Output, FloorUpstreamObservation), String> {
+async fn run_floor_journey(
+    journey: FloorJourney,
+) -> Result<(Output, FloorUpstreamObservation), String> {
     let smoke_root = SmokeTempRoot::new(&format!("installed-codex-floor-{}", journey.name()))?;
     let codex_home = smoke_root.path().join("codex-home");
     let process_home = smoke_root.path().join("home");
@@ -225,7 +224,7 @@ fn run_floor_journey(journey: FloorJourney) -> Result<(Output, FloorUpstreamObse
     }
     seed_floor_fixture(&state_path, &secret_root)?;
     let upstream = FloorUpstream::start(journey)?;
-    let router = FloorRouter::start(&state_path, &secret_root, &upstream.address)?;
+    let router = FloorRouter::start(&state_path, &secret_root, &upstream.address).await?;
     let profile = CodexRouterProfile::new(router.port);
     CodexRouterProfileWriter::new(&codex_home)
         .write(&profile, true)
@@ -269,7 +268,7 @@ fn run_floor_journey(journey: FloorJourney) -> Result<(Output, FloorUpstreamObse
         .join()
         .map_err(|_| "installed Codex floor child thread panicked".to_owned())?;
     let upstream_observation = upstream.finish();
-    let router_stop = router.stop();
+    let router_stop = router.stop().await;
     if let Err(controller_error) = controller_result {
         let child_summary = match &child_output {
             Ok(output) => format!(
@@ -312,27 +311,28 @@ fn run_floor_journey(journey: FloorJourney) -> Result<(Output, FloorUpstreamObse
     Ok((child_output, observation))
 }
 
-#[test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "real installed Codex floor fixture; run the named ignored test deliberately"]
-fn installed_codex_websocket_floor_switch_e2e_healthy_peer() {
-    assert_installed_floor_journey(FloorJourney::HealthyPeer);
+async fn installed_codex_websocket_floor_switch_e2e_healthy_peer() {
+    assert_installed_floor_journey(FloorJourney::HealthyPeer).await;
 }
 
-#[test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "real installed Codex floor fixture; run the named ignored test deliberately"]
-fn installed_codex_websocket_floor_switch_e2e_no_peer() {
-    assert_installed_floor_journey(FloorJourney::NoPeer);
+async fn installed_codex_websocket_floor_switch_e2e_no_peer() {
+    assert_installed_floor_journey(FloorJourney::NoPeer).await;
 }
 
-#[test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "real installed Codex floor fixture; run the named ignored test deliberately"]
-fn installed_codex_websocket_floor_switch_e2e_hard_floor() {
-    assert_installed_floor_journey(FloorJourney::HardFloor);
+async fn installed_codex_websocket_floor_switch_e2e_hard_floor() {
+    assert_installed_floor_journey(FloorJourney::HardFloor).await;
 }
 
-fn assert_installed_floor_journey(journey: FloorJourney) {
-    let (_output, observation) =
-        run_floor_journey(journey).unwrap_or_else(|error| panic!("{}: {error}", journey.name()));
+async fn assert_installed_floor_journey(journey: FloorJourney) {
+    let (_output, observation) = run_floor_journey(journey)
+        .await
+        .unwrap_or_else(|error| panic!("{}: {error}", journey.name()));
     assert_eq!(observation.first_account, "primary", "{}", journey.name());
     let expected_peer = if matches!(journey, FloorJourney::NoPeer) {
         "primary"

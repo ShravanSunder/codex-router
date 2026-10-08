@@ -51,12 +51,12 @@ fn runtime_config(
     )
 }
 
-fn serve_one_request(runtime: LoopbackRouterRuntime) -> String {
+async fn serve_one_request(runtime: LoopbackRouterRuntime) -> String {
     let router_address = runtime.local_addr();
-    let server_thread = thread::spawn(move || runtime.serve_http_connections(1));
+    let server_thread = tokio::spawn(async move { runtime.serve_http_connections(1).await });
     let response = send_claude_request(router_address);
     let serve_result = server_thread
-        .join()
+        .await
         .unwrap_or_else(|_error| panic!("fixture server thread should join"));
     assert_eq!(serve_result.unwrap_or(0), 1);
     response
@@ -134,17 +134,18 @@ fn assert_fake_upstream_received_no_request(
     );
 }
 
-#[test]
-fn loopback_claude_no_enabled_accounts_returns_reason_one() {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn loopback_claude_no_enabled_accounts_returns_reason_one() {
     let database_path = test_database_path("no-accounts");
     let secret_root = database_path.with_extension("secrets");
     let (endpoint, probe_start, upstream_probe) = fake_claude_upstream_probe();
     let config =
         runtime_config(&database_path, &secret_root).with_debug_claude_upstream_endpoint(endpoint);
     let runtime = LoopbackRouterRuntime::start_for_test(config)
+        .await
         .unwrap_or_else(|error| panic!("fixture Router should start: {error}"));
 
-    let response = serve_one_request(runtime);
+    let response = serve_one_request(runtime).await;
     assert_r12_message(&response, "No Claude account is configured or enabled");
     assert_fake_upstream_received_no_request(probe_start, upstream_probe);
 }
@@ -167,18 +168,11 @@ async fn add_enabled_account_without_credential(
         .unwrap_or_else(|error| panic!("fixture account should be stored: {error}"));
 }
 
-#[test]
-fn loopback_claude_key_unavailable_returns_reason_two() {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn loopback_claude_key_unavailable_returns_reason_two() {
     let database_path = test_database_path("key-unavailable");
     let secret_root = database_path.with_extension("secrets");
-    let setup_runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap_or_else(|error| panic!("fixture setup runtime should build: {error}"));
-    setup_runtime.block_on(add_enabled_account_without_credential(
-        &database_path,
-        "Claude Locked",
-    ));
+    add_enabled_account_without_credential(&database_path, "Claude Locked").await;
     let file_store = FileSecretStore::open(&secret_root)
         .unwrap_or_else(|error| panic!("fixture file store should open: {error}"));
     let (endpoint, probe_start, upstream_probe) = fake_claude_upstream_probe();
@@ -186,24 +180,19 @@ fn loopback_claude_key_unavailable_returns_reason_two() {
         runtime_config(&database_path, &secret_root).with_debug_claude_upstream_endpoint(endpoint),
         EncryptedCredentialStore::key_unavailable(file_store),
     )
+    .await
     .unwrap_or_else(|error| panic!("fixture Router should start with locked credentials: {error}"));
 
-    assert_r12_message(&serve_one_request(runtime), "Keychain key is unreadable");
+    let response = serve_one_request(runtime).await;
+    assert_r12_message(&response, "Keychain key is unreadable");
     assert_fake_upstream_received_no_request(probe_start, upstream_probe);
 }
 
-#[test]
-fn loopback_claude_migration_incomplete_returns_reason_two() {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn loopback_claude_migration_incomplete_returns_reason_two() {
     let database_path = test_database_path("migration-incomplete");
     let secret_root = database_path.with_extension("secrets");
-    let setup_runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap_or_else(|error| panic!("fixture setup runtime should build: {error}"));
-    setup_runtime.block_on(add_enabled_account_without_credential(
-        &database_path,
-        "Claude Migrating",
-    ));
+    add_enabled_account_without_credential(&database_path, "Claude Migrating").await;
     let file_store = FileSecretStore::open(&secret_root)
         .unwrap_or_else(|error| panic!("fixture file store should open: {error}"));
     let (endpoint, probe_start, upstream_probe) = fake_claude_upstream_probe();
@@ -215,46 +204,44 @@ fn loopback_claude_migration_incomplete_returns_reason_two() {
             CredentialMigrationFailure::MigrationNotComplete,
         ),
     )
+    .await
     .unwrap_or_else(|error| {
         panic!("fixture Router should start with incomplete migration: {error}")
     });
 
     assert_r12_message(
-        &serve_one_request(runtime),
+        &serve_one_request(runtime).await,
         "pooled-credential migration is incomplete",
     );
     assert_fake_upstream_received_no_request(probe_start, upstream_probe);
 }
 
-#[test]
-fn loopback_claude_selection_failure_returns_account_login_reason() {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn loopback_claude_selection_failure_returns_account_login_reason() {
     let database_path = test_database_path("needs-login");
     let secret_root = database_path.with_extension("secrets");
     let account_id = account_id("needs-login");
-    let setup_runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap_or_else(|error| panic!("fixture setup runtime should build: {error}"));
-    setup_runtime.block_on(async {
-        AsyncSqliteStateStore::open(&database_path)
-            .await
-            .unwrap_or_else(|error| panic!("fixture state should open: {error}"))
-            .upsert_account(&AccountRecord::new(
-                Provider::Claude,
-                account_id.clone(),
-                "Claude Home",
-                AccountStatus::Enabled,
-            ))
-            .await
-            .unwrap_or_else(|error| panic!("fixture account should be stored: {error}"));
-    });
+    let state = AsyncSqliteStateStore::open(&database_path)
+        .await
+        .unwrap_or_else(|error| panic!("fixture state should open: {error}"));
+    state
+        .upsert_account(&AccountRecord::new(
+            Provider::Claude,
+            account_id.clone(),
+            "Claude Home",
+            AccountStatus::Enabled,
+        ))
+        .await
+        .unwrap_or_else(|error| panic!("fixture account should be stored: {error}"));
+    state.close().await.expect("close fixture state");
 
     let (endpoint, probe_start, upstream_probe) = fake_claude_upstream_probe();
     let config =
         runtime_config(&database_path, &secret_root).with_debug_claude_upstream_endpoint(endpoint);
     let runtime = LoopbackRouterRuntime::start_for_test(config)
+        .await
         .unwrap_or_else(|error| panic!("fixture Router should start: {error}"));
-    let response = serve_one_request(runtime);
+    let response = serve_one_request(runtime).await;
     assert_fake_upstream_received_no_request(probe_start, upstream_probe);
     let (headers, body) = response
         .split_once("\r\n\r\n")
@@ -275,66 +262,63 @@ fn loopback_claude_selection_failure_returns_account_login_reason() {
     assert!(!message.contains(account_id.as_str()));
 }
 
-#[test]
-fn loopback_claude_hard_weekly_floor_returns_reason_five() {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn loopback_claude_hard_weekly_floor_returns_reason_five() {
     let database_path = test_database_path("hard-floor");
     let secret_root = database_path.with_extension("secrets");
     let account_id = account_id("hard-floor");
-    let setup_runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap_or_else(|error| panic!("fixture setup runtime should build: {error}"));
-    setup_runtime.block_on(async {
-        let state = AsyncSqliteStateStore::open(&database_path)
-            .await
-            .unwrap_or_else(|error| panic!("fixture state should open: {error}"));
-        state
-            .upsert_account(
-                &AccountRecord::new(
-                    Provider::Claude,
-                    account_id.clone(),
-                    "Claude Floor",
-                    AccountStatus::Enabled,
-                )
-                .with_active_credential_generation(1),
-            )
-            .await
-            .unwrap_or_else(|error| panic!("fixture account should be stored: {error}"));
-        let mutation_store = AsyncWeeklyQuotaFloorMutationStore::open(&database_path)
-            .await
-            .unwrap_or_else(|error| panic!("fixture floor store should open: {error}"));
-        mutation_store
-            .set_weekly_quota_floor_by_label(
+    let state = AsyncSqliteStateStore::open(&database_path)
+        .await
+        .unwrap_or_else(|error| panic!("fixture state should open: {error}"));
+    state
+        .upsert_account(
+            &AccountRecord::new(
+                Provider::Claude,
+                account_id.clone(),
                 "Claude Floor",
-                Some(StateWeeklyFloor::new(100).unwrap_or_else(|error| {
+                AccountStatus::Enabled,
+            )
+            .with_active_credential_generation(1),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("fixture account should be stored: {error}"));
+    let mutation_store = AsyncWeeklyQuotaFloorMutationStore::open(&database_path)
+        .await
+        .unwrap_or_else(|error| panic!("fixture floor store should open: {error}"));
+    mutation_store
+        .set_weekly_quota_floor_by_label(
+            "Claude Floor",
+            Some(
+                StateWeeklyFloor::new(100).unwrap_or_else(|error| {
                     panic!("fixture weekly floor should be valid: {error}")
-                })),
+                }),
+            ),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("fixture floor should be stored: {error}"));
+    mutation_store.close().await;
+    for (window_kind, remaining_basis_points) in
+        [(WindowKind::FiveHour, 10_000), (WindowKind::Weekly, 0)]
+    {
+        state
+            .record_window_observation(
+                &WindowObservation::new(
+                    WindowObservationProps::new(
+                        account_id.clone(),
+                        window_kind,
+                        remaining_basis_points,
+                        1_000,
+                    )
+                    .with_reset_unix_seconds(5_000)
+                    .with_fresh_until_unix_seconds(2_000),
+                )
+                .unwrap_or_else(|error| panic!("fixture observation should be valid: {error}")),
+                || 1_100,
             )
             .await
-            .unwrap_or_else(|error| panic!("fixture floor should be stored: {error}"));
-        mutation_store.close().await;
-        for (window_kind, remaining_basis_points) in
-            [(WindowKind::FiveHour, 10_000), (WindowKind::Weekly, 0)]
-        {
-            state
-                .record_window_observation(
-                    &WindowObservation::new(
-                        WindowObservationProps::new(
-                            account_id.clone(),
-                            window_kind,
-                            remaining_basis_points,
-                            1_000,
-                        )
-                        .with_reset_unix_seconds(5_000)
-                        .with_fresh_until_unix_seconds(2_000),
-                    )
-                    .unwrap_or_else(|error| panic!("fixture observation should be valid: {error}")),
-                    || 1_100,
-                )
-                .await
-                .unwrap_or_else(|error| panic!("fixture observation should be stored: {error}"));
-        }
-    });
+            .unwrap_or_else(|error| panic!("fixture observation should be stored: {error}"));
+    }
+    state.close().await.expect("close hard-floor fixture state");
     let credentials =
         codex_router_secret_store::test_support::open_encrypted_credential_store(&secret_root)
             .unwrap_or_else(|error| panic!("fixture encrypted store should open: {error}"));
@@ -343,17 +327,18 @@ fn loopback_claude_hard_weekly_floor_returns_reason_five() {
         .with_quota_clock(1_100, 300)
         .with_debug_claude_upstream_endpoint(endpoint);
     let runtime = LoopbackRouterRuntime::start(config, credentials)
+        .await
         .unwrap_or_else(|error| panic!("fixture Router should start: {error}"));
 
     assert_r12_message(
-        &serve_one_request(runtime),
+        &serve_one_request(runtime).await,
         "Claude Floor (at the configured hard quota floor)",
     );
     assert_fake_upstream_received_no_request(probe_start, upstream_probe);
 }
 
-#[test]
-fn loopback_exhaustion_preserves_provider_attempt_one_usage_limit_response() {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn loopback_exhaustion_preserves_provider_attempt_one_usage_limit_response() {
     let database_path = test_database_path("attempt-one-limit");
     let secret_root = database_path.with_extension("secrets");
     let account_id = account_id("attempt-one-limit");
@@ -376,41 +361,39 @@ fn loopback_exhaustion_preserves_provider_attempt_one_usage_limit_response() {
         )
         .unwrap_or_else(|error| panic!("fixture Claude credential should be stored: {error}"));
 
-    let setup_runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap_or_else(|error| panic!("fixture setup runtime should build: {error}"));
-    setup_runtime.block_on(async {
-        let state = AsyncSqliteStateStore::open(&database_path)
-            .await
-            .unwrap_or_else(|error| panic!("fixture state should open: {error}"));
+    let state = AsyncSqliteStateStore::open(&database_path)
+        .await
+        .unwrap_or_else(|error| panic!("fixture state should open: {error}"));
+    state
+        .upsert_account(
+            &AccountRecord::new(
+                Provider::Claude,
+                account_id.clone(),
+                "Claude Home",
+                AccountStatus::Enabled,
+            )
+            .with_active_credential_generation(1),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("fixture account should be stored: {error}"));
+    for window_kind in [WindowKind::FiveHour, WindowKind::Weekly] {
         state
-            .upsert_account(
-                &AccountRecord::new(
-                    Provider::Claude,
-                    account_id.clone(),
-                    "Claude Home",
-                    AccountStatus::Enabled,
+            .record_window_observation(
+                &WindowObservation::new(
+                    WindowObservationProps::new(account_id.clone(), window_kind, 10_000, 1_000)
+                        .with_reset_unix_seconds(5_000)
+                        .with_fresh_until_unix_seconds(2_000),
                 )
-                .with_active_credential_generation(1),
+                .unwrap_or_else(|error| panic!("fixture observation should be valid: {error}")),
+                || 1_100,
             )
             .await
-            .unwrap_or_else(|error| panic!("fixture account should be stored: {error}"));
-        for window_kind in [WindowKind::FiveHour, WindowKind::Weekly] {
-            state
-                .record_window_observation(
-                    &WindowObservation::new(
-                        WindowObservationProps::new(account_id.clone(), window_kind, 10_000, 1_000)
-                            .with_reset_unix_seconds(5_000)
-                            .with_fresh_until_unix_seconds(2_000),
-                    )
-                    .unwrap_or_else(|error| panic!("fixture observation should be valid: {error}")),
-                    || 1_100,
-                )
-                .await
-                .unwrap_or_else(|error| panic!("fixture observation should be stored: {error}"));
-        }
-    });
+            .unwrap_or_else(|error| panic!("fixture observation should be stored: {error}"));
+    }
+    state
+        .close()
+        .await
+        .expect("close attempt-one fixture state");
 
     let upstream_listener = TcpListener::bind("127.0.0.1:0")
         .unwrap_or_else(|error| panic!("fixture upstream should bind: {error}"));
@@ -471,9 +454,10 @@ fn loopback_exhaustion_preserves_provider_attempt_one_usage_limit_response() {
             }),
         );
     let runtime = LoopbackRouterRuntime::start(config, credentials)
+        .await
         .unwrap_or_else(|error| panic!("fixture Router should start: {error}"));
 
-    let response = serve_one_request(runtime);
+    let response = serve_one_request(runtime).await;
     let upstream_request_count = upstream_thread
         .join()
         .unwrap_or_else(|_error| panic!("fixture upstream thread should join"));

@@ -50,7 +50,7 @@ const CREDIT_SOURCE_TOKEN: &str = "credit-turn-source-token";
 const INCLUDED_PEER_TOKEN: &str = "credit-included-peer-token";
 const OLD_SOCKET_RECONNECT_TURN: u64 = 2;
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn assembled_websocket_credit_source_yields_after_terminal_to_included_peer() {
     let directory = CreditTurnTestDirectory::new();
     let fixture = CreditTurnFixture::new(&directory).await;
@@ -190,13 +190,14 @@ async fn assembled_websocket_credit_source_yields_after_terminal_to_included_pee
     .with_quota_clock(CREDIT_TURN_FIXTURE_TIME, 300);
     let runtime_secrets = secrets.clone();
     let (router_address_sender, router_address_receiver) = mpsc::channel();
-    let runtime_thread = thread::spawn(move || {
+    let runtime_thread = tokio::spawn(async move {
         let runtime = LoopbackRouterRuntime::start(config, runtime_secrets)
+            .await
             .unwrap_or_else(|error| panic!("assembled WebSocket runtime should start: {error}"));
         router_address_sender
             .send(runtime.local_addr())
             .unwrap_or_else(|error| panic!("router address should reach the test: {error}"));
-        runtime.serve_protocol_connections(2)
+        runtime.serve_protocol_connections(2).await
     });
     let router_address = router_address_receiver
         .recv_timeout(Duration::from_secs(3))
@@ -331,7 +332,7 @@ async fn assembled_websocket_credit_source_yields_after_terminal_to_included_pee
         r#"{"type":"response.create","turn":1}"#
     );
     let handled_connections = runtime_thread
-        .join()
+        .await
         .unwrap_or_else(|error| panic!("assembled WebSocket runtime should not panic: {error:?}"))
         .unwrap_or_else(|error| {
             panic!("assembled WebSocket runtime should serve two sockets: {error}")

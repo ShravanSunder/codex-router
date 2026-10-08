@@ -8,9 +8,9 @@ const CREDIT_AFFINITY_SESSION_ID: &str = "credit-affinity-session";
 const CREDIT_PREVIOUS_RESPONSE_ID: &str = "resp_credit_affinity_owner";
 const NO_REPLAY_PROBE_PATH: &str = "/__credit_affinity_no_replay_probe";
 
-#[test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[allow(clippy::result_large_err)]
-fn assembled_loopback_http_session_affinity_yields_credit_owner_to_included_peer() {
+async fn assembled_loopback_http_session_affinity_yields_credit_owner_to_included_peer() {
     let temp_dir = ProxyTestTempDir::new("credit_affinity_session_yields_to_included_peer");
     let database_path = temp_dir.path().join("state.sqlite");
     let secret_path = temp_dir.path().join("secrets");
@@ -24,7 +24,8 @@ fn assembled_loopback_http_session_affinity_yields_credit_owner_to_included_peer
         "credit-session-affinity",
         AccountStatus::Enabled,
     );
-    persist_available_credit_owner(&database_path, &secrets, &credit_account, quota_observed_at);
+    persist_available_credit_owner(&database_path, &secrets, &credit_account, quota_observed_at)
+        .await;
     let state = SqliteStateStore::open(&database_path)
         .unwrap_or_else(|error| panic!("session-affinity state should open: {error}"));
 
@@ -36,17 +37,28 @@ fn assembled_loopback_http_session_affinity_yields_credit_owner_to_included_peer
     );
     let (upstream_address, upstream_requests, upstream_thread) =
         spawn_three_response_http_upstream();
-    let mut journey = None;
-    let captured_logs = crate::test_log_capture::capture_log_output(|| {
+    let (
+        captured_logs,
+        (
+            first_response,
+            second_response,
+            third_response,
+            first_upstream,
+            second_upstream,
+            third_upstream,
+            handled_connections,
+        ),
+    ) = crate::test_log_capture::capture_log_output_async(async {
         let runtime = start_credit_affinity_runtime(
             upstream_address,
             &database_path,
             &secret_path,
             secrets.clone(),
             quota_observed_at + 30,
-        );
+        )
+        .await;
         let router_address = runtime.local_addr();
-        let runtime_thread = thread::spawn(move || runtime.serve_http_connections(3));
+        let runtime_thread = tokio::spawn(async move { runtime.serve_http_connections(3).await });
 
         let first_client = thread::spawn(move || {
             send_loopback_request_with_session(
@@ -98,12 +110,12 @@ fn assembled_loopback_http_session_affinity_yields_credit_owner_to_included_peer
             .recv_timeout(Duration::from_secs(2))
             .unwrap_or_else(|error| panic!("included-peer request should reach upstream: {error}"));
         let handled_connections = runtime_thread
-            .join()
+            .await
             .unwrap_or_else(|error| panic!("HTTP runtime should not panic: {error:?}"))
             .unwrap_or_else(|error| {
                 panic!("HTTP runtime should serve all three requests: {error}")
             });
-        journey = Some((
+        (
             first_response,
             second_response,
             third_response,
@@ -111,17 +123,9 @@ fn assembled_loopback_http_session_affinity_yields_credit_owner_to_included_peer
             second_upstream,
             third_upstream,
             handled_connections,
-        ));
-    });
-    let (
-        first_response,
-        second_response,
-        third_response,
-        first_upstream,
-        second_upstream,
-        third_upstream,
-        handled_connections,
-    ) = journey.unwrap_or_else(|| panic!("all session-affinity requests should complete"));
+        )
+    })
+    .await;
 
     assert!(
         first_response.starts_with("HTTP/1.1 200 OK\r\n"),
@@ -172,16 +176,17 @@ fn assembled_loopback_http_session_affinity_yields_credit_owner_to_included_peer
     let persisted_session_affinity =
         wait_for_session_affinity(&database_path, CREDIT_AFFINITY_SESSION_ID, |affinity| {
             affinity.account_id() == Some(included_peer.account_id())
-        });
+        })
+        .await;
     assert_eq!(
         persisted_session_affinity.account_id(),
         Some(included_peer.account_id())
     );
 }
 
-#[test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[allow(clippy::result_large_err)]
-fn assembled_loopback_http_previous_response_credit_owner_fails_closed_without_replay() {
+async fn assembled_loopback_http_previous_response_credit_owner_fails_closed_without_replay() {
     let temp_dir = ProxyTestTempDir::new("credit_affinity_previous_response_fails_closed");
     let database_path = temp_dir.path().join("state.sqlite");
     let secret_path = temp_dir.path().join("secrets");
@@ -195,7 +200,8 @@ fn assembled_loopback_http_previous_response_credit_owner_fails_closed_without_r
         "credit-previous-response-affinity",
         AccountStatus::Enabled,
     );
-    persist_available_credit_owner(&database_path, &secrets, &credit_account, quota_observed_at);
+    persist_available_credit_owner(&database_path, &secrets, &credit_account, quota_observed_at)
+        .await;
     let state = SqliteStateStore::open(&database_path)
         .unwrap_or_else(|error| panic!("previous-response state should open: {error}"));
     let affinity_secret = must_ok(load_or_create_router_affinity_hash_secret(&secrets))
@@ -210,48 +216,45 @@ fn assembled_loopback_http_previous_response_credit_owner_fails_closed_without_r
 
     let (upstream_address, upstream_requests, upstream_thread) =
         spawn_previous_response_no_replay_upstream();
-    let mut first_response_result = None;
-    let mut runtime_server = None;
-    let captured_logs = crate::test_log_capture::capture_log_output(|| {
-        let runtime = start_credit_affinity_runtime(
-            upstream_address,
-            &database_path,
-            &secret_path,
-            secrets.clone(),
-            quota_observed_at + 30,
-        );
-        let router_address = runtime.local_addr();
-        let runtime_thread = thread::spawn(move || runtime.serve_http_connections(2));
-        let first_client = thread::spawn(move || {
-            send_loopback_request(
-                router_address,
-                "POST /v1/responses HTTP/1.1\r\n",
-                br#"{"model":"gpt-5"}"#,
+    let (captured_logs, (first_response, runtime_server)) =
+        crate::test_log_capture::capture_log_output_async(async {
+            let runtime = start_credit_affinity_runtime(
+                upstream_address,
+                &database_path,
+                &secret_path,
+                secrets.clone(),
+                quota_observed_at + 30,
             )
-        });
-        let first_response = first_client
-            .join()
-            .unwrap_or_else(|error| panic!("initial credit client should finish: {error:?}"));
-        assert!(
-            first_response.starts_with("HTTP/1.1 200 OK\r\n"),
-            "{first_response}"
-        );
-        let first_upstream = upstream_requests
-            .recv_timeout(Duration::from_secs(2))
-            .unwrap_or_else(|error| {
-                panic!("initial credit request should reach upstream: {error}")
+            .await;
+            let router_address = runtime.local_addr();
+            let runtime_thread =
+                tokio::spawn(async move { runtime.serve_http_connections(2).await });
+            let first_client = thread::spawn(move || {
+                send_loopback_request(
+                    router_address,
+                    "POST /v1/responses HTTP/1.1\r\n",
+                    br#"{"model":"gpt-5"}"#,
+                )
             });
-        assert_eq!(
-            first_upstream.authorization.as_deref(),
-            Some("authorization: Bearer credit-previous-response-affinity-token")
-        );
-        first_response_result = Some(first_response);
-        runtime_server = Some((router_address, runtime_thread));
-    });
-    let first_response =
-        first_response_result.unwrap_or_else(|| panic!("initial credit request should complete"));
-    let (router_address, runtime_thread) = runtime_server
-        .unwrap_or_else(|| panic!("previous-response router server should remain available"));
+            let first_response = first_client
+                .join()
+                .unwrap_or_else(|error| panic!("initial credit client should finish: {error:?}"));
+            assert!(
+                first_response.starts_with("HTTP/1.1 200 OK\r\n"),
+                "{first_response}"
+            );
+            let first_upstream = upstream_requests
+                .recv_timeout(Duration::from_secs(2))
+                .unwrap_or_else(|error| {
+                    panic!("initial credit request should reach upstream: {error}")
+                });
+            assert_eq!(
+                first_upstream.authorization.as_deref(),
+                Some("authorization: Bearer credit-previous-response-affinity-token")
+            );
+            (first_response, (router_address, runtime_thread))
+        })
+        .await;
     assert!(
         first_response.starts_with("HTTP/1.1 200 OK\r\n"),
         "{first_response}"
@@ -264,6 +267,7 @@ fn assembled_loopback_http_previous_response_credit_owner_fails_closed_without_r
         }),
         "the first request should select the credit-backed owner:\n{captured_logs}"
     );
+    let (router_address, runtime_thread) = runtime_server;
 
     let response_id = PreviousResponseId::new(CREDIT_PREVIOUS_RESPONSE_ID)
         .unwrap_or_else(|error| panic!("previous response id should validate: {error}"));
@@ -283,31 +287,30 @@ fn assembled_loopback_http_previous_response_credit_owner_fails_closed_without_r
         INCLUDED_PEER_TOKEN,
     );
 
-    let selector_state = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap_or_else(|error| panic!("affinity selector runtime should build: {error}"));
-    let async_state = selector_state
-        .block_on(AsyncSqliteStateStore::open_read_only(&database_path))
+    let async_state = AsyncSqliteStateStore::open_read_only(&database_path)
+        .await
         .unwrap_or_else(|error| panic!("affinity selector state should open: {error}"));
     let selector = AsyncRepositoryBackedAccountSelector::new(&async_state);
     let previous_response_request = HttpProxyRequest::new(Method::Post, "/v1/responses").with_body(
         format!(r#"{{"model":"gpt-5","previous_response_id":"{CREDIT_PREVIOUS_RESPONSE_ID}"}}"#)
             .into_bytes(),
     );
-    let direct_selection = selector_state.block_on(selector.select_upstream_account(
-        &previous_response_request,
-        TokenGeneration::new(1),
-        Some(&affinity_secret),
-    ));
+    let direct_selection = selector
+        .select_upstream_account(
+            &previous_response_request,
+            TokenGeneration::new(1),
+            Some(&affinity_secret),
+        )
+        .await;
     let previous_owner_fails_closed = matches!(
         direct_selection.as_ref(),
         Err(HttpProxyError::Selection {
             reason: QuotaAwareAccountSelectorError::AffinityOwnerUnavailable
         })
     );
-    selector_state
-        .block_on(async_state.close())
+    async_state
+        .close()
+        .await
         .unwrap_or_else(|error| panic!("affinity selector state should close: {error}"));
 
     let followup_client = thread::spawn(move || {
@@ -325,7 +328,7 @@ fn assembled_loopback_http_previous_response_credit_owner_fails_closed_without_r
         .unwrap_or_else(|error| panic!("previous-response client should finish: {error:?}"));
     assert_eq!(
         runtime_thread
-            .join()
+            .await
             .unwrap_or_else(|error| panic!("previous-response runtime should not panic: {error:?}"))
             .unwrap_or_else(|error| panic!(
                 "previous-response runtime should serve two requests: {error}"
@@ -366,7 +369,7 @@ fn assembled_loopback_http_previous_response_credit_owner_fails_closed_without_r
     assert_eq!(upstream_tail.authorization, None);
 }
 
-fn persist_available_credit_owner(
+async fn persist_available_credit_owner(
     database_path: &Path,
     secrets: &EncryptedCredentialStore,
     account: &AccountRecord,
@@ -385,10 +388,11 @@ fn persist_available_credit_owner(
                     .expect("credit fixture balance should validate"),
             ),
         },
-    );
+    )
+    .await;
 }
 
-fn start_credit_affinity_runtime(
+async fn start_credit_affinity_runtime(
     upstream_address: SocketAddr,
     database_path: &Path,
     secret_path: &Path,
@@ -408,6 +412,7 @@ fn start_credit_affinity_runtime(
     )
     .with_quota_clock(quota_now_unix_seconds, 300);
     LoopbackRouterRuntime::start(config, secrets)
+        .await
         .unwrap_or_else(|error| panic!("real affinity router runtime should start: {error}"))
 }
 

@@ -1,8 +1,8 @@
 use super::*;
 
-#[test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[allow(clippy::result_large_err)]
-fn served_router_http_uses_persisted_quota_while_background_refresh_is_blocked() {
+async fn served_router_http_uses_persisted_quota_while_background_refresh_is_blocked() {
     let test_root = TestRoot::new("serve-background-refresh-blocked");
     must_ok(fs::create_dir(test_root.path()));
     let state_path = test_root.path().join("state.sqlite");
@@ -76,20 +76,27 @@ fn served_router_http_uses_persisted_quota_while_background_refresh_is_blocked()
         local_token.clone(),
     )
     .with_quota_clock(1_030, 60);
-    let runtime = must_ok(LoopbackRouterRuntime::start(runtime_config, secrets));
+    let runtime = must_ok(LoopbackRouterRuntime::start(runtime_config, secrets).await);
     let runtime_address = runtime.local_addr();
     assert_eq!(runtime_address.port(), router_port);
-    let router_thread = thread::spawn(move || {
-        if let Err(error) = runtime.serve_protocol_connections(1) {
+    let router_task = tokio::spawn(async move {
+        if let Err(error) = runtime.serve_protocol_connections(1).await {
             panic!("router runtime should serve HTTP: {error}");
         }
     });
 
-    let resolver = must_ok(CliCredentialResolver::open_with_refresh_client(
-        &state_path,
-        &secret_root,
-        NoopCredentialRefreshClient,
-    ));
+    let resolver_state_path = state_path.clone();
+    let resolver_secret_root = secret_root.clone();
+    let resolver = tokio::task::spawn_blocking(move || {
+        CliCredentialResolver::open_with_refresh_client(
+            &resolver_state_path,
+            &resolver_secret_root,
+            NoopCredentialRefreshClient,
+        )
+    })
+    .await
+    .unwrap_or_else(|error| panic!("quota resolver open task should join: {error}"));
+    let resolver = must_ok(resolver);
     let (refresh_started_sender, refresh_started_receiver) = mpsc::channel();
     let (release_refresh_sender, release_refresh_receiver) = mpsc::channel();
     let provider =
@@ -136,19 +143,18 @@ fn served_router_http_uses_persisted_quota_while_background_refresh_is_blocked()
     );
     assert!(!http_request.contains("current-token"));
 
-    match router_thread.join() {
-        Ok(()) => {}
-        Err(error) => panic!("router thread panicked: {error:?}"),
-    }
+    router_task
+        .await
+        .unwrap_or_else(|error| panic!("router task panicked: {error}"));
     match upstream_thread.join() {
         Ok(()) => {}
         Err(error) => panic!("mock upstream thread panicked: {error:?}"),
     }
 }
 
-#[test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[allow(clippy::result_large_err)]
-fn served_router_websocket_uses_persisted_quota_while_background_refresh_is_blocked() {
+async fn served_router_websocket_uses_persisted_quota_while_background_refresh_is_blocked() {
     let test_root = TestRoot::new("serve-websocket-background-refresh-blocked");
     must_ok(fs::create_dir(test_root.path()));
     let state_path = test_root.path().join("state.sqlite");
@@ -232,19 +238,26 @@ fn served_router_websocket_uses_persisted_quota_while_background_refresh_is_bloc
         local_token.clone(),
     )
     .with_quota_clock(1_030, 60);
-    let runtime = must_ok(LoopbackRouterRuntime::start(runtime_config, secrets));
+    let runtime = must_ok(LoopbackRouterRuntime::start(runtime_config, secrets).await);
     assert_eq!(runtime.local_addr().port(), router_port);
-    let router_thread = thread::spawn(move || {
-        if let Err(error) = runtime.serve_protocol_connections(1) {
+    let router_task = tokio::spawn(async move {
+        if let Err(error) = runtime.serve_protocol_connections(1).await {
             panic!("router runtime should serve WebSocket: {error}");
         }
     });
 
-    let resolver = must_ok(CliCredentialResolver::open_with_refresh_client(
-        &state_path,
-        &secret_root,
-        NoopCredentialRefreshClient,
-    ));
+    let resolver_state_path = state_path.clone();
+    let resolver_secret_root = secret_root.clone();
+    let resolver = tokio::task::spawn_blocking(move || {
+        CliCredentialResolver::open_with_refresh_client(
+            &resolver_state_path,
+            &resolver_secret_root,
+            NoopCredentialRefreshClient,
+        )
+    })
+    .await
+    .unwrap_or_else(|error| panic!("quota resolver open task should join: {error}"));
+    let resolver = must_ok(resolver);
     let (refresh_started_sender, refresh_started_receiver) = mpsc::channel();
     let (release_refresh_sender, release_refresh_receiver) = mpsc::channel();
     let provider =
@@ -296,10 +309,9 @@ fn served_router_websocket_uses_persisted_quota_while_background_refresh_is_bloc
         ("ws-frame".to_owned(), first_frame.to_owned())
     );
 
-    match router_thread.join() {
-        Ok(()) => {}
-        Err(error) => panic!("router thread panicked: {error:?}"),
-    }
+    router_task
+        .await
+        .unwrap_or_else(|error| panic!("router task panicked: {error}"));
     match upstream_thread.join() {
         Ok(()) => {}
         Err(error) => panic!("mock upstream thread panicked: {error:?}"),

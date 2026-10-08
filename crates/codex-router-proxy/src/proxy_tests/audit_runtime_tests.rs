@@ -1,7 +1,6 @@
 use super::*;
 
-#[test]
-fn assembled_loopback_router_runtime_writes_redacted_private_audit_events() {
+async fn assembled_loopback_router_runtime_writes_redacted_private_audit_events() {
     let temp_dir = ProxyTestTempDir::new("assembled_runtime_audit");
     let database_path = temp_dir.path().join("state.sqlite");
     let secret_path = temp_dir.path().join("secrets");
@@ -72,14 +71,16 @@ fn assembled_loopback_router_runtime_writes_redacted_private_audit_events() {
     )
     .with_quota_clock(1_030, 60)
     .with_audit_file(audit_path.clone());
-    let runtime = match LoopbackRouterRuntime::start_for_test(config) {
+    let runtime = match LoopbackRouterRuntime::start_for_test(config).await {
         Ok(runtime) => runtime,
         Err(error) => panic!("router runtime should start: {error}"),
     };
     let router_address = runtime.local_addr();
-    let server_thread = thread::spawn(move || match runtime.serve_http_connections(2) {
-        Ok(handled) => handled,
-        Err(error) => panic!("router runtime should serve audit connections: {error}"),
+    let server_thread = tokio::spawn(async move {
+        match runtime.serve_http_connections(2).await {
+            Ok(handled) => handled,
+            Err(error) => panic!("router runtime should serve audit connections: {error}"),
+        }
     });
 
     let unauthorized_response = send_loopback_request_with_token(
@@ -95,7 +96,7 @@ fn assembled_loopback_router_runtime_writes_redacted_private_audit_events() {
     );
     assert!(authorized_response.starts_with("HTTP/1.1 200 OK\r\n"));
 
-    match server_thread.join() {
+    match server_thread.await {
         Ok(handled) => assert_eq!(handled, 2),
         Err(error) => panic!("server thread panicked: {error:?}"),
     }
@@ -134,15 +135,14 @@ fn assembled_loopback_router_runtime_writes_redacted_private_audit_events() {
     }
 }
 
-#[test]
-fn assembled_loopback_router_runtime_redacts_http_and_websocket_audit_events() {
-    assembled_loopback_router_runtime_writes_redacted_private_audit_events();
-    loopback_router_runtime_dispatches_websocket_upgrade_to_tunnel();
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn assembled_loopback_router_runtime_redacts_http_and_websocket_audit_events() {
+    assembled_loopback_router_runtime_writes_redacted_private_audit_events().await;
+    loopback_router_runtime_dispatches_websocket_upgrade_to_tunnel().await;
 }
 
-#[test]
 #[allow(clippy::result_large_err)]
-fn loopback_router_runtime_dispatches_websocket_upgrade_to_tunnel() {
+async fn loopback_router_runtime_dispatches_websocket_upgrade_to_tunnel() {
     let temp_dir = ProxyTestTempDir::new("runtime_websocket");
     let database_path = temp_dir.path().join("state.sqlite");
     let secret_path = temp_dir.path().join("secrets");
@@ -245,7 +245,7 @@ fn loopback_router_runtime_dispatches_websocket_upgrade_to_tunnel() {
         LocalRouterTokenRecord::new(SecretString::new("current-token"), TokenGeneration::new(1)),
     )
     .with_audit_file(audit_path.clone());
-    let runtime = match LoopbackRouterRuntime::start_for_test(config) {
+    let runtime = match LoopbackRouterRuntime::start_for_test(config).await {
         Ok(runtime) => runtime,
         Err(error) => panic!("router runtime should start: {error}"),
     };
@@ -299,7 +299,7 @@ fn loopback_router_runtime_dispatches_websocket_upgrade_to_tunnel() {
         response
     });
 
-    let runtime_thread = thread::spawn(move || runtime.serve_protocol_connections(1));
+    let runtime_thread = tokio::spawn(async move { runtime.serve_protocol_connections(1).await });
     ready_receiver
         .recv()
         .expect("established websocket should report ready");
@@ -308,7 +308,8 @@ fn loopback_router_runtime_dispatches_websocket_upgrade_to_tunnel() {
             affinity
                 .account_id()
                 .is_some_and(|account_id| account_id.as_str() == "acct_ws_runtime")
-        });
+        })
+        .await;
     let advance_deadline = std::time::Instant::now() + Duration::from_secs(2);
     while test_unix_seconds() <= initial_affinity.last_seen_unix_seconds() {
         assert!(
@@ -320,7 +321,7 @@ fn loopback_router_runtime_dispatches_websocket_upgrade_to_tunnel() {
     continue_sender
         .send(())
         .expect("established websocket should continue");
-    let handled = match runtime_thread.join() {
+    let handled = match runtime_thread.await {
         Ok(Ok(handled)) => handled,
         Ok(Err(error)) => panic!("router runtime should serve websocket connection: {error}"),
         Err(error) => panic!("router runtime thread panicked: {error:?}"),
@@ -361,7 +362,8 @@ fn loopback_router_runtime_dispatches_websocket_upgrade_to_tunnel() {
     let renewed_affinity =
         wait_for_session_affinity(&database_path, "assembled-websocket-session", |affinity| {
             affinity.last_seen_unix_seconds() > initial_affinity.last_seen_unix_seconds()
-        });
+        })
+        .await;
     assert_eq!(
         renewed_affinity
             .account_id()

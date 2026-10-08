@@ -22,6 +22,41 @@ pub(super) struct BlockingDbWriteRepository {
     calls: AtomicUsize,
 }
 
+#[derive(Default)]
+pub(super) struct ShutdownBlockedDbWriteRepository {
+    pub(super) provider_entered: Notify,
+    pub(super) provider_release: Notify,
+    pub(super) affinity_entered: Notify,
+    pub(super) affinity_release: Notify,
+}
+
+impl DbWriteRepository for ShutdownBlockedDbWriteRepository {
+    fn record_provider_quota_exhausted<'a>(
+        &'a self,
+        _account_id: AccountId,
+        _route_band: RouteBand,
+        _classification: ProviderErrorClassification,
+        _observed_unix_seconds: u64,
+    ) -> BoxFuture<'a, Result<(), DbWriteRepositoryError>> {
+        Box::pin(async move {
+            self.provider_entered.notify_one();
+            self.provider_release.notified().await;
+            Ok(())
+        })
+    }
+
+    fn record_session_account_affinity<'a>(
+        &'a self,
+        _affinity: SessionAccountAffinity,
+    ) -> BoxFuture<'a, Result<(), DbWriteRepositoryError>> {
+        Box::pin(async move {
+            self.affinity_entered.notify_one();
+            self.affinity_release.notified().await;
+            Ok(())
+        })
+    }
+}
+
 impl DbWriteRepository for BlockingDbWriteRepository {
     fn record_provider_quota_exhausted<'a>(
         &'a self,

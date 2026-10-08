@@ -87,34 +87,28 @@ pub(super) fn persist_account_with_snapshot_and_token(
     }
 }
 
-pub(super) fn set_weekly_floor_for_test(
+pub(super) async fn set_weekly_floor_for_test(
     database_path: &Path,
     account_label: &str,
     floor_basis_points: u16,
 ) {
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("weekly-floor test runtime should build");
-    runtime.block_on(async {
-        let mutation = AsyncWeeklyQuotaFloorMutationStore::open(database_path)
-            .await
-            .expect("weekly-floor mutation store should open");
-        mutation
-            .set_weekly_quota_floor_by_label(
-                account_label,
-                Some(
-                    WeeklyQuotaFloorBasisPoints::new(floor_basis_points)
-                        .expect("weekly floor should validate"),
-                ),
-            )
-            .await
-            .expect("weekly floor should commit");
-        mutation.close().await;
-    });
+    let mutation = AsyncWeeklyQuotaFloorMutationStore::open(database_path)
+        .await
+        .expect("weekly-floor mutation store should open");
+    mutation
+        .set_weekly_quota_floor_by_label(
+            account_label,
+            Some(
+                WeeklyQuotaFloorBasisPoints::new(floor_basis_points)
+                    .expect("weekly floor should validate"),
+            ),
+        )
+        .await
+        .expect("weekly floor should commit");
+    mutation.close().await;
 }
 
-pub(super) fn seed_computable_weekly_margin_for_test(
+pub(super) async fn seed_computable_weekly_margin_for_test(
     database_path: &Path,
     account_id: &AccountId,
     now_unix_seconds: u64,
@@ -160,97 +154,85 @@ pub(super) fn seed_computable_weekly_margin_for_test(
     .expect("fresh selector windows should persist atomically");
     drop(state);
 
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("weekly-margin test runtime should build");
-    runtime.block_on(async {
-        let state = AsyncSqliteStateStore::open(database_path)
-            .await
-            .expect("async state should open for history");
-        append_history_series_with_reset(
-            &state,
-            account_id,
+    let state = AsyncSqliteStateStore::open(database_path)
+        .await
+        .expect("async state should open for history");
+    append_history_series_with_reset(
+        &state,
+        account_id,
+        "responses",
+        604_800,
+        weekly_reset,
+        &[
+            (history_start, prior_remaining_percent),
+            (history_middle, prior_remaining_percent),
+            (now_unix_seconds, current_remaining_percent),
+        ],
+    )
+    .await;
+    record_completed_active_session(
+        &state,
+        account_id,
+        &format!("process-floor-margin-{}", account_id.as_str()),
+        &format!("reservation-floor-margin-{}", account_id.as_str()),
+        history_start,
+        now_unix_seconds,
+    )
+    .await;
+    state
+        .refresh_active_session_rollups_for_interval(
             "responses",
-            604_800,
-            weekly_reset,
-            &[
-                (history_start, prior_remaining_percent),
-                (history_middle, prior_remaining_percent),
-                (now_unix_seconds, current_remaining_percent),
-            ],
-        )
-        .await;
-        record_completed_active_session(
-            &state,
-            account_id,
-            &format!("process-floor-margin-{}", account_id.as_str()),
-            &format!("reservation-floor-margin-{}", account_id.as_str()),
             history_start,
             now_unix_seconds,
+            300,
         )
-        .await;
-        state
-            .refresh_active_session_rollups_for_interval(
-                "responses",
-                history_start,
-                now_unix_seconds,
-                300,
-            )
-            .await
-            .expect("active-session rollups should refresh");
-        state.close().await.expect("async state should close");
-    });
+        .await
+        .expect("active-session rollups should refresh");
+    state.close().await.expect("async state should close");
 }
 
-pub(super) fn assert_bad_projected_margin_does_not_floor_block_for_test(
+pub(super) async fn assert_bad_projected_margin_does_not_floor_block_for_test(
     database_path: &Path,
     account_id: &AccountId,
     now_unix_seconds: u64,
     floor_basis_points: i64,
 ) {
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("weekly-margin assertion runtime should build");
-    runtime.block_on(async {
-        let state = AsyncSqliteStateStore::open(database_path)
-            .await
-            .expect("async state should open for margin assertion");
-        let projection = project_route_band_selection_inputs_with_active_counts(
-            &state,
-            "responses",
-            now_unix_seconds,
-            60,
-            None,
-        )
+    let state = AsyncSqliteStateStore::open(database_path)
         .await
-        .expect("weekly-margin projection should load");
-        let assessment = assess_route_band(BurnDownRouteBandAssessmentInput::new(
-            RouteBand::Responses,
-            now_unix_seconds,
-            RESPONSES_HTTP.clone(),
-            projection.accounts().to_vec(),
-        ));
-        let account = assessment
-            .accounts()
-            .iter()
-            .find(|account| account.account_id() == account_id)
-            .expect("weekly-margin account should be assessed");
-        assert!(
-            account
-                .weekly_survival_margin_basis_points()
-                .is_some_and(|margin| margin < floor_basis_points),
-            "test requires a forecast below the configured floor: {account:?}"
-        );
-        assert_eq!(
-            account.routing_exclusion(),
-            codex_router_selection::burn_down::RoutingExclusion::None,
-            "forecast must not control the observed-current floor: {account:?}"
-        );
-        assert_eq!(assessment.preferred_next(), Some(account.account_id()));
-        state.close().await.expect("assertion state should close");
-    });
+        .expect("async state should open for margin assertion");
+    let projection = project_route_band_selection_inputs_with_active_counts(
+        &state,
+        "responses",
+        now_unix_seconds,
+        60,
+        None,
+    )
+    .await
+    .expect("weekly-margin projection should load");
+    let assessment = assess_route_band(BurnDownRouteBandAssessmentInput::new(
+        RouteBand::Responses,
+        now_unix_seconds,
+        RESPONSES_HTTP.clone(),
+        projection.accounts().to_vec(),
+    ));
+    let account = assessment
+        .accounts()
+        .iter()
+        .find(|account| account.account_id() == account_id)
+        .expect("weekly-margin account should be assessed");
+    assert!(
+        account
+            .weekly_survival_margin_basis_points()
+            .is_some_and(|margin| margin < floor_basis_points),
+        "test requires a forecast below the configured floor: {account:?}"
+    );
+    assert_eq!(
+        account.routing_exclusion(),
+        codex_router_selection::burn_down::RoutingExclusion::None,
+        "forecast must not control the observed-current floor: {account:?}"
+    );
+    assert_eq!(assessment.preferred_next(), Some(account.account_id()));
+    state.close().await.expect("assertion state should close");
 }
 
 pub(super) async fn append_history_series_with_reset(

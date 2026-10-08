@@ -1,7 +1,7 @@
 use super::*;
 
-#[test]
-fn assembled_loopback_router_runtime_streams_sse_before_upstream_eof() {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn assembled_loopback_router_runtime_streams_sse_before_upstream_eof() {
     let temp_dir = ProxyTestTempDir::new("assembled_runtime_streams_sse");
     let database_path = temp_dir.path().join("state.sqlite");
     let secret_path = temp_dir.path().join("secrets");
@@ -73,14 +73,16 @@ fn assembled_loopback_router_runtime_streams_sse_before_upstream_eof() {
         LocalRouterTokenRecord::new(SecretString::new("current-token"), TokenGeneration::new(1)),
     )
     .with_quota_clock(1_030, 60);
-    let runtime = match LoopbackRouterRuntime::start_for_test(config) {
+    let runtime = match LoopbackRouterRuntime::start_for_test(config).await {
         Ok(runtime) => runtime,
         Err(error) => panic!("router runtime should start: {error}"),
     };
     let router_address = runtime.local_addr();
-    let server_thread = thread::spawn(move || match runtime.serve_http_connections(1) {
-        Ok(handled) => handled,
-        Err(error) => panic!("router runtime should serve one streaming connection: {error}"),
+    let server_thread = tokio::spawn(async move {
+        match runtime.serve_http_connections(1).await {
+            Ok(handled) => handled,
+            Err(error) => panic!("router runtime should serve one streaming connection: {error}"),
+        }
     });
 
     let mut client = match TcpStream::connect(router_address) {
@@ -109,7 +111,7 @@ fn assembled_loopback_router_runtime_streams_sse_before_upstream_eof() {
     let _ = client.read_to_end(&mut drain);
     drop(client);
 
-    match server_thread.join() {
+    match server_thread.await {
         Ok(handled) => assert_eq!(handled, 1),
         Err(error) => panic!("server thread panicked: {error:?}"),
     }
@@ -128,8 +130,8 @@ fn assembled_loopback_router_runtime_streams_sse_before_upstream_eof() {
     assert!(response.contains("data: first\n\n"));
 }
 
-#[test]
-fn assembled_loopback_router_runtime_routes_split_frame_previous_response_affinity() {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn assembled_loopback_router_runtime_routes_split_frame_previous_response_affinity() {
     let temp_dir = ProxyTestTempDir::new("assembled_runtime_split_affinity");
     let database_path = temp_dir.path().join("state.sqlite");
     let secret_path = temp_dir.path().join("secrets");
@@ -212,14 +214,16 @@ fn assembled_loopback_router_runtime_routes_split_frame_previous_response_affini
         LocalRouterTokenRecord::new(SecretString::new("current-token"), TokenGeneration::new(1)),
     )
     .with_quota_clock(1_030, 60);
-    let runtime = match LoopbackRouterRuntime::start_for_test(config) {
+    let runtime = match LoopbackRouterRuntime::start_for_test(config).await {
         Ok(runtime) => runtime,
         Err(error) => panic!("router runtime should start: {error}"),
     };
     let router_address = runtime.local_addr();
-    let server_thread = thread::spawn(move || match runtime.serve_http_connections(1) {
-        Ok(handled) => handled,
-        Err(error) => panic!("router runtime should serve split request: {error}"),
+    let server_thread = tokio::spawn(async move {
+        match runtime.serve_http_connections(1).await {
+            Ok(handled) => handled,
+            Err(error) => panic!("router runtime should serve split request: {error}"),
+        }
     });
 
     let body = br#"{"model":"gpt-5","previous_response_id":"resp_beta_split"}"#;
@@ -253,7 +257,7 @@ fn assembled_loopback_router_runtime_routes_split_frame_previous_response_affini
         panic!("client response should read: {error}");
     }
 
-    match server_thread.join() {
+    match server_thread.await {
         Ok(handled) => assert_eq!(handled, 1),
         Err(error) => panic!("server thread panicked: {error:?}"),
     }

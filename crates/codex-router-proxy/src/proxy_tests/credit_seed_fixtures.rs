@@ -1,6 +1,6 @@
 use super::*;
 
-pub(super) fn persist_credit_backed_account_with_token(
+pub(super) async fn persist_credit_backed_account_with_token(
     database_path: &Path,
     secrets: &EncryptedCredentialStore,
     account: &AccountRecord,
@@ -8,18 +8,15 @@ pub(super) fn persist_credit_backed_account_with_token(
     observed_unix_seconds: u64,
     allow_credit_usage: bool,
 ) {
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap_or_else(|error| panic!("credit fixture runtime should build: {error}"));
-    runtime.block_on(persist_credit_backed_account_with_token_async(
+    persist_credit_backed_account_with_token_async(
         database_path,
         secrets,
         account,
         upstream_token,
         observed_unix_seconds,
         allow_credit_usage,
-    ));
+    )
+    .await;
 }
 
 pub(super) async fn persist_credit_backed_account_with_token_async(
@@ -47,7 +44,7 @@ pub(super) async fn persist_credit_backed_account_with_token_async(
     .await;
 }
 
-pub(super) fn persist_credit_account_with_availability(
+pub(super) async fn persist_credit_account_with_availability(
     database_path: &Path,
     secrets: &EncryptedCredentialStore,
     account: &AccountRecord,
@@ -56,11 +53,7 @@ pub(super) fn persist_credit_account_with_availability(
     allow_credit_usage: bool,
     availability: codex_router_core::credit_usage::CreditAvailability,
 ) {
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap_or_else(|error| panic!("credit fixture runtime should build: {error}"));
-    runtime.block_on(persist_credit_account_with_availability_async(
+    persist_credit_account_with_availability_async(
         database_path,
         secrets,
         account,
@@ -68,7 +61,8 @@ pub(super) fn persist_credit_account_with_availability(
         observed_unix_seconds,
         allow_credit_usage,
         availability,
-    ));
+    )
+    .await;
 }
 
 async fn persist_credit_account_with_availability_async(

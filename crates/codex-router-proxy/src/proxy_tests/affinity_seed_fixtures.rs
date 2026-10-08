@@ -1,74 +1,64 @@
 use super::*;
 
-pub(super) fn wait_for_session_affinity(
+pub(super) async fn wait_for_session_affinity(
     database_path: &Path,
     session_id: &str,
     predicate: impl Fn(&SessionAccountAffinity) -> bool,
 ) -> SessionAccountAffinity {
-    let observation_runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("observation runtime should build");
-    observation_runtime.block_on(async {
-        let state = AsyncSqliteStateStore::open(database_path)
-            .await
-            .expect("async state should open");
-        tokio::time::timeout(Duration::from_secs(1), async {
-            loop {
-                if let Some(affinity) = state
-                    .load_session_account_affinity(Provider::Openai, session_id)
-                    .await
-                    .expect("session affinity should load")
-                    && predicate(&affinity)
-                {
-                    return affinity;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
+    let state = AsyncSqliteStateStore::open(database_path)
         .await
-        .expect("session affinity observation should arrive")
+        .expect("async state should open");
+    let affinity = tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if let Some(affinity) = state
+                .load_session_account_affinity(Provider::Openai, session_id)
+                .await
+                .expect("session affinity should load")
+                && predicate(&affinity)
+            {
+                return affinity;
+            }
+            tokio::task::yield_now().await;
+        }
     })
+    .await
+    .expect("session affinity observation should arrive");
+    state.close().await.expect("close async state");
+    affinity
 }
 
-pub(super) fn seed_completed_active_session(
+pub(super) async fn seed_completed_active_session(
     database_path: &Path,
     account_id: &AccountId,
     reservation_id: &str,
     started_unix_seconds: u64,
     ended_unix_seconds: u64,
 ) {
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("active-session fixture runtime should build");
-    runtime.block_on(async {
-        let state = AsyncSqliteStateStore::open(database_path)
-            .await
-            .expect("active-session fixture state should open");
-        let reservation_id = ReservationId::new(reservation_id);
-        state
-            .record_active_client_acquired(
-                "responses",
-                "retention-fixture",
-                &reservation_id,
-                account_id,
-                started_unix_seconds,
-                8,
-            )
-            .await
-            .expect("active-session acquisition should persist");
-        state
-            .record_active_client_released(
-                "responses",
-                "retention-fixture",
-                &reservation_id,
-                ended_unix_seconds,
-            )
-            .await
-            .expect("active-session release should persist");
-        state.close().await.expect("fixture state should close");
-    });
+    let state = AsyncSqliteStateStore::open(database_path)
+        .await
+        .expect("active-session fixture state should open");
+    let reservation_id = ReservationId::new(reservation_id);
+    state
+        .record_active_client_acquired(
+            "responses",
+            "retention-fixture",
+            &reservation_id,
+            account_id,
+            started_unix_seconds,
+            8,
+        )
+        .await
+        .expect("active-session acquisition should persist");
+    state
+        .record_active_client_released(
+            "responses",
+            "retention-fixture",
+            &reservation_id,
+            ended_unix_seconds,
+        )
+        .await
+        .expect("active-session release should persist");
+    state.close().await.expect("fixture state should close");
 }
 
 pub(super) fn wait_for_responses_history_compaction(
@@ -90,28 +80,25 @@ pub(super) fn wait_for_responses_history_compaction(
     }
 }
 
-pub(super) fn observed_active_session_reservation_ids(
-    runtime: &tokio::runtime::Runtime,
+pub(super) async fn observed_active_session_reservation_ids(
     state: &AsyncSqliteStateStore,
 ) -> Vec<String> {
-    runtime.block_on(async {
-        state
-            .active_session_events_for_route_band("responses")
-            .await
-            .expect("active-session events should load")
-            .into_iter()
-            .map(|event| event.reservation_id().as_str().to_owned())
-            .collect()
-    })
+    state
+        .active_session_events_for_route_band("responses")
+        .await
+        .expect("active-session events should load")
+        .into_iter()
+        .map(|event| event.reservation_id().as_str().to_owned())
+        .collect()
 }
 
-pub(super) fn assert_active_session_absent(
-    runtime: &tokio::runtime::Runtime,
+pub(super) async fn assert_active_session_absent(
     state: &AsyncSqliteStateStore,
     reservation_id: &str,
 ) {
     assert!(
-        !observed_active_session_reservation_ids(runtime, state)
+        !observed_active_session_reservation_ids(state)
+            .await
             .iter()
             .any(|candidate| candidate == reservation_id),
         "maintenance should delete completed session {reservation_id}"

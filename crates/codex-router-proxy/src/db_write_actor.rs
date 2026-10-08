@@ -399,8 +399,9 @@ pub struct DbWriteActor {
     route_band_queue_health: RouteBandQueueHealth,
     last_degraded_event: Arc<Mutex<Option<QueueDegradedEvent>>>,
     last_queue_lag_event: Arc<Mutex<Option<QueueLagEvent>>>,
-    task: Arc<Mutex<Option<JoinHandle<()>>>>,
-    session_affinity_task: Arc<Mutex<Option<JoinHandle<()>>>>,
+    // Keep both handles stored if a caller drops an in-progress shutdown future.
+    task: Arc<tokio::sync::Mutex<Option<JoinHandle<()>>>>,
+    session_affinity_task: Arc<tokio::sync::Mutex<Option<JoinHandle<()>>>>,
 }
 
 struct DbWriteActorRuntime {
@@ -513,8 +514,8 @@ impl DbWriteActor {
             route_band_queue_health,
             last_degraded_event: Arc::new(Mutex::new(None)),
             last_queue_lag_event,
-            task: Arc::new(Mutex::new(Some(task))),
-            session_affinity_task: Arc::new(Mutex::new(Some(session_affinity_task))),
+            task: Arc::new(tokio::sync::Mutex::new(Some(task))),
+            session_affinity_task: Arc::new(tokio::sync::Mutex::new(Some(session_affinity_task))),
         }
     }
 
@@ -597,35 +598,18 @@ impl DbWriteActor {
         }
     }
 
-    /// Cancels the actor and waits for the task to finish.
-    pub async fn shutdown(&self) {
+    /// Stops admitting new work and requests cancellation without joining tasks.
+    pub(crate) fn request_shutdown(&self) {
         self.closed.store(true, Ordering::Release);
         self.shutdown.cancel();
-        let task = match self.task.lock() {
-            Ok(mut task) => task.take(),
-            Err(error) => {
-                tracing::warn!(
-                    error.class = "db_write_actor_task_lock_poisoned",
-                    error.message = %error,
-                    "codex_router.db_write_actor_shutdown_task_unavailable"
-                );
-                None
-            }
-        };
-        let session_affinity_task = match self.session_affinity_task.lock() {
-            Ok(mut task) => task.take(),
-            Err(error) => {
-                tracing::warn!(
-                    error.class = "session_affinity_task_lock_poisoned",
-                    error.message = %error,
-                    "codex_router.session_affinity_task_unavailable"
-                );
-                None
-            }
-        };
+    }
+
+    /// Cancels the actor and waits for the task to finish.
+    pub async fn shutdown(&self) {
+        self.request_shutdown();
         tokio::join!(
-            await_db_write_task_shutdown(task),
-            await_db_write_task_shutdown(session_affinity_task),
+            await_db_write_task_shutdown(&self.task),
+            await_db_write_task_shutdown(&self.session_affinity_task),
         );
     }
 

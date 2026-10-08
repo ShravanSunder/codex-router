@@ -150,7 +150,7 @@ pub(super) fn run_cli<const ARGUMENT_COUNT: usize>(
     let arguments = args.into_iter().map(Into::into).collect::<Vec<_>>();
     if matches!(
         must_ok(CliCommand::parse(arguments.clone())),
-        CliCommand::Quota(_)
+        CliCommand::Quota(_) | CliCommand::Serve(_)
     ) {
         must_ok(test_async_runtime().block_on(run_with_io_async(
             arguments,
@@ -161,6 +161,21 @@ pub(super) fn run_cli<const ARGUMENT_COUNT: usize>(
     } else {
         must_ok(run_with_io(arguments, &context, &mut stdout, &mut stderr));
     }
+
+    CliRunOutput {
+        stdout: must_ok(String::from_utf8(stdout)),
+        stderr: must_ok(String::from_utf8(stderr)),
+    }
+}
+
+pub(super) async fn run_cli_async<const ARGUMENT_COUNT: usize>(
+    args: [&str; ARGUMENT_COUNT],
+    context: CliContext,
+) -> CliRunOutput {
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let arguments = args.into_iter().map(Into::into).collect::<Vec<_>>();
+    must_ok(run_with_io_async(arguments, &context, &mut stdout, &mut stderr).await);
 
     CliRunOutput {
         stdout: must_ok(String::from_utf8(stdout)),

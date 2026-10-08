@@ -165,23 +165,20 @@ fn assert_fake_claude_refresh_request(request: &HttpProxyRequest, expected_refre
     );
 }
 
-fn read_claude_credential_maintenance(
+async fn read_claude_credential_maintenance(
     receipt: &ClaudeLoopbackReceipt,
     account_id: &AccountId,
 ) -> codex_router_state::credential_maintenance::CredentialMaintenanceRecord {
-    tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("maintenance read runtime")
-        .block_on(async {
-            AsyncSqliteStateStore::open(&receipt.database_path)
-                .await
-                .expect("maintenance read state")
-                .load_credential_maintenance(account_id)
-                .await
-                .expect("maintenance state read")
-                .expect("credential maintenance record")
-        })
+    let state = AsyncSqliteStateStore::open(&receipt.database_path)
+        .await
+        .expect("maintenance read state");
+    let maintenance = state
+        .load_credential_maintenance(account_id)
+        .await
+        .expect("maintenance state read")
+        .expect("credential maintenance record");
+    state.close().await.expect("close maintenance read state");
+    maintenance
 }
 
 struct ClaudeLoopbackScenario {
@@ -253,33 +250,28 @@ fn write_claude_fixture_request_with_declared_content_length(
         .expect("request complete");
 }
 
-fn mark_claude_primary_reserve(database_path: &std::path::Path, account_id: &AccountId) {
-    tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("quota update runtime")
-        .block_on(async {
-            let state = AsyncSqliteStateStore::open(database_path)
-                .await
-                .expect("quota update state");
-            let observation = codex_router_state::window_observation::WindowObservation::new(
-                codex_router_state::window_observation::WindowObservationProps::new(
-                    account_id.clone(),
-                    codex_router_core::route_profile::WindowKind::FiveHour,
-                    500,
-                    1_099,
-                )
-                .with_reset_unix_seconds(2_000)
-                .with_fresh_until_unix_seconds(2_000),
-            )
-            .expect("reserve observation");
-            assert!(
-                state
-                    .record_window_observation(&observation, || 1_100)
-                    .await
-                    .expect("record reserve observation")
-            );
-        });
+async fn mark_claude_primary_reserve(database_path: &std::path::Path, account_id: &AccountId) {
+    let state = AsyncSqliteStateStore::open(database_path)
+        .await
+        .expect("quota update state");
+    let observation = codex_router_state::window_observation::WindowObservation::new(
+        codex_router_state::window_observation::WindowObservationProps::new(
+            account_id.clone(),
+            codex_router_core::route_profile::WindowKind::FiveHour,
+            500,
+            1_099,
+        )
+        .with_reset_unix_seconds(2_000)
+        .with_fresh_until_unix_seconds(2_000),
+    )
+    .expect("reserve observation");
+    assert!(
+        state
+            .record_window_observation(&observation, || 1_100)
+            .await
+            .expect("record reserve observation")
+    );
+    state.close().await.expect("close quota update state");
 }
 
 fn client_response_body(response: &str) -> &str {
@@ -289,29 +281,26 @@ fn client_response_body(response: &str) -> &str {
         .unwrap_or_else(|| panic!("fixture response has headers and a body boundary"))
 }
 
-fn read_claude_fixture_pin(
+async fn read_claude_fixture_pin(
     receipt: &ClaudeLoopbackReceipt,
 ) -> codex_router_state::session_account_affinity::SessionAccountAffinity {
-    tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("read runtime")
-        .block_on(async {
-            AsyncSqliteStateStore::open(&receipt.database_path)
-                .await
-                .expect("read state")
-                .load_session_account_affinity(
-                    codex_router_core::provider::Provider::Claude,
-                    "claude-session",
-                )
-                .await
-                .expect("read pin")
-                .expect("fixture pin")
-        })
+    let state = AsyncSqliteStateStore::open(&receipt.database_path)
+        .await
+        .expect("read state");
+    let pin = state
+        .load_session_account_affinity(
+            codex_router_core::provider::Provider::Claude,
+            "claude-session",
+        )
+        .await
+        .expect("read pin")
+        .expect("fixture pin");
+    state.close().await.expect("close read state");
+    pin
 }
 
-#[test]
-fn claude_server_success_preserves_request_and_renews_pin_after_body_completion() {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn claude_server_success_preserves_request_and_renews_pin_after_body_completion() {
     let body = br#"{"model":"claude-sonnet","messages":[]}"#.to_vec();
     let receipt = run_claude_loopback_scenario(ClaudeLoopbackScenario {
         reserve_primary: false,
@@ -324,7 +313,8 @@ fn claude_server_success_preserves_request_and_renews_pin_after_body_completion(
             "Content-Type: application/json\r\n",
             "{\"type\":\"message\"}",
         )],
-    });
+    })
+    .await;
     assert!(
         receipt.response.starts_with("HTTP/1.1 200 OK"),
         "{}",
@@ -347,14 +337,14 @@ fn claude_server_success_preserves_request_and_renews_pin_after_body_completion(
         request.header_value("anthropic-version"),
         Some("2023-06-01")
     );
-    let pin = read_claude_fixture_pin(&receipt);
+    let pin = read_claude_fixture_pin(&receipt).await;
     assert_eq!(pin.account_id(), Some(&receipt.account_ids[0]));
     assert_eq!(pin.pin_version(), 3);
     assert_eq!(pin.last_seen_unix_seconds(), 1_100);
 }
 
-#[test]
-fn claude_server_persists_passive_windows_with_the_configured_interval_deadline() {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn claude_server_persists_passive_windows_with_the_configured_interval_deadline() {
     let receipt = run_claude_loopback_scenario(ClaudeLoopbackScenario {
         case: "claude_server_passive_quota_freshness",
         request_body: b"{}".to_vec(),
@@ -366,22 +356,18 @@ fn claude_server_persists_passive_windows_with_the_configured_interval_deadline(
             "anthropic-ratelimit-unified-5h-utilization: 0.25\r\nanthropic-ratelimit-unified-5h-reset: 3000\r\nanthropic-ratelimit-unified-7d-utilization: 0.8\r\nanthropic-ratelimit-unified-7d-reset: 4000\r\n",
             "{}",
         )],
-    });
+    }).await;
     assert!(receipt.response.starts_with("HTTP/1.1 200 OK"));
     assert_eq!(receipt.requests.len(), 1);
 
-    let observations = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("read runtime")
-        .block_on(async {
-            AsyncSqliteStateStore::open(&receipt.database_path)
-                .await
-                .expect("read state")
-                .window_observations_for_account(&receipt.account_ids[0])
-                .await
-                .expect("read passive observations")
-        });
+    let state = AsyncSqliteStateStore::open(&receipt.database_path)
+        .await
+        .expect("read state");
+    let observations = state
+        .window_observations_for_account(&receipt.account_ids[0])
+        .await
+        .expect("read passive observations");
+    state.close().await.expect("close read state");
     assert_eq!(observations.len(), 2);
     for observation in &observations {
         assert_eq!(observation.observation_started_at(), 1_100);
@@ -403,8 +389,8 @@ fn claude_shared_window_rejection() -> String {
     )
 }
 
-#[test]
-fn claude_server_shared_window_rejection_replays_body_and_publishes_replacement_pin() {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn claude_server_shared_window_rejection_replays_body_and_publishes_replacement_pin() {
     let body = vec![b' '; 3 * 1024 * 1024];
     let receipt = run_claude_loopback_scenario(ClaudeLoopbackScenario {
         reserve_primary: false,
@@ -420,7 +406,8 @@ fn claude_server_shared_window_rejection_replays_body_and_publishes_replacement_
                 "{\"type\":\"message\"}",
             ),
         ],
-    });
+    })
+    .await;
     assert!(
         receipt.response.starts_with("HTTP/1.1 200 OK"),
         "{}",
@@ -438,13 +425,13 @@ fn claude_server_shared_window_rejection_replays_body_and_publishes_replacement_
         receipt.requests[1].header_value("authorization"),
         Some("Bearer claude-access-1")
     );
-    let pin = read_claude_fixture_pin(&receipt);
+    let pin = read_claude_fixture_pin(&receipt).await;
     assert_eq!(pin.account_id(), Some(&receipt.account_ids[1]));
     assert_eq!(pin.pin_version(), 5);
 }
 
-#[test]
-fn claude_server_final_credential_rejection_marks_generation_without_third_attempt() {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn claude_server_final_credential_rejection_marks_generation_without_third_attempt() {
     let rejection = r#"{"type":"error","error":{"type":"authentication_error","message":"OAuth token has expired"}}"#;
     let receipt = run_claude_loopback_scenario(ClaudeLoopbackScenario {
         reserve_primary: false,
@@ -456,7 +443,8 @@ fn claude_server_final_credential_rejection_marks_generation_without_third_attem
             claude_shared_window_rejection(),
             claude_fixture_response("401 Unauthorized", "", rejection),
         ],
-    });
+    })
+    .await;
     assert!(
         receipt.response.starts_with("HTTP/1.1 401 Unauthorized"),
         "{}",
@@ -464,29 +452,17 @@ fn claude_server_final_credential_rejection_marks_generation_without_third_attem
     );
     assert!(receipt.response.ends_with(rejection));
     assert_eq!(receipt.requests.len(), 2);
-    let maintenance = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("read runtime")
-        .block_on(async {
-            AsyncSqliteStateStore::open(&receipt.database_path)
-                .await
-                .expect("read state")
-                .load_credential_maintenance(&receipt.account_ids[1])
-                .await
-                .expect("read maintenance")
-                .expect("rejection state")
-        });
+    let maintenance = read_claude_credential_maintenance(&receipt, &receipt.account_ids[1]).await;
     assert_eq!(
         maintenance.state,
         CredentialMaintenanceState::ReauthRequired
     );
     assert_eq!(maintenance.credential_generation, 1);
-    assert_eq!(read_claude_fixture_pin(&receipt).account_id(), None);
+    assert_eq!(read_claude_fixture_pin(&receipt).await.account_id(), None);
 }
 
-#[test]
-fn claude_server_pass_through_preserves_long_error_body_without_renewing_pin() {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn claude_server_pass_through_preserves_long_error_body_without_renewing_pin() {
     let body = "provider-error".repeat(6_000);
     let receipt = run_claude_loopback_scenario(ClaudeLoopbackScenario {
         reserve_primary: false,
@@ -499,19 +475,22 @@ fn claude_server_pass_through_preserves_long_error_body_without_renewing_pin() {
             "X-Fixture: retained\r\n",
             &body,
         )],
-    });
+    })
+    .await;
     assert!(receipt.response.starts_with("HTTP/1.1 529"));
     assert!(receipt.response.ends_with(&body));
     assert!(receipt.response.contains("x-fixture: retained"));
     assert_eq!(receipt.requests.len(), 1);
     assert_eq!(
-        read_claude_fixture_pin(&receipt).last_seen_unix_seconds(),
+        read_claude_fixture_pin(&receipt)
+            .await
+            .last_seen_unix_seconds(),
         1_000
     );
 }
 
-#[test]
-fn claude_server_incomplete_success_stream_does_not_renew_pin() {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn claude_server_incomplete_success_stream_does_not_renew_pin() {
     let body = "event: message_start\ndata: {\"type\":\"message_start\"}\n\n";
     let receipt = run_claude_loopback_scenario(ClaudeLoopbackScenario {
         reserve_primary: false,
@@ -524,18 +503,21 @@ fn claude_server_incomplete_success_stream_does_not_renew_pin() {
             "Content-Type: text/event-stream\r\n",
             body,
         )],
-    });
+    })
+    .await;
     assert!(receipt.response.starts_with("HTTP/1.1 200 OK"));
     assert!(receipt.response.ends_with(body));
     assert_eq!(receipt.requests.len(), 1);
     assert_eq!(
-        read_claude_fixture_pin(&receipt).last_seen_unix_seconds(),
+        read_claude_fixture_pin(&receipt)
+            .await
+            .last_seen_unix_seconds(),
         1_000
     );
 }
 
-#[test]
-fn claude_server_complete_sse_message_stop_renews_pin() {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn claude_server_complete_sse_message_stop_renews_pin() {
     let body = "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n";
     let receipt = run_claude_loopback_scenario(ClaudeLoopbackScenario {
         case: "claude_server_sse_complete",
@@ -548,17 +530,18 @@ fn claude_server_complete_sse_message_stop_renews_pin() {
             "Content-Type: text/event-stream\r\n",
             body,
         )],
-    });
+    })
+    .await;
     assert!(receipt.response.starts_with("HTTP/1.1 200 OK"));
     assert!(receipt.response.ends_with(body));
     assert_eq!(receipt.requests.len(), 1);
-    let pin = read_claude_fixture_pin(&receipt);
+    let pin = read_claude_fixture_pin(&receipt).await;
     assert_eq!(pin.pin_version(), 3);
     assert_eq!(pin.last_seen_unix_seconds(), 1_100);
 }
 
-#[test]
-fn claude_server_reserve_pin_releases_through_writable_pool_before_preferred_attempt() {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn claude_server_reserve_pin_releases_through_writable_pool_before_preferred_attempt() {
     let receipt = run_claude_loopback_scenario(ClaudeLoopbackScenario {
         case: "claude_server_reserve_release",
         request_body: b"{}".to_vec(),
@@ -570,7 +553,8 @@ fn claude_server_reserve_pin_releases_through_writable_pool_before_preferred_att
             "Content-Type: application/json\r\n",
             "{}",
         )],
-    });
+    })
+    .await;
     assert!(
         receipt.response.starts_with("HTTP/1.1 200 OK"),
         "{}",
@@ -581,7 +565,7 @@ fn claude_server_reserve_pin_releases_through_writable_pool_before_preferred_att
         receipt.requests[0].header_value("authorization"),
         Some("Bearer claude-access-1")
     );
-    let pin = read_claude_fixture_pin(&receipt);
+    let pin = read_claude_fixture_pin(&receipt).await;
     assert_eq!(pin.account_id(), Some(&receipt.account_ids[1]));
     assert_eq!(pin.pin_version(), 5);
 }

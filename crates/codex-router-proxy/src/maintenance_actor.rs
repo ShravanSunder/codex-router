@@ -206,7 +206,8 @@ pub struct MaintenanceActor {
     pending: Arc<Mutex<HashMap<MaintenanceCoalescingKey, Instant>>>,
     closed: Arc<AtomicBool>,
     shutdown: CancellationToken,
-    task: Arc<Mutex<Option<JoinHandle<()>>>>,
+    // Keep the handle stored if a caller drops an in-progress shutdown future.
+    task: Arc<tokio::sync::Mutex<Option<JoinHandle<()>>>>,
     #[cfg(test)]
     completion_sender: Arc<Mutex<Option<TestCompletionSender<MaintenanceCompletion>>>>,
 }
@@ -266,7 +267,7 @@ impl MaintenanceActor {
             pending,
             closed,
             shutdown,
-            task: Arc::new(Mutex::new(Some(task))),
+            task: Arc::new(tokio::sync::Mutex::new(Some(task))),
             #[cfg(test)]
             completion_sender,
         }
@@ -359,24 +360,19 @@ impl MaintenanceActor {
         }
     }
 
-    /// Cancels the actor and waits for the task to stop.
-    pub async fn shutdown(&self) {
+    /// Stops admitting new work and requests cancellation without joining the task.
+    pub(crate) fn request_shutdown(&self) {
         self.closed.store(true, Ordering::Release);
         self.shutdown.cancel();
-        let task = match self.task.lock() {
-            Ok(mut task) => task.take(),
-            Err(error) => {
-                tracing::warn!(
-                    component = "maintenance_actor",
-                    lock = "task",
-                    error.message = %error,
-                    "codex_router.maintenance_task_lock_poisoned"
-                );
-                None
-            }
-        };
-        if let Some(task) = task {
+    }
+
+    /// Cancels the actor and waits for the stored task to stop.
+    pub async fn shutdown(&self) {
+        self.request_shutdown();
+        let mut stored_task = self.task.lock().await;
+        if let Some(task) = stored_task.as_mut() {
             let _join_result = task.await;
+            *stored_task = None;
         }
     }
 

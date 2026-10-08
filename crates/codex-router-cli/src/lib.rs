@@ -98,6 +98,7 @@ pub async fn run_async() -> i32 {
     let context = CliContext::from_process();
     let parsed_command = CliCommand::parse(args.clone());
     let uses_async_dispatch = matches!(&parsed_command, Ok(CliCommand::Quota(_)))
+        || matches!(&parsed_command, Ok(CliCommand::Serve(_)))
         || matches!(&parsed_command, Ok(CliCommand::Host(_)));
     if !uses_async_dispatch {
         return std::thread::spawn(move || run_sync_process_args(args))
@@ -220,11 +221,24 @@ where
             host_command::run_host_command(stdout, command, context, telemetry_shutdown).await?;
             stderr.flush().map_err(CliError::Stderr)
         }
+        CliCommand::Serve(command) => {
+            let credential_store =
+                secret_store_factory::open_cli_secret_store(&command.secret_root)
+                    .map_err(|_| CliError::CredentialStoreOpen)?;
+            run_serve_command_with_upkeep_start(
+                stdout,
+                command,
+                credential_store,
+                credential_upkeep_worker::start_background_credential_upkeep_worker,
+            )
+            .await?;
+            stderr.flush().map_err(CliError::Stderr)
+        }
         _ => run_with_io(args, context, stdout, stderr),
     }
 }
 
-fn run_serve_command_with_upkeep_start(
+async fn run_serve_command_with_upkeep_start(
     stdout: &mut impl Write,
     command: cli_argument_parsing::ServeCommand,
     credential_store: EncryptedCredentialStore,
@@ -234,7 +248,8 @@ fn run_serve_command_with_upkeep_start(
     ) -> Result<
         credential_upkeep_worker::CredentialUpkeepWorker,
         credential_upkeep_worker::CredentialUpkeepStartError,
-    >,
+    > + Send
+    + 'static,
 ) -> Result<(), CliError> {
     run_serve_command_with_upkeep_start_and_token_reload_observer(
         stdout,
@@ -243,9 +258,10 @@ fn run_serve_command_with_upkeep_start(
         upkeep_start,
         |_generation| {},
     )
+    .await
 }
 
-fn run_serve_command_with_upkeep_start_and_token_reload_observer(
+async fn run_serve_command_with_upkeep_start_and_token_reload_observer(
     stdout: &mut impl Write,
     command: cli_argument_parsing::ServeCommand,
     credential_store: EncryptedCredentialStore,
@@ -255,7 +271,8 @@ fn run_serve_command_with_upkeep_start_and_token_reload_observer(
     ) -> Result<
         credential_upkeep_worker::CredentialUpkeepWorker,
         credential_upkeep_worker::CredentialUpkeepStartError,
-    >,
+    > + Send
+    + 'static,
     token_reload_observer: impl Fn(codex_router_core::ids::TokenGeneration) + Send + 'static,
 ) -> Result<(), CliError> {
     let mut runtime_config = base_serve_runtime_config(&command)?;
@@ -282,7 +299,7 @@ fn run_serve_command_with_upkeep_start_and_token_reload_observer(
         runtime_config =
             runtime_config.with_quota_clock(now_unix_seconds, command.max_snapshot_age_seconds);
     }
-    let runtime = LoopbackRouterRuntime::start(runtime_config, credential_store.clone())?;
+    let runtime = LoopbackRouterRuntime::start(runtime_config, credential_store.clone()).await?;
     let local_auth_reloader = runtime.local_auth_reloader();
     let _token_reload_watcher =
         LocalTokenReloadWatcher::start(local_token_store, initial_token_generation, move |auth| {
@@ -297,20 +314,41 @@ fn run_serve_command_with_upkeep_start_and_token_reload_observer(
     )
     .map_err(CliError::Stdout)?;
     writeln!(stdout, "listening: {}", runtime.local_addr()).map_err(CliError::Stdout)?;
-    let _credential_upkeep_worker = upkeep_start(&state_db, credential_store.clone())?;
+    let upkeep_start_state_db = state_db.clone();
+    let upkeep_start_credential_store = credential_store.clone();
+    let _credential_upkeep_worker = tokio::task::spawn_blocking(move || {
+        upkeep_start(&upkeep_start_state_db, upkeep_start_credential_store)
+    })
+    .await
+    .map_err(|error| {
+        credential_upkeep_worker::CredentialUpkeepStartError::Thread(std::io::Error::other(error))
+    })??;
     let _quota_refresh_worker = if command.background_quota_refresh_enabled {
-        Some(quota::start_background_quota_refresh_worker(
-            state_db,
-            secret_root,
-            credential_store,
-            DEFAULT_CHATGPT_BACKEND_BASE_URL.to_owned(),
-            quota_refresh_interval,
-            runtime.websocket_quota_floor_notifier(),
-        )?)
+        let quota_state_db = state_db.clone();
+        let quota_secret_root = secret_root.clone();
+        let quota_credential_store = credential_store.clone();
+        let quota_floor_notifier = runtime.websocket_quota_floor_notifier();
+        let quota_refresh_worker = tokio::task::spawn_blocking(move || {
+            quota::start_background_quota_refresh_worker(
+                quota_state_db,
+                quota_secret_root,
+                quota_credential_store,
+                DEFAULT_CHATGPT_BACKEND_BASE_URL.to_owned(),
+                quota_refresh_interval,
+                quota_floor_notifier,
+            )
+        })
+        .await
+        .map_err(|error| {
+            QuotaCommandError::BackgroundWorkerInitialization(std::io::Error::other(error))
+        })??;
+        Some(quota_refresh_worker)
     } else {
         None
     };
-    let handled_connections = runtime.serve_protocol_connections(command.max_connections)?;
+    let handled_connections = runtime
+        .serve_protocol_connections(command.max_connections)
+        .await?;
     if let Some(report_file) = command.websocket_registry_report_file {
         write_websocket_registry_report_file(&report_file, handled_connections, &runtime)?;
     }
@@ -524,17 +562,7 @@ where
 {
     let command = CliCommand::parse(args)?;
     match command {
-        CliCommand::Serve(command) => {
-            let credential_store =
-                secret_store_factory::open_cli_secret_store(&command.secret_root)
-                    .map_err(|_| CliError::CredentialStoreOpen)?;
-            run_serve_command_with_upkeep_start(
-                stdout,
-                command,
-                credential_store,
-                credential_upkeep_worker::start_background_credential_upkeep_worker,
-            )?;
-        }
+        CliCommand::Serve(_) => return Err(CliError::ServeRequiresAsyncDispatch),
         CliCommand::Token(TokenCommand::Init { router_root }) => {
             let store =
                 FileSecretStore::open(&router_root).map_err(TokenCommandError::SecretStore)?;

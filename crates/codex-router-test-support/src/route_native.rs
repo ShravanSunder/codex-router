@@ -20,7 +20,7 @@ use upstream::RouteNativeUpstream;
 use upstream::assert_route_native_transcript;
 
 /// Runs route-native black-box proof against a served local router.
-pub fn run_route_native_black_box() -> Result<RouteNativeReport, String> {
+pub async fn run_route_native_black_box() -> Result<RouteNativeReport, String> {
     let test_root = RouteNativeTempRoot::new("route-native")?;
     let state_path = test_root.path().join("state.sqlite");
     let secret_root = test_root.path().join("secrets");
@@ -32,7 +32,8 @@ pub fn run_route_native_black_box() -> Result<RouteNativeReport, String> {
         &secret_root,
         format!("http://{}/v1", upstream.address()),
         9,
-    )?;
+    )
+    .await?;
     let router_address = router.address;
 
     let responses = send_http_request(
@@ -96,7 +97,7 @@ pub fn run_route_native_black_box() -> Result<RouteNativeReport, String> {
         ));
     }
 
-    router.join()?;
+    router.join().await?;
     let transcript = upstream.join()?;
     assert_route_native_transcript(&transcript)?;
 
@@ -121,10 +122,10 @@ impl RouteNativeReport {
 mod tests {
     use super::run_route_native_black_box;
 
-    #[test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[ignore = "T8b route-native black-box proof"]
-    fn route_native_black_box_all_supported_routes_and_rejections() {
-        let report = match run_route_native_black_box() {
+    async fn route_native_black_box_all_supported_routes_and_rejections() {
+        let report = match run_route_native_black_box().await {
             Ok(report) => report,
             Err(error) => panic!("route-native black-box proof failed: {error}"),
         };

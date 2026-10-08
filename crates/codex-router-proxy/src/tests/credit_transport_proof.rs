@@ -8,8 +8,8 @@ use std::sync::mpsc::Receiver;
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-#[test]
-fn assembled_loopback_http_routes_positive_and_nearzero_allowed_credit_with_credit_reason() {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn assembled_loopback_http_routes_positive_and_nearzero_allowed_credit_with_credit_reason() {
     for (scenario, balance, upstream_token) in [
         ("positive_allowed", "2.75", "positive-credit-token"),
         ("nearzero_allowed", "0.0001", "nearzero-credit-token"),
@@ -19,12 +19,13 @@ fn assembled_loopback_http_routes_positive_and_nearzero_allowed_credit_with_cred
             true,
             available_credits(balance),
             Some(upstream_token),
-        );
+        )
+        .await;
     }
 }
 
-#[test]
-fn assembled_loopback_http_rejects_disallowed_zero_and_depleted_credit() {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn assembled_loopback_http_rejects_disallowed_zero_and_depleted_credit() {
     for (scenario, allow_credit_usage, availability) in [
         ("disallowed_positive", false, available_credits("2.75")),
         ("allowed_zero", true, available_credits("0")),
@@ -34,12 +35,12 @@ fn assembled_loopback_http_rejects_disallowed_zero_and_depleted_credit() {
             codex_router_core::credit_usage::CreditAvailability::Depleted,
         ),
     ] {
-        assert_assembled_http_credit_case(scenario, allow_credit_usage, availability, None);
+        assert_assembled_http_credit_case(scenario, allow_credit_usage, availability, None).await;
     }
 }
 
-#[test]
-fn assembled_loopback_http_credits_cover_responses_compact_and_image_routes() {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn assembled_loopback_http_credits_cover_responses_compact_and_image_routes() {
     for request_line in [
         "POST /v1/responses HTTP/1.1\r\n",
         "POST /v1/responses/compact HTTP/1.1\r\n",
@@ -52,12 +53,13 @@ fn assembled_loopback_http_credits_cover_responses_compact_and_image_routes() {
             available_credits("2.75"),
             Some("credit-family-token"),
             request_line,
-        );
+        )
+        .await;
     }
 }
 
-#[test]
-fn assembled_loopback_http_preserves_provider_authoritative_hidden_and_unlimited_credits() {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn assembled_loopback_http_preserves_provider_authoritative_hidden_and_unlimited_credits() {
     for availability in [
         codex_router_core::credit_usage::CreditAvailability::Unlimited,
         codex_router_core::credit_usage::CreditAvailability::Available { balance: None },
@@ -67,7 +69,8 @@ fn assembled_loopback_http_preserves_provider_authoritative_hidden_and_unlimited
             true,
             availability,
             Some("available-credit-token"),
-        );
+        )
+        .await;
     }
 }
 
@@ -80,7 +83,7 @@ fn available_credits(balance: &str) -> codex_router_core::credit_usage::CreditAv
     }
 }
 
-fn assert_assembled_http_credit_case(
+async fn assert_assembled_http_credit_case(
     scenario: &str,
     allow_credit_usage: bool,
     availability: codex_router_core::credit_usage::CreditAvailability,
@@ -92,10 +95,11 @@ fn assert_assembled_http_credit_case(
         availability,
         expected_upstream_token,
         "POST /v1/responses HTTP/1.1\r\n",
-    );
+    )
+    .await;
 }
 
-fn assert_assembled_http_credit_route(
+async fn assert_assembled_http_credit_route(
     scenario: &str,
     allow_credit_usage: bool,
     availability: codex_router_core::credit_usage::CreditAvailability,
@@ -123,7 +127,8 @@ fn assert_assembled_http_credit_route(
         1_030,
         allow_credit_usage,
         availability,
-    );
+    )
+    .await;
 
     let upstream_listener = TcpListener::bind("127.0.0.1:0")
         .unwrap_or_else(|error| panic!("credit mock upstream should bind: {error}"));
@@ -144,28 +149,29 @@ fn assert_assembled_http_credit_route(
     )
     .with_quota_clock(1_030, 60);
 
-    let mut output = None;
-    let captured_logs = crate::test_log_capture::capture_log_output(|| {
-        let runtime = LoopbackRouterRuntime::start(config, secrets)
-            .unwrap_or_else(|error| panic!("credit proxy runtime should start: {error}"));
-        let router_address = runtime.local_addr();
-        let client_thread = std::thread::spawn(move || {
-            send_loopback_request(
-                router_address,
-                request_line,
-                br#"{"model":"gpt-5","credit_backed":true}"#,
-            )
-        });
-        let handled_connections = runtime
-            .serve_http_connections(1)
-            .unwrap_or_else(|error| panic!("credit runtime should serve request: {error}"));
-        let response = client_thread
-            .join()
-            .unwrap_or_else(|error| panic!("credit client should finish: {error:?}"));
-        output = Some((handled_connections, response));
-    });
-    let (handled_connections, response) =
-        output.unwrap_or_else(|| panic!("credit proxy runtime should produce a response"));
+    let (captured_logs, (handled_connections, response)) =
+        crate::test_log_capture::capture_log_output_async(async {
+            let runtime = LoopbackRouterRuntime::start(config, secrets)
+                .await
+                .unwrap_or_else(|error| panic!("credit proxy runtime should start: {error}"));
+            let router_address = runtime.local_addr();
+            let client_thread = std::thread::spawn(move || {
+                send_loopback_request(
+                    router_address,
+                    request_line,
+                    br#"{"model":"gpt-5","credit_backed":true}"#,
+                )
+            });
+            let handled_connections = runtime
+                .serve_http_connections(1)
+                .await
+                .unwrap_or_else(|error| panic!("credit runtime should serve request: {error}"));
+            let response = client_thread
+                .join()
+                .unwrap_or_else(|error| panic!("credit client should finish: {error:?}"));
+            (handled_connections, response)
+        })
+        .await;
     assert_eq!(handled_connections, 1);
 
     if let Some(expected_token) = expected_upstream_token {

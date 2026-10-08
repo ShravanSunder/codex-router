@@ -96,16 +96,18 @@ impl Drop for RouteNativeTempRoot {
 
 pub(super) struct StartedRouteNativeRouter {
     pub(super) address: SocketAddr,
-    handle: thread::JoinHandle<Result<(), String>>,
+    handle: tokio::task::JoinHandle<Result<(), String>>,
 }
 
 impl StartedRouteNativeRouter {
-    pub(super) fn join(self) -> Result<(), String> {
-        join_result(self.handle, "route-native router")
+    pub(super) async fn join(self) -> Result<(), String> {
+        self.handle
+            .await
+            .map_err(|error| format!("route-native router task failed: {error}"))?
     }
 }
 
-pub(super) fn start_route_native_router(
+pub(super) async fn start_route_native_router(
     state_path: &Path,
     secret_root: &Path,
     upstream_base_url: String,
@@ -133,17 +135,16 @@ pub(super) fn start_route_native_router(
         .with_quota_clock(1_030, 60),
         credential_store,
     )
+    .await
     .map_err(|error| format!("failed to start route-native router: {error}"))?;
     let address = runtime.local_addr();
-    let handle = thread::Builder::new()
-        .name("codex-router-route-native-router".to_owned())
-        .spawn(move || {
-            runtime
-                .serve_protocol_connections(max_connections)
-                .map(|_| ())
-                .map_err(|error| format!("route-native router failed: {error}"))
-        })
-        .map_err(|error| format!("failed to spawn route-native router: {error}"))?;
+    let handle = tokio::spawn(async move {
+        runtime
+            .serve_protocol_connections(max_connections)
+            .await
+            .map(|_| ())
+            .map_err(|error| format!("route-native router failed: {error}"))
+    });
 
     Ok(StartedRouteNativeRouter { address, handle })
 }

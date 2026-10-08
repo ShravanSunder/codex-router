@@ -40,34 +40,34 @@ pub(super) fn runtime_affinity_cache_uses_configured_session_pin_idle_ttl() {
     }
 }
 
-pub(super) fn open_read_only_after_shutdown(
-    runtime: &tokio::runtime::Runtime,
+pub(super) async fn open_read_only_after_shutdown(
     database_path: &Path,
     case: &str,
 ) -> AsyncSqliteStateStore {
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
     loop {
-        match runtime.block_on(AsyncSqliteStateStore::open_read_only(database_path)) {
+        match AsyncSqliteStateStore::open_read_only(database_path).await {
             Ok(state) => return state,
             Err(error)
                 if format!("{error}").contains("locked")
                     && std::time::Instant::now() < deadline =>
             {
-                std::thread::yield_now()
+                tokio::task::yield_now().await;
             }
             Err(error) => panic!("{case} read-only state unavailable: {error}"),
         }
     }
 }
 
-#[test]
-pub(super) fn proxy_shutdown_drains_claimed_refresh_or_preserves_unresolved_claim_at_bound() {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+pub(super) async fn proxy_shutdown_drains_claimed_refresh_or_preserves_unresolved_claim_at_bound() {
     for (case, drain_limit, complete_before_shutdown) in [
         ("completed", Duration::from_secs(2), true),
         ("bounded", Duration::from_millis(100), false),
     ] {
         let (router, account_id, database_path, _secrets) =
-            proxy_refresh_fixture(case, drain_limit);
+            proxy_refresh_fixture(case, drain_limit).await;
+        let refresh_factory = router.credential_factory.clone();
         let (entered_sender, entered_receiver) = mpsc::channel();
         let (release_sender, release_receiver) = mpsc::channel();
         let (completed_sender, completed_receiver) = mpsc::channel();
@@ -80,19 +80,14 @@ pub(super) fn proxy_shutdown_drains_claimed_refresh_or_preserves_unresolved_clai
             .credential_factory
             .resolver_for_state_with_refresh_client(router.credential_state_store.clone(), client);
         let account_for_task = account_id.clone();
-        let request_task = router
-            .runtime
-            .as_ref()
-            .expect("runtime")
-            .handle()
-            .spawn(async move {
-                resolver
-                    .resolve_provider_credentials(
-                        &account_for_task,
-                        codex_router_core::provider::Provider::Openai,
-                    )
-                    .await
-            });
+        let request_task = tokio::spawn(async move {
+            resolver
+                .resolve_provider_credentials(
+                    &account_for_task,
+                    codex_router_core::provider::Provider::Openai,
+                )
+                .await
+        });
         entered_receiver
             .recv_timeout(Duration::from_secs(2))
             .expect("provider should start");
@@ -100,8 +95,10 @@ pub(super) fn proxy_shutdown_drains_claimed_refresh_or_preserves_unresolved_clai
         let shutdown = CancellationToken::new();
         shutdown.cancel();
         let (stopped_sender, stopped_receiver) = mpsc::channel();
-        let shutdown_thread = std::thread::spawn(move || {
-            let result = router.serve_protocol_connections_until_cancelled(usize::MAX, shutdown);
+        let shutdown_task = tokio::spawn(async move {
+            let result = router
+                .serve_protocol_connections_until_cancelled(usize::MAX, shutdown)
+                .await;
             stopped_sender.send(result).expect("shutdown should report");
         });
         if complete_before_shutdown {
@@ -116,26 +113,16 @@ pub(super) fn proxy_shutdown_drains_claimed_refresh_or_preserves_unresolved_clai
             .expect("proxy shutdown should finish")
             .expect("proxy shutdown should succeed");
         assert_eq!(result, 0);
-        shutdown_thread.join().expect("shutdown thread");
-        if !complete_before_shutdown {
-            release_sender
-                .send(())
-                .expect("release provider after bound");
-        }
-        completed_receiver
-            .recv_timeout(Duration::from_secs(2))
-            .expect("provider should finish");
-        let read_runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("read runtime");
-        let read_state = open_read_only_after_shutdown(&read_runtime, &database_path, case);
-        let account = read_runtime
-            .block_on(read_state.load_account(&account_id))
+        shutdown_task.await.expect("shutdown task");
+        let read_state = open_read_only_after_shutdown(&database_path, case).await;
+        let account = read_state
+            .load_account(&account_id)
+            .await
             .expect("account read")
             .expect("account exists");
-        let maintenance = read_runtime
-            .block_on(read_state.load_credential_maintenance(&account_id))
+        let maintenance = read_state
+            .load_credential_maintenance(&account_id)
+            .await
             .expect("maintenance read")
             .expect("claim exists");
         if complete_before_shutdown {
@@ -146,9 +133,45 @@ pub(super) fn proxy_shutdown_drains_claimed_refresh_or_preserves_unresolved_clai
             assert_eq!(maintenance.state, CredentialMaintenanceState::InProgress);
             assert_eq!(maintenance.claimed_successor_generation, Some(2));
         }
-        read_runtime
-            .block_on(read_state.close())
-            .expect("read state close");
+        read_state.close().await.expect("read state close");
+
+        if complete_before_shutdown {
+            completed_receiver
+                .recv_timeout(Duration::from_secs(2))
+                .expect("provider should finish before shutdown completes");
+        } else {
+            release_sender
+                .send(())
+                .expect("release provider after observing the bounded drain");
+            completed_receiver
+                .recv_timeout(Duration::from_secs(2))
+                .expect("provider should finish after the bounded drain returns");
+            assert!(
+                refresh_factory
+                    .drain_refresh_tasks(Duration::from_secs(2))
+                    .await
+            );
+            let completed_state = open_read_only_after_shutdown(&database_path, case).await;
+            let completed_account = completed_state
+                .load_account(&account_id)
+                .await
+                .expect("completed account read")
+                .expect("account remains stored");
+            let completed_maintenance = completed_state
+                .load_credential_maintenance(&account_id)
+                .await
+                .expect("completed maintenance read")
+                .expect("claim remains stored");
+            assert_eq!(completed_account.active_credential_generation(), Some(2));
+            assert_eq!(
+                completed_maintenance.state,
+                CredentialMaintenanceState::Healthy
+            );
+            completed_state
+                .close()
+                .await
+                .expect("completed read state close");
+        }
     }
 }
 
@@ -200,10 +223,10 @@ impl SecretStore for HeldProxySecretWriteStore {
     }
 }
 
-#[test]
-pub(super) fn proxy_shutdown_waits_for_blocking_successor_write_before_returning() {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+pub(super) async fn proxy_shutdown_waits_for_blocking_successor_write_before_returning() {
     let (router, account_id, database_path, file_secrets) =
-        proxy_refresh_fixture("held-successor-write", Duration::from_secs(2));
+        proxy_refresh_fixture("held-successor-write", Duration::from_secs(2)).await;
     let (entered_sender, entered_receiver) = mpsc::channel();
     let (release_sender, release_receiver) = mpsc::channel();
     let secrets = HeldProxySecretWriteStore {
@@ -219,19 +242,14 @@ pub(super) fn proxy_shutdown_waits_for_blocking_successor_write_before_returning
             ImmediateProxyRefreshClient,
         );
     let account_for_task = account_id.clone();
-    let request_task = router
-        .runtime
-        .as_ref()
-        .expect("runtime")
-        .handle()
-        .spawn(async move {
-            resolver
-                .resolve_provider_credentials(
-                    &account_for_task,
-                    codex_router_core::provider::Provider::Openai,
-                )
-                .await
-        });
+    let request_task = tokio::spawn(async move {
+        resolver
+            .resolve_provider_credentials(
+                &account_for_task,
+                codex_router_core::provider::Provider::Openai,
+            )
+            .await
+    });
     entered_receiver
         .recv_timeout(Duration::from_secs(2))
         .expect("successor write should start");
@@ -239,8 +257,10 @@ pub(super) fn proxy_shutdown_waits_for_blocking_successor_write_before_returning
     let shutdown = CancellationToken::new();
     shutdown.cancel();
     let (stopped_sender, stopped_receiver) = mpsc::channel();
-    let shutdown_thread = std::thread::spawn(move || {
-        let result = router.serve_protocol_connections_until_cancelled(usize::MAX, shutdown);
+    let shutdown_task = tokio::spawn(async move {
+        let result = router
+            .serve_protocol_connections_until_cancelled(usize::MAX, shutdown)
+            .await;
         stopped_sender.send(result).expect("shutdown should report");
     });
     assert!(matches!(
@@ -255,21 +275,15 @@ pub(super) fn proxy_shutdown_waits_for_blocking_successor_write_before_returning
             .expect("shutdown should succeed"),
         0,
     );
-    shutdown_thread.join().expect("shutdown thread");
-    let read_runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("read runtime");
-    let read_state =
-        open_read_only_after_shutdown(&read_runtime, &database_path, "held successor write");
-    let account = read_runtime
-        .block_on(read_state.load_account(&account_id))
+    shutdown_task.await.expect("shutdown task");
+    let read_state = open_read_only_after_shutdown(&database_path, "held successor write").await;
+    let account = read_state
+        .load_account(&account_id)
+        .await
         .expect("account read")
         .expect("account exists");
     assert_eq!(account.active_credential_generation(), Some(2));
-    read_runtime
-        .block_on(read_state.close())
-        .expect("read state close");
+    read_state.close().await.expect("read state close");
 }
 
 #[test]

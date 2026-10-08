@@ -1,17 +1,17 @@
 use super::*;
 
-#[test]
-fn saved_switch_band_refresh_waits_for_active_turn_then_reconnects_to_healthy_peer() {
-    run_saved_switch_band_websocket_case(true);
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn saved_switch_band_refresh_waits_for_active_turn_then_reconnects_to_healthy_peer() {
+    run_saved_switch_band_websocket_case(true).await;
 }
 
-#[test]
-fn saved_switch_band_refresh_keeps_active_socket_when_no_healthy_peer_exists() {
-    run_saved_switch_band_websocket_case(false);
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn saved_switch_band_refresh_keeps_active_socket_when_no_healthy_peer_exists() {
+    run_saved_switch_band_websocket_case(false).await;
 }
 
 #[allow(clippy::result_large_err)]
-fn run_saved_switch_band_websocket_case(with_healthy_peer: bool) {
+async fn run_saved_switch_band_websocket_case(with_healthy_peer: bool) {
     let test_root = TestRoot::new("joined-graceful-floor-websocket");
     must_ok(fs::create_dir(test_root.path()));
     let state_path = test_root.path().join("state.sqlite");
@@ -78,18 +78,16 @@ fn run_saved_switch_band_websocket_case(with_healthy_peer: bool) {
         9,
         "graceful-floor-access",
     );
-    test_async_runtime().block_on(async {
-        let mutation = must_ok(AsyncWeeklyQuotaFloorMutationStore::open(&state_path).await);
-        must_ok(
-            mutation
-                .set_weekly_quota_floor_by_account_id(
-                    &floor_account_id,
-                    Some(must_ok(WeeklyQuotaFloorBasisPoints::new(500))),
-                )
-                .await,
-        );
-        mutation.close().await;
-    });
+    let mutation = must_ok(AsyncWeeklyQuotaFloorMutationStore::open(&state_path).await);
+    must_ok(
+        mutation
+            .set_weekly_quota_floor_by_account_id(
+                &floor_account_id,
+                Some(must_ok(WeeklyQuotaFloorBasisPoints::new(500))),
+            )
+            .await,
+    );
+    mutation.close().await;
 
     let upstream_listener = must_ok(TcpListener::bind("127.0.0.1:0"));
     let upstream_address = must_ok(upstream_listener.local_addr());
@@ -155,11 +153,16 @@ fn run_saved_switch_band_websocket_case(with_healthy_peer: bool) {
         secret_root.clone(),
     )
     .with_quota_clock(1_100, 300);
-    let router = must_ok(LoopbackRouterRuntime::start(config, secrets.clone()));
+    let router = must_ok(LoopbackRouterRuntime::start(config, secrets.clone()).await);
     let router_port = router.local_addr().port();
     let floor_notifier = router.websocket_quota_floor_notifier();
-    let router_thread = thread::spawn(move || {
-        router.serve_protocol_connections(if with_healthy_peer { 2 } else { 1 })
+    let router_task = tokio::spawn(async move {
+        router
+            .serve_protocol_connections(if with_healthy_peer { 2 } else { 1 })
+            .await
+            .unwrap_or_else(|error| {
+                panic!("router runtime should serve websocket connections: {error}")
+            });
     });
 
     let mut first_client = connect_tokenless_websocket_with_retry(router_port);
@@ -184,19 +187,22 @@ fn run_saved_switch_band_websocket_case(with_healthy_peer: bool) {
         RouterCredentialResolver::new(&state, &secrets, NoopCredentialRefreshClient, 1_100);
     let provider = JoinedFloorCrossingProvider { floor_account_id };
     let mut output = Vec::new();
-    must_ok(refresh_quota_store_paths_with_floor_observer(
-        &mut output,
-        &state_path,
-        &secret_root,
-        "https://chatgpt.com/backend-api".to_owned(),
-        &resolver,
-        &provider,
-        QuotaRefreshObservationContext {
-            observed_unix_seconds: 1_200,
-            schedule: crate::quota::QuotaRefreshSchedule::Manual,
-            weekly_floor_observer: Some(&floor_notifier),
-        },
-    ));
+    let _report = must_ok(
+        refresh_quota_store_paths_with_dependencies_and_floor_notifier_async(
+            &mut output,
+            &state_path,
+            &secret_root,
+            "https://chatgpt.com/backend-api".to_owned(),
+            &resolver,
+            &provider,
+            QuotaRefreshObservationContext {
+                observed_unix_seconds: 1_200,
+                schedule: crate::quota::QuotaRefreshSchedule::Manual,
+                weekly_floor_observer: Some(&floor_notifier),
+            },
+        )
+        .await,
+    );
     must_ok(first_client.send(Message::text(r#"{"type":"response.create","turn":2}"#)));
     must_ok(finish_turn_sender.send(()));
     assert_eq!(
@@ -231,8 +237,6 @@ fn run_saved_switch_band_websocket_case(with_healthy_peer: bool) {
         must_ok(completion_ack_sender.send(()));
         drop(first_client);
     }
-    must_ok(must_ok(
-        router_thread.join().map_err(|_| "router thread failed"),
-    ));
+    must_ok(router_task.await.map_err(|_| "router task failed"));
     must_ok(upstream_thread.join().map_err(|_| "upstream thread failed"));
 }

@@ -1,5 +1,63 @@
 use super::*;
 
+async fn wait_for_upkeep_generation_async(
+    state_path: &Path,
+    account_id: &AccountId,
+    expected_generation: u64,
+) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    let state = loop {
+        match codex_router_state::sqlite::AsyncSqliteStateStore::open_read_only(state_path).await {
+            Ok(state) => break state,
+            Err(error)
+                if format!("{error}").contains("locked")
+                    && tokio::time::Instant::now() < deadline =>
+            {
+                tokio::task::yield_now().await;
+            }
+            Err(error) => panic!("read-only upkeep observation failed: {error}"),
+        }
+    };
+
+    loop {
+        match state.load_account(account_id).await {
+            Ok(Some(account))
+                if account.active_credential_generation() == Some(expected_generation) =>
+            {
+                state.close().await.unwrap_or_else(|error| {
+                    panic!("upkeep observation state should close: {error}")
+                });
+                return;
+            }
+            Ok(_) => {}
+            Err(error) if format!("{error}").contains("locked") => {}
+            Err(error) => panic!("upkeep account observation failed: {error}"),
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "upkeep account should reach credential generation {expected_generation}"
+        );
+        tokio::task::yield_now().await;
+    }
+}
+
+#[test]
+fn synchronous_serve_dispatch_returns_async_dispatch_error_before_opening_storage() {
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let error = run_with_io(
+        [OsString::from("serve")],
+        &CliContext::new(Vec::new()),
+        &mut stdout,
+        &mut stderr,
+    )
+    .expect_err("Serve must use the caller's async runtime");
+
+    assert!(matches!(error, CliError::ServeRequiresAsyncDispatch));
+    assert!(stdout.is_empty());
+    assert!(stderr.is_empty());
+}
+
 #[test]
 fn serve_provisions_local_token_and_keeps_codex_optional() {
     let test_root = TestRoot::new("serve-command");
@@ -120,7 +178,59 @@ fn serve_provisions_local_token_and_keeps_codex_optional() {
 }
 
 #[test]
-fn serve_starts_and_codex_route_fails_closed_for_unavailable_pooled_stores() {
+fn serve_with_background_quota_refresh_enabled_uses_async_dispatch() {
+    let test_root = TestRoot::new("serve-background-quota-enabled");
+    must_ok(fs::create_dir(test_root.path()));
+    let state_path = test_root.path().join("state.sqlite");
+    let secret_root = test_root.path().join("secrets");
+    let router_port = reserve_loopback_port();
+    let router_port_text = router_port.to_string();
+    let health_client_thread =
+        thread::spawn(move || {
+            let mut client = connect_with_retry(router_port);
+            must_ok(client.write_all(
+                b"GET /healthz HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+            ));
+            must_ok(client.shutdown(Shutdown::Write));
+            let mut response = String::new();
+            must_ok(client.read_to_string(&mut response));
+            response
+        });
+
+    let output = run_cli(
+        [
+            "codex-router",
+            "serve",
+            "--listen-host",
+            "127.0.0.1",
+            "--port",
+            router_port_text.as_str(),
+            "--state-db",
+            path_to_str(&state_path),
+            "--secret-root",
+            path_to_str(&secret_root),
+            "--upstream-base-url",
+            "http://127.0.0.1:1/v1",
+            "--max-connections",
+            "1",
+        ],
+        CliContext::new(Vec::new()),
+    );
+
+    assert!(output.stderr.is_empty());
+    assert!(
+        output
+            .stdout
+            .contains(format!("listening: 127.0.0.1:{router_port}\n").as_str())
+    );
+    let health_response = health_client_thread
+        .join()
+        .unwrap_or_else(|error| panic!("health client should join: {error:?}"));
+    assert!(health_response.starts_with("HTTP/1.1 200 OK\r\n"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn serve_starts_and_codex_route_fails_closed_for_unavailable_pooled_stores() {
     #[derive(Clone, Copy)]
     enum UnavailableStoreKind {
         KeyUnavailable,
@@ -199,20 +309,22 @@ fn serve_starts_and_codex_route_fails_closed_for_unavailable_pooled_stores() {
                 br#"{"model":"gpt-5","serve":true}"#,
             )
         });
-        let serve_thread = thread::spawn(move || {
+        let serve_task = tokio::spawn(async move {
             let mut stdout = Vec::new();
             let result = run_serve_command_with_upkeep_start(
                 &mut stdout,
                 command,
                 credential_store,
                 credential_upkeep_worker::start_background_credential_upkeep_worker,
-            );
+            )
+            .await;
             (result, stdout)
         });
 
         let response = must_ok(client_thread.join().map_err(|_| "client thread failed"));
-        let (serve_result, stdout) =
-            must_ok(serve_thread.join().map_err(|_| "serve thread failed"));
+        let (serve_result, stdout) = serve_task
+            .await
+            .unwrap_or_else(|error| panic!("serve task should join: {error}"));
         must_ok(serve_result);
 
         assert!(String::from_utf8_lossy(&stdout).contains("listening: 127.0.0.1:"));
@@ -482,9 +594,8 @@ impl CredentialRefreshClient for LoopbackUpkeepOAuthClient {
     }
 }
 
-#[test]
-fn serve_startup_maintains_idle_enabled_oauth_account_across_simulated_days() {
-    use super::credential_upkeep_tests::wait_for_upkeep_generation;
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn serve_startup_maintains_idle_enabled_oauth_account_across_simulated_days() {
     use crate::credential_upkeep_worker::start_background_credential_upkeep_worker_with_client_and_clock;
 
     let test_root = TestRoot::new("serve-idle-oauth-upkeep");
@@ -620,7 +731,7 @@ fn serve_startup_maintains_idle_enabled_oauth_account_across_simulated_days() {
     let credential_store = must_ok(
         codex_router_secret_store::test_support::open_encrypted_credential_store(&secret_root),
     );
-    let serve_thread = thread::spawn(move || {
+    let serve_task = tokio::spawn(async move {
         let mut stdout = Vec::new();
         let result = run_serve_command_with_upkeep_start(
             &mut stdout,
@@ -637,7 +748,8 @@ fn serve_startup_maintains_idle_enabled_oauth_account_across_simulated_days() {
                 must_ok(wake_sender.send(worker.wake_handle_for_test()));
                 Ok(worker)
             },
-        );
+        )
+        .await;
         (result, stdout)
     });
     let wake_handle = must_ok(wake_receiver.recv_timeout(Duration::from_secs(2)));
@@ -645,14 +757,14 @@ fn serve_startup_maintains_idle_enabled_oauth_account_across_simulated_days() {
         must_ok(oauth_call_receiver.recv_timeout(Duration::from_secs(2))),
         1
     );
-    wait_for_upkeep_generation(&state_path, &enabled_id, 2);
+    wait_for_upkeep_generation_async(&state_path, &enabled_id, 2).await;
     clock.store(1_000 + 2 * 86_400, Ordering::SeqCst);
     wake_handle.wake();
     assert_eq!(
         must_ok(oauth_call_receiver.recv_timeout(Duration::from_secs(2))),
         2
     );
-    wait_for_upkeep_generation(&state_path, &enabled_id, 3);
+    wait_for_upkeep_generation_async(&state_path, &enabled_id, 3).await;
 
     let mut health_client = must_ok(TcpStream::connect(("127.0.0.1", router_port)));
     must_ok(
@@ -662,7 +774,9 @@ fn serve_startup_maintains_idle_enabled_oauth_account_across_simulated_days() {
     let mut health_response = String::new();
     must_ok(health_client.read_to_string(&mut health_response));
     assert!(health_response.starts_with("HTTP/1.1 200 OK"));
-    let (serve_result, stdout) = must_ok(serve_thread.join().map_err(|_| "serve thread failed"));
+    let (serve_result, stdout) = serve_task
+        .await
+        .unwrap_or_else(|error| panic!("serve task should join: {error}"));
     must_ok(serve_result);
     assert!(String::from_utf8_lossy(&stdout).contains("listening: 127.0.0.1:"));
     must_ok(oauth_thread.join().map_err(|_| "OAuth thread failed"));
