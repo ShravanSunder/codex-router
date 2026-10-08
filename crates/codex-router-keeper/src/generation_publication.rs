@@ -104,7 +104,8 @@ impl GenerationEndpointPublisher {
             .ok_or(PublicationError::OwnershipLost)?;
         let mut temporary = OsString::from(".");
         temporary.push(name);
-        temporary.push(".publication");
+        temporary.push(".publication.");
+        temporary.push(uuid::Uuid::now_v7().to_string());
         Ok(self.endpoint.as_path().with_file_name(temporary))
     }
     // The plan's narrow filesystem seam enables real-node ordinary rename failure proof.
@@ -131,3 +132,7 @@ impl GenerationEndpointPublisher {
 #[cfg(test)]
 #[path = "generation_publication_tests.rs"]
 mod generation_publication_tests;
+
+#[cfg(test)]
+#[path = "generation_publication_crash_tests.rs"]
+mod generation_publication_crash_tests;

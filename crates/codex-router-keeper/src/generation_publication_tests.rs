@@ -1,8 +1,8 @@
 use super::*;
 #[path = "../tests/support/publication_exchange.rs"]
-mod publication_exchange;
+pub(super) mod publication_exchange;
 #[path = "../tests/support/publication_fixture.rs"]
-mod publication_fixture;
+pub(super) mod publication_fixture;
 use publication_exchange::{connect, request_reply};
 use publication_fixture::{NativeSocketFixture, TestResult, private_directory};
 #[tokio::test]
@@ -30,8 +30,12 @@ async fn ordinary_rename_failure_preserves_current_reply_and_cleans_only_owned_t
     let blocked = directory.path().join("not-a-symlink");
     fs::create_dir(&blocked)?;
     fs::write(blocked.join("foreign"), b"do not replace")?;
+    let mut attempted_staging = None;
     let result = publisher.publish_with_rename(&next.generation, &next.alias, |source, _target| {
-        if fs::read_link(source)? != Path::new("gen-11111111-2.sock") {
+        attempted_staging = Some(source.to_owned());
+        if source.parent() != Some(directory.path())
+            || fs::read_link(source)? != Path::new("gen-11111111-2.sock")
+        {
             return Err(std::io::Error::other("temporary target changed"));
         }
         // Exercise an actual filesystem rename failure, with the real prepared temporary node.
@@ -39,7 +43,10 @@ async fn ordinary_rename_failure_preserves_current_reply_and_cleans_only_owned_t
     });
     if !matches!(result, Err(PublicationError::Filesystem(_)))
         || fs::read_link(endpoint.as_path())? != Path::new("gen-11111111-1.sock")
-        || publisher.temporary_path()?.symlink_metadata().is_ok()
+        || attempted_staging
+            .ok_or("rename did not inspect its actual staging node")?
+            .symlink_metadata()
+            .is_ok()
         || fs::read(blocked.join("foreign"))? != b"do not replace"
     {
         return Err("failed rename changed committed/foreign node or leaked temporary".into());

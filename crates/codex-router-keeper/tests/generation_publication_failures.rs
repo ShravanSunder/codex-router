@@ -35,13 +35,6 @@ async fn candidate_mismatch_absence_regular_file_and_occupied_temp_preserve_answ
     }
     std::fs::remove_file(next.alias.as_path())?;
     std::os::unix::fs::symlink(&physical, next.alias.as_path())?;
-    let temporary = directory.path().join(".app-server.sock.publication");
-    std::fs::write(&temporary, b"occupied foreign temporary")?;
-    if publisher.publish(&next.generation, &next.alias).is_ok()
-        || std::fs::read(&temporary)? != b"occupied foreign temporary"
-    {
-        return Err("occupied temporary overwritten/deleted".into());
-    }
     let after = std::fs::symlink_metadata(endpoint.as_path())?;
     if (before.dev(), before.ino()) != (after.dev(), after.ino())
         || std::fs::read_link(endpoint.as_path())? != Path::new("gen-11111111-1.sock")
@@ -52,6 +45,24 @@ async fn candidate_mismatch_absence_regular_file_and_occupied_temp_preserve_answ
     if request_reply(&old).await? != *b"N1" {
         return Err("failed candidate broke predecessor reply".into());
     }
+    let temporary = directory.path().join(".app-server.sock.publication");
+    std::fs::write(&temporary, b"occupied foreign temporary")?;
+    let foreign_before = std::fs::symlink_metadata(&temporary)?;
+    publisher.publish(&next.generation, &next.alias)?;
+    let foreign_after = std::fs::symlink_metadata(&temporary)?;
+    let new = connect(endpoint.as_path()).await?;
+    if std::fs::read_link(endpoint.as_path())? != Path::new("gen-11111111-2.sock")
+        || request_reply(&new).await? != *b"N2"
+        || request_reply(&old).await? != *b"N1"
+        || (foreign_before.dev(), foreign_before.ino())
+            != (foreign_after.dev(), foreign_after.ino())
+        || std::fs::read(&temporary)? != b"occupied foreign temporary"
+    {
+        return Err(
+            "foreign staging blocked publication or changed owned/foreign replies and nodes".into(),
+        );
+    }
+    drop(new);
     drop(old);
     first.finish().await?;
     next.finish().await?;
