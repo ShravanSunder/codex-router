@@ -114,7 +114,9 @@ impl TursoConnection {
 
         while let Some(depth) = self.transaction_state.pop_pending_rollback() {
             let sql = sqlx_core::transaction::rollback_ansi_transaction_sql(depth);
-            if let Err(error) = self.raw().execute(sql.as_str(), ()).await {
+            let rollback = self.raw().execute(sql.as_str(), ()).await;
+            self.forget_cached_statements();
+            if let Err(error) = rollback {
                 if depth == 1 && rollback_error_is_inactive_transaction(&error) {
                     continue;
                 }
@@ -186,8 +188,15 @@ impl TursoConnection {
     /// The engine reprepares a stale statement only when it first steps, after the driver and
     /// the SDK have already taken its column list, so a statement cached before a schema change
     /// (a local migration, a pulled one, another connection's) would keep returning the old
-    /// result shape. The schema cookie changes with every schema change; comparing it before
-    /// reusing the cache keeps cached statements current.
+    /// result shape. The schema cookie changes with every schema change, so it is compared
+    /// before every single statement this driver prepares, cached or not.
+    ///
+    /// The cookie only grows, except across a rollback: that restores an earlier schema and its
+    /// cookie, and a later change can then reach a cookie the cache recorded for a schema that
+    /// no longer exists. Whatever can roll back between two comparisons therefore forgets the
+    /// cache instead ([`Self::forget_cached_statements`]): the transaction manager's rollbacks,
+    /// deferred rollbacks and multi-statement batches. A rollback written as a single statement
+    /// is seen by the comparison before the next one.
     pub(crate) async fn discard_statements_prepared_for_another_schema(
         &mut self,
     ) -> Result<(), Error> {
@@ -200,6 +209,12 @@ impl TursoConnection {
             self.statements_schema_version = Some(schema_version);
         }
         Ok(())
+    }
+
+    /// Drops every cached statement and the schema cookie they were checked against
+    pub(crate) fn forget_cached_statements(&mut self) {
+        self.statements.clear();
+        self.statements_schema_version = None;
     }
 
     async fn read_schema_version(&mut self) -> Result<i64, Error> {
@@ -287,8 +302,7 @@ impl Connection for TursoConnection {
     where
         Self::Database: sqlx_core::database::HasStatementCache,
     {
-        self.statements.clear();
-        self.statements_schema_version = None;
+        self.forget_cached_statements();
         future::ready(Ok(()))
     }
 }

@@ -49,10 +49,11 @@ impl TursoConnection {
                 return Err(TursoAdapterError::BatchArgumentsUnsupported.into());
             }
 
-            self.raw()
-                .execute_batch(sql.as_str())
-                .await
-                .map_err(map_turso_error)?;
+            let batch = self.raw().execute_batch(sql.as_str()).await;
+            // A batch can roll back and change the schema between statements that no cookie
+            // comparison sees, even when it fails part-way.
+            self.forget_cached_statements();
+            batch.map_err(map_turso_error)?;
             drop(logger);
             let batch_result: Either<TursoQueryResult, TursoRow> =
                 Either::Left(TursoQueryResult::default());
@@ -115,8 +116,15 @@ impl TursoConnection {
         sql: SqlStr,
         persistent: bool,
     ) -> Result<turso::Statement, Error> {
-        if persistent && let Some(statement) = self.prepare_sql(sql.clone()).await?.raw() {
-            return Ok(statement);
+        if persistent {
+            if let Some(statement) = self.prepare_sql(sql.clone()).await?.raw() {
+                return Ok(statement);
+            }
+        } else {
+            // An unprepared statement can follow a written rollback, so it compares the cookie
+            // as a cached one does.
+            self.discard_statements_prepared_for_another_schema()
+                .await?;
         }
 
         self.raw()
