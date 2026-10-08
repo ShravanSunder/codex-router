@@ -25,3 +25,7 @@ mod provider_id;
 pub use provider_id::{ProviderId, ProviderIdError};
 mod link_role;
 pub use link_role::LinkRole;
+mod link_approval_outcome;
+pub use link_approval_outcome::LinkApprovalOutcome;
+mod link_decision;
+pub use link_decision::LinkDecision;

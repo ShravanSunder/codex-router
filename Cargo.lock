@@ -3388,6 +3388,7 @@ version = "0.1.74"
 dependencies = [
  "serde",
  "serde_json",
+ "session-event-model",
  "thiserror 2.0.18",
  "uuid",
 ]
