@@ -247,3 +247,28 @@ intact, the batch path skipped the comparison, and so did unprepared single stat
   (local unpushed schema changes replayed over a remote one); not reproduced, not handled
   beyond the comparison before each statement.
 
+### 2026-10-08 — F1 follow-up: cancellation-safe invalidation; Sync risk narrowed
+
+Sol's follow-up on `2993c5d1` closed the rollback/cookie-reuse sequence and its variants and
+found the forget ran only after the batch or rollback returned: a future dropped part-way
+skipped it while an already-committed prefix survived.
+
+- **Fix:** the batch, the transaction manager's rollback and each deferred rollback forget the
+  cache before they start. The future holds the connection exclusively, so nothing is cached
+  during it and no forget is needed afterwards.
+- **Probe (temporary, removed):** an uncontended batch `ROLLBACK; ALTER …; UPDATE …; INSERT …`
+  completed in a single poll. Turso 0.8.1 yields only while a statement waits on a lock; the
+  write lock is the only lock that waits, and the schema-changing prefix needs it too, so no
+  other connection can take it between the prefix and a later statement at a deterministic
+  point. A busy `wal_checkpoint(TRUNCATE)` returns a busy row rather than waiting; ATTACH is
+  behind an experimental flag this driver does not expose.
+- **Test at the boundary that is deterministic:** another connection holds the write lock; the
+  batch waits on it, is polled three times by hand (pending each time), and is dropped. Right
+  after the drop the cache is empty (before the fix: 2 entries), and `describe` shows none of
+  the batch ran. The full "committed prefix, then wait" oracle is not reproducible without a
+  thread race; recorded in design §12.5.
+- **Sync:** Sol narrowed the earlier note: ordinary page application writes
+  `max(current, pre-apply) + 1` before replay, but replace-base, logical-stream and raw-page
+  replay paths were not shown to keep that bump. Recorded in §12.5 as an open, unverified
+  integration risk; `sync` is opt-in and unused by Router.
+
