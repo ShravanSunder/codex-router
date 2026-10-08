@@ -61,10 +61,13 @@ impl TransactionManager for TursoTransactionManager {
         }
 
         let sql = rollback_ansi_transaction_sql(depth);
-        let rollback = conn.raw().execute(sql.as_str(), ()).await;
         // The rollback may restore an earlier schema whose cookie a later change reuses.
+        // Forgetting before it starts also covers a rollback that fails or is dropped.
         conn.forget_cached_statements();
-        rollback.map_err(map_turso_error)?;
+        conn.raw()
+            .execute(sql.as_str(), ())
+            .await
+            .map_err(map_turso_error)?;
         conn.decrement_transaction_depth();
         Ok(())
     }

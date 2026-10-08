@@ -114,9 +114,8 @@ impl TursoConnection {
 
         while let Some(depth) = self.transaction_state.pop_pending_rollback() {
             let sql = sqlx_core::transaction::rollback_ansi_transaction_sql(depth);
-            let rollback = self.raw().execute(sql.as_str(), ()).await;
             self.forget_cached_statements();
-            if let Err(error) = rollback {
+            if let Err(error) = self.raw().execute(sql.as_str(), ()).await {
                 if depth == 1 && rollback_error_is_inactive_transaction(&error) {
                     continue;
                 }
@@ -195,8 +194,9 @@ impl TursoConnection {
     /// cookie, and a later change can then reach a cookie the cache recorded for a schema that
     /// no longer exists. Whatever can roll back between two comparisons therefore forgets the
     /// cache instead ([`Self::forget_cached_statements`]): the transaction manager's rollbacks,
-    /// deferred rollbacks and multi-statement batches. A rollback written as a single statement
-    /// is seen by the comparison before the next one.
+    /// deferred rollbacks and multi-statement batches. Each forgets before it starts, so a
+    /// future dropped part-way cannot skip it. A rollback written as a single statement is seen
+    /// by the comparison before the next one.
     pub(crate) async fn discard_statements_prepared_for_another_schema(
         &mut self,
     ) -> Result<(), Error> {

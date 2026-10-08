@@ -4,6 +4,9 @@
 //! already taken the column list, so a statement cached before a schema change would otherwise
 //! keep returning the old shape.
 
+use std::time::Duration;
+
+use futures_util::FutureExt;
 use sqlx_core::{
     column::Column,
     connection::{ConnectOptions, Connection},
@@ -278,4 +281,51 @@ async fn a_column_rolled_back_inside_a_batch_is_not_reused() -> sqlx_core::Resul
     // Assert
     assert_items_have_the_title_column(&mut transaction).await?;
     transaction.commit().await
+}
+
+#[tokio::test]
+async fn a_batch_dropped_while_it_waits_on_a_lock_has_already_forgotten_the_cache()
+-> sqlx_core::Result<()> {
+    // Arrange: another connection holds the write lock the batch's first statement needs. In
+    // Turso 0.8.1 a batch yields only while a statement waits on a lock, so this is the boundary
+    // where a caller can drop it part-way.
+    let directory = tempfile::tempdir()?;
+    let options = TursoConnectOptions::new()
+        .filename(directory.path().join("cancelled.db"))
+        .create_if_missing(true);
+    let mut connection = options
+        .clone()
+        .busy_timeout(Duration::from_secs(60))
+        .connect()
+        .await?;
+    let mut lock_holder = options.connect().await?;
+    (&mut connection)
+        .execute("CREATE TABLE items (id INTEGER PRIMARY KEY)")
+        .await?;
+    (&mut connection)
+        .execute("INSERT INTO items (id) VALUES (1)")
+        .await?;
+    query::<Turso>(SELECT_ALL)
+        .fetch_all(&mut connection)
+        .await?;
+    let cached_before = connection.cached_statements_size();
+    (&mut lock_holder).execute("BEGIN IMMEDIATE").await?;
+
+    // Act: poll the batch by hand while it waits on the lock, then drop it
+    let waited_on_the_lock = {
+        let mut batch = (&mut connection).execute(REPLACE_LABEL_WITH_TITLE);
+        (0..3).all(|_| (&mut batch).now_or_never().is_none())
+    };
+    let cached_after_drop = connection.cached_statements_size();
+    (&mut lock_holder).execute("ROLLBACK").await?;
+    let describe = (&mut connection)
+        .describe(SqlStr::from_static(SELECT_ALL))
+        .await?;
+
+    // Assert: none of the batch ran, and the cache was already forgotten when it was dropped
+    assert!(cached_before > 0);
+    assert!(waited_on_the_lock, "the batch waits on the held write lock");
+    assert_eq!(cached_after_drop, 0);
+    assert_eq!(described_column_names(&describe), ["id"]);
+    Ok(())
 }

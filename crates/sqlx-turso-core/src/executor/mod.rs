@@ -49,11 +49,14 @@ impl TursoConnection {
                 return Err(TursoAdapterError::BatchArgumentsUnsupported.into());
             }
 
-            let batch = self.raw().execute_batch(sql.as_str()).await;
             // A batch can roll back and change the schema between statements that no cookie
-            // comparison sees, even when it fails part-way.
+            // comparison sees. Forgetting before it starts also covers a batch that fails or is
+            // dropped part-way.
             self.forget_cached_statements();
-            batch.map_err(map_turso_error)?;
+            self.raw()
+                .execute_batch(sql.as_str())
+                .await
+                .map_err(map_turso_error)?;
             drop(logger);
             let batch_result: Either<TursoQueryResult, TursoRow> =
                 Either::Left(TursoQueryResult::default());
