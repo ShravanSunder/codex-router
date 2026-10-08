@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT request_id, record_json, created_at, typeof(request_id) AS \"request_storage!: String\", typeof(record_json) AS \"record_storage!: String\", typeof(created_at) AS \"timestamp_storage!: String\" FROM interaction_history_records ORDER BY request_id",
+  "query": "SELECT request_id, record_json, created_at, typeof(request_id) AS \"request_storage!: String\", typeof(record_json) AS \"record_storage!: String\", typeof(created_at) AS \"timestamp_storage!: String\" FROM typed_interaction_history ORDER BY request_id",
   "describe": {
     "columns": [
       {
@@ -9,7 +9,7 @@
         "type_info": "Text",
         "origin": {
           "Table": {
-            "table": "interaction_history_records",
+            "table": "typed_interaction_history",
             "name": "request_id"
           }
         }
@@ -20,7 +20,7 @@
         "type_info": "Text",
         "origin": {
           "Table": {
-            "table": "interaction_history_records",
+            "table": "typed_interaction_history",
             "name": "record_json"
           }
         }
@@ -31,7 +31,7 @@
         "type_info": "Text",
         "origin": {
           "Table": {
-            "table": "interaction_history_records",
+            "table": "typed_interaction_history",
             "name": "created_at"
           }
         }
@@ -67,5 +67,5 @@
       null
     ]
   },
-  "hash": "62063788692ef6e57c8e6859a12c8152f376fb7420866ede6ea5fe9d7fe1be78"
+  "hash": "04948b063439dcc73e93a388733d567a69b08233dbb07581207eee657f5c538a"
 }

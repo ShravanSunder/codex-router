@@ -1,0 +1,27 @@
+# Typed interaction storage contract
+
+Basis: [Requirements](requirements.md), U1–U5. The storage transition must preserve the broker's observable behavior.
+
+## Entities
+
+| Entity | Identity, relationships and invariants | Observable states / basis |
+|---|---|---|
+| E1 Typed interaction | One request id identifies one approval, refused approval or Question. It has one requester and one approver; an approval/Question may not approve itself. Offered choices and field/answer validation retain their existing meaning. | Approval: pending → decided or cancelled. Question: pending → answered, declined or cancelled. Refused approval is terminal. U1, U3. |
+| E2 Creation time | One immutable UTC creation instant belongs to each E1; settlement does not reset it. An undated old record gets the first successful import instant. | Retained at exactly 30 days; eligible strictly after 30 days. U3. |
+| E3 Recovery source | The original typed JSON file, including dated or historically undated records, is a recovery snapshot. It has zero or more E1 records keyed by their exact request ids. The legacy approval file is a distinct protected source. | Not imported, imported, or changed after import. U2, U4. |
+
+## Obligations and proof
+
+| Obligation | Observable contract and failure expectation | Basis | Proof modality |
+|---|---|---|---|
+| R1 Durable typed history | Successful E1 mutations must survive close/reopen in `interaction.sqlite`. A failed transaction must leave the previously committed set intact. | U1; E1,E2 | Real SQLite mutation, reopen and failure-state inspection. |
+| R2 Atomic import | On first cutover, every valid E3 entry must be imported together or none must become authoritative. Preserve E2; stamp undated entries once. A rolled-back first import must remain retryable without deleting the resulting empty database file. Do not rewrite/delete E3 or import the legacy approval file. | U2; E1,E2,E3 | Populated dated/undated import, rollback/retry, idempotent reopen and byte comparison. |
+| R3 Invalid data | Invalid JSON, duplicate source keys, key/request-id mismatch, invalid domain variants/identities/answers/timestamps, corrupt rows, unknown database/schema or migration history must fail closed. No empty-history fallback or silent coercion. | U2; E1,E2,E3 | Negative fixture table, corrupt database/row and unknown-schema inspection. |
+| R4 Broker semantics | Preserve E1 admission, exact approver checks, offered choices, persistent-choice acknowledgement, single settlement and cancellation causes. Questions deliver the validated answer before later history persistence; approval decisions persist before response delivery. A later Question-history failure does not retract its sent answer. | U3; E1 | Existing broker tests plus actual SQLite write failure at both ordering boundaries. |
+| R5 Restart and retention | Ordinary startup must durably cancel pending approvals and Questions as `hostRestarted`, without replay; terminal records stay terminal. Prune E1 strictly older than 30 days from E2, with existing bounded batch and ordering. | U3; E1,E2 | Populated broker reopen and exact-cutoff/batch/reopen proof. |
+| R6 Writer and recovery safety | SQLite writers must not silently lose committed mutations. An unacknowledged commit must not require a Host restart before the same store can accept its next valid mutation. Cutover requires the old JSON writer to be stopped; if E3 changes after import, later startup must reject divergence rather than merge, overwrite or re-import it. Operators must distinguish invalid source, invalid database state and recovery-source divergence through sanitized startup diagnostics. The original E3 is not a current rollback image after SQLite receives new writes; recovery must preserve the database and divergent source. | U4; E1,E3 | Concurrent mutation/settlement and commit-before-cache next-mutation tests; reason-specific startup diagnostics; changed-source rejection; documented non-destructive recovery boundary. |
+| R7 Bounded delivery | Exercise actual SQLite import/reopen/corruption/concurrency/settlement and preserved broker behavior; keep required formatting, checked-query metadata and applicable compiler/lint/test gates. Obtain independent review and a coherent local checkpoint under the repository signing policy before this lane's owner-requested merge-ready non-draft PR, left unmerged. No merge, release or production change. | U5; E1,E2,E3 | Scoped real-path tests, quality receipts, independent assessment, explicit commit-signature evidence and actual PR/head/check evidence. |
+
+Public approval/Question schemas and methods remain unchanged. Existing errors for unavailable history and invalid interaction operations remain the response failure contract; startup diagnostics supply the operator distinction without new public error codes. Aborted callers do not authorize replay, native decisions or automatic answers. This task makes no callback/Question-work lifetime guarantee beyond the current broker; the fixes design's Question caller-lifetime decision remains separate.
+
+Examples: an answered Question with a 20-day-old creation instant remains answered with that instant after import. A pending approval becomes `hostRestarted` on ordinary startup. Two attempts to settle one pending interaction cannot both succeed. A JSON source modified by an older release after successful import prevents a later silent SQLite startup.

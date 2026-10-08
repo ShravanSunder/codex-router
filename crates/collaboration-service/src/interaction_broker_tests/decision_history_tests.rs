@@ -460,7 +460,7 @@ async fn typed_interaction_rejects_self_approver_and_corrupt_stored_rows() {
     )
     .await
     .expect("owned history observer");
-    sqlx::query("INSERT INTO interaction_history_records VALUES ('bad', '{\"requestId\":\"other\"}', '2026-10-01T00:00:00.000000000Z')")
+    sqlx::query("INSERT INTO typed_interaction_history VALUES ('bad', '{\"requestId\":\"other\"}', '2026-10-01T00:00:00.000000000Z')")
         .execute(&mut observer).await.expect("corrupt actual SQLite record");
     let reload = ServiceInteractionBroker::load(
         broker.service_id.clone(),

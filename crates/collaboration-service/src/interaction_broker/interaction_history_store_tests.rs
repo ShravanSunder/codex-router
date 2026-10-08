@@ -99,7 +99,7 @@ async fn sqlite_import_reopens_records_without_rewriting_original_json() {
     let mut observer = <sqlx::SqliteConnection as sqlx::Connection>::connect_with(&options)
         .await
         .expect("independent observer");
-    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM interaction_history_records")
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM typed_interaction_history")
         .fetch_one(&mut observer)
         .await
         .expect("durable rows");
@@ -237,7 +237,7 @@ async fn load_stamps_undated_entries_and_prunes_strictly_after_thirty_days() {
     .await
     .expect("SQLite observer");
     let persisted: String = sqlx::query_scalar(
-        "SELECT created_at FROM interaction_history_records WHERE request_id='new-request'",
+        "SELECT created_at FROM typed_interaction_history WHERE request_id='new-request'",
     )
     .fetch_one(&mut observer)
     .await

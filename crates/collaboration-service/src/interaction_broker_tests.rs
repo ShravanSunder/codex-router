@@ -415,7 +415,7 @@ async fn human_and_old_provider_approval_rows_stay_detailed_only() {
     .await
     .expect("owned SQLite history");
     let record_json: String = sqlx::query_scalar(
-        "SELECT record_json FROM interaction_history_records WHERE request_id='old-row'",
+        "SELECT record_json FROM typed_interaction_history WHERE request_id='old-row'",
     )
     .fetch_one(&mut observer)
     .await
@@ -425,7 +425,7 @@ async fn human_and_old_provider_approval_rows_stay_detailed_only() {
         .as_object_mut()
         .expect("legacy metadata")
         .remove("requestedBy");
-    sqlx::query("UPDATE interaction_history_records SET record_json=? WHERE request_id='old-row'")
+    sqlx::query("UPDATE typed_interaction_history SET record_json=? WHERE request_id='old-row'")
         .bind(serde_json::to_string(&stored).expect("old record bytes"))
         .execute(&mut observer)
         .await

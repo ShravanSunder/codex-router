@@ -366,7 +366,7 @@ async fn question_answer_delivery_reports_later_history_write_failure() {
     let mut transaction = sqlx::Connection::begin(&mut observer)
         .await
         .expect("poison transaction");
-    sqlx::query("UPDATE interaction_history_records SET record_json='{}' WHERE request_id='write-failure-question'")
+    sqlx::query("UPDATE typed_interaction_history SET record_json='{}' WHERE request_id='write-failure-question'")
         .execute(&mut *transaction).await.expect("corrupt actual record after validation");
     sqlx::query("UPDATE interaction_history_import SET revision=revision+1")
         .execute(&mut *transaction)
@@ -421,7 +421,7 @@ async fn approval_decision_real_sqlite_write_failure_keeps_channel_unsent_then_c
     )
     .await
     .expect("independent SQLite observer");
-    sqlx::query("CREATE TRIGGER reject_history_update BEFORE UPDATE ON interaction_history_records BEGIN SELECT RAISE(ABORT, 'fixture failed decision'); END")
+    sqlx::query("CREATE TRIGGER reject_history_update BEFORE UPDATE ON typed_interaction_history BEGIN SELECT RAISE(ABORT, 'fixture failed decision'); END")
         .execute(&mut independent).await.expect("real write rejection");
     let decide = || TypedInteractionDecision::SelectApproval {
         option_id: "allow-once".into(),
@@ -438,7 +438,7 @@ async fn approval_decision_real_sqlite_write_failure_keeps_channel_unsent_then_c
         receiver.try_recv(),
         Err(tokio::sync::oneshot::error::TryRecvError::Empty)
     ));
-    let record_json: String = sqlx::query_scalar("SELECT record_json FROM interaction_history_records WHERE request_id='approval-write-failure'")
+    let record_json: String = sqlx::query_scalar("SELECT record_json FROM typed_interaction_history WHERE request_id='approval-write-failure'")
         .fetch_one(&mut independent).await.expect("unchanged committed row");
     let record: InteractionHistoryRecord = serde_json::from_str(&record_json).expect("record");
     assert_eq!(
@@ -451,7 +451,7 @@ async fn approval_decision_real_sqlite_write_failure_keeps_channel_unsent_then_c
         .expect("restore fixture");
     let consumer = tokio::spawn(async move {
         let outcome = receiver.await.expect("approval delivered after commit");
-        let committed: String = sqlx::query_scalar("SELECT record_json FROM interaction_history_records WHERE request_id='approval-write-failure'")
+        let committed: String = sqlx::query_scalar("SELECT record_json FROM typed_interaction_history WHERE request_id='approval-write-failure'")
             .fetch_one(&mut independent).await.expect("decision already durable at channel receipt");
         let record: InteractionHistoryRecord =
             serde_json::from_str(&committed).expect("committed record");

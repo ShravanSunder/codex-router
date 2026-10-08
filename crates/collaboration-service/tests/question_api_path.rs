@@ -98,6 +98,39 @@ async fn question_list_and_answer_cross_the_real_api() {
         Some("wrongActor"),
         "{failure:?}"
     );
+    assert_eq!(
+        client
+            .list_questions(true)
+            .await
+            .expect("still pending after rejection")
+            .questions
+            .len(),
+        1
+    );
+    let mut rejected_observer = <sqlx::SqliteConnection as sqlx::Connection>::connect_with(
+        &sqlx::sqlite::SqliteConnectOptions::new()
+            .filename(root.path().join("interaction.sqlite"))
+            .read_only(true),
+    )
+    .await
+    .expect("independent rejection observer");
+    let unchanged: String = sqlx::query_scalar(
+        "SELECT record_json FROM typed_interaction_history WHERE request_id='question-1'",
+    )
+    .fetch_one(&mut rejected_observer)
+    .await
+    .expect("rejected action leaves durable row");
+    assert!(matches!(
+        serde_json::from_str::<collaboration_service::InteractionHistoryRecord>(&unchanged)
+            .expect("pending durable record"),
+        collaboration_service::InteractionHistoryRecord::Question {
+            state: collaboration_service::QuestionHistoryState::Pending,
+            ..
+        }
+    ));
+    sqlx::Connection::close(rejected_observer)
+        .await
+        .expect("close rejection observer");
     // A rejection leaves the client usable: each call is its own request.
     let receipt = client
         .answer_question(QuestionAnswerParams {
@@ -109,6 +142,20 @@ async fn question_list_and_answer_cross_the_real_api() {
         .expect("answer");
     assert_eq!(receipt.state, QuestionState::Answered);
     assert_eq!(agent_reply.await.expect("agent reply"), answer);
+    assert!(
+        client
+            .list_questions(true)
+            .await
+            .expect("pending list")
+            .questions
+            .is_empty()
+    );
+    drop(client);
+    served
+        .stop()
+        .await
+        .expect("stop public route before durable reopen");
+    drop(broker);
     let mut observer = <sqlx::SqliteConnection as sqlx::Connection>::connect_with(
         &sqlx::sqlite::SqliteConnectOptions::new()
             .filename(root.path().join("interaction.sqlite"))
@@ -117,11 +164,11 @@ async fn question_list_and_answer_cross_the_real_api() {
     .await
     .expect("independent durable observation");
     let record_json: String = sqlx::query_scalar(
-        "SELECT record_json FROM interaction_history_records WHERE request_id='question-1'",
+        "SELECT record_json FROM typed_interaction_history WHERE request_id='question-1'",
     )
     .fetch_one(&mut observer)
     .await
-    .expect("actual answer persisted through Control route");
+    .expect("actual answer persisted through public MCP route");
     let stored: collaboration_service::InteractionHistoryRecord =
         serde_json::from_str(&record_json).expect("typed stored answer");
     let collaboration_service::InteractionHistoryRecord::Question {
@@ -132,7 +179,7 @@ async fn question_list_and_answer_cross_the_real_api() {
         panic!("durable Question must be answered");
     };
     assert_eq!(QuestionResponse::Answered { content }, answer);
-    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM interaction_history_records")
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM typed_interaction_history")
         .fetch_one(&mut observer)
         .await
         .expect("import plus real route mutation");
@@ -143,13 +190,7 @@ async fn question_list_and_answer_cross_the_real_api() {
             .expect("recovery bytes"),
         original
     );
-    assert!(
-        client
-            .list_questions(true)
-            .await
-            .expect("pending list")
-            .questions
-            .is_empty()
-    );
-    served.stop().await.expect("close");
+    sqlx::Connection::close(observer)
+        .await
+        .expect("close durable observer");
 }

@@ -286,7 +286,7 @@ async fn aborted_commit_before_cache_publication_recovers_on_same_store_next_mut
         .expect("bounded actual commit")
         .expect("commit reached publication gap");
     let mut independent = observer(directory.path()).await;
-    let persisted: i64 = sqlx::query_scalar("SELECT count(*) FROM interaction_history_records WHERE request_id='committed-unacknowledged'")
+    let persisted: i64 = sqlx::query_scalar("SELECT count(*) FROM typed_interaction_history WHERE request_id='committed-unacknowledged'")
         .fetch_one(&mut independent).await.expect("actual commit visible externally");
     assert_eq!(persisted, 1);
     mutation.abort();
@@ -334,14 +334,14 @@ async fn reconciliation_failure_after_import_keeps_committed_stamp_for_next_owni
         .expect("committed first import");
     let committed_stamp = store.data.lock().await.created_at["pending"];
     let mut connection = observer(directory.path()).await;
-    sqlx::query("CREATE TRIGGER reject_reconciliation BEFORE UPDATE ON interaction_history_records BEGIN SELECT RAISE(ABORT, 'fixture reconciliation failure'); END")
+    sqlx::query("CREATE TRIGGER reject_reconciliation BEFORE UPDATE ON typed_interaction_history BEGIN SELECT RAISE(ABORT, 'fixture reconciliation failure'); END")
         .execute(&mut connection).await.expect("real post-import failure");
     assert!(matches!(
         store.reconcile_pending_on_startup().await,
         Err(InteractionHistoryError::Unavailable)
     ));
     let json: String = sqlx::query_scalar(
-        "SELECT record_json FROM interaction_history_records WHERE request_id='pending'",
+        "SELECT record_json FROM typed_interaction_history WHERE request_id='pending'",
     )
     .fetch_one(&mut connection)
     .await
@@ -398,7 +398,7 @@ async fn revision_overflow_rejects_mutation_without_wrapping_or_committing_rows(
         .fetch_one(&mut independent)
         .await
         .expect("unchanged revision");
-    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM interaction_history_records")
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM typed_interaction_history")
         .fetch_one(&mut independent)
         .await
         .expect("unchanged committed history");
@@ -418,14 +418,14 @@ async fn real_sqlite_write_failure_rolls_back_delta_and_retains_acknowledged_cac
         .await
         .expect("initial committed record");
     let mut connection = observer(directory.path()).await;
-    sqlx::query("CREATE TRIGGER reject_history_insert BEFORE INSERT ON interaction_history_records BEGIN SELECT RAISE(ABORT, 'fixture write rejection'); END")
+    sqlx::query("CREATE TRIGGER reject_history_insert BEFORE INSERT ON typed_interaction_history BEGIN SELECT RAISE(ABORT, 'fixture write rejection'); END")
         .execute(&mut connection).await.expect("real SQLite write failure boundary");
     assert!(matches!(
         add_refusal(&store, "failed").await,
         Err(InteractionHistoryError::Unavailable)
     ));
     assert_eq!(store.list_all().await.len(), 1);
-    let records: i64 = sqlx::query_scalar("SELECT count(*) FROM interaction_history_records")
+    let records: i64 = sqlx::query_scalar("SELECT count(*) FROM typed_interaction_history")
         .fetch_one(&mut connection)
         .await
         .expect("previous committed set retained");

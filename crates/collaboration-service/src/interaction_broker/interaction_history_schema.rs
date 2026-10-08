@@ -72,7 +72,7 @@ pub(super) async fn inspect_schema(
     let expected_names = [
         "_sqlx_migrations",
         "interaction_history_import",
-        "interaction_history_records",
+        "typed_interaction_history",
     ];
     if objects.len() != expected_names.len()
         || objects

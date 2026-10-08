@@ -84,7 +84,7 @@ async fn read_history(path: &Path) -> TestResult<BTreeMap<String, Value>> {
             .read_only(true),
     )
     .await?;
-    let rows: Vec<(String, String, String)> = sqlx::query_as("SELECT request_id, record_json, created_at FROM interaction_history_records ORDER BY request_id")
+    let rows: Vec<(String, String, String)> = sqlx::query_as("SELECT request_id, record_json, created_at FROM typed_interaction_history ORDER BY request_id")
         .fetch_all(&mut connection).await?;
     let mut records = BTreeMap::new();
     for (request_id, record_json, created_at) in rows {
@@ -329,7 +329,7 @@ async fn retention_worker_prunes_real_broker_history_and_sqlite_payloads_with_on
             .as_str()
             .ok_or("timestamp text")?
             .to_owned();
-        sqlx::query("INSERT INTO interaction_history_records (request_id,record_json,created_at) VALUES (?,?,?)")
+        sqlx::query("INSERT INTO typed_interaction_history (request_id,record_json,created_at) VALUES (?,?,?)")
             .bind(request_id).bind(serde_json::to_string(&value)?).bind(created_at)
             .execute(&mut *transaction).await?;
     }

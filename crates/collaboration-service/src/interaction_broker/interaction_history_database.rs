@@ -117,7 +117,7 @@ pub(super) async fn read_records(
     connection: &mut SqliteConnection,
 ) -> Result<InteractionHistoryData, HistoryStorageFailure> {
     let rows = sqlx::query_as!(StoredInteractionRow,
-        "SELECT request_id, record_json, created_at, typeof(request_id) AS \"request_storage!: String\", typeof(record_json) AS \"record_storage!: String\", typeof(created_at) AS \"timestamp_storage!: String\" FROM interaction_history_records ORDER BY request_id")
+        "SELECT request_id, record_json, created_at, typeof(request_id) AS \"request_storage!: String\", typeof(record_json) AS \"record_storage!: String\", typeof(created_at) AS \"timestamp_storage!: String\" FROM typed_interaction_history ORDER BY request_id")
         .fetch_all(connection).await.map_err(|_| HistoryStorageFailure::InvalidStoredRecord)?;
     let mut data = InteractionHistoryData::default();
     for row in rows {
@@ -231,7 +231,7 @@ async fn initialize_history_impl(
                         .get(request_id)
                         .ok_or(HistoryStorageFailure::InvalidStoredRecord)?,
                 );
-                sqlx::query!("INSERT INTO interaction_history_records (request_id, record_json, created_at) VALUES (?, ?, ?)",
+                sqlx::query!("INSERT INTO typed_interaction_history (request_id, record_json, created_at) VALUES (?, ?, ?)",
                     request_id, record_json, created_at).execute(&mut *transaction).await
                     .map_err(|_| HistoryStorageFailure::StorageUnavailable)?;
             }
@@ -239,7 +239,7 @@ async fn initialize_history_impl(
             #[cfg(test)]
             if matches!(fault, ImportTestFault::ConstraintFailureAfterRows) {
                 // Actual SQLite failure after schema and populated rows, before the import marker.
-                sqlx::query!("INSERT INTO interaction_history_records (request_id, record_json, created_at) VALUES (NULL, '{}', '2026-10-01T00:00:00.000000000Z')")
+                sqlx::query!("INSERT INTO typed_interaction_history (request_id, record_json, created_at) VALUES (NULL, '{}', '2026-10-01T00:00:00.000000000Z')")
                     .execute(&mut *transaction).await
                     .map_err(|_| HistoryStorageFailure::StorageUnavailable)?;
             }
@@ -347,7 +347,7 @@ pub(super) async fn commit_delta(
                 record_json,
                 created_at,
             } => {
-                sqlx::query!("INSERT INTO interaction_history_records (request_id, record_json, created_at) VALUES (?, ?, ?)", request_id,record_json,created_at)
+                sqlx::query!("INSERT INTO typed_interaction_history (request_id, record_json, created_at) VALUES (?, ?, ?)", request_id,record_json,created_at)
                     .execute(&mut **transaction).await.map_err(|_| HistoryStorageFailure::StorageUnavailable)?;
             }
             HistoryRowDelta::Update {
@@ -355,7 +355,7 @@ pub(super) async fn commit_delta(
                 record_json,
             } => {
                 sqlx::query!(
-                    "UPDATE interaction_history_records SET record_json = ? WHERE request_id = ?",
+                    "UPDATE typed_interaction_history SET record_json = ? WHERE request_id = ?",
                     record_json,
                     request_id
                 )
@@ -365,7 +365,7 @@ pub(super) async fn commit_delta(
             }
             HistoryRowDelta::Delete { request_id } => {
                 sqlx::query!(
-                    "DELETE FROM interaction_history_records WHERE request_id = ?",
+                    "DELETE FROM typed_interaction_history WHERE request_id = ?",
                     request_id
                 )
                 .execute(&mut **transaction)

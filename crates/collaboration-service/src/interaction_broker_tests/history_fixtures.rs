@@ -10,7 +10,7 @@ pub(super) async fn stored_interaction_records(
     .await
     .expect("independent history observer");
     let rows: Vec<(String, String)> = sqlx::query_as(
-        "SELECT request_id,record_json FROM interaction_history_records ORDER BY request_id",
+        "SELECT request_id,record_json FROM typed_interaction_history ORDER BY request_id",
     )
     .fetch_all(&mut observer)
     .await

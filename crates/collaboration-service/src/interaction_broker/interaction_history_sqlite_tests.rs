@@ -96,12 +96,41 @@ async fn malformed_source_matrix_rejects_without_rewriting_or_committing_rows() 
     bad_timestamp["createdAt"] = "2026-10-01T00:00:00+00:00".into();
     let mut bad_reason = valid.clone();
     bad_reason["refusal"]["reason"] = "".into();
+    let mut bad_identity = valid.clone();
+    bad_identity["requester"]["sessionId"] = "".into();
+    let mut bad_variant = valid.clone();
+    bad_variant["kind"] = "unknownInteraction".into();
+    let bad_answer = InteractionHistoryRecord::Question {
+        requester: session_ref("requester"),
+        approver: Identity::Session {
+            session: session_ref("approver"),
+        },
+        request: question("record"),
+        state: super::super::super::QuestionHistoryState::Answered {
+            content: serde_json::from_value(serde_json::json!({"yes":"wrong-type"}))
+                .expect("structurally valid answer with wrong domain type"),
+        },
+    };
+    let serialized = serde_json::to_string(&valid).expect("duplicate nested fixture");
+    let nested_duplicate = serialized.replacen(
+        "\"requestId\":\"record\"",
+        "\"requestId\":\"record\",\"requestId\":\"record\"",
+        1,
+    );
+    assert_ne!(
+        nested_duplicate, serialized,
+        "fixture duplicates an owned nested key"
+    );
     let inputs = [
         b"{".to_vec(),
         b"[]".to_vec(),
         serde_json::to_vec(&serde_json::json!({"wrong-id":valid})).expect("wrong key"),
         serde_json::to_vec(&serde_json::json!({"record":bad_timestamp})).expect("timestamp"),
         serde_json::to_vec(&serde_json::json!({"record":bad_reason})).expect("reason"),
+        serde_json::to_vec(&serde_json::json!({"record":bad_identity})).expect("identity"),
+        serde_json::to_vec(&serde_json::json!({"record":bad_variant})).expect("variant"),
+        serde_json::to_vec(&serde_json::json!({"record":bad_answer})).expect("answer"),
+        format!("{{\"record\":{nested_duplicate}}}").into_bytes(),
     ];
     for bytes in inputs {
         let directory = tempfile::tempdir().expect("invalid fixture");
@@ -141,7 +170,7 @@ async fn owned_row_corruption_is_distinct_from_recovery_source_divergence() {
         .expect("import");
     drop(store);
     let mut connection = observer(directory.path()).await;
-    sqlx::query("UPDATE interaction_history_records SET record_json='{}'")
+    sqlx::query("UPDATE typed_interaction_history SET record_json='{}'")
         .execute(&mut connection)
         .await
         .expect("corrupt owned row");
@@ -162,15 +191,15 @@ async fn stored_text_columns_reject_blob_coercion_even_when_payload_bytes_are_va
     for (column, statement) in [
         (
             "request_id",
-            "UPDATE interaction_history_records SET request_id=CAST(request_id AS BLOB)",
+            "UPDATE typed_interaction_history SET request_id=CAST(request_id AS BLOB)",
         ),
         (
             "record_json",
-            "UPDATE interaction_history_records SET record_json=CAST(record_json AS BLOB)",
+            "UPDATE typed_interaction_history SET record_json=CAST(record_json AS BLOB)",
         ),
         (
             "created_at",
-            "UPDATE interaction_history_records SET created_at=CAST(created_at AS BLOB)",
+            "UPDATE typed_interaction_history SET created_at=CAST(created_at AS BLOB)",
         ),
     ] {
         let directory = tempfile::tempdir().expect("stored SQLite class fixture");
@@ -217,8 +246,8 @@ async fn owned_schema_and_metadata_negative_matrix_fails_closed() {
         "UPDATE interaction_history_import SET source_sha256='invalid'",
         "DELETE FROM interaction_history_import",
         "INSERT INTO interaction_history_import VALUES (2,0,NULL,0)",
-        "ALTER TABLE interaction_history_records ADD COLUMN unexpected TEXT",
-        "DROP TABLE interaction_history_records",
+        "ALTER TABLE typed_interaction_history ADD COLUMN unexpected TEXT",
+        "DROP TABLE typed_interaction_history",
         "CREATE TABLE unrelated (value TEXT)",
         "PRAGMA user_version=7",
         "PRAGMA application_id=9",
