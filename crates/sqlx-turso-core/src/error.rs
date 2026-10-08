@@ -49,6 +49,10 @@ pub enum TursoAdapterError {
         /// The placeholder as written in the SQL
         placeholder: String,
     },
+    /// `PRAGMA schema_version` did not return an integer, so cached statements cannot be
+    /// checked against the current schema
+    #[error("Turso did not report an integer schema version")]
+    SchemaVersionUnreadable,
     /// A migrations table name is not a valid SQLite identifier path
     #[error("invalid SQLite identifier `{name}` for the migrations table")]
     InvalidMigrationTableName {

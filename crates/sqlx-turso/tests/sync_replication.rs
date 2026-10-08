@@ -10,7 +10,10 @@ use std::{
     time::{Duration, Instant},
 };
 
-use sqlx_turso::{TursoConnection, sqlx::Connection};
+use sqlx_turso::{
+    TursoConnection,
+    sqlx::{Column, Connection, Row},
+};
 use support::{
     TestResult,
     project_admission::{ProjectSnapshot, TaskRow, admit_task, complete_task, initialize_project},
@@ -128,6 +131,38 @@ async fn push_then_wait_for_the_reader(
     .map_err(|_elapsed| "the reader stopped observing")?
     .map(|_observed| ())?;
     Ok(())
+}
+
+#[tokio::test]
+async fn a_persistent_reader_sees_a_pulled_column_through_its_cached_statement() -> TestResult {
+    // Arrange: the reader caches `SELECT *` before the writer adds a column
+    let mut project = ReplicatedProject::start().await?;
+    insert_record(&mut project.writer, 1, "first").await?;
+    push(&project.writer).await?;
+    pull(&project.reader).await?;
+    let before = sqlx::query("SELECT * FROM records")
+        .fetch_one(&mut project.reader)
+        .await?;
+    sqlx::query("ALTER TABLE records ADD COLUMN note TEXT")
+        .execute(&mut project.writer)
+        .await?;
+    sqlx::query("UPDATE records SET note = 'pulled' WHERE sequence = 1")
+        .execute(&mut project.writer)
+        .await?;
+    push(&project.writer).await?;
+
+    // Act
+    pull(&project.reader).await?;
+    let after = sqlx::query("SELECT * FROM records")
+        .fetch_one(&mut project.reader)
+        .await?;
+
+    // Assert
+    assert_eq!(before.columns().len(), 2);
+    let names: Vec<&str> = after.columns().iter().map(|column| column.name()).collect();
+    assert_eq!(names, ["sequence", "body", "note"]);
+    assert_eq!(after.try_get::<String, _>("note")?, "pulled");
+    project.stop().await
 }
 
 /// Proves, against a real hub: while the writer commits admissions (task state, event and

@@ -16,6 +16,10 @@ pub struct TursoConnection {
     #[cfg(feature = "sync")]
     sync: Option<turso::sync::Database>,
     statements: StatementCache<TursoStatement>,
+    /// The schema cookie the cached statements were prepared against
+    statements_schema_version: Option<i64>,
+    /// `PRAGMA schema_version`, prepared on the first check and kept outside the evictable cache
+    schema_version_statement: Option<turso::Statement>,
     transaction_state: TransactionState,
 }
 
@@ -81,6 +85,8 @@ impl TursoConnection {
             raw: connection.raw,
             #[cfg(feature = "sync")]
             sync: connection.sync,
+            statements_schema_version: None,
+            schema_version_statement: None,
             transaction_state: TransactionState::default(),
         }
     }
@@ -175,10 +181,61 @@ impl TursoConnection {
         self.statements.get_mut(sql).cloned()
     }
 
+    /// Drops every cached statement when the schema changed since they were prepared
+    ///
+    /// The engine reprepares a stale statement only when it first steps, after the driver and
+    /// the SDK have already taken its column list, so a statement cached before a schema change
+    /// (a local migration, a pulled one, another connection's) would keep returning the old
+    /// result shape. The schema cookie changes with every schema change; comparing it before
+    /// reusing the cache keeps cached statements current.
+    pub(crate) async fn discard_statements_prepared_for_another_schema(
+        &mut self,
+    ) -> Result<(), Error> {
+        if !self.statements.is_enabled() {
+            return Ok(());
+        }
+        let schema_version = self.read_schema_version().await?;
+        if self.statements_schema_version != Some(schema_version) {
+            self.statements.clear();
+            self.statements_schema_version = Some(schema_version);
+        }
+        Ok(())
+    }
+
+    async fn read_schema_version(&mut self) -> Result<i64, Error> {
+        let mut statement = match self.schema_version_statement.take() {
+            Some(statement) => statement,
+            None => self
+                .raw
+                .prepare("PRAGMA schema_version")
+                .await
+                .map_err(map_turso_error)?,
+        };
+        let schema_version = read_schema_cookie(&mut statement).await;
+        self.schema_version_statement = Some(statement);
+        schema_version
+    }
+
     pub(crate) fn cache_statement(&mut self, sql: &str, statement: TursoStatement) {
         if self.statements.is_enabled() {
             self.statements.insert(sql, statement);
         }
+    }
+}
+
+async fn read_schema_cookie(statement: &mut turso::Statement) -> Result<i64, Error> {
+    let mut rows = statement.query(()).await.map_err(map_turso_error)?;
+    let value = match rows.next().await.map_err(map_turso_error)? {
+        Some(row) => row.get_value(0).map_err(map_turso_error)?,
+        None => turso::Value::Null,
+    };
+    drop(rows);
+    // The statement stopped on its row; an unfinished statement would hold its read snapshot
+    // and pin the connection to the schema it saw.
+    statement.reset().map_err(map_turso_error)?;
+    match value {
+        turso::Value::Integer(schema_version) => Ok(schema_version),
+        _ => Err(crate::TursoAdapterError::SchemaVersionUnreadable.into()),
     }
 }
 
@@ -231,6 +288,7 @@ impl Connection for TursoConnection {
         Self::Database: sqlx_core::database::HasStatementCache,
     {
         self.statements.clear();
+        self.statements_schema_version = None;
         future::ready(Ok(()))
     }
 }

@@ -3,6 +3,8 @@
 mod row_stream;
 mod sql_inspection;
 #[cfg(test)]
+mod statement_cache_tests;
+#[cfg(test)]
 mod tests;
 
 use std::sync::Arc;
@@ -18,7 +20,10 @@ use sqlx_core::{
     statement::Statement,
 };
 
-use self::{row_stream::RowStreamState, sql_inspection::inspect_sql};
+use self::{
+    row_stream::{RowStreamState, RunningQuery},
+    sql_inspection::inspect_sql,
+};
 use crate::{
     Turso, TursoAdapterError, TursoArguments, TursoColumn, TursoConnection, TursoQueryResult,
     TursoRow, TursoStatement, column::collect_column_names, error::map_turso_error,
@@ -72,20 +77,21 @@ impl TursoConnection {
         };
 
         Ok(stream::try_unfold(
-            RowStreamState::Rows {
-                rows,
+            RowStreamState::Rows(Box::new(RunningQuery {
                 statement,
+                rows,
                 columns,
                 column_names,
-                pending_row: None,
                 logger,
-            },
+            })),
             RowStreamState::next,
         )
         .boxed())
     }
 
     async fn prepare_sql(&mut self, sql: SqlStr) -> Result<TursoStatement, Error> {
+        self.discard_statements_prepared_for_another_schema()
+            .await?;
         if let Some(statement) = self.cached_statement(sql.as_str()) {
             return Ok(statement);
         }
