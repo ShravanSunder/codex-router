@@ -5024,7 +5024,7 @@ dependencies = [
 
 [[package]]
 name = "sqlx-turso"
-version = "0.1.63"
+version = "0.1.65"
 dependencies = [
  "chrono",
  "rustls",
@@ -5040,7 +5040,7 @@ dependencies = [
 
 [[package]]
 name = "sqlx-turso-core"
-version = "0.1.63"
+version = "0.1.65"
 dependencies = [
  "chrono",
  "either",
@@ -5063,7 +5063,7 @@ dependencies = [
 
 [[package]]
 name = "sqlx-turso-macros"
-version = "0.1.63"
+version = "0.1.65"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",
