@@ -407,7 +407,10 @@ impl AsyncSqliteStateStore {
                    WHEN quota_refresh_status.stale_after_unix_seconds < excluded.stale_after_unix_seconds
                      THEN quota_refresh_status.stale_after_unix_seconds
                    ELSE excluded.stale_after_unix_seconds
-                 END",
+                 END
+             WHERE quota_refresh_status.last_attempt_unix_seconds IS NULL
+                OR quota_refresh_status.last_attempt_unix_seconds
+                   <= excluded.last_attempt_unix_seconds",
         )
         .bind(account_id.as_str())
         .bind(route_band)

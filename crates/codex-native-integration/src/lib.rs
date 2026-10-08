@@ -38,6 +38,7 @@ pub use native_executable_identity::executable_version_sync;
 pub use native_executable_identity::managed_executable_version;
 pub use native_executable_identity::parse_executable_version;
 pub use native_executable_identity::start_executable_identity;
+pub use native_executable_identity::{RecordedExecutableIdentity, RecordedExecutableIdentityError};
 pub use native_protocol_observation::AppServerObservation;
 pub use native_protocol_observation::CodexProtocolError;
 pub use native_protocol_observation::observe_app_server;
@@ -72,6 +73,7 @@ pub use native_protocol_connection::{NativeConnectionError, NativeProtocolConnec
 mod native_input_submission;
 mod native_payload_schemas;
 mod native_schema_bundle;
+mod native_schema_digest;
 mod native_schema_export;
 mod native_schema_validation;
 mod validated_native_request;
@@ -82,6 +84,7 @@ mod schema_bundle_storage;
 mod schema_export_collection;
 mod schema_json_validation;
 pub use native_schema_bundle::{NativeSchemaBundle, NativeSchemaError};
+pub use native_schema_digest::{NativeSchemaDigest, NativeSchemaDigestError};
 mod native_thread_operations;
 pub use native_input_submission::NativeInputSubmission;
 

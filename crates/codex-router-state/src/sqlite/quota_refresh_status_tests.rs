@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use crate::account::{AccountRecord, AccountStatus};
 use crate::quota_snapshot::{
     PersistedQuotaSnapshot, PersistedSelectorQuotaWindow, QuotaRefreshErrorClass,
-    SelectorQuotaWindowStatus,
+    QuotaRefreshStatusView, SelectorQuotaWindowStatus,
 };
 use crate::window_observation::{
     WindowObservation, WindowObservationProps, WindowRejection, WindowRejectionProps,
@@ -34,6 +34,14 @@ impl Drop for QuotaStatusDirectory {
     fn drop(&mut self) {
         std::fs::remove_dir_all(&self.0).expect("remove synthetic test directory");
     }
+}
+
+async fn open_quota_status_state() -> (QuotaStatusDirectory, AsyncSqliteStateStore) {
+    let directory = QuotaStatusDirectory::new();
+    let state = AsyncSqliteStateStore::open(&directory.0.join("state.sqlite"))
+        .await
+        .expect("state");
+    (directory, state)
 }
 
 #[derive(Debug, PartialEq, sqlx::FromRow)]
@@ -172,12 +180,38 @@ async fn seed_protected_state(state: &AsyncSqliteStateStore) -> AccountId {
     account_id
 }
 
+async fn read_claude_refresh_status(
+    state: &AsyncSqliteStateStore,
+    account_id: &AccountId,
+) -> Option<QuotaRefreshStatusView> {
+    state
+        .quota_refresh_statuses_for_route_band(RouteBand::ClaudeMessages.as_str())
+        .await
+        .expect("Claude refresh statuses")
+        .into_iter()
+        .find(|status| status.account_id() == account_id)
+}
+
+async fn create_claude_account_without_refresh_status(
+    state: &AsyncSqliteStateStore,
+    account_id_value: &str,
+) -> AccountId {
+    let account_id = AccountId::new(account_id_value).expect("Claude account id");
+    state
+        .upsert_account(&AccountRecord::new(
+            Provider::Claude,
+            account_id.clone(),
+            "synthetic-claude",
+            AccountStatus::Enabled,
+        ))
+        .await
+        .expect("Claude account without refresh status");
+    account_id
+}
+
 #[tokio::test]
 async fn status_only_success_records_recovery_without_changing_account_evidence() {
-    let directory = QuotaStatusDirectory::new();
-    let state = AsyncSqliteStateStore::open(&directory.0.join("state.sqlite"))
-        .await
-        .expect("state");
+    let (_directory, state) = open_quota_status_state().await;
     let account_id = seed_protected_state(&state).await;
     let other_account_id = AccountId::new("other-refresh-account").expect("other account id");
     state
@@ -247,10 +281,7 @@ async fn status_only_success_records_recovery_without_changing_account_evidence(
 
 #[tokio::test]
 async fn combined_success_still_replaces_selectors_and_clears_route_exhaustion() {
-    let directory = QuotaStatusDirectory::new();
-    let state = AsyncSqliteStateStore::open(&directory.0.join("state.sqlite"))
-        .await
-        .expect("state");
+    let (_directory, state) = open_quota_status_state().await;
     let account_id = seed_protected_state(&state).await;
     let before = read_preserved_account_state(&state, &account_id).await;
     let replacement = PersistedSelectorQuotaWindow::new(
@@ -294,10 +325,7 @@ async fn combined_success_still_replaces_selectors_and_clears_route_exhaustion()
 
 #[tokio::test]
 async fn status_only_success_rejects_unrepresentable_timestamps_without_writing() {
-    let directory = QuotaStatusDirectory::new();
-    let state = AsyncSqliteStateStore::open(&directory.0.join("state.sqlite"))
-        .await
-        .expect("state");
+    let (_directory, state) = open_quota_status_state().await;
     let account_id = seed_protected_state(&state).await;
     let before = state
         .quota_refresh_statuses_for_route_band(RouteBand::ClaudeMessages.as_str())
@@ -328,11 +356,8 @@ async fn status_only_success_rejects_unrepresentable_timestamps_without_writing(
 
 #[tokio::test]
 async fn status_only_success_on_read_only_store_preserves_existing_failure() {
-    let directory = QuotaStatusDirectory::new();
+    let (directory, state) = open_quota_status_state().await;
     let database_path = directory.0.join("state.sqlite");
-    let state = AsyncSqliteStateStore::open(&database_path)
-        .await
-        .expect("state");
     let account_id = seed_protected_state(&state).await;
     state.close().await.expect("close writable state");
     let state = AsyncSqliteStateStore::open_read_only(&database_path)
@@ -362,3 +387,6 @@ async fn status_only_success_on_read_only_store_preserves_existing_failure() {
     );
     state.close().await.expect("close state");
 }
+
+#[path = "quota_refresh_status_ordering_tests.rs"]
+mod ordering_tests;
