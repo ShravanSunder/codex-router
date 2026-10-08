@@ -210,6 +210,11 @@ where
         } else {
             DEFAULT_ROUTE_BANDS
         };
+        let credential_resolution_started_at = if account.provider() == Provider::Claude {
+            Some(current_unix_seconds())
+        } else {
+            None
+        };
         let mut resolved = match credential_resolver
             .resolve_provider_credentials_async(account.account_id(), account.provider())
             .await
@@ -240,6 +245,8 @@ where
                     }
                     None => None,
                 };
+                let failure_status_attempt_unix_seconds =
+                    credential_resolution_started_at.unwrap_or(observed_unix_seconds);
                 for route_band in route_bands {
                     if *route_band == USER_QUOTA_ROUTE_BAND {
                         if let Some(attempt) = responses_credit_attempt.as_ref() {
@@ -279,7 +286,7 @@ where
                             .record_refresh_failure_preserving_selector_windows(
                                 account.account_id(),
                                 route_band,
-                                observed_unix_seconds,
+                                failure_status_attempt_unix_seconds,
                                 QuotaRefreshErrorClass::AuthError,
                             )
                             .await?;
@@ -372,7 +379,7 @@ where
                         .record_refresh_failure_preserving_selector_windows(
                             account.account_id(),
                             "claude_messages",
-                            observed_unix_seconds,
+                            observation_started_at,
                             error_class,
                         )
                         .await?;
@@ -454,6 +461,14 @@ where
                 }
             }
             if observations_recorded > 0 {
+                quota_history_state
+                    .record_refresh_success_status(
+                        account.account_id(),
+                        RouteBand::ClaudeMessages.as_str(),
+                        observation_started_at,
+                        fresh_until_unix_seconds,
+                    )
+                    .await?;
                 refreshed_count = refreshed_count.saturating_add(1);
             }
             continue;

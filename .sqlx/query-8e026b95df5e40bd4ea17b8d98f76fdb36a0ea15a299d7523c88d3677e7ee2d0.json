@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO quota_refresh_status (\n               account_id, route_band, last_success_unix_seconds,\n               last_attempt_unix_seconds, last_error_class,\n               stale_after_unix_seconds\n             )\n             VALUES (?1, ?2, ?3, ?3, NULL, ?4)\n             ON CONFLICT(account_id, route_band) DO UPDATE SET\n               last_success_unix_seconds =\n                 CASE\n                   WHEN quota_refresh_status.last_success_unix_seconds IS NULL\n                     OR quota_refresh_status.last_success_unix_seconds\n                        < excluded.last_success_unix_seconds\n                   THEN excluded.last_success_unix_seconds\n                   ELSE quota_refresh_status.last_success_unix_seconds\n                 END,\n               last_attempt_unix_seconds =\n                 CASE\n                   WHEN quota_refresh_status.last_attempt_unix_seconds IS NULL\n                     OR quota_refresh_status.last_attempt_unix_seconds\n                        <= excluded.last_attempt_unix_seconds\n                   THEN excluded.last_attempt_unix_seconds\n                   ELSE quota_refresh_status.last_attempt_unix_seconds\n                 END,\n               last_error_class =\n                 CASE\n                   WHEN quota_refresh_status.last_attempt_unix_seconds IS NULL\n                     OR quota_refresh_status.last_attempt_unix_seconds\n                        <= excluded.last_attempt_unix_seconds\n                   THEN excluded.last_error_class\n                   ELSE quota_refresh_status.last_error_class\n                 END,\n               stale_after_unix_seconds =\n                 CASE\n                   WHEN quota_refresh_status.last_attempt_unix_seconds IS NULL\n                     OR quota_refresh_status.last_attempt_unix_seconds\n                        <= excluded.last_attempt_unix_seconds\n                   THEN excluded.stale_after_unix_seconds\n                   ELSE quota_refresh_status.stale_after_unix_seconds\n                 END",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "8e026b95df5e40bd4ea17b8d98f76fdb36a0ea15a299d7523c88d3677e7ee2d0"
+}
