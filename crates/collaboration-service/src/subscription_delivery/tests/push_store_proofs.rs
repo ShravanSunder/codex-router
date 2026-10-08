@@ -562,6 +562,8 @@ async fn accepted_push_record_settlement_retries_before_board_settlement_without
 
 #[tokio::test(start_paused = true)]
 async fn failed_record_insert_releases_selection_and_never_calls_layer_zero() {
+    use futures_util::FutureExt;
+
     let fixture = OwnerFixture::new().await;
     let mut observer = sqlx::SqliteConnection::connect_with(
         &sqlx::sqlite::SqliteConnectOptions::new()
@@ -574,28 +576,68 @@ async fn failed_record_insert_releases_selection_and_never_calls_layer_zero() {
     fixture
         .post(&fixture.root, "Never pushed without a record")
         .await;
-    runtime.synchronize(&fixture.reader).await;
-    assert!(runtime.requests.lock().await.try_recv().is_err());
-    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM router_pushes")
-        .fetch_one(&mut observer)
-        .await
-        .unwrap();
-    assert_eq!(count, 0);
-    let roots = fixture
-        .store
+    let hold = runtime
+        .hold_reader_at_storage_boundary(&fixture.reader)
+        .await;
+    let observation = std::panic::AssertUnwindSafe(async {
+        let mut trace = OwnerObservationTrace::default();
+        let mut saw_selection = false;
+        let mut events = runtime.observations.lock().await;
+        while let Ok(event) = events.try_recv() {
+            saw_selection |= matches!(event, OwnerObservation::Selected);
+            trace.record("failed-insert held observation", event);
+        }
+        drop(events);
+        assert!(
+            saw_selection,
+            "real selection must precede held release observation"
+        );
+        eprintln!("failed-insert: same owner held after actual Selected");
+        assert!(runtime.requests.lock().await.try_recv().is_err());
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM router_pushes")
+            .fetch_one(&mut observer)
+            .await
+            .unwrap();
+        assert_eq!(count, 0);
+        let roots = fixture
+            .store
+            .lock()
+            .await
+            .due_subscription_roots(&fixture.reader, fixture.clock.now())
+            .await
+            .unwrap();
+        eprintln!("failed-insert: held push_count={count}; due_roots={roots:?}");
+        assert_eq!(roots, vec![fixture.root.clone()]);
+        sqlx::query("DROP TRIGGER fail_push_insert")
+            .execute(&mut observer)
+            .await
+            .unwrap();
+    })
+    .catch_unwind()
+    .await;
+    // Release on both paths before any shutdown; preserve a failing assertion's original panic.
+    drop(hold);
+    if let Err(failure) = observation {
+        let _ = observer.close().await;
+        runtime.close().await;
+        std::panic::resume_unwind(failure);
+    }
+    fixture.clock.advance(1).await;
+    let request = runtime.requests.lock().await.recv().await.unwrap();
+    runtime.await_settled().await;
+    let stored = fixture
+        .push_store
         .lock()
         .await
-        .due_subscription_roots(&fixture.reader, fixture.clock.now())
+        .get_push_record(&request.payload.push_id)
         .await
+        .unwrap()
         .unwrap();
-    assert_eq!(roots, vec![fixture.root.clone()]);
-    sqlx::query("DROP TRIGGER fail_push_insert")
-        .execute(&mut observer)
-        .await
-        .unwrap();
-    fixture.clock.advance(1).await;
-    runtime.requests.lock().await.recv().await.unwrap();
-    runtime.await_settled().await;
+    assert_eq!(stored.delivery_state, PushDeliveryState::Delivered);
+    eprintln!(
+        "failed-insert: same-runtime retry delivered push_id={}",
+        request.payload.push_id.as_str()
+    );
     observer.close().await.unwrap();
     runtime.close().await;
 }

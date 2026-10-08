@@ -33,9 +33,20 @@ use tokio_util::sync::CancellationToken;
 
 type DirectMessageReply = oneshot::Sender<Result<PushRecord, BoardError>>;
 
+#[cfg(test)]
+pub(super) enum ReaderStorageBarrier {
+    Observe {
+        ack: oneshot::Sender<()>,
+    },
+    Hold {
+        ack: oneshot::Sender<()>,
+        release: oneshot::Receiver<()>,
+    },
+}
+
 pub(super) enum ReaderDeliveryCommand {
     #[cfg(test)]
-    Barrier(oneshot::Sender<()>),
+    Barrier(ReaderStorageBarrier),
     Reconcile(oneshot::Sender<()>),
     DmQueued {
         push_id: PushId,
@@ -91,7 +102,7 @@ pub(super) struct ReaderDeliveryOwner {
     dm_checked_presence: HashMap<PushId, Instant>,
     dm_replies: HashMap<PushId, Vec<DirectMessageReply>>,
     #[cfg(test)]
-    barriers: Vec<oneshot::Sender<()>>,
+    barriers: Vec<ReaderStorageBarrier>,
     #[cfg(test)]
     observations: broadcast::Sender<OwnerObservation>,
 }
@@ -367,7 +378,18 @@ impl ReaderDeliveryOwner {
     async fn wait_for_input(&mut self, deadline: Option<Instant>) -> bool {
         #[cfg(test)]
         for barrier in self.barriers.drain(..) {
-            let _ = barrier.send(());
+            match barrier {
+                ReaderStorageBarrier::Observe { ack } => {
+                    let _ = ack.send(());
+                }
+                ReaderStorageBarrier::Hold { ack, release } => {
+                    let _ = ack.send(());
+                    tokio::select! {
+                        () = self.shutdown.cancelled() => return false,
+                        _ = release => {}
+                    }
+                }
+            }
         }
         #[cfg(test)]
         self.observe(OwnerObservation::Sleeping(deadline));

@@ -353,6 +353,15 @@ impl OwnerRuntime {
     pub async fn synchronize(&self, reader: &Identity) {
         self.service.synchronize_reader(reader.clone()).await;
     }
+    pub async fn hold_reader_at_storage_boundary(
+        &self,
+        reader: &Identity,
+    ) -> super::super::subscription_service::ReaderStorageHold {
+        self.service
+            .hold_reader_at_storage_boundary(reader.clone())
+            .await
+    }
+
     pub async fn reconcile(&self, reader: &Identity) {
         self.service.request_reconcile(reader.clone()).await;
     }
