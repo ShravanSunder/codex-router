@@ -13,9 +13,7 @@ pub use service_identity::subscription_delivery::{
     SystemSubscriptionClock,
 };
 mod endpoint_directory;
-pub use endpoint_directory::{
-    EndpointDirectory, EndpointSnapshot, EndpointSubscription, EndpointUpdate,
-};
+pub use endpoint_directory::{EndpointDirectory, EndpointInventoryReader, EndpointSnapshot};
 mod native_channel_relay;
 pub use native_channel_relay::{
     MAX_NATIVE_MESSAGE_BYTES, connect_native_relay, relay_native_channels,

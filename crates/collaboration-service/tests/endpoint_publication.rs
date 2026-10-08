@@ -2,41 +2,40 @@ use collaboration_protocol::{EndpointDescription, UuidIdentity};
 use collaboration_service::EndpointDirectory;
 use serde_json::json;
 
-#[tokio::test]
-async fn snapshots_and_subscribers_share_publication_order() {
+fn codex_endpoint(service_id: &str) -> EndpointDescription {
+    serde_json::from_value(json!({"endpoint":{"serviceId":service_id,"endpointId":"codex-local"},"label":"Codex","availability":{"state":"unprobed"},"channels":[{"kind":"nativeCodex","transport":"unixWebSocket","path":"codex-native.sock","schemaDigest":null,"generation":null}]})).unwrap_or_else(|e| panic!("endpoint: {e}"))
+}
+
+#[test]
+fn the_inventory_counts_every_publication_and_holds_the_latest_description() {
+    // Arrange
     let service_id = UuidIdentity::try_from("00000000-0000-4000-8000-000000000001".to_owned())
         .unwrap_or_else(|e| panic!("id: {e}"));
     let directory = EndpointDirectory::new(service_id);
-    let mut first = directory
+    let endpoint = codex_endpoint("00000000-0000-4000-8000-000000000001");
+    let reader = directory
         .subscribe()
-        .unwrap_or_else(|e| panic!("subscribe: {e}"));
-    let endpoint: EndpointDescription = serde_json::from_value(json!({"endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"codex-local"},"label":"Codex","availability":{"state":"unprobed"},"channels":[{"kind":"nativeCodex","transport":"unixWebSocket","path":"codex-native.sock","schemaDigest":null,"generation":null}]})).unwrap_or_else(|e|panic!("endpoint: {e}"));
+        .unwrap_or_else(|e| panic!("reader: {e}"));
+
+    // Act
     directory
         .publish(endpoint.clone())
         .unwrap_or_else(|e| panic!("publish: {e}"));
-    let snapshot = first.snapshot().unwrap_or_else(|e| panic!("snapshot: {e}"));
-    assert_eq!(snapshot.sequence, 1);
-    assert_eq!(snapshot.endpoints, vec![endpoint.clone()]);
-    let update = first.next().await.unwrap_or_else(|e| panic!("event: {e}"));
-    assert_eq!(update.sequence, 1);
-    let second = directory
-        .subscribe()
-        .unwrap_or_else(|e| panic!("second: {e}"));
-    assert_eq!(
-        second
-            .snapshot()
-            .unwrap_or_else(|e| panic!("snapshot: {e}"))
-            .sequence,
-        0
-    );
+    let first = directory
+        .inventory()
+        .unwrap_or_else(|e| panic!("inventory: {e}"));
     directory
-        .publish(endpoint)
-        .unwrap_or_else(|e| panic!("publish: {e}"));
-    assert_eq!(
-        second
-            .snapshot()
-            .unwrap_or_else(|e| panic!("snapshot: {e}"))
-            .sequence,
-        1
-    );
+        .publish(endpoint.clone())
+        .unwrap_or_else(|e| panic!("republish: {e}"));
+    let foreign = directory.publish(codex_endpoint("00000000-0000-4000-8000-000000000009"));
+    let second = reader
+        .snapshot()
+        .unwrap_or_else(|e| panic!("snapshot: {e}"));
+
+    // Assert
+    assert_eq!(first.sequence, 1);
+    assert_eq!(first.endpoints, vec![endpoint.clone()]);
+    assert!(foreign.is_err(), "another service's endpoint was published");
+    assert_eq!(second.sequence, 2);
+    assert_eq!(second.endpoints, vec![endpoint]);
 }
