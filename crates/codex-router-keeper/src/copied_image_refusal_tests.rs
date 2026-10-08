@@ -165,7 +165,16 @@ pub(super) async fn prove_copied_refusal(mode: &str) -> TestResult {
     std::fs::write(&foreign, b"foreign-node")?;
     let mut registry = ImageRegistry::new(&root).await?;
     let result = registry
-        .pin_with_link(&source, &expected_build(1)?, exdev, Duration::from_secs(2))
+        .pin_with_link(
+            &source,
+            &expected_build(1)?,
+            exdev,
+            if mode == "timeout" {
+                Duration::from_secs(2)
+            } else {
+                PREPARE_DEADLINE
+            },
+        )
         .await;
     let witness = registry
         .last_warmup_observation

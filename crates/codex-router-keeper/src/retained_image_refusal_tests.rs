@@ -158,7 +158,11 @@ async fn refusal_case(mode: &str) -> TestResult {
             &source,
             &expected_build(1)?,
             hard_link,
-            Duration::from_secs(2),
+            if mode == "timeout" {
+                Duration::from_secs(2)
+            } else {
+                PREPARE_DEADLINE
+            },
         )
         .await;
     let pid = ChildPid::new(std::fs::read_to_string(proof)?.parse()?)?;

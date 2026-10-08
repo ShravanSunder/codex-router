@@ -7,7 +7,7 @@ async fn fresh_repin(link: LinkOperation) -> TestResult {
     let bytes = std::fs::read(&source)?;
     let mut first = ImageRegistry::new(&root).await?;
     let lease = first
-        .pin_with_link(&source, &expected_build(1)?, link, Duration::from_secs(2))
+        .pin_with_link(&source, &expected_build(1)?, link, PREPARE_DEADLINE)
         .await?;
     let record = lease.image().clone();
     let before = std::fs::metadata(record.retained_path())?;
@@ -18,7 +18,7 @@ async fn fresh_repin(link: LinkOperation) -> TestResult {
     }
     let mut fresh = ImageRegistry::new(&root).await?;
     let lease = fresh
-        .pin_with_link(&source, &expected_build(1)?, link, Duration::from_secs(2))
+        .pin_with_link(&source, &expected_build(1)?, link, PREPARE_DEADLINE)
         .await?;
     let after = std::fs::metadata(lease.image().retained_path())?;
     if lease.image() != &record

@@ -17,7 +17,7 @@ async fn native_fixture(
     let mut transcript = Vec::new();
     let first = peer.next().await.ok_or("initialize absent")??;
     let initialize: Value = serde_json::from_str(first.to_text()?)?;
-    let expected = json!({"id":1,"method":"initialize","params":{"clientInfo":{"name":"codex_router_host","title":"Codex Router Host","version":"0.1.66"},"capabilities":{"experimentalApi":true}}});
+    let expected = json!({"id":1,"method":"initialize","params":{"clientInfo":{"name":"codex_router_host","title":"Codex Router Host","version":env!("CARGO_PKG_VERSION")},"capabilities":{"experimentalApi":true}}});
     if initialize != expected {
         eprintln!("NATIVE_INITIALIZE_LITERAL_MISMATCH expected={expected} actual={initialize}");
         return Err(format!("literal initialize request differs: {initialize}").into());

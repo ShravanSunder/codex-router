@@ -54,6 +54,7 @@ fn fixture(
             ),
         )
         .replace(&"11".repeat(32), &format!("{byte:02x}").repeat(32));
+    let source = fixture_launch::direct_python_fixture(&source)?;
     std::fs::write(&path, source)?;
     std::fs::set_permissions(&path, Permissions::from_mode(0o755))?;
     Ok((path, proof))
@@ -137,7 +138,7 @@ async fn copied_image_runs_real_warmup_and_survives_source_removal() -> TestResu
     let original = std::fs::metadata(&source)?;
     let mut registry = ImageRegistry::new(&root).await?;
     let lease = match registry
-        .pin_with_link(&source, &expected_build(1)?, exdev, Duration::from_secs(2))
+        .pin_with_link(&source, &expected_build(1)?, exdev, PREPARE_DEADLINE)
         .await
     {
         Ok(lease) => lease,
@@ -418,7 +419,7 @@ async fn bounded_vm_teardown_warmup_requires_normal_exit_and_actual_reap_fence()
     let (source, proof) = fixture(&root, "vm-exit", "vm-teardown", "VM_IMAGE", 1)?;
     let mut registry = ImageRegistry::new(&root).await?;
     let lease = registry
-        .pin_with_link(&source, &expected_build(1)?, exdev, Duration::from_secs(2))
+        .pin_with_link(&source, &expected_build(1)?, exdev, PREPARE_DEADLINE)
         .await?;
     let pid =
         codex_router_keeper_protocol::ChildPid::new(std::fs::read_to_string(proof)?.parse()?)?;
@@ -446,3 +447,24 @@ mod launch_failure_tests;
 
 #[path = "copied_image_refusal_tests.rs"]
 mod copied_refusal_tests;
+
+#[test]
+fn generated_fixture_shebang_launches_python_directly() -> TestResult {
+    let temp = root()?;
+    let root = private_root(&temp)?;
+    let (path, _) = fixture(&root, "direct", "valid", "IMAGE_A", 1)?;
+    let source = std::fs::read_to_string(path)?;
+    let first_line = source.lines().next().ok_or("fixture shebang absent")?;
+    eprintln!("GENERATED_FIXTURE_SHEBANG actual={first_line:?}");
+    if first_line == "#!/usr/bin/env python3" {
+        return Err("fixture retains the extra env startup before the selected interpreter".into());
+    }
+    let interpreter = Path::new(first_line.strip_prefix("#!").ok_or("invalid shebang")?);
+    if !interpreter.is_absolute() || std::fs::canonicalize(interpreter)? != interpreter {
+        return Err("direct fixture interpreter is not canonical and absolute".into());
+    }
+    Ok(())
+}
+
+#[path = "retained_image_fixture_launch.rs"]
+mod fixture_launch;
