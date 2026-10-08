@@ -160,3 +160,7 @@ pub(crate) use quota_status_view_model::CreditUsageStatus;
 
 #[cfg(test)]
 mod quota_command_family_test;
+
+#[cfg(test)]
+#[path = "quota/claude_quota_refresh_ingestion_tests.rs"]
+mod claude_quota_refresh_ingestion_tests;
