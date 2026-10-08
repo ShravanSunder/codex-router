@@ -243,7 +243,8 @@ pub use delivery_inspection_contract::{
 mod wakeup_subscription_contract;
 pub use wakeup_subscription_contract::{
     NoMutation, UnknownFire, WaitNextAction, WaitStage, WaitUnavailable, WaitUnavailableEffects,
-    WaitUnavailableKind, WakeChange, WakeChanged, WakeSubscription,
+    WaitUnavailableKind, WakeChange, WakeChanged, WakeSubscription, WakeWaitOutcome,
+    WakeWaitRequest, WakeWaitResult,
 };
 
 pub use wakeup_subscription_contract::{

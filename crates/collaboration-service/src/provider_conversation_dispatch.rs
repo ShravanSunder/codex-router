@@ -116,7 +116,7 @@ fn inspect_response(
 }
 
 fn inspect_failure_response(id: Value, failure: ProviderInspectFailure) -> Value {
-    json!({"jsonrpc":"2.0","id":id,"error":{"code":-32050,"message":failure.message,"data":failure}})
+    crate::control_connection::rejection_response(id, &failure)
 }
 
 fn settings_response(
@@ -130,7 +130,7 @@ fn settings_response(
 }
 
 fn settings_failure_response(id: Value, failure: ProviderSettingsFailure) -> Value {
-    json!({"jsonrpc":"2.0","id":id,"error":{"code":-32050,"message":failure.message,"data":failure}})
+    crate::control_connection::rejection_response(id, &failure)
 }
 
 fn parse<T: DeserializeOwned>(params: Value) -> Result<T, ()> {
@@ -147,11 +147,7 @@ fn conversation_response(
 ) -> Value {
     match result {
         Ok(result) => success(id, result),
-        Err(ConversationFailure::Operation(failure)) => failure_response(id, failure),
-        Err(
-            failure @ (ConversationFailure::InvalidStoredOperation
-            | ConversationFailure::UndescribableFailure),
-        ) => json_rpc_error(id, -32603, &failure.to_string()),
+        Err(failure) => crate::control_connection::rejection_response(id, &failure),
     }
 }
 
@@ -162,6 +158,5 @@ fn json_rpc_error(id: Value, code: i64, message: &str) -> Value {
     json!({"jsonrpc":"2.0","id":id,"error":{"code":code,"message":message}})
 }
 fn failure_response(id: Value, failure: ConversationOperationFailure) -> Value {
-    let message = String::from(failure.message.clone());
-    json!({"jsonrpc":"2.0","id":id,"error":{"code":-32050,"message":message,"data":failure}})
+    crate::control_connection::rejection_response(id, &ConversationFailure::Operation(failure))
 }

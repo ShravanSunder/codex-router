@@ -4,7 +4,7 @@
 //!
 //! Each sub-area fails with its existing typed payload (`ConfigurationFailure`, `RunFailure`,
 //! `InstructionFailure`, `ScheduleFailure`, `AutomationInspectionFailure`).
-use super::{CollaborationRejection, CollaborationRejectionReason};
+use super::{CollaborationRejection, CollaborationRejectionReason, PublishedRejection};
 use crate::ServiceIdentity;
 use automation_storage::{
     AutomationStore, InstructionUpdate, StorageError, SummaryRecoveryAction, SummaryRecoveryRequest,
@@ -469,6 +469,14 @@ impl CollaborationRejection for ConfigurationFailure {
             | ConfigurationFailureKind::OutcomeUnknown => None,
         }
     }
+
+    fn published_rejection(&self) -> PublishedRejection {
+        PublishedRejection::typed(
+            PublishedRejection::OPERATION_FAILED,
+            "Automation configuration failed",
+            self,
+        )
+    }
 }
 
 impl CollaborationRejection for RunFailure {
@@ -484,6 +492,14 @@ impl CollaborationRejection for RunFailure {
             | RunFailureKind::AutomationUnavailable
             | RunFailureKind::InvalidRecord => None,
         }
+    }
+
+    fn published_rejection(&self) -> PublishedRejection {
+        PublishedRejection::typed(
+            PublishedRejection::OPERATION_FAILED,
+            "Run request failed",
+            self,
+        )
     }
 }
 
@@ -504,6 +520,14 @@ impl CollaborationRejection for InstructionFailure {
             | InstructionFailureKind::AutomationUnavailable
             | InstructionFailureKind::InvalidRecord => None,
         }
+    }
+
+    fn published_rejection(&self) -> PublishedRejection {
+        PublishedRejection::typed(
+            PublishedRejection::OPERATION_FAILED,
+            "Instruction operation failed",
+            self,
+        )
     }
 }
 
@@ -527,6 +551,14 @@ impl CollaborationRejection for ScheduleFailure {
             | ScheduleFailureKind::InstructionConflict => None,
         }
     }
+
+    fn published_rejection(&self) -> PublishedRejection {
+        PublishedRejection::typed(
+            PublishedRejection::OPERATION_FAILED,
+            "Schedule operation failed",
+            self,
+        )
+    }
 }
 
 impl CollaborationRejection for AutomationInspectionFailure {
@@ -543,5 +575,13 @@ impl CollaborationRejection for AutomationInspectionFailure {
             | AutomationInspectionFailureKind::InvalidRecord
             | AutomationInspectionFailureKind::HistoryExpired => None,
         }
+    }
+
+    fn published_rejection(&self) -> PublishedRejection {
+        PublishedRejection::typed(
+            PublishedRejection::OPERATION_FAILED,
+            "Automation inspection failed",
+            self,
+        )
     }
 }

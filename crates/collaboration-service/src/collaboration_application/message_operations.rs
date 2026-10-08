@@ -1,5 +1,5 @@
 //! Direct messages: store-first sends and replies, push inspection, inbox and history.
-use super::{CollaborationRejection, CollaborationRejectionReason};
+use super::{CollaborationRejection, CollaborationRejectionReason, PublishedRejection};
 use crate::ServiceIdentity;
 use crate::push_record_delivery::{PushDeliveryFailure, store_first_and_deliver};
 use crate::push_record_resolver::{
@@ -520,5 +520,21 @@ impl CollaborationRejection for MessageFailure {
             | MessageFailureKind::OwnerReplyUnsupported
             | MessageFailureKind::OutcomeUnknown => None,
         }
+    }
+
+    fn published_rejection(&self) -> PublishedRejection {
+        let code = match self.kind {
+            MessageFailureKind::InvalidField | MessageFailureKind::WrongService => {
+                PublishedRejection::INVALID_PARAMS
+            }
+            MessageFailureKind::ForeignMachine
+            | MessageFailureKind::Unavailable
+            | MessageFailureKind::NotFound
+            | MessageFailureKind::NotPermitted
+            | MessageFailureKind::NotDirectMessage
+            | MessageFailureKind::OwnerReplyUnsupported
+            | MessageFailureKind::OutcomeUnknown => PublishedRejection::OPERATION_FAILED,
+        };
+        PublishedRejection::typed(code, self.message.clone(), self)
     }
 }

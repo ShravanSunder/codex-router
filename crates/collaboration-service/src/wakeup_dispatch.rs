@@ -83,7 +83,7 @@ pub(crate) fn wake_response(
 }
 
 pub(crate) fn failure_response(id: Value, data: WakeFailure) -> Value {
-    json!({"jsonrpc":"2.0","id":id,"error":{"code":-32050,"message":"Wake operation failed","data":data}})
+    crate::control_connection::rejection_response(id, &data)
 }
 
 pub(crate) fn failure(

@@ -3,15 +3,17 @@
 //! Codex native operations are generation-scoped calls on the Codex app-server; this module owns
 //! their admission and failure classification but no provider policy or native process. Session
 //! inventories page through `codex_session_inventory` and `provider_session_inventory`.
-use super::{CollaborationRejection, CollaborationRejectionReason, ResultByteBudget};
+use super::{
+    CollaborationRejection, CollaborationRejectionReason, PublishedRejection, ResultByteBudget,
+};
 use crate::ServiceIdentity;
 use codex_native_integration::{NativeConnectionError, NativeOperation, NativeProtocolConnection};
 use collaboration_protocol::{
-    ChannelDescription, CodexGeneration, EndpointDescription, NativeInspectParams,
-    NativeInspectResult, NativeInterruptKind, NativeInterruptParams, NativeInterruptResult,
-    NativeRenameParams, NativeRenameResult, NativeSessionListParams, NativeSessionListResult,
-    ProviderSessionListParams, ProviderSessionListResult, RouterAccess, SessionRef,
-    SettingsObservation, SettingsUnavailableReason,
+    ChannelDescription, CodexGeneration, EndpointDescription, EndpointInventory,
+    NativeInspectParams, NativeInspectResult, NativeInterruptKind, NativeInterruptParams,
+    NativeInterruptResult, NativeRenameParams, NativeRenameResult, NativeSessionListParams,
+    NativeSessionListResult, ProviderSessionListParams, ProviderSessionListResult, RouterAccess,
+    SessionRef, SettingsObservation, SettingsUnavailableReason,
 };
 use serde_json::{Map, Value, json};
 
@@ -23,6 +25,20 @@ pub struct SessionOperations<'service> {
 impl<'service> SessionOperations<'service> {
     pub(crate) fn new(identity: &'service ServiceIdentity) -> Self {
         Self { identity }
+    }
+
+    /// Every endpoint this Router publishes, with the Host-wide publication sequence.
+    pub fn endpoints_list(&self) -> Result<EndpointInventory, EndpointDirectoryUnavailable> {
+        let inventory = self
+            .identity
+            .directory
+            .inventory()
+            .map_err(|_| EndpointDirectoryUnavailable)?;
+        Ok(EndpointInventory {
+            service_epoch: self.identity.service_epoch.clone(),
+            sequence: inventory.sequence,
+            endpoints: inventory.endpoints,
+        })
     }
 
     /// Pages a Codex endpoint's stored catalog or its loaded and active threads.
@@ -133,7 +149,9 @@ impl<'service> SessionOperations<'service> {
         let stage = NativeSessionStage::Rename;
         let refused = |kind| NativeSessionFailure::refused(kind, stage);
         if !valid_session_rename_name(&request.name) {
-            return Err(NativeSessionFailure::InvalidRequest);
+            return Err(NativeSessionFailure::InvalidRequest(
+                INVALID_NATIVE_PARAMETERS,
+            ));
         }
         let route = self.native_route(&request.target, stage)?;
         let Ok(admission) = route.backend.gate.acquire() else {
@@ -406,7 +424,9 @@ pub(crate) fn classify_native_call_failure(
 ) -> NativeSessionFailure {
     let stage_name = stage.as_str();
     match error {
-        NativeConnectionError::InvalidInput => NativeSessionFailure::InvalidRequest,
+        NativeConnectionError::InvalidInput => {
+            NativeSessionFailure::InvalidRequest(INVALID_NATIVE_PARAMETERS)
+        }
         NativeConnectionError::Rejected { code } => {
             let (reason, next_action) =
                 crate::message_effect_state::classify_native_rejection(*code, native);
@@ -462,13 +482,18 @@ pub(crate) fn rename_method_unsupported() -> NativeSessionFailure {
 }
 
 const NATIVE_FAILURE_MESSAGE: &str = "Native control operation failed";
+/// The correction for an invalid native session call.
+pub(crate) const INVALID_NATIVE_PARAMETERS: &str = "Invalid native control parameters";
+/// The correction for an invalid session inventory request.
+pub(crate) const INVALID_INVENTORY_PARAMETERS: &str =
+    "Invalid session inventory parameters or cursor";
 
 /// Why a Codex native session operation failed.
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum NativeSessionFailure {
-    /// The request's fields or cursor are invalid.
-    #[error("Invalid native session request")]
-    InvalidRequest,
+    /// The request's fields or cursor are invalid; the message names the correction.
+    #[error("{0}")]
+    InvalidRequest(&'static str),
     /// The operation was refused or could not complete: `{kind, stage, message}`.
     #[error("{message}")]
     Refused {
@@ -550,7 +575,7 @@ impl serde::Serialize for NativeSessionFailure {
         serializer: TSerializer,
     ) -> Result<TSerializer::Ok, TSerializer::Error> {
         let payload = match self {
-            Self::InvalidRequest => {
+            Self::InvalidRequest(_) => {
                 json!({"kind":"invalidRequest","message":self.to_string()})
             }
             Self::Refused {
@@ -590,7 +615,7 @@ impl serde::Serialize for NativeSessionFailure {
 impl CollaborationRejection for NativeSessionFailure {
     fn rejection_reason(&self) -> Option<CollaborationRejectionReason> {
         match self {
-            Self::InvalidRequest => Some(CollaborationRejectionReason::InvalidShape),
+            Self::InvalidRequest(_) => Some(CollaborationRejectionReason::InvalidShape),
             // A result too large for its response budget is not the API's concurrency limit.
             Self::Refused { kind, .. } => match kind {
                 NativeSessionFailureKind::WrongService
@@ -602,6 +627,21 @@ impl CollaborationRejection for NativeSessionFailure {
                 | NativeSessionFailureKind::ResponseTooLarge => None,
             },
             Self::NativeRejected { .. } | Self::NameMismatch { .. } => None,
+        }
+    }
+
+    fn published_rejection(&self) -> PublishedRejection {
+        match self {
+            Self::InvalidRequest(message) => {
+                PublishedRejection::bare(PublishedRejection::INVALID_PARAMS, *message)
+            }
+            Self::Refused { .. } | Self::NativeRejected { .. } | Self::NameMismatch { .. } => {
+                PublishedRejection::typed(
+                    PublishedRejection::OPERATION_FAILED,
+                    self.to_string(),
+                    self,
+                )
+            }
         }
     }
 }
@@ -665,5 +705,33 @@ impl CollaborationRejection for ProviderInventoryFailure {
             },
             Self::NoStoredTerminalInventory => None,
         }
+    }
+
+    fn published_rejection(&self) -> PublishedRejection {
+        match self {
+            Self::InvalidRequest(message) => {
+                PublishedRejection::bare(PublishedRejection::INVALID_PARAMS, *message)
+            }
+            Self::Unavailable(_) | Self::NoStoredTerminalInventory => PublishedRejection::typed(
+                PublishedRejection::OPERATION_FAILED,
+                self.to_string(),
+                self,
+            ),
+        }
+    }
+}
+
+/// The endpoint directory could not be read.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+#[error("Endpoint directory unavailable")]
+pub struct EndpointDirectoryUnavailable;
+
+impl CollaborationRejection for EndpointDirectoryUnavailable {
+    fn rejection_reason(&self) -> Option<CollaborationRejectionReason> {
+        None
+    }
+
+    fn published_rejection(&self) -> PublishedRejection {
+        PublishedRejection::bare(PublishedRejection::INTERNAL, self.to_string())
     }
 }

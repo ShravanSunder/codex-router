@@ -1,5 +1,5 @@
 //! Approvals and questions: decisions a person or agent owes a waiting session.
-use super::{CollaborationRejection, CollaborationRejectionReason};
+use super::{CollaborationRejection, CollaborationRejectionReason, PublishedRejection};
 use crate::ServiceIdentity;
 use crate::interaction_broker::{
     InteractionHistoryError, InteractionHistoryRecord, QuestionHistoryState,
@@ -173,6 +173,22 @@ impl InteractionFailure {
 impl CollaborationRejection for InteractionFailure {
     fn rejection_reason(&self) -> Option<CollaborationRejectionReason> {
         None
+    }
+
+    fn published_rejection(&self) -> PublishedRejection {
+        match self {
+            // The detailed list and question projections have always failed without a payload.
+            Self::ApprovalListUnavailable | Self::QuestionListUnavailable => {
+                PublishedRejection::bare(PublishedRejection::OPERATION_FAILED, self.to_string())
+            }
+            Self::BrokerUnavailable | Self::ApprovalRejected(_) | Self::QuestionRejected(_) => {
+                PublishedRejection::typed(
+                    PublishedRejection::OPERATION_FAILED,
+                    self.to_string(),
+                    &self.payload(),
+                )
+            }
+        }
     }
 }
 

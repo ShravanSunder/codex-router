@@ -51,10 +51,10 @@ pub(crate) async fn dispatch_native(
                             NativeSessionFailureKind::ResponseTooLarge,
                             NativeSessionStage::Discovery,
                         );
-                        failure_response(id, &failure, INVALID_INVENTORY_MESSAGE)
+                        crate::control_connection::rejection_response(id, &failure)
                     }
                 }
-                Err(failure) => failure_response(id, &failure, INVALID_INVENTORY_MESSAGE),
+                Err(failure) => crate::control_connection::rejection_response(id, &failure),
             };
         }
         "codex/sessionInspect" => {
@@ -85,11 +85,11 @@ pub(crate) async fn dispatch_native(
     };
     match result {
         Ok(result) => json!({"jsonrpc":"2.0","id":id,"result":result}),
-        Err(failure) => failure_response(id, &failure, INVALID_MESSAGE),
+        Err(failure) => crate::control_connection::rejection_response(id, &failure),
     }
 }
 
-const INVALID_MESSAGE: &str = "Invalid native control parameters";
+const INVALID_MESSAGE: &str = crate::collaboration_application::INVALID_NATIVE_PARAMETERS;
 /// The fields Control has always published for each listed session, in their written order.
 const PUBLISHED_SESSION_FIELDS: [&str; 10] = [
     "target",
@@ -103,7 +103,8 @@ const PUBLISHED_SESSION_FIELDS: [&str; 10] = [
     "reasoningEffort",
     "idleSeconds",
 ];
-const INVALID_INVENTORY_MESSAGE: &str = "Invalid session inventory parameters or cursor";
+const INVALID_INVENTORY_MESSAGE: &str =
+    crate::collaboration_application::INVALID_INVENTORY_PARAMETERS;
 
 /// Control's published session page: every session carries every field, with an absent model
 /// or reasoning effort as `null`. Its size is checked again, since the nulls add bytes.
@@ -130,18 +131,6 @@ fn invalid(id: Value, message: &str) -> Value {
     json!({"jsonrpc":"2.0","id":id,"error":{"code":-32602,"message":message}})
 }
 
-/// Control encodes an invalid request as -32602 without data, every other failure as -32050.
-fn failure_response(id: Value, failure: &NativeSessionFailure, invalid_message: &str) -> Value {
-    match failure {
-        NativeSessionFailure::InvalidRequest => invalid(id, invalid_message),
-        NativeSessionFailure::Refused { .. }
-        | NativeSessionFailure::NativeRejected { .. }
-        | NativeSessionFailure::NameMismatch { .. } => {
-            json!({"jsonrpc":"2.0","id":id,"error":{"code":-32050,"message":failure.to_string(),"data":failure}})
-        }
-    }
-}
-
 #[cfg(test)]
 fn native_call_failure(
     id: Value,
@@ -156,7 +145,7 @@ fn native_call_failure(
         _ => NativeSessionStage::Rename,
     };
     let failure = classify_native_call_failure(stage, mutation, error, native);
-    failure_response(id, &failure, INVALID_MESSAGE)
+    crate::control_connection::rejection_response(id, &failure)
 }
 
 #[cfg(test)]
@@ -165,13 +154,13 @@ fn rename_echo_mismatch(id: Value, requested: &str, effective: &str) -> Value {
         requested: requested.to_owned(),
         effective: effective.to_owned(),
     };
-    failure_response(id, &failure, INVALID_MESSAGE)
+    crate::control_connection::rejection_response(id, &failure)
 }
 
 #[cfg(test)]
 fn rename_method_unsupported(id: Value) -> Value {
     let failure = crate::collaboration_application::rename_method_unsupported();
-    failure_response(id, &failure, INVALID_MESSAGE)
+    crate::control_connection::rejection_response(id, &failure)
 }
 
 #[cfg(test)]

@@ -32,12 +32,6 @@ pub(crate) async fn observe(id: Value, params: Value, identity: &ServiceIdentity
     }
 }
 
-/// Control answers a missing Session with -32002 and an invalid request with -32602.
 pub(crate) fn failure_response(id: Value, failure: ObservationFailure) -> Value {
-    let code = match failure {
-        ObservationFailure::InvalidField => -32602,
-        ObservationFailure::NotFound => -32002,
-        ObservationFailure::Unavailable => -32050,
-    };
-    json!({"jsonrpc":"2.0","id":id,"error":{"code":code,"message":failure.to_string(),"data":failure}})
+    crate::control_connection::rejection_response(id, &failure)
 }

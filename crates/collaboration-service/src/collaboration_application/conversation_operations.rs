@@ -1,6 +1,6 @@
 //! Provider conversations: Host-owned operations on external provider sessions, plus the
 //! inspection and recovery of recorded Codex ACP operations.
-use super::{CollaborationRejection, CollaborationRejectionReason};
+use super::{CollaborationRejection, CollaborationRejectionReason, PublishedRejection};
 use crate::{ProviderConversationBackend, ServiceIdentity};
 use collaboration_protocol::{
     CodexGeneration, ConversationAdmissionState, ConversationBindingIdentity,
@@ -487,6 +487,19 @@ impl CollaborationRejection for ConversationFailure {
             | ConversationOperationFailureKind::OutcomeUnknown => None,
         }
     }
+
+    fn published_rejection(&self) -> PublishedRejection {
+        match self {
+            Self::Operation(failure) => PublishedRejection::typed(
+                PublishedRejection::OPERATION_FAILED,
+                String::from(failure.message.clone()),
+                failure,
+            ),
+            Self::InvalidStoredOperation | Self::UndescribableFailure => {
+                PublishedRejection::bare(PublishedRejection::INTERNAL, self.to_string())
+            }
+        }
+    }
 }
 
 impl CollaborationRejection for ProviderSettingsFailure {
@@ -504,6 +517,14 @@ impl CollaborationRejection for ProviderSettingsFailure {
             | ProviderSettingsFailureKind::Unavailable => None,
         }
     }
+
+    fn published_rejection(&self) -> PublishedRejection {
+        PublishedRejection::typed(
+            PublishedRejection::OPERATION_FAILED,
+            self.message.clone(),
+            self,
+        )
+    }
 }
 
 impl CollaborationRejection for ProviderInspectFailure {
@@ -514,6 +535,14 @@ impl CollaborationRejection for ProviderInspectFailure {
             }
             ProviderInspectFailureKind::NotFound | ProviderInspectFailureKind::Unavailable => None,
         }
+    }
+
+    fn published_rejection(&self) -> PublishedRejection {
+        PublishedRejection::typed(
+            PublishedRejection::OPERATION_FAILED,
+            self.message.clone(),
+            self,
+        )
     }
 }
 

@@ -176,7 +176,7 @@ impl<'service> AutomationOperations<'service> {
                 if records.is_empty() {
                     return Err(failure::invalid(
                         "limit",
-                        "One complete attempt record exceeds the Control frame limit; it was not silently truncated.",
+                        "One complete attempt record exceeds the response limit; it was not silently truncated.",
                     ));
                 }
                 break;
@@ -269,7 +269,7 @@ impl<'service> AutomationOperations<'service> {
                 if records.is_empty() {
                     return Err(failure::invalid(
                         "limit",
-                        "A single event exceeds the Control frame budget; its content was not silently truncated.",
+                        "A single event exceeds the response limit; its content was not silently truncated.",
                     ));
                 }
                 break;

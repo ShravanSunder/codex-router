@@ -1,7 +1,8 @@
 //! Stored catalog and live native inventory keep separate, endpoint-bound pagination.
 use crate::ServiceIdentity;
 use crate::collaboration_application::{
-    NativeSessionFailure, NativeSessionFailureKind, NativeSessionStage, ResultByteBudget,
+    INVALID_INVENTORY_PARAMETERS, NativeSessionFailure, NativeSessionFailureKind,
+    NativeSessionStage, ResultByteBudget,
 };
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use codex_native_integration::{
@@ -179,7 +180,9 @@ pub(crate) async fn list_codex_sessions(
 ) -> Result<NativeSessionListResult, NativeSessionFailure> {
     let display_names = &identity.display_names;
     if !(1..=100).contains(&params.page_size) {
-        return Err(NativeSessionFailure::InvalidRequest);
+        return Err(NativeSessionFailure::InvalidRequest(
+            INVALID_INVENTORY_PARAMETERS,
+        ));
     }
     if params.endpoint.service_id != identity.service_id {
         return Err(failed(NativeSessionFailureKind::WrongService));
@@ -205,7 +208,9 @@ pub(crate) async fn list_codex_sessions(
         None => None,
         Some(text) => {
             if text.is_empty() || text.len() > 1024 {
-                return Err(NativeSessionFailure::InvalidRequest);
+                return Err(NativeSessionFailure::InvalidRequest(
+                    INVALID_INVENTORY_PARAMETERS,
+                ));
             }
             let decoded = URL_SAFE_NO_PAD
                 .decode(text)
@@ -219,7 +224,9 @@ pub(crate) async fn list_codex_sessions(
                     && c.include_empty_sessions == params.include_empty_sessions
                     && c.query == params.query
             }) else {
-                return Err(NativeSessionFailure::InvalidRequest);
+                return Err(NativeSessionFailure::InvalidRequest(
+                    INVALID_INVENTORY_PARAMETERS,
+                ));
             };
             Some(cursor)
         }
@@ -231,7 +238,9 @@ pub(crate) async fn list_codex_sessions(
                 || c.expires_at.is_some()
                 || c.stored_id.as_ref().is_none_or(String::is_empty)
         }) {
-            return Err(NativeSessionFailure::InvalidRequest);
+            return Err(NativeSessionFailure::InvalidRequest(
+                INVALID_INVENTORY_PARAMETERS,
+            ));
         }
         stored_page(&backend.codex_home, &params, cursor, display_names, budget).await
     } else {
@@ -248,7 +257,9 @@ pub(crate) async fn list_codex_sessions(
                 || c.stored_id.is_some()
                 || c.stored_time.is_some()
         }) {
-            return Err(NativeSessionFailure::InvalidRequest);
+            return Err(NativeSessionFailure::InvalidRequest(
+                INVALID_INVENTORY_PARAMETERS,
+            ));
         }
         let retired = admission.retirement();
         tokio::select! {

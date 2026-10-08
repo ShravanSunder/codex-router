@@ -40,4 +40,46 @@ impl CollaborationRejectionReason {
 pub trait CollaborationRejection {
     /// The spec 1 §5 reason this failure is, or `None` for a family-specific failure.
     fn rejection_reason(&self) -> Option<CollaborationRejectionReason>;
+
+    /// The failure as published to callers: its error code, summary and typed payload.
+    fn published_rejection(&self) -> PublishedRejection;
+}
+
+/// A failure as callers receive it: a JSON-RPC error code, a summary and, for typed failures,
+/// the payload whose `kind` names the failure. Every transport publishes the same object.
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+pub struct PublishedRejection {
+    pub code: i64,
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data: Option<serde_json::Value>,
+}
+
+impl PublishedRejection {
+    /// The request was refused before the operation ran.
+    pub const INVALID_PARAMS: i64 = -32602;
+    /// The operation refused or could not complete; the payload says why.
+    pub const OPERATION_FAILED: i64 = -32050;
+    /// The named subject does not exist.
+    pub const NOT_FOUND: i64 = -32002;
+    /// The service could not describe its own failure.
+    pub const INTERNAL: i64 = -32603;
+
+    /// A failure with its typed payload.
+    pub fn typed(code: i64, message: impl Into<String>, data: &impl serde::Serialize) -> Self {
+        Self {
+            code,
+            message: message.into(),
+            data: serde_json::to_value(data).ok(),
+        }
+    }
+
+    /// A failure without a payload.
+    pub fn bare(code: i64, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            message: message.into(),
+            data: None,
+        }
+    }
 }

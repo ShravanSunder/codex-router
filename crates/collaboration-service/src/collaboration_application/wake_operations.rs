@@ -1,7 +1,9 @@
 //! Wakes and their deliveries: durable reminders in automation storage. Timing workers own the
 //! later native submission; these operations never touch a native thread.
-use super::{CollaborationRejection, CollaborationRejectionReason, ResultByteBudget};
-use crate::wakeup_subscription::WakeSubscriptionState;
+use super::{
+    CollaborationRejection, CollaborationRejectionReason, PublishedRejection, ResultByteBudget,
+};
+use crate::wakeup_subscription::{WakeResumeError, WakeSubscriptionState};
 use agent_automation::WakeupId;
 use automation_storage::{
     AutomationStore, StorageError, WakeAction, WakeCreate, WakeListPosition, WakeMutation,
@@ -11,24 +13,43 @@ use collaboration_protocol::{
     LocalMutationEvidence, LocalMutationState, OperationId, SavedMessage, UuidIdentity,
     WaitUnavailable, WakeFailure, WakeFailureReason, WakeFailureStage, WakeMutationRequest,
     WakeMutationResult, WakeNextAction, WakeNotFound, WakeSendRequest, WakeShowRequest,
-    WakeSnapshot, WakeSubscription,
+    WakeSnapshot, WakeState, WakeSubscription, WakeWaitOutcome, WakeWaitRequest, WakeWaitResult,
 };
 use serde_json::json;
-use std::sync::Arc;
-use tokio::sync::{Mutex, Semaphore};
+use std::{sync::Arc, time::Duration};
+use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore};
 
 /// Wake and delivery operations over automation storage.
 pub struct WakeOperations<'service> {
     service_id: &'service UuidIdentity,
     store: Option<&'service Arc<Mutex<AutomationStore>>>,
+    /// Concurrent first-fire waits share these permits; a handle without them cannot wait.
+    wait_permits: Option<&'service Arc<Semaphore>>,
 }
+
+/// How often a first-fire wait checks for new automation events.
+const WAKE_WAIT_POLL_INTERVAL: Duration = Duration::from_millis(50);
+/// How long a first-fire wait runs when the caller names no timeout.
+const DEFAULT_WAKE_WAIT_SECONDS: u32 = 60;
+/// The longest a single first-fire wait may run.
+const MAX_WAKE_WAIT_SECONDS: u32 = 1500;
 
 impl<'service> WakeOperations<'service> {
     pub(crate) fn new(
         service_id: &'service UuidIdentity,
         store: Option<&'service Arc<Mutex<AutomationStore>>>,
     ) -> Self {
-        Self { service_id, store }
+        Self {
+            service_id,
+            store,
+            wait_permits: None,
+        }
+    }
+
+    /// Lets this handle run first-fire waits, sharing `wait_permits` with every other wait.
+    pub(crate) fn with_wait_capacity(mut self, wait_permits: &'service Arc<Semaphore>) -> Self {
+        self.wait_permits = Some(wait_permits);
+        self
     }
 
     fn store(
@@ -355,17 +376,13 @@ impl<'service> WakeOperations<'service> {
 
     /// Starts a first-fire wait: a snapshot plus the cursor its later changes follow.
     ///
-    /// Waits share `wait_permits`; at capacity the wait is unavailable, never queued.
+    /// Waits share the handle's wait permits; at capacity the wait is unavailable, never queued.
     pub(crate) async fn wake_wait_start(
         &self,
         request: WakeShowRequest,
-        wait_permits: &Arc<Semaphore>,
     ) -> Result<(WakeSubscriptionState, WakeSubscription), WakeWaitFailure> {
         let wakeup_id = request.wakeup_id.clone();
-        let permit = Arc::clone(wait_permits).try_acquire_owned();
-        let (Some(store), Ok(permit)) = (self.store, permit) else {
-            return Err(WakeWaitFailure::unavailable(wakeup_id));
-        };
+        let (store, permit) = self.wait_admission(&wakeup_id)?;
         crate::wakeup_subscription::start(
             Arc::clone(store),
             self.service_id.clone(),
@@ -377,6 +394,122 @@ impl<'service> WakeOperations<'service> {
             StorageError::WakeNotFound => WakeWaitFailure::not_found(wakeup_id),
             _ => WakeWaitFailure::unavailable(wakeup_id),
         })
+    }
+
+    /// Waits up to `timeoutSeconds` for a wake-up's first fire, or for a change that rules one
+    /// out. Starts from the current state, or resumes after `after`, and always returns the
+    /// cursor a later wait resumes from, so no change is lost between calls.
+    pub async fn wake_wait_until_first_fire(
+        &self,
+        request: WakeWaitRequest,
+    ) -> Result<WakeWaitResult, WakeWaitFailure> {
+        let wakeup_id = request.wakeup_id.clone();
+        let timeout_seconds = request.timeout_seconds.unwrap_or(DEFAULT_WAKE_WAIT_SECONDS);
+        if !(1..=MAX_WAKE_WAIT_SECONDS).contains(&timeout_seconds) {
+            return Err(WakeWaitFailure::InvalidField {
+                field: "timeoutSeconds",
+                constraint: "Wait between 1 and 1500 seconds.",
+            });
+        }
+        let deadline =
+            tokio::time::Instant::now() + Duration::from_secs(u64::from(timeout_seconds));
+        let (store, permit) = self.wait_admission(&wakeup_id)?;
+        let mut observation = match request.after {
+            None => {
+                let (observation, subscription) = crate::wakeup_subscription::start(
+                    Arc::clone(store),
+                    self.service_id.clone(),
+                    WakeShowRequest {
+                        wakeup_id: wakeup_id.clone(),
+                    },
+                    permit,
+                )
+                .await
+                .map_err(|error| match error {
+                    StorageError::WakeNotFound => WakeWaitFailure::not_found(wakeup_id.clone()),
+                    _ => WakeWaitFailure::unavailable(wakeup_id.clone()),
+                })?;
+                if let Some(outcome) = settled_outcome(&subscription.snapshot) {
+                    return Ok(WakeWaitResult {
+                        wakeup_id,
+                        outcome,
+                        cursor: subscription.after,
+                    });
+                }
+                observation
+            }
+            Some(cursor) => WakeSubscriptionState::resume(
+                Arc::clone(store),
+                self.service_id.clone(),
+                wakeup_id.clone(),
+                &cursor,
+                permit,
+            )
+            .await
+            .map_err(|error| match error {
+                WakeResumeError::InvalidCursor => WakeWaitFailure::InvalidField {
+                    field: "after",
+                    constraint: "Use a cursor an earlier wait on this service returned, or omit it.",
+                },
+                WakeResumeError::NotFound => WakeWaitFailure::not_found(wakeup_id.clone()),
+                WakeResumeError::Unavailable => WakeWaitFailure::unavailable(wakeup_id.clone()),
+            })?,
+        };
+        loop {
+            let changes = observation
+                .next_changes()
+                .await
+                .map_err(|_| WakeWaitFailure::unavailable(wakeup_id.clone()))?;
+            if let Some(changed) = changes.into_iter().next() {
+                return Ok(WakeWaitResult {
+                    wakeup_id,
+                    outcome: changed.change.into(),
+                    cursor: changed.cursor,
+                });
+            }
+            if tokio::time::Instant::now() >= deadline {
+                let cursor = observation
+                    .cursor()
+                    .map_err(|_| WakeWaitFailure::unavailable(wakeup_id.clone()))?;
+                return Ok(WakeWaitResult {
+                    wakeup_id,
+                    outcome: WakeWaitOutcome::TimedOut,
+                    cursor,
+                });
+            }
+            tokio::time::sleep_until(
+                (tokio::time::Instant::now() + WAKE_WAIT_POLL_INTERVAL).min(deadline),
+            )
+            .await;
+        }
+    }
+
+    fn wait_admission(
+        &self,
+        wakeup_id: &WakeupId,
+    ) -> Result<(&'service Arc<Mutex<AutomationStore>>, OwnedSemaphorePermit), WakeWaitFailure>
+    {
+        let permit = self
+            .wait_permits
+            .and_then(|permits| Arc::clone(permits).try_acquire_owned().ok());
+        match (self.store, permit) {
+            (Some(store), Some(permit)) => Ok((store, permit)),
+            _ => Err(WakeWaitFailure::unavailable(wakeup_id.clone())),
+        }
+    }
+}
+
+/// A snapshot that already answers a first-fire wait: it fired, or can no longer fire.
+fn settled_outcome(snapshot: &WakeSnapshot) -> Option<WakeWaitOutcome> {
+    if let Some(fire) = snapshot.first_fire.clone() {
+        return Some(WakeWaitOutcome::Fired { fire });
+    }
+    match snapshot.state {
+        WakeState::Active => None,
+        WakeState::Paused => Some(WakeWaitOutcome::Paused),
+        WakeState::Cancelled => Some(WakeWaitOutcome::Cancelled),
+        WakeState::Expired => Some(WakeWaitOutcome::Expired),
+        WakeState::Finished => Some(WakeWaitOutcome::FinishedWithoutFiring),
     }
 }
 
@@ -459,6 +592,11 @@ pub enum WakeWaitFailure {
     /// No wait capacity or storage; reconnect the wait without recreating the reminder.
     Unavailable(WaitUnavailable),
     NotFound(WakeNotFound),
+    /// The wait's cursor or timeout is invalid.
+    InvalidField {
+        field: &'static str,
+        constraint: &'static str,
+    },
 }
 
 impl WakeWaitFailure {
@@ -508,10 +646,47 @@ impl CollaborationRejection for WakeFailure {
             | WakeFailureReason::LifecycleConflict => None,
         }
     }
+
+    fn published_rejection(&self) -> PublishedRejection {
+        PublishedRejection::typed(
+            PublishedRejection::OPERATION_FAILED,
+            "Wake operation failed",
+            self,
+        )
+    }
 }
 
 impl CollaborationRejection for WakeWaitFailure {
     fn rejection_reason(&self) -> Option<CollaborationRejectionReason> {
-        None
+        match self {
+            Self::InvalidField { .. } => Some(CollaborationRejectionReason::InvalidShape),
+            Self::Unavailable(_) | Self::NotFound(_) => None,
+        }
+    }
+
+    fn published_rejection(&self) -> PublishedRejection {
+        match self {
+            Self::Unavailable(data) => PublishedRejection::typed(
+                PublishedRejection::OPERATION_FAILED,
+                "Wake wait unavailable",
+                data,
+            ),
+            Self::NotFound(data) => PublishedRejection::typed(
+                PublishedRejection::OPERATION_FAILED,
+                "Wake not found",
+                data,
+            ),
+            Self::InvalidField { field, constraint } => PublishedRejection::typed(
+                PublishedRejection::INVALID_PARAMS,
+                *constraint,
+                &json!({
+                    "kind":"invalidField",
+                    "stage":"waitForFirstFire",
+                    "field":field,
+                    "constraint":constraint,
+                    "message":constraint,
+                }),
+            ),
+        }
     }
 }

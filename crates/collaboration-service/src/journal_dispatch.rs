@@ -4,7 +4,7 @@ use crate::collaboration_application::{JournalFailure, SessionOperations};
 use serde_json::{Value, json};
 
 fn invalid(id: Value) -> Value {
-    json!({"jsonrpc":"2.0","id":id,"error":{"code":-32602,"message":"Invalid lifecycle parameters"}})
+    crate::control_connection::rejection_response(id, &JournalFailure::InvalidRequest)
 }
 
 pub(crate) async fn dispatch_journal(
@@ -40,13 +40,6 @@ pub(crate) async fn dispatch_journal(
     };
     match result {
         Ok(result) => json!({"jsonrpc":"2.0","id":id,"result":result}),
-        Err(JournalFailure::InvalidRequest) => invalid(id),
-        Err(
-            failure @ (JournalFailure::Unavailable(_)
-            | JournalFailure::SnapshotExpired
-            | JournalFailure::CursorInvalidated { .. }),
-        ) => {
-            json!({"jsonrpc":"2.0","id":id,"error":{"code":-32050,"message":failure.to_string(),"data":failure}})
-        }
+        Err(failure) => crate::control_connection::rejection_response(id, &failure),
     }
 }

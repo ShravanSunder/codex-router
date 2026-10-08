@@ -4,7 +4,7 @@ use crate::collaboration_application::BoardOperations;
 use message_board::*;
 use serde_json::{Value, json};
 pub(crate) fn failure(id: Value, error: BoardError) -> Value {
-    json!({"jsonrpc":"2.0","id":id,"error":{"code":-32050,"message":error.message,"data":error}})
+    crate::control_connection::rejection_response(id, &error)
 }
 pub(crate) fn overloaded(id: Value) -> Value {
     failure(

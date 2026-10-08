@@ -96,5 +96,5 @@ pub(crate) async fn prepare(id: Value, params: Value, identity: &ServiceIdentity
 }
 
 fn schedule_failure_response(id: Value, failure: ScheduleOperationFailure) -> Value {
-    json!({"jsonrpc":"2.0","id":id,"error":{"code":-32050,"message":failure.to_string(),"data":failure.failure()}})
+    crate::control_connection::rejection_response(id, &failure)
 }

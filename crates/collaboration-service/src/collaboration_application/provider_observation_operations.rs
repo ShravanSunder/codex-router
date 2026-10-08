@@ -1,6 +1,6 @@
 //! Provider Session observation: bounded, resumable reads of the same hub attached faces use,
 //! and the live stream Control's `provider/sessionListen` still serves.
-use super::{CollaborationRejection, CollaborationRejectionReason};
+use super::{CollaborationRejection, CollaborationRejectionReason, PublishedRejection};
 use crate::{HubEvent, ServiceIdentity, SessionEventAttachment, SessionEventHubError};
 use collaboration_protocol::{
     BoundedObservationRequest, BoundedObservationResult, ChannelDescription, CodexGeneration,
@@ -355,5 +355,14 @@ impl CollaborationRejection for ObservationFailure {
             Self::InvalidField => Some(CollaborationRejectionReason::InvalidShape),
             Self::NotFound | Self::Unavailable => None,
         }
+    }
+
+    fn published_rejection(&self) -> PublishedRejection {
+        let code = match self {
+            Self::InvalidField => PublishedRejection::INVALID_PARAMS,
+            Self::NotFound => PublishedRejection::NOT_FOUND,
+            Self::Unavailable => PublishedRejection::OPERATION_FAILED,
+        };
+        PublishedRejection::typed(code, self.to_string(), self)
     }
 }

@@ -501,7 +501,7 @@ fn a_result_too_large_for_its_response_is_not_the_concurrency_limit() {
     assert_eq!(inventory.rejection_reason(), None);
     assert_eq!(wire_kind(&inventory), "overloaded");
     assert_eq!(
-        NativeSessionFailure::InvalidRequest.rejection_reason(),
+        NativeSessionFailure::InvalidRequest(INVALID_NATIVE_PARAMETERS).rejection_reason(),
         Some(Reason::InvalidShape)
     );
     assert_eq!(

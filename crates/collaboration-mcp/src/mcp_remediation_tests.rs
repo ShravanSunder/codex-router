@@ -1,4 +1,4 @@
-use super::{CollaborationMcpListener, CollaborationMcpListenerConfig, LoopbackBindAddress};
+use crate::api_test_harness::{ServedApi, api_config};
 use futures_util::{SinkExt, StreamExt};
 use reqwest::header::{ACCEPT, CONTENT_TYPE};
 use serde_json::{Value, json};
@@ -11,7 +11,7 @@ const SERVICE_ID: &str = "00000000-0000-4000-8000-000000000001";
 const SERVICE_EPOCH: &str = "00000000-0000-4000-8000-000000000002";
 
 #[tokio::test]
-async fn initialized_http_application_deadline_detaches_without_cancelling_turn() {
+async fn stateless_http_application_deadline_detaches_without_cancelling_turn() {
     let fixture = ConversationFixture::start("deadline-acp.sock").await;
     let acp_path = fixture.root.path().join("deadline-acp.sock");
     let acp = tokio::net::UnixListener::bind(&acp_path).expect("ACP listener");
@@ -52,10 +52,9 @@ async fn initialized_http_application_deadline_detaches_without_cancelling_turn(
         );
     });
     let client = reqwest::Client::new();
-    let session_id = initialize_mcp(&client, &fixture.listener).await;
     let endpoint = json!({"serviceId":SERVICE_ID,"endpointId":"codex-local"});
     let caller = json!({"endpoint":endpoint,"sessionId":"deadline-caller"});
-    let response = client.post(fixture.listener.local_url()).header(CONTENT_TYPE,"application/json").header(ACCEPT,"application/json, text/event-stream").header("mcp-session-id",session_id).header("mcp-protocol-version","2025-11-25").json(&json!({
+    let response = client.post(fixture.listener.url()).header(CONTENT_TYPE,"application/json").header(ACCEPT,"application/json, text/event-stream").header("mcp-protocol-version","2025-11-25").json(&json!({
         "jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"conversation_create_and_prompt","arguments":{
             "create":{"operationId":collaboration_protocol::OperationId::generate(),"endpoint":endpoint,"workingDirectory":fixture.root.path(),"fork":null,"model":"gpt-5.6-luna","effort":"low","access":"workspace-write","createdBy":caller,"approver":caller,"rootMessageId":null},
             "message":{"kind":"humanUser","text":"deadline proof"},"promptEffort":"low","timeoutSeconds":1
@@ -87,12 +86,11 @@ enum ObservationClosure {
 }
 
 #[tokio::test]
-async fn initialized_http_observation_distinguishes_malformed_frame_from_clean_eof() {
+async fn stateless_http_observation_distinguishes_malformed_frame_from_clean_eof() {
     for closure in [ObservationClosure::Clean, ObservationClosure::Malformed] {
         let fixture = NativeObservationFixture::start(closure).await;
         let client = reqwest::Client::new();
-        let session_id = initialize_mcp(&client, &fixture.fixture.listener).await;
-        let response = client.post(fixture.fixture.listener.local_url()).header(CONTENT_TYPE,"application/json").header(ACCEPT,"application/json, text/event-stream").header("mcp-session-id",session_id).header("mcp-protocol-version","2025-11-25").json(&json!({
+        let response = client.post(fixture.fixture.listener.url()).header(CONTENT_TYPE,"application/json").header(ACCEPT,"application/json, text/event-stream").header("mcp-protocol-version","2025-11-25").json(&json!({
             "jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"events_observe","arguments":{
                 "target":{"endpoint":{"serviceId":SERVICE_ID,"endpointId":"codex-local"},"sessionId":"observe-thread"},
                 "timeoutSeconds":2,"maxEvents":8,"maxBytes":4096
@@ -126,7 +124,7 @@ async fn initialized_http_observation_distinguishes_malformed_frame_from_clean_e
 
 struct ConversationFixture {
     root: tempfile::TempDir,
-    listener: CollaborationMcpListener,
+    listener: ServedApi,
     stop: CancellationToken,
     control_task: tokio::task::JoinHandle<std::io::Result<()>>,
     publication: collaboration_service::ManifestPublication,
@@ -156,6 +154,7 @@ impl ConversationFixture {
                 .expect("identity")
                 .with_endpoints(vec![endpoint])
                 .expect("endpoint directory");
+        let application = collaboration_service::CollaborationApplication::new(identity.clone());
         let control = collaboration_service::LocalControlService::bind(
             &root.path().join("control.sock"),
             identity,
@@ -167,13 +166,7 @@ impl ConversationFixture {
                 .expect("publication");
         let stop = CancellationToken::new();
         let control_task = tokio::spawn(control.run(stop.clone()));
-        let listener = CollaborationMcpListener::start(CollaborationMcpListenerConfig {
-            bind_address: LoopbackBindAddress::parse("127.0.0.1:0").expect("bind"),
-            service_directory: root.path().to_owned(),
-            allowed_origins: Vec::new(),
-        })
-        .await
-        .expect("listener");
+        let listener = ServedApi::tcp(&api_config(application, root.path())).await;
         Self {
             root,
             listener,
@@ -184,7 +177,7 @@ impl ConversationFixture {
     }
 
     async fn shutdown(self) {
-        self.listener.shutdown().await.expect("listener shutdown");
+        self.listener.stop().await;
         self.stop.cancel();
         self.control_task
             .await
@@ -267,31 +260,6 @@ async fn next_ws_json(
         .expect("native frame")
         .expect("native read");
     serde_json::from_str(frame.to_text().expect("native text")).expect("native JSON")
-}
-
-async fn initialize_mcp(
-    client: &reqwest::Client,
-    listener: &CollaborationMcpListener,
-) -> reqwest::header::HeaderValue {
-    let response = client.post(listener.local_url()).header(CONTENT_TYPE,"application/json").header(ACCEPT,"application/json, text/event-stream").json(&json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"remediation-proof","version":"1"}}})).send().await.expect("initialize");
-    let session = response
-        .headers()
-        .get("mcp-session-id")
-        .cloned()
-        .expect("session ID");
-    let _ = protocol_response_json(response).await;
-    let initialized = client
-        .post(listener.local_url())
-        .header(CONTENT_TYPE, "application/json")
-        .header(ACCEPT, "application/json, text/event-stream")
-        .header("mcp-session-id", session.clone())
-        .header("mcp-protocol-version", "2025-11-25")
-        .json(&json!({"jsonrpc":"2.0","method":"notifications/initialized","params":{}}))
-        .send()
-        .await
-        .expect("initialized");
-    assert!(initialized.status().is_success());
-    session
 }
 
 async fn protocol_response_json(response: reqwest::Response) -> Value {

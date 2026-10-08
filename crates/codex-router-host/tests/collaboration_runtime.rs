@@ -27,6 +27,75 @@ async fn host_without_provider_faces_does_not_require_owner_lookup()
 }
 
 #[tokio::test]
+async fn host_serves_the_stateless_collaboration_api_at_the_manifest_url() {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    // Arrange
+    let root = tempfile::tempdir().expect("temporary runtime root");
+    std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700))
+        .expect("private runtime root");
+    let runtime = CollaborationRuntime::start(CollaborationRuntimeInputs {
+        directory: root.path().to_owned(),
+        codex_home: root.path().to_owned(),
+        backend_socket: root.path().join("backend.sock"),
+        mcp_bind: std::net::SocketAddr::from(([127, 0, 0, 1], 0)),
+        native_schema: None,
+        peer_registry_directory: None,
+        remote_control_server_name: None,
+        owner_human_id: None,
+    })
+    .await
+    .expect("runtime starts");
+    let manifest: collaboration_protocol::ServiceManifest =
+        serde_json::from_slice(&std::fs::read(root.path().join("service.json")).expect("manifest"))
+            .expect("manifest decode");
+    let authority = manifest
+        .mcp
+        .url
+        .strip_prefix("http://")
+        .and_then(|rest| rest.strip_suffix("/mcp"))
+        .expect("loopback MCP URL")
+        .to_owned();
+    let body = serde_json::to_vec(&serde_json::json!({
+        "jsonrpc":"2.0","id":1,"method":"tools/call",
+        "params":{"name":"endpoints_list","arguments":{}}
+    }))
+    .expect("tool call JSON");
+
+    // Act: one stateless call, with no initialize and no session.
+    let mut stream = tokio::net::TcpStream::connect(&authority)
+        .await
+        .expect("connect to the collaboration API");
+    stream
+        .write_all(
+            format!(
+                "POST /mcp HTTP/1.1\r\nHost: {authority}\r\nContent-Type: application/json\r\nAccept: application/json, text/event-stream\r\nMCP-Protocol-Version: 2025-11-25\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            )
+            .as_bytes(),
+        )
+        .await
+        .expect("request head");
+    stream.write_all(&body).await.expect("request body");
+    let mut response = String::new();
+    stream
+        .read_to_string(&mut response)
+        .await
+        .expect("API response");
+
+    // Assert
+    let (head, payload) = response.split_once("\r\n\r\n").expect("HTTP response");
+    assert!(head.starts_with("HTTP/1.1 200"), "{head}");
+    let answer: serde_json::Value = serde_json::from_str(payload).expect("JSON-RPC response");
+    assert_eq!(answer["result"]["isError"], false, "{answer}");
+    assert_eq!(
+        answer["result"]["structuredContent"]["serviceEpoch"],
+        serde_json::json!(runtime.service_epoch())
+    );
+    runtime.shutdown().await.expect("runtime shutdown");
+}
+
+#[tokio::test]
 async fn post_bind_manifest_failure_releases_mcp_port() {
     let root = tempfile::tempdir().expect("temporary runtime root");
     std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700))

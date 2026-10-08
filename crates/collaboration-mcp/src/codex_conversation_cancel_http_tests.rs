@@ -1,5 +1,5 @@
 //! The common cancellation tool must not turn Codex ACP work into provider cancellation.
-use super::{CollaborationMcpListener, CollaborationMcpListenerConfig, LoopbackBindAddress};
+use crate::api_test_harness::{ServedApi, api_config};
 use reqwest::header::{ACCEPT, CONTENT_TYPE};
 use serde_json::{Value, json};
 use std::os::unix::fs::PermissionsExt;
@@ -26,6 +26,7 @@ async fn codex_conversation_cancel_names_turn_interrupt_without_sending_acp_canc
         .expect("service identity")
         .with_endpoints(vec![description])
         .expect("endpoint directory");
+    let application = collaboration_service::CollaborationApplication::new(identity.clone());
     let control = collaboration_service::LocalControlService::bind(
         &root.path().join("control.sock"),
         identity,
@@ -73,49 +74,13 @@ async fn codex_conversation_cancel_names_turn_interrupt_without_sending_acp_canc
             );
         }
     });
-    let listener = CollaborationMcpListener::start(CollaborationMcpListenerConfig {
-        bind_address: LoopbackBindAddress::parse("127.0.0.1:0").expect("loopback"),
-        service_directory: root.path().to_owned(),
-        allowed_origins: Vec::new(),
-    })
-    .await
-    .expect("MCP listener");
+    let listener = ServedApi::tcp(&api_config(application, root.path())).await;
     let client = reqwest::Client::new();
-    let initialized = client
-        .post(listener.local_url())
-        .header(CONTENT_TYPE, "application/json")
-        .header(ACCEPT, "application/json, text/event-stream")
-        .json(
-            &json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{
-            "protocolVersion":"2025-11-25","capabilities":{},
-            "clientInfo":{"name":"codex-cancel-proof","version":"1"}}}),
-        )
-        .send()
-        .await
-        .expect("MCP initialization");
-    let session = initialized
-        .headers()
-        .get("mcp-session-id")
-        .cloned()
-        .expect("MCP session");
-    let _body = initialized.text().await.expect("initialization body");
-    let notified = client
-        .post(listener.local_url())
-        .header(CONTENT_TYPE, "application/json")
-        .header(ACCEPT, "application/json, text/event-stream")
-        .header("mcp-session-id", session.clone())
-        .header("mcp-protocol-version", "2025-11-25")
-        .json(&json!({"jsonrpc":"2.0","method":"notifications/initialized","params":{}}))
-        .send()
-        .await
-        .expect("initialized notification");
-    assert!(notified.status().is_success());
     let target = json!({"endpoint":endpoint,"sessionId":"codex-thread"});
     let response = client
-        .post(listener.local_url())
+        .post(listener.url())
         .header(CONTENT_TYPE, "application/json")
         .header(ACCEPT, "application/json, text/event-stream")
-        .header("mcp-session-id", session.clone())
         .header("mcp-protocol-version", "2025-11-25")
         .json(
             &json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{
@@ -148,10 +113,9 @@ async fn codex_conversation_cancel_names_turn_interrupt_without_sending_acp_canc
     );
     let prompt_operation_id = collaboration_protocol::OperationId::generate();
     let response = client
-        .post(listener.local_url())
+        .post(listener.url())
         .header(CONTENT_TYPE, "application/json")
         .header(ACCEPT, "application/json, text/event-stream")
-        .header("mcp-session-id", session.clone())
         .header("mcp-protocol-version", "2025-11-25")
         .json(
             &json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{
@@ -191,10 +155,9 @@ async fn codex_conversation_cancel_names_turn_interrupt_without_sending_acp_canc
     );
     let load_operation_id = collaboration_protocol::OperationId::generate();
     let response = client
-        .post(listener.local_url())
+        .post(listener.url())
         .header(CONTENT_TYPE, "application/json")
         .header(ACCEPT, "application/json, text/event-stream")
-        .header("mcp-session-id", session)
         .header("mcp-protocol-version", "2025-11-25")
         .json(
             &json!({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{
@@ -229,7 +192,7 @@ async fn codex_conversation_cancel_names_turn_interrupt_without_sending_acp_canc
         "omit the operation ID for Codex prompts; it is not inspectable"
     );
     acp_peer.await.expect("ACP peer");
-    listener.shutdown().await.expect("MCP shutdown");
+    listener.stop().await;
     stop.cancel();
     control_task
         .await

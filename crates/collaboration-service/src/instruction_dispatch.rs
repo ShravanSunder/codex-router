@@ -83,7 +83,7 @@ fn invalid(id: Value, context: InstructionContext, message: &str) -> Value {
     )
 }
 fn failure_response(id: Value, data: InstructionFailure) -> Value {
-    json!({"jsonrpc":"2.0","id":id,"error":{"code":-32050,"message":"Instruction operation failed","data":data}})
+    crate::control_connection::rejection_response(id, &data)
 }
 pub(crate) fn overloaded(id: Value) -> Value {
     failure_response(

@@ -23,9 +23,7 @@ fn codex_running_prompt_is_a_successful_typed_tool_result() {
         "Turn continues. Follow with: agent-collaboration events listen --endpoint codex-local --session active-thread --attach; or agent-collaboration session inspect --endpoint codex-local --session active-thread --json"
     );
 
-    let server = super::CollaborationMcpServer::new(
-        tempfile::tempdir().expect("directory").path().to_owned(),
-    );
+    let server = super::CollaborationMcpServer::catalog_only();
     let schema = server
         .resolved_tools()
         .into_iter()

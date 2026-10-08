@@ -1,4 +1,5 @@
-use super::{CollaborationMcpListener, CollaborationMcpListenerConfig, LoopbackBindAddress};
+use crate::api_test_harness::{ServedApi, api_config, test_identity};
+use collaboration_service::CollaborationApplication;
 use reqwest::header::{ACCEPT, CONTENT_TYPE};
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -7,13 +8,12 @@ pub(super) const SERVICE_ID: &str = "00000000-0000-4000-8000-000000000001";
 const SERVICE_EPOCH: &str = "00000000-0000-4000-8000-000000000002";
 pub(super) const CREATE_OPERATION: &str = "019f0000-0000-7000-8000-000000000001";
 const PROMPT_OPERATION: &str = "019f0000-0000-7000-8000-000000000002";
-pub(super) const WAIT_OPERATION: &str = "019f0000-0000-7000-8000-000000000003";
 const LOAD_OPERATION: &str = "019f0000-0000-7000-8000-000000000004";
 const PENDING_OPERATION: &str = "019f0000-0000-7000-8000-000000000005";
 const CANCEL_OPERATION: &str = "019f0000-0000-7000-8000-000000000006";
 
 #[tokio::test]
-async fn initialized_http_exposes_one_conversation_surface_for_provider_operations() {
+async fn stateless_http_exposes_one_conversation_surface_for_provider_operations() {
     let temporary = tempfile::tempdir().expect("temporary service directory");
     let _publication = publish_manifest(temporary.path());
     let control = tokio::net::UnixListener::bind(temporary.path().join("control.sock"))
@@ -22,22 +22,19 @@ async fn initialized_http_exposes_one_conversation_surface_for_provider_operatio
         for expected in [
             "conversation/create",
             "conversation/prompt",
-            "conversation/operationShow",
             "conversation/load",
         ] {
             let (stream, _) = control.accept().await.expect("Control accept");
             let (reader, mut writer) = stream.into_split();
             let mut lines = BufReader::new(reader).lines();
             initialize_control(&mut lines, &mut writer).await;
-            if expected != "conversation/operationShow" {
-                let inventory = read_json_line(&mut lines).await;
-                assert_eq!(inventory["method"], "endpoint/list");
-                write_json_line(
-                    &mut writer,
-                    json!({"jsonrpc":"2.0","id":inventory["id"],"result":endpoint_inventory()}),
-                )
-                .await;
-            }
+            let inventory = read_json_line(&mut lines).await;
+            assert_eq!(inventory["method"], "endpoint/list");
+            write_json_line(
+                &mut writer,
+                json!({"jsonrpc":"2.0","id":inventory["id"],"result":endpoint_inventory()}),
+            )
+            .await;
             let request = read_json_line(&mut lines).await;
             assert_eq!(request["method"], expected);
             let operation_id = request["params"]["operationId"]
@@ -72,11 +69,7 @@ async fn initialized_http_exposes_one_conversation_surface_for_provider_operatio
             } else {
                 operation_snapshot(operation_id, operation)
             };
-            let result = if expected == "conversation/operationShow" {
-                snapshot
-            } else {
-                json!({"admission":"admitted","operation":snapshot})
-            };
+            let result = json!({"admission":"admitted","operation":snapshot});
             write_json_line(
                 &mut writer,
                 json!({"jsonrpc":"2.0","id":request["id"],"result":result}),
@@ -113,9 +106,8 @@ async fn initialized_http_exposes_one_conversation_surface_for_provider_operatio
     });
     let listener = start_listener(temporary.path()).await;
     let client = reqwest::Client::new();
-    let session = initialize_mcp(&client, &listener).await;
 
-    let tools = call_mcp(&client, &listener, &session, 2, "tools/list", json!({})).await;
+    let tools = call_mcp(&client, &listener, 2, "tools/list", json!({})).await;
     let listed = tools["result"]["tools"].as_array().expect("tool array");
     for name in [
         "conversation_create",
@@ -146,7 +138,6 @@ async fn initialized_http_exposes_one_conversation_surface_for_provider_operatio
     let create = call_tool(
         &client,
         &listener,
-        &session,
         3,
         "conversation_create",
         json!({
@@ -170,7 +161,6 @@ async fn initialized_http_exposes_one_conversation_surface_for_provider_operatio
     let prompt = call_tool(
         &client,
         &listener,
-        &session,
         4,
         "conversation_prompt",
         json!({
@@ -206,25 +196,9 @@ async fn initialized_http_exposes_one_conversation_surface_for_provider_operatio
         "provider reply"
     );
 
-    let show = call_tool(
-        &client,
-        &listener,
-        &session,
-        5,
-        "conversation_operation_show",
-        json!({"operationId":PROMPT_OPERATION}),
-    )
-    .await;
-    assert_eq!(show["result"]["isError"], false);
-    assert_eq!(
-        show["result"]["structuredContent"]["operationId"],
-        PROMPT_OPERATION
-    );
-
     let load = call_tool(
         &client,
         &listener,
-        &session,
         6,
         "conversation_load",
         json!({
@@ -245,7 +219,7 @@ async fn initialized_http_exposes_one_conversation_surface_for_provider_operatio
         LOAD_OPERATION
     );
     peer.await.expect("Control peer");
-    listener.shutdown().await.expect("listener shutdown");
+    listener.stop().await;
 }
 
 #[tokio::test]
@@ -294,12 +268,10 @@ async fn mcp_provider_create_accepts_typed_human_creator_and_approver() {
     });
     let listener = start_listener(temporary.path()).await;
     let client = reqwest::Client::new();
-    let session = initialize_mcp(&client, &listener).await;
     let human = json!({"kind":"human","humanId":"fixture-owner"});
     let created = call_tool(
         &client,
         &listener,
-        &session,
         2,
         "conversation_create",
         json!({
@@ -316,7 +288,7 @@ async fn mcp_provider_create_accepts_typed_human_creator_and_approver() {
     assert_eq!(created["result"]["isError"], false, "{created}");
     assert_eq!(created["result"]["structuredContent"]["kind"], "created");
     peer.await.expect("Control peer");
-    listener.shutdown().await.expect("listener shutdown");
+    listener.stop().await;
 }
 
 #[tokio::test]
@@ -369,14 +341,12 @@ async fn provider_prompt_wait_timeout_returns_pending_exact_operation_and_target
     });
     let listener = start_listener(temporary.path()).await;
     let client = reqwest::Client::new();
-    let session = initialize_mcp(&client, &listener).await;
     let endpoint = json!({"serviceId":SERVICE_ID,"endpointId":"claude-code"});
     let target = json!({"endpoint":endpoint,"sessionId":"provider-thread"});
     let actor = json!({"endpoint":endpoint,"sessionId":"caller-session"});
     let response = call_tool(
         &client,
         &listener,
-        &session,
         2,
         "conversation_prompt",
         json!({
@@ -395,7 +365,7 @@ async fn provider_prompt_wait_timeout_returns_pending_exact_operation_and_target
     );
     assert_eq!(response["result"]["structuredContent"]["target"], target);
     peer.await.expect("Control peer");
-    listener.shutdown().await.expect("listener shutdown");
+    listener.stop().await;
 }
 
 #[tokio::test]
@@ -429,14 +399,12 @@ async fn provider_prompt_without_operation_id_names_uuidv7_generator_before_muta
     });
     let listener = start_listener(temporary.path()).await;
     let client = reqwest::Client::new();
-    let session = initialize_mcp(&client, &listener).await;
     let endpoint = json!({"serviceId":SERVICE_ID,"endpointId":"claude-code"});
     let target = json!({"endpoint":endpoint,"sessionId":"provider-thread"});
     let actor = json!({"endpoint":endpoint,"sessionId":"caller-session"});
     let response = call_tool(
         &client,
         &listener,
-        &session,
         2,
         "conversation_prompt",
         json!({"target":target,"requestedBy":actor,
@@ -470,7 +438,6 @@ async fn provider_prompt_without_operation_id_names_uuidv7_generator_before_muta
     let load = call_tool(
         &client,
         &listener,
-        &session,
         3,
         "conversation_load",
         json!({"target":target,"workingDirectory":temporary.path(),
@@ -495,7 +462,7 @@ async fn provider_prompt_without_operation_id_names_uuidv7_generator_before_muta
             .is_some_and(|fix| fix.contains("python3 -c 'import uuid; print(uuid.uuid7())'"))
     );
     peer.await.expect("Control peer");
-    listener.shutdown().await.expect("listener shutdown");
+    listener.stop().await;
 }
 
 #[tokio::test]
@@ -540,14 +507,12 @@ async fn provider_cancel_keeps_the_exact_target_operation_on_the_common_mcp_surf
     });
     let listener = start_listener(temporary.path()).await;
     let client = reqwest::Client::new();
-    let session = initialize_mcp(&client, &listener).await;
     let endpoint = json!({"serviceId":SERVICE_ID,"endpointId":"claude-code"});
     let target = json!({"endpoint":endpoint,"sessionId":"provider-thread"});
     let actor = json!({"endpoint":endpoint,"sessionId":"caller-session"});
     let response = call_tool(
         &client,
         &listener,
-        &session,
         2,
         "conversation_cancel",
         json!({
@@ -566,7 +531,7 @@ async fn provider_cancel_keeps_the_exact_target_operation_on_the_common_mcp_surf
         "conversationCancel"
     );
     peer.await.expect("Control peer");
-    listener.shutdown().await.expect("listener shutdown");
+    listener.stop().await;
 }
 
 pub(super) fn publish_manifest(
@@ -587,14 +552,12 @@ pub(super) fn publish_manifest(
     .expect("manifest publication")
 }
 
-pub(super) async fn start_listener(path: &std::path::Path) -> CollaborationMcpListener {
-    CollaborationMcpListener::start(CollaborationMcpListenerConfig {
-        bind_address: LoopbackBindAddress::parse("127.0.0.1:0").expect("loopback bind"),
-        service_directory: path.to_owned(),
-        allowed_origins: Vec::new(),
-    })
+pub(super) async fn start_listener(path: &std::path::Path) -> ServedApi {
+    ServedApi::tcp(&api_config(
+        CollaborationApplication::new(test_identity()),
+        path,
+    ))
     .await
-    .expect("MCP listener starts")
 }
 
 pub(super) async fn initialize_control(
@@ -681,35 +644,9 @@ pub(super) fn generation() -> Value {
     json!({"serviceEpoch":SERVICE_EPOCH,"generation":3})
 }
 
-pub(super) async fn initialize_mcp(
-    client: &reqwest::Client,
-    listener: &CollaborationMcpListener,
-) -> reqwest::header::HeaderValue {
-    let response = client.post(listener.local_url()).header(CONTENT_TYPE,"application/json").header(ACCEPT,"application/json, text/event-stream").json(&json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"provider-conversation-test","version":"1"}}})).send().await.expect("MCP initialize");
-    let session = response
-        .headers()
-        .get("mcp-session-id")
-        .cloned()
-        .expect("MCP session");
-    let _ = protocol_response_json(response).await;
-    let initialized = client
-        .post(listener.local_url())
-        .header(CONTENT_TYPE, "application/json")
-        .header(ACCEPT, "application/json, text/event-stream")
-        .header("mcp-session-id", session.clone())
-        .header("mcp-protocol-version", "2025-11-25")
-        .json(&json!({"jsonrpc":"2.0","method":"notifications/initialized","params":{}}))
-        .send()
-        .await
-        .expect("MCP initialized");
-    assert!(initialized.status().is_success());
-    session
-}
-
 async fn call_tool(
     client: &reqwest::Client,
-    listener: &CollaborationMcpListener,
-    session: &reqwest::header::HeaderValue,
+    listener: &ServedApi,
     id: u64,
     name: &str,
     arguments: Value,
@@ -717,7 +654,6 @@ async fn call_tool(
     call_mcp(
         client,
         listener,
-        session,
         id,
         "tools/call",
         json!({"name":name,"arguments":arguments}),
@@ -727,17 +663,15 @@ async fn call_tool(
 
 async fn call_mcp(
     client: &reqwest::Client,
-    listener: &CollaborationMcpListener,
-    session: &reqwest::header::HeaderValue,
+    listener: &ServedApi,
     id: u64,
     method: &str,
     params: Value,
 ) -> Value {
     let response = client
-        .post(listener.local_url())
+        .post(listener.url())
         .header(CONTENT_TYPE, "application/json")
         .header(ACCEPT, "application/json, text/event-stream")
-        .header("mcp-session-id", session.clone())
         .header("mcp-protocol-version", "2025-11-25")
         .json(&json!({"jsonrpc":"2.0","id":id,"method":method,"params":params}))
         .send()

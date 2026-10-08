@@ -3,7 +3,9 @@
 //! Every board write enters the one serialized board store. Writes that can open or close a
 //! subscription window then reconcile the reader's delivery owner, using the delivery owner's
 //! clock for durable window deadlines.
-use super::{CollaborationRejection, CollaborationRejectionReason};
+use super::{
+    CollaborationRejection, CollaborationRejectionReason, PublishedRejection, ResultByteBudget,
+};
 use crate::ServiceIdentity;
 use collaboration_protocol::{
     SubscriptionWaitBatch, ThreadSubscribeRequest, ThreadSubscriptionPresence,
@@ -342,6 +344,70 @@ impl CollaborationRejection for BoardError {
             | BoardFailureKind::SessionTopicPost => None,
         }
     }
+
+    fn published_rejection(&self) -> PublishedRejection {
+        PublishedRejection::typed(
+            PublishedRejection::OPERATION_FAILED,
+            self.message.clone(),
+            self,
+        )
+    }
+}
+
+/// Why a response bound leaves no room for a thread-wait notice.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum ThreadWaitBudgetError {
+    #[error("the response bound leaves no room for a subscription wait response")]
+    NoRoomForResponse,
+    #[error("the response bound leaves no room for one subscription root")]
+    NoRoomForOneRoot,
+}
+
+/// The bytes a wait notice's roots may take so the largest notice still fits `budget`.
+///
+/// The notice reserves room for the longest push line and held-since time; only its roots
+/// shrink to fit.
+pub fn thread_wait_root_notice_limit(
+    budget: ResultByteBudget,
+) -> Result<usize, ThreadWaitBudgetError> {
+    const MAX_HELD_SINCE_WIRE_BYTES: usize = 64;
+    let empty_roots = serde_json::json!([]);
+    let largest_notice = serde_json::json!({
+        "batch":{
+            "kind":"notice",
+            "pushId":"01890f2e-7b4c-7cc0-98c4-000000000002",
+            "line":"\\".repeat(collaboration_protocol::MAX_PUSH_LINE_BYTES),
+            "held":true,
+            "heldSince":"x".repeat(MAX_HELD_SINCE_WIRE_BYTES),
+            "draining":true,
+            "roots":empty_roots,
+        }
+    });
+    let empty_roots_bytes = serde_json::to_vec(&empty_roots)
+        .map_err(|_| ThreadWaitBudgetError::NoRoomForResponse)?
+        .len();
+    let fixed_response_bytes = budget
+        .response_bytes(&largest_notice)
+        .and_then(|bytes| bytes.checked_sub(empty_roots_bytes))
+        .ok_or(ThreadWaitBudgetError::NoRoomForResponse)?;
+    let maximum_root_notice_bytes = budget
+        .response_limit_bytes()
+        .checked_sub(fixed_response_bytes)
+        .ok_or(ThreadWaitBudgetError::NoRoomForResponse)?;
+    let largest_root = serde_json::json!([{
+        "rootId":"01890f2e-7b4c-7cc0-98c4-000000000002",
+        "topicId":"01890f2e-7b4c-7cc0-98c4-000000000003",
+        "fromSequence":i64::MAX,
+        "throughSequence":i64::MAX,
+        "messageCount":u64::MAX,
+    }]);
+    let minimum_root_notice_bytes = serde_json::to_vec(&largest_root)
+        .map_err(|_| ThreadWaitBudgetError::NoRoomForOneRoot)?
+        .len();
+    if maximum_root_notice_bytes < minimum_root_notice_bytes {
+        return Err(ThreadWaitBudgetError::NoRoomForOneRoot);
+    }
+    Ok(maximum_root_notice_bytes)
 }
 
 /// The board store is not open on this Router.

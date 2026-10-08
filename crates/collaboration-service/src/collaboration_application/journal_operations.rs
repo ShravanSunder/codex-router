@@ -1,6 +1,8 @@
 //! The lifecycle journal and the address book: long-polled lifecycle reads and paged address
 //! snapshots for the endpoints this Router publishes.
-use super::{CollaborationRejection, CollaborationRejectionReason, SessionOperations};
+use super::{
+    CollaborationRejection, CollaborationRejectionReason, PublishedRejection, SessionOperations,
+};
 use collaboration_protocol::{AddressListParams, JournalReadParams, JournalStatus};
 use lifecycle_observation::{AddressPage, JournalBounds, JournalError, JournalPage};
 use serde_json::json;
@@ -197,6 +199,21 @@ impl CollaborationRejection for JournalFailure {
                 | JournalUnavailableKind::Unavailable => None,
             },
             Self::SnapshotExpired | Self::CursorInvalidated { .. } => None,
+        }
+    }
+
+    fn published_rejection(&self) -> PublishedRejection {
+        match self {
+            Self::InvalidRequest => {
+                PublishedRejection::bare(PublishedRejection::INVALID_PARAMS, self.to_string())
+            }
+            Self::Unavailable(_) | Self::SnapshotExpired | Self::CursorInvalidated { .. } => {
+                PublishedRejection::typed(
+                    PublishedRejection::OPERATION_FAILED,
+                    self.to_string(),
+                    self,
+                )
+            }
         }
     }
 }

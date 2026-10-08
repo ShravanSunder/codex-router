@@ -5,7 +5,7 @@ use collaboration_protocol::{
     FireKind, FireReceipt, SavedMessage, UuidIdentity, WakeChange, WakeChanged, WakeShowRequest,
     WakeSubscription,
 };
-use serde_json::{Value, json};
+use serde_json::Value;
 use std::{io, sync::Arc};
 use tokio::sync::{Mutex, OwnedSemaphorePermit};
 pub(crate) struct WakeSubscriptionState {
@@ -52,7 +52,75 @@ pub(crate) async fn start(
         result,
     ))
 }
+/// Why a wait could not resume from its cursor.
+pub(crate) enum WakeResumeError {
+    InvalidCursor,
+    NotFound,
+    Unavailable,
+}
+
+const WAKE_EVENT_COLLECTION: &str = "automation-events";
+
 impl WakeSubscriptionState {
+    /// Resumes observing a wake-up after `cursor`, the automation-events position an earlier
+    /// wait returned. The wake-up must still exist.
+    pub(crate) async fn resume(
+        store: Arc<Mutex<AutomationStore>>,
+        service_id: UuidIdentity,
+        wakeup_id: WakeupId,
+        cursor: &str,
+        permit: OwnedSemaphorePermit,
+    ) -> Result<Self, WakeResumeError> {
+        let (version, cursor_service, collection, sequence, observed_at_ms): (
+            u8,
+            UuidIdentity,
+            String,
+            i64,
+            i64,
+        ) = serde_json::from_str(cursor).map_err(|_| WakeResumeError::InvalidCursor)?;
+        if version != 1
+            || cursor_service != service_id
+            || collection != WAKE_EVENT_COLLECTION
+            || sequence < 0
+            || observed_at_ms < 0
+        {
+            return Err(WakeResumeError::InvalidCursor);
+        }
+        let read = store
+            .lock()
+            .await
+            .read_wakeup::<SavedMessage>(&wakeup_id)
+            .await;
+        match read {
+            Ok(_) => {}
+            Err(automation_storage::StorageError::WakeNotFound) => {
+                return Err(WakeResumeError::NotFound);
+            }
+            Err(_) => return Err(WakeResumeError::Unavailable),
+        }
+        Ok(Self {
+            store,
+            service_id,
+            wakeup_id,
+            subscription_id: SubscriptionId::generate(),
+            sequence,
+            observed_at_ms,
+            permit,
+        })
+    }
+
+    /// The automation-events position this observation has reached.
+    pub(crate) fn cursor(&self) -> io::Result<String> {
+        serde_json::to_string(&(
+            1_u8,
+            &self.service_id,
+            WAKE_EVENT_COLLECTION,
+            self.sequence,
+            self.observed_at_ms,
+        ))
+        .map_err(io::Error::other)
+    }
+
     pub async fn next_changes(&mut self) -> io::Result<Vec<WakeChanged>> {
         let _retained_permit = &self.permit;
         let now = chrono::Utc::now();
@@ -134,15 +202,7 @@ pub(crate) fn wait_failure_response(
     id: Value,
     failure: crate::collaboration_application::WakeWaitFailure,
 ) -> Value {
-    use crate::collaboration_application::WakeWaitFailure;
-    match failure {
-        WakeWaitFailure::Unavailable(data) => {
-            json!({"jsonrpc":"2.0","id":id,"error":{"code":-32050,"message":"Wake wait unavailable","data":data}})
-        }
-        WakeWaitFailure::NotFound(data) => {
-            json!({"jsonrpc":"2.0","id":id,"error":{"code":-32050,"message":"Wake not found","data":data}})
-        }
-    }
+    crate::control_connection::rejection_response(id, &failure)
 }
 
 pub(crate) fn unavailable(id: Value, wakeup_id: WakeupId) -> Value {

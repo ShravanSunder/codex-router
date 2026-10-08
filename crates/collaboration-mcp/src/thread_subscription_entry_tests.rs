@@ -91,6 +91,8 @@ async fn subscription_tools_roundtrip_through_mcp_control_and_sqlite() {
         .expect("Control service identity")
         .with_board_store(Arc::clone(&board_store))
         .with_subscription_delivery_service(subscription_service.clone(), presence);
+    let application =
+        collaboration_service::CollaborationApplication::new(service_identity.clone());
     let control =
         LocalControlService::bind(&temporary.path().join("control.sock"), service_identity)
             .expect("Control listener");
@@ -182,7 +184,8 @@ async fn subscription_tools_roundtrip_through_mcp_control_and_sqlite() {
         .await
         .expect("close setup Control client");
 
-    let mcp_server = CollaborationMcpServer::new(temporary.path().to_owned());
+    let mcp_server =
+        CollaborationMcpServer::for_application(application, temporary.path().to_owned());
     let handler = mcp_server.clone();
     let (server_transport, client_transport) = tokio::io::duplex(4096);
     let (running_server, running_client) = tokio::join!(

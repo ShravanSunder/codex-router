@@ -13,6 +13,8 @@ pub struct EndpointDirectory {
 struct DirectoryState {
     service_id: UuidIdentity,
     endpoints: BTreeMap<EndpointRef, EndpointDescription>,
+    /// Counts every publication across the Host, independent of any subscriber.
+    publications: u64,
     subscribers: BTreeMap<u64, SubscriberState>,
     next_subscriber: u64,
 }
@@ -51,6 +53,7 @@ impl EndpointDirectory {
             state: Arc::new(Mutex::new(DirectoryState {
                 service_id,
                 endpoints: BTreeMap::new(),
+                publications: 0,
                 subscribers: BTreeMap::new(),
                 next_subscriber: 0,
             })),
@@ -77,6 +80,7 @@ impl EndpointDirectory {
         state
             .endpoints
             .insert(endpoint.endpoint.clone(), endpoint.clone());
+        state.publications = state.publications.saturating_add(1);
         state.subscribers.retain(|_, subscriber| {
             if subscriber.sequence >= 9_007_199_254_740_991 {
                 subscriber.overflow.store(true, Ordering::Release);
@@ -98,6 +102,17 @@ impl EndpointDirectory {
             }
         });
         Ok(())
+    }
+    /// Every published endpoint, with the Host-wide count of publications they reflect.
+    pub fn inventory(&self) -> io::Result<EndpointSnapshot> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| io::Error::other("endpoint directory unavailable"))?;
+        Ok(EndpointSnapshot {
+            sequence: state.publications,
+            endpoints: state.endpoints.values().cloned().collect(),
+        })
     }
     pub fn subscribe(&self) -> io::Result<EndpointSubscription> {
         let mut state = self

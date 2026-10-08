@@ -3,7 +3,7 @@ use collaboration_protocol::{
     AutomationInspectionFailure, AutomationInspectionFailureKind, AutomationInspectionNextAction,
     AutomationInspectionStage, LocalMutationEvidence, LocalMutationState,
 };
-use serde_json::{Value, json};
+use serde_json::Value;
 pub(crate) fn invalid(field: &str, constraint: &str) -> AutomationInspectionFailure {
     AutomationInspectionFailure {
         kind: AutomationInspectionFailureKind::InvalidField,
@@ -64,5 +64,5 @@ pub(crate) fn unavailable() -> AutomationInspectionFailure {
     failure
 }
 pub(crate) fn response(id: Value, failure: AutomationInspectionFailure) -> Value {
-    json!({"jsonrpc":"2.0","id":id,"error":{"code":-32050,"message":"Automation inspection failed","data":failure}})
+    crate::control_connection::rejection_response(id, &failure)
 }

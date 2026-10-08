@@ -26,5 +26,5 @@ pub(crate) async fn dispatch(
     }
 }
 fn failure(id: Value, data: ConfigurationFailure) -> Value {
-    json!({"jsonrpc":"2.0","id":id,"error":{"code":-32050,"message":"Automation configuration failed","data":data}})
+    crate::control_connection::rejection_response(id, &data)
 }

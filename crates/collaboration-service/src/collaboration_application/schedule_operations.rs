@@ -1,7 +1,8 @@
 //! Schedules: local administration and portable packages, plus the explicit preparation that
 //! allocates a native destination. Only preparation reaches a native route.
 use super::{
-    AutomationOperations, CollaborationRejection, CollaborationRejectionReason, ResultByteBudget,
+    AutomationOperations, CollaborationRejection, CollaborationRejectionReason, PublishedRejection,
+    ResultByteBudget,
 };
 use automation_storage::{
     AutomationStore, ScheduleCreate, ScheduleEdit, ScheduleInspection, ScheduleMutation,
@@ -537,5 +538,13 @@ impl CollaborationRejection for ScheduleOperationFailure {
             | Self::Preparation(failure)
             | Self::RetainedPreparation(failure) => failure.rejection_reason(),
         }
+    }
+
+    fn published_rejection(&self) -> PublishedRejection {
+        PublishedRejection::typed(
+            PublishedRejection::OPERATION_FAILED,
+            self.to_string(),
+            self.failure(),
+        )
     }
 }

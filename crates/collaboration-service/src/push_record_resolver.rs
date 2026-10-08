@@ -2,7 +2,7 @@
 //! The `show`, `inbox` and `history` Control entry points decode requests for the typed
 //! message operations.
 use crate::ServiceIdentity;
-use crate::collaboration_application::{MessageFailure, MessageFailureKind, MessageOperations};
+use crate::collaboration_application::{MessageFailure, MessageOperations};
 use collaboration_protocol::{
     MachineId, PushActivityRangeRead, PushId, PushKind, PushLineInput, PushMessageSendResult,
     PushOrigin, PushRecord, PushRecordHistoryParams, PushRecordListParams, PushRecordNotice,
@@ -102,26 +102,13 @@ pub(crate) async fn history(id: Value, params: Value, identity: &ServiceIdentity
     )
 }
 
-/// Control encodes a refused request field or service as invalid params, other failures as -32050.
 pub(crate) fn message_response(
     id: Value,
     result: Result<impl serde::Serialize, MessageFailure>,
 ) -> Value {
     match result {
         Ok(result) => json!({"jsonrpc":"2.0","id":id,"result":result}),
-        Err(failure) => {
-            let code = match failure.kind {
-                MessageFailureKind::InvalidField | MessageFailureKind::WrongService => -32602,
-                MessageFailureKind::ForeignMachine
-                | MessageFailureKind::Unavailable
-                | MessageFailureKind::NotFound
-                | MessageFailureKind::NotPermitted
-                | MessageFailureKind::NotDirectMessage
-                | MessageFailureKind::OwnerReplyUnsupported
-                | MessageFailureKind::OutcomeUnknown => -32050,
-            };
-            json!({"jsonrpc":"2.0","id":id,"error":{"code":code,"message":failure.message,"data":failure}})
-        }
+        Err(failure) => crate::control_connection::rejection_response(id, &failure),
     }
 }
 

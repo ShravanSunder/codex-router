@@ -208,7 +208,7 @@ impl<'service> AutomationOperations<'service> {
                 if records.is_empty() {
                     let mut error = failure::invalid(
                         "limit",
-                        "One record exceeds the 1048576-byte Control response limit; no record was truncated.",
+                        "One record exceeds the 1048576-byte response limit; no record was truncated.",
                     );
                     error.resource_id = Some(key.resource_id.clone());
                     return Err(error);
@@ -350,7 +350,7 @@ impl<'service> AutomationOperations<'service> {
             Some(_) => {
                 let mut error = failure::invalid(
                     "operationId",
-                    "Original receipt exceeds the Control frame budget; inspect the affected resource. No request was resubmitted.",
+                    "Original receipt exceeds the response limit; inspect the affected resource. No request was resubmitted.",
                 );
                 error.resource_id = Some(snapshot.resource_id);
                 Err(error)
@@ -466,7 +466,7 @@ fn bounded_reconciliation<TResult: serde::Serialize>(
     } else {
         Err(failure::invalid(
             "response",
-            "Reconciled evidence exceeds the Control frame budget. Inspect the affected resource; no input was resent.",
+            "Reconciled evidence exceeds the response limit. Inspect the affected resource; no input was resent.",
         ))
     }
 }

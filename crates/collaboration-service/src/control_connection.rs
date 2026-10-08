@@ -110,7 +110,8 @@ pub async fn serve_control_connection(
                                     &identity.service_id,
                                     identity.automation.as_ref(),
                                 )
-                                .wake_wait_start(params, &identity.wake_wait_permits)
+                                .with_wait_capacity(&identity.wake_wait_permits)
+                                .wake_wait_start(params)
                                 .await
                                 {
                                     Ok((state, result)) => {
@@ -660,26 +661,16 @@ async fn dispatch_interaction(
     };
     match result {
         Ok(result) => json!({"jsonrpc":"2.0","id":id,"result":result}),
-        Err(failure) => interaction_failure(id, &failure),
+        Err(failure) => rejection_response(id, &failure),
     }
 }
 
-/// Control encodes a missing detailed list or question projection without a data payload.
-fn interaction_failure(
+/// Control answers a failed operation with the failure's published rejection.
+pub(crate) fn rejection_response(
     id: Value,
-    failure: &crate::collaboration_application::InteractionFailure,
+    failure: &impl crate::collaboration_application::CollaborationRejection,
 ) -> Value {
-    use crate::collaboration_application::InteractionFailure;
-    let message = failure.to_string();
-    match failure {
-        InteractionFailure::ApprovalListUnavailable
-        | InteractionFailure::QuestionListUnavailable => error(id, -32050, &message),
-        InteractionFailure::BrokerUnavailable
-        | InteractionFailure::ApprovalRejected(_)
-        | InteractionFailure::QuestionRejected(_) => {
-            json!({"jsonrpc":"2.0","id":id,"error":{"code":-32050,"message":message,"data":failure.payload()}})
-        }
-    }
+    json!({"jsonrpc":"2.0","id":id,"error":failure.published_rejection()})
 }
 
 /// The response bound for a result sent back to `id`: one Control frame, envelope included.

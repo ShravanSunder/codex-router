@@ -1,4 +1,4 @@
-use crate::{CollaborationMcpListener, CollaborationMcpListenerConfig, LoopbackBindAddress};
+use crate::api_test_harness::{ServedApi, api_config};
 use codex_acp_adapter::{
     AcpSchemaCatalog, ApprovalBroker, ApprovalRoute, BrokeredApprovalOutcome,
     BrokeredApprovalRequest, PendingPermission,
@@ -33,6 +33,7 @@ const SERVICE_EPOCH: &str = "00000000-0000-4000-8000-000000000012";
 
 struct ApprovalFixture {
     directory: tempfile::TempDir,
+    application: collaboration_service::CollaborationApplication,
     broker: Arc<ServiceInteractionBroker>,
     _automation_store: Arc<tokio::sync::Mutex<automation_storage::AutomationStore>>,
     generation: CodexGeneration,
@@ -222,6 +223,7 @@ impl ApprovalFixture {
         } else {
             "control.sock"
         });
+        let application = collaboration_service::CollaborationApplication::new(identity.clone());
         let control = LocalControlService::bind(&control_path, identity).expect("control bind");
         let forwarded_decisions = drop_decision_reply.then(|| Arc::new(AtomicUsize::new(0)));
         let fault_task = forwarded_decisions.as_ref().map(|forwarded_decisions| {
@@ -246,6 +248,7 @@ impl ApprovalFixture {
         let control_task = tokio::spawn(control.run(control_stop.clone()));
         Self {
             directory,
+            application,
             broker,
             _automation_store: automation_store,
             generation,

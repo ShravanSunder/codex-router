@@ -36,8 +36,10 @@ pub use automation_operations::AutomationOperations;
 pub(crate) use automation_operations::{
     InstructionContext, InstructionFailureReason, instruction_failure, run_failure_context,
 };
-pub use board_operations::BoardOperations;
-pub use collaboration_rejection::{CollaborationRejection, CollaborationRejectionReason};
+pub use board_operations::{BoardOperations, ThreadWaitBudgetError, thread_wait_root_notice_limit};
+pub use collaboration_rejection::{
+    CollaborationRejection, CollaborationRejectionReason, PublishedRejection,
+};
 pub use conversation_operations::{ConversationFailure, ConversationOperations};
 pub use interaction_operations::{InteractionFailure, InteractionOperations, QuestionRejection};
 pub use journal_operations::{JournalCursorInvalidation, JournalFailure, JournalUnavailableKind};
@@ -50,9 +52,10 @@ pub use provider_observation_operations::{
 pub use schedule_operations::ScheduleOperationFailure;
 pub(crate) use schedule_operations::{ScheduleFailureContext, invalid_schedule_request};
 pub use session_operations::{
-    NativeSessionFailure, NativeSessionFailureKind, NativeSessionStage, ProviderInventoryFailure,
-    ProviderInventoryFailureKind, SessionOperations,
+    EndpointDirectoryUnavailable, NativeSessionFailure, NativeSessionFailureKind,
+    NativeSessionStage, ProviderInventoryFailure, ProviderInventoryFailureKind, SessionOperations,
 };
+pub(crate) use session_operations::{INVALID_INVENTORY_PARAMETERS, INVALID_NATIVE_PARAMETERS};
 #[cfg(test)]
 pub(crate) use session_operations::{
     classify_native_call_failure, rename_method_unsupported, valid_session_rename_name,
@@ -116,6 +119,7 @@ impl CollaborationApplication {
     #[must_use]
     pub fn wakes(&self) -> WakeOperations<'_> {
         WakeOperations::new(&self.identity.service_id, self.identity.automation.as_ref())
+            .with_wait_capacity(&self.identity.wake_wait_permits)
     }
 
     /// Approvals and questions held by the interaction broker.
@@ -124,6 +128,12 @@ impl CollaborationApplication {
         InteractionOperations::new(&self.identity)
     }
 }
+
+/// The most bytes of encoded JSON any operation returns, whatever transport carries it.
+pub const RESULT_LIMIT_BYTES: usize = 1024 * 1024;
+
+/// The response bound for transports that frame a result apart from its envelope.
+pub const API_RESULT_BUDGET: ResultByteBudget = ResultByteBudget::new(RESULT_LIMIT_BYTES, 0);
 
 /// The response bound an operation's result must fit.
 ///

@@ -124,7 +124,7 @@ pub struct CollaborationRuntime {
     current_generation: Option<CodexGeneration>,
     observer_task: Option<tokio::task::JoinHandle<()>>,
     manifest: Option<collaboration_service::ManifestPublication>,
-    mcp: Option<collaboration_mcp::CollaborationMcpListener>,
+    collaboration_api: ServedCollaborationApi,
 }
 impl CollaborationRuntime {
     pub async fn configure_provider_operation_retention(
@@ -256,6 +256,9 @@ impl CollaborationRuntime {
         let control_schema = collaboration_protocol::ControlSchema::generate(native_digest)
             .map_err(io::Error::other)?;
         collaboration_service::publish_control_schema(&inputs.directory, &control_schema)?;
+        let native_definitions = inputs.native_schema.as_ref().and_then(|export| {
+            collaboration_mcp::NativeSchemaDefinitions::from_bundle(export.bundle())
+        });
         let journal = async {
             let database = lifecycle_observation::ObservationJournal::open(
                 &inputs.directory.join("session-registry.sqlite"),
@@ -347,18 +350,8 @@ impl CollaborationRuntime {
                 None
             }
         };
-        let mcp_bind = collaboration_mcp::LoopbackBindAddress::new(inputs.mcp_bind)
-            .map_err(io::Error::other)?;
-        let mcp = collaboration_mcp::CollaborationMcpListener::start_with_router_relation(
-            collaboration_mcp::CollaborationMcpListenerConfig {
-                bind_address: mcp_bind,
-                service_directory: inputs.directory.clone(),
-                allowed_origins: Vec::new(),
-            },
-            relation_receiver,
-        )
-        .await?;
-        let mcp_url = mcp.local_url();
+        let collaboration_api = BoundCollaborationApi::bind(inputs.mcp_bind).await?;
+        let mcp_url = collaboration_api.url();
         let startup = crate::provider_startup_composition::compose_provider_startup(
             provider_launches,
             provider_store.clone(),
@@ -504,6 +497,7 @@ impl CollaborationRuntime {
             identity
         };
         let permits = std::sync::Arc::new(tokio::sync::Semaphore::new(32));
+        let application = collaboration_service::CollaborationApplication::new(identity.clone());
         let control = LocalControlService::bind(&inputs.directory.join("control.sock"), identity)?
             .with_connection_budget(std::sync::Arc::clone(&permits));
         let native = NativeRelayListener::bind(
@@ -643,6 +637,15 @@ impl CollaborationRuntime {
             schedule_worker.map(|worker| tokio::spawn(worker.run(shutdown.clone())));
         let automation_maintenance =
             retention_worker.map(|worker| tokio::spawn(worker.run(shutdown.clone())));
+        let collaboration_api =
+            collaboration_api.serve(&collaboration_mcp::CollaborationApiConfig {
+                application,
+                service_directory: inputs.directory.clone(),
+                native_definitions,
+                router_executable_relation: relation_receiver,
+                concurrent_requests: collaboration_mcp::DEFAULT_CONCURRENT_REQUESTS,
+                shutdown: shutdown.clone(),
+            });
         let mut tasks = JoinSet::new();
         let mut provider_retirement_tasks = JoinSet::new();
         tasks.spawn(control.run(shutdown.clone()));
@@ -699,7 +702,7 @@ impl CollaborationRuntime {
             automation_maintenance,
             current_generation: None,
             observer_task: None,
-            mcp: Some(mcp),
+            collaboration_api,
         })
     }
 
@@ -915,6 +918,9 @@ impl CollaborationRuntime {
     }
 }
 
+#[path = "collaboration_runtime/collaboration_api_serving.rs"]
+mod collaboration_api_serving;
+use collaboration_api_serving::{BoundCollaborationApi, ServedCollaborationApi};
 #[path = "collaboration_runtime/lifecycle.rs"]
 mod lifecycle;
 
