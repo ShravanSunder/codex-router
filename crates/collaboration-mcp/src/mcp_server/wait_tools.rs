@@ -2,6 +2,7 @@
 //!
 //! Each wait is one call bounded by its own limit. A caller that goes away cancels the call,
 //! which drops the wait and releases what it holds.
+use super::board_argument_classification::UndecodedBoardArguments;
 use super::*;
 use collaboration_protocol::{WakeWaitRequest, WakeWaitResult};
 use collaboration_service::collaboration_application::{
@@ -19,9 +20,13 @@ impl CollaborationMcpServer {
     )]
     pub(super) async fn board_thread_wait(
         &self,
-        Parameters(request): Parameters<ThreadSubscriptionWaitRequest>,
+        Parameters(arguments): Parameters<UndecodedBoardArguments<ThreadSubscriptionWaitRequest>>,
         context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
     ) -> CallToolResult {
+        let request = match arguments.decode("board_thread_wait") {
+            Ok(request) => request,
+            Err(rejection) => return domain_result::<(), _>(Err(rejection), true),
+        };
         let Ok(maximum_root_notice_bytes) = thread_wait_root_notice_limit(API_RESULT_BUDGET) else {
             return validation_failure(
                 "The tool result budget leaves no room for one subscription root.",

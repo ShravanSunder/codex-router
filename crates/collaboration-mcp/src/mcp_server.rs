@@ -47,6 +47,7 @@ use std::{
 };
 
 mod application_tool_results;
+mod board_argument_classification;
 mod carrier_tools;
 mod catalog_descriptions;
 mod catalog_tools;

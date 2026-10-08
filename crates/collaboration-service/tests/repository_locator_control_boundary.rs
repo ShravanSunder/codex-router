@@ -6,7 +6,7 @@ mod board_control_support;
 use board_control_support::served_api;
 
 #[tokio::test]
-async fn oversized_repository_locators_name_field_and_numeric_bound()
+async fn oversized_repository_locators_return_field_and_numeric_bound()
 -> Result<(), Box<dyn std::error::Error>> {
     let path = std::env::temp_dir().join(format!(
         "repository-control-{}.sqlite",
@@ -25,23 +25,22 @@ async fn oversized_repository_locators_name_field_and_numeric_bound()
         serde_json::json!({"jsonrpc":"2.0","id":"origin","method":"board/repositoryAttach","params":{"projectId":project_id,"repository":{"kind":"origin","normalizedOrigin":format!("github.com/{}", "x".repeat(455_000))},"actor":actor}}),
         serde_json::json!({"jsonrpc":"2.0","id":"directory","method":"board/repositoryAttach","params":{"projectId":project_id,"repository":{"kind":"local","serviceId":"00000000-0000-4000-8000-000000000001","commonDirectory":format!("/{}", "x".repeat(500_000))},"actor":actor}}),
     ]).await?;
-    // Tool arguments that fail to decode are refused at validation with the decoder's
-    // message, which names the field and its bound; the oversized value is not echoed.
     for (response, field) in responses
         .iter()
-        .zip(["normalizedOrigin", "commonDirectory"])
+        .zip(["repository.normalizedOrigin", "repository.commonDirectory"])
     {
-        let failure = response.pointer("/error/data");
-        let text = |name: &str| {
-            failure
-                .and_then(|failure| failure.get(name))
+        let valid = response
+            .pointer("/error/data/kind")
+            .and_then(serde_json::Value::as_str)
+            == Some("invalidField")
+            && response
+                .pointer("/error/data/details/field")
                 .and_then(serde_json::Value::as_str)
-        };
-        let valid = text("kind") == Some("protocolViolation")
-            && text("stage") == Some("validation")
-            && text("effect") == Some("none")
-            && text("message").is_some_and(|message| message.contains(field))
-            && text("message").is_some_and(|message| message.contains("4096"))
+                == Some(field)
+            && response
+                .pointer("/error/data/details/requirement")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|value| value.contains("4096"))
             && response.to_string().len() < 1_048_576;
         if !valid {
             return Err(

@@ -297,7 +297,7 @@ async fn control_thread_list_pages_escape_heavy_holders_without_skips_or_repeats
 }
 
 #[tokio::test]
-async fn malformed_board_requests_are_refused_before_effect_without_echoing_values()
+async fn malformed_board_requests_return_safe_specific_failures()
 -> Result<(), Box<dyn std::error::Error>> {
     let path = std::env::temp_dir().join(format!(
         "board-control-validation-{}.sqlite",
@@ -364,27 +364,54 @@ async fn malformed_board_requests_are_refused_before_effect_without_echoing_valu
         ],
     )
     .await?;
-    // Tool arguments that fail to decode are refused at validation, before any effect, with
-    // the decoder's message. Control's own field classifier went with Control.
-    if responses.len() != 14 {
+    let expected = [
+        ("invalidField", "scope", "required"),
+        ("invalidField", "scope", "required"),
+        ("invalidIdentity", "actor", "4096"),
+        ("invalidIdentity", "reader", "4096"),
+        ("invalidIdentity", "actingFor", "4096"),
+        ("invalidTopicName", "name", "256"),
+        ("invalidField", "projectId", "UUIDv7"),
+        ("invalidField", "description", "16384"),
+        ("invalidField", "name", "256"),
+        ("invalidField", "text", "65536"),
+        ("invalidField", "page.limit", "100"),
+        (
+            "invalidField",
+            "selection.afterActivitySequence",
+            "9223372036854775807",
+        ),
+        ("invalidField", "placement", "topic or thread"),
+        ("invalidField", "request", "camelCase"),
+    ];
+    if responses.len() != expected.len() {
         return Err("validation response count changed".into());
     }
-    for response in &responses {
-        let failure = response.pointer("/error/data");
-        let text = |name: &str| {
-            failure
-                .and_then(|failure| failure.get(name))
+    for (response, (kind, field, requirement)) in responses.iter().zip(expected) {
+        if response
+            .pointer("/error/data/kind")
+            .and_then(serde_json::Value::as_str)
+            != Some(kind)
+            || response
+                .pointer("/error/data/details/field")
                 .and_then(serde_json::Value::as_str)
-        };
-        if text("kind") != Some("protocolViolation")
-            || text("stage") != Some("validation")
-            || text("effect") != Some("none")
-            || text("message").is_none_or(str::is_empty)
+                != Some(field)
+            || !response
+                .pointer("/error/data/details/requirement")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|value| value.contains(requirement))
         {
-            return Err(format!("unexpected board validation failure: {response}").into());
+            return Err(format!("unexpected classified board failure: {response}").into());
         }
-        if response.to_string().contains(private_value) {
-            return Err("validation response echoed a supplied value".into());
+        let encoded = response.to_string();
+        if encoded.contains(private_value)
+            || encoded.contains("privateField")
+            || encoded.contains("privateKind")
+        {
+            return Err(
+                "validation response echoed a supplied value, unknown key, or private variant"
+                    .into(),
+            );
         }
     }
     drop(store);
