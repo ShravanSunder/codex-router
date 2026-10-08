@@ -7,8 +7,144 @@ use std::sync::atomic::Ordering;
 use codex_native_integration::UpdaterCommandSpec;
 use codex_native_integration::executable_identity;
 use codex_native_integration::managed_executable_version;
+use codex_native_integration::{RecordedExecutableIdentity, RecordedExecutableIdentityError};
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+#[tokio::test]
+async fn captured_identity_reconstructs_after_file_removal_without_observation()
+-> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::tempdir()?;
+    let executable = directory.path().join("codex");
+    std::fs::write(&executable, b"abc")?;
+    let observed = executable_identity(&executable).await?;
+    let captured = RecordedExecutableIdentity::from(&observed);
+    let expected_digest = [
+        0xba, 0x78, 0x16, 0xbf, 0x8f, 0x01, 0xcf, 0xea, 0x41, 0x41, 0x40, 0xde, 0x5d, 0xae, 0x22,
+        0x23, 0xb0, 0x03, 0x61, 0xa3, 0x96, 0x17, 0x7a, 0x9c, 0xb4, 0x10, 0xff, 0x61, 0xf2, 0x00,
+        0x15, 0xad,
+    ];
+
+    std::fs::remove_file(&executable)?;
+    let reconstructed =
+        RecordedExecutableIdentity::new(captured.recorded_path().to_path_buf(), expected_digest)?;
+
+    if captured.recorded_path() != observed.canonical_path() {
+        return Err("capture must retain the observed canonical path".into());
+    }
+    if captured.content_digest() != &expected_digest {
+        return Err("capture must retain the known SHA-256 of abc".into());
+    }
+    if reconstructed != captured || !reconstructed.matches_observed(&observed) {
+        return Err(
+            "structural reconstruction after deletion must preserve captured identity".into(),
+        );
+    }
+    if executable_identity(&executable).await.is_ok() {
+        return Err("fresh observation must fail after the executable is removed".into());
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn captured_identity_distinguishes_changed_content_and_different_paths()
+-> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::tempdir()?;
+    let executable = directory.path().join("codex");
+    let other_executable = directory.path().join("other-codex");
+    std::fs::write(&executable, b"first")?;
+    std::fs::write(&other_executable, b"first")?;
+    let original = executable_identity(&executable).await?;
+    let captured = RecordedExecutableIdentity::from(&original);
+
+    std::fs::write(&executable, b"second")?;
+    let changed = executable_identity(&executable).await?;
+    let other = executable_identity(&other_executable).await?;
+    let reconstructed = RecordedExecutableIdentity::new(
+        captured.recorded_path().to_path_buf(),
+        *captured.content_digest(),
+    )?;
+
+    if reconstructed != captured || !captured.matches_observed(&original) {
+        return Err("changed file must not invalidate its previously captured record".into());
+    }
+    if captured.matches_observed(&changed) || captured.matches_observed(&other) {
+        return Err(
+            "changed content or a different path must not match the original record".into(),
+        );
+    }
+    if changed.canonical_path() != original.canonical_path() {
+        return Err("the changed-content scenario must retain the same canonical path".into());
+    }
+    if RecordedExecutableIdentity::from(&other).content_digest() != captured.content_digest() {
+        return Err("the different-path scenario must retain identical file contents".into());
+    }
+    Ok(())
+}
+
+#[test]
+fn recorded_identity_rejects_nonabsolute_or_invalid_executable_paths() {
+    for path in ["", "codex", "./codex", "../codex"] {
+        assert!(matches!(
+            RecordedExecutableIdentity::new(PathBuf::from(path), [0; 32]),
+            Err(RecordedExecutableIdentityError::RelativePath)
+        ));
+    }
+    for path in ["/", "/codex\0hidden", "/tmp/../codex", "/tmp/./codex"] {
+        assert!(matches!(
+            RecordedExecutableIdentity::new(PathBuf::from(path), [0; 32]),
+            Err(RecordedExecutableIdentityError::InvalidPath)
+        ));
+    }
+}
+
+#[test]
+fn recorded_identity_rejects_empty_path_components_without_filesystem_lookup() {
+    use std::os::unix::ffi::OsStringExt;
+
+    for path_bytes in [
+        b"//codex".as_slice(),
+        b"///codex".as_slice(),
+        b"/tmp//codex".as_slice(),
+        b"/tmp///codex".as_slice(),
+        b"/tmp/codex/".as_slice(),
+        b"/tmp/codex//".as_slice(),
+        b"/absent//codex-\xff".as_slice(),
+    ] {
+        let recorded_path = PathBuf::from(std::ffi::OsString::from_vec(path_bytes.to_vec()));
+        assert!(
+            matches!(
+                RecordedExecutableIdentity::new(recorded_path, [0; 32]),
+                Err(RecordedExecutableIdentityError::InvalidPath)
+            ),
+            "empty path components must be rejected: {path_bytes:?}",
+        );
+    }
+
+    for path_bytes in [
+        b"/absent/codex".as_slice(),
+        b"/absent/codex-\xff".as_slice(),
+    ] {
+        let recorded_path = PathBuf::from(std::ffi::OsString::from_vec(path_bytes.to_vec()));
+        assert!(RecordedExecutableIdentity::new(recorded_path, [0; 32]).is_ok());
+    }
+}
+
+#[test]
+fn recorded_identity_preserves_valid_non_utf8_path_without_filesystem_lookup()
+-> Result<(), Box<dyn std::error::Error>> {
+    use std::os::unix::ffi::OsStringExt;
+    let path = PathBuf::from(std::ffi::OsString::from_vec(b"/absent/codex-\xff".to_vec()));
+
+    let record = RecordedExecutableIdentity::new(path.clone(), [0; 32])?;
+
+    if record.recorded_path() != path || record.content_digest() != &[0; 32] {
+        return Err(
+            "structural construction must preserve valid non-UTF-8 path bytes and digest".into(),
+        );
+    }
+    Ok(())
+}
 
 #[tokio::test]
 async fn executable_identity_uses_canonical_path_and_changes_with_content() {

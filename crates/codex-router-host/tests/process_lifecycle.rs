@@ -469,6 +469,7 @@ async fn app_server_group_parent_child_entrypoint() -> Result<(), Box<dyn std::e
     }
     let process_log = std::env::var_os("CODEX_ROUTER_HOST_APP_SERVER_GROUP_LOG")
         .ok_or("app-server group process log is missing")?;
+    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     append_process_id(Path::new(&process_log))?;
     let mut descendant = Command::new(std::env::current_exe()?);
     descendant
@@ -480,7 +481,6 @@ async fn app_server_group_parent_child_entrypoint() -> Result<(), Box<dyn std::e
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     let _descendant = descendant.spawn()?;
-    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     while terminate.recv().await.is_some() {}
     Ok(())
 }
