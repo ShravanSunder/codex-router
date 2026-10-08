@@ -322,3 +322,98 @@ async fn real_source_service_rejects_an_inventory_request_for_another_service() 
     let _closed = client.close().await;
     fixture.finish().await;
 }
+
+#[tokio::test]
+async fn concurrent_source_services_keep_equal_session_ids_and_cross_source_reads_isolated() {
+    let second_service = "00000000-0000-4000-8000-000000000003";
+    let ((mut first_client, first_fixture), (mut second_client, second_fixture)) = tokio::join!(
+        StoredServiceFixture::open(SERVICE, "first-source-model"),
+        StoredServiceFixture::open(second_service, "second-source-model"),
+    );
+    let (first_inventory, second_inventory) = tokio::join!(
+        first_client.list_endpoints(),
+        second_client.list_endpoints(),
+    );
+    let first_binding = bind_native_inventory(
+        &first_inventory.unwrap(),
+        first_client.identity(),
+        &SERVICE.to_owned().try_into().unwrap(),
+        NativeEndpointSelector::UniqueNative,
+        NativeSessionView::Stored,
+    )
+    .unwrap();
+    let second_binding = bind_native_inventory(
+        &second_inventory.unwrap(),
+        second_client.identity(),
+        &second_service.to_owned().try_into().unwrap(),
+        NativeEndpointSelector::UniqueNative,
+        NativeSessionView::Stored,
+    )
+    .unwrap();
+
+    let request_for = |endpoint: EndpointRef| {
+        let mut request = paging_request(NativeSessionView::Stored);
+        request.endpoint = endpoint;
+        request.scope = NativeSessionScope::Any;
+        request.query = Some("Source".to_owned());
+        request.page_size = 1;
+        request
+    };
+    // A live second service must not make a request sent to the first service valid.
+    // The existing client retires a connection on a protocol mismatch. Keep that
+    // negative probe independent from the healthy readers; do not weaken retirement.
+    let mut rejected_client = ControlClient::connect(
+        &std::fs::canonicalize(first_fixture.root.path()).unwrap(),
+        "wrong-source-probe",
+        "1",
+    )
+    .await
+    .unwrap();
+    let mut wrong_source =
+        NativeInventoryPager::new(request_for(second_binding.endpoint.clone()), None).unwrap();
+    assert!(wrong_source.next_page(&mut rejected_client).await.is_err());
+    assert!(wrong_source.next_page(&mut rejected_client).await.is_err());
+    let _closed = rejected_client.close().await;
+
+    let mut first_pager =
+        NativeInventoryPager::new(request_for(first_binding.endpoint.clone()), None).unwrap();
+    let mut second_pager =
+        NativeInventoryPager::new(request_for(second_binding.endpoint.clone()), None).unwrap();
+    let (first_sparse, second_sparse) = tokio::join!(
+        first_pager.next_page(&mut first_client),
+        second_pager.next_page(&mut second_client),
+    );
+    for sparse in [first_sparse, second_sparse] {
+        let page = sparse.unwrap().unwrap();
+        assert!(page.sessions.is_empty() && page.next_cursor.is_some());
+        assert!(page.generation.is_none());
+    }
+    let (first_page, second_page) = tokio::join!(
+        first_pager.next_page(&mut first_client),
+        second_pager.next_page(&mut second_client),
+    );
+    let first_page = first_page.unwrap().unwrap();
+    let second_page = second_page.unwrap().unwrap();
+    assert_eq!(first_page.endpoint, first_binding.endpoint);
+    assert_eq!(second_page.endpoint, second_binding.endpoint);
+    assert_eq!(first_page.sessions.len(), 1);
+    assert_eq!(second_page.sessions.len(), 1);
+    let first_record = SessionPickerRecord::from_native_summary(&first_page.sessions[0]);
+    let second_record = SessionPickerRecord::from_native_summary(&second_page.sessions[0]);
+    assert_eq!(
+        first_page.sessions[0].target.session_id,
+        "shared-source-id".to_owned().try_into().unwrap()
+    );
+    assert_eq!(
+        first_page.sessions[0].target.session_id,
+        second_page.sessions[0].target.session_id
+    );
+    assert_ne!(first_record.identity, second_record.identity);
+    assert_eq!(first_record.model.as_deref(), Some("first-source-model"));
+    assert_eq!(second_record.model.as_deref(), Some("second-source-model"));
+    assert!(first_record.normalized_cwd.is_none() && second_record.normalized_cwd.is_none());
+    let (first_closed, second_closed) = tokio::join!(first_client.close(), second_client.close());
+    first_closed.unwrap();
+    second_closed.unwrap();
+    tokio::join!(first_fixture.finish(), second_fixture.finish());
+}
