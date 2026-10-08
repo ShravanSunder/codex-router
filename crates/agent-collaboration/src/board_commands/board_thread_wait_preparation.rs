@@ -1,4 +1,4 @@
-//! Parse the subscription wait filter and deadline before opening Control.
+//! Parse the subscription wait filter and deadline before calling the collaboration API.
 use super::board_arguments::ThreadWaitArguments;
 use super::board_preparation::{
     self, ActorInput, CommandContext, PreparedBoardCommand, placeholder_identity,

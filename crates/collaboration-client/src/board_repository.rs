@@ -1,5 +1,5 @@
 //! Local repository discovery before a board request is transmitted.
-use crate::{ClientError, ControlClient};
+use crate::{ClientError, CollaborationClient};
 use message_board::{
     CommonDirectory, NormalizedOrigin, RepositoryRef, ServiceId, normalize_git_origin_url,
 };
@@ -70,7 +70,7 @@ impl BoardRepositoryLocation {
     }
 
     /// Binds a local locator to the service verified by the connected client.
-    pub fn for_client(self, client: &ControlClient) -> Result<RepositoryRef, ClientError> {
+    pub fn for_client(self, client: &CollaborationClient) -> Result<RepositoryRef, ClientError> {
         match self {
             Self::Origin(normalized_origin) => Ok(RepositoryRef::Origin { normalized_origin }),
             Self::Local(common_directory) => {

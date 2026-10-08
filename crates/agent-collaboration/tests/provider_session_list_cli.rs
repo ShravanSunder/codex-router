@@ -5,13 +5,9 @@ use collaboration_client::protocol::{
     EndpointDescription, ProviderRequestedPolicy, ProviderWorkingDirectory, RouterAccess,
     SessionRef,
 };
-use collaboration_service::{
-    LocalControlService, ManifestPublication, ProviderOperationStore, ProviderSessionRecord,
-    ServiceIdentity,
-};
+use collaboration_service::{ProviderOperationStore, ProviderSessionRecord, ServiceIdentity};
 use serde_json::{Value, json};
 use tokio::sync::Mutex;
-use tokio_util::sync::CancellationToken;
 
 #[tokio::test]
 async fn cli_dispatches_provider_session_list_by_endpoint_channel() {
@@ -37,7 +33,6 @@ async fn cli_dispatches_provider_session_list_by_endpoint_channel() {
     .expect("fixture registry record");
     let service_id = "00000000-0000-4000-8000-000000000001";
     let epoch = "00000000-0000-4000-8000-000000000002";
-    let digest = format!("sha256:{}", "a".repeat(64));
     let target: SessionRef = serde_json::from_value(json!({
         "endpoint":{"serviceId":service_id,"endpointId":"claude-local"},"sessionId":"provider-session"
     })).expect("target");
@@ -85,24 +80,18 @@ async fn cli_dispatches_provider_session_list_by_endpoint_channel() {
             "schemaDigest":null,"generation":null}]
     }))
     .expect("native endpoint");
-    let identity = ServiceIdentity::new(service_id, epoch, &digest)
+    let identity = ServiceIdentity::new(service_id, epoch)
         .expect("identity")
         .with_endpoints(vec![endpoint, native_endpoint])
         .expect("endpoint inventory")
         .with_provider_operation_store(store)
         .with_claude_code_sessions(Arc::new(ClaudeCodeSessionRegistry::new(registry_directory)));
-    let control = LocalControlService::bind(&root.path().join("control.sock"), identity)
-        .expect("control listener");
-    let manifest = serde_json::from_value(json!({
-        "version":2,"serviceId":service_id,"serviceEpoch":epoch,
-        "machineLabel":"fixture-host","control":{"transport":"unixJsonLines","path":"control.sock"},
-        "controlSchemaDigest":digest,
-        "mcp":{"transport":"streamableHttp","url":"http://127.0.0.1:0/mcp"}
-    }))
-    .expect("manifest");
-    let _publication = ManifestPublication::publish(root.path(), &manifest).expect("publish");
-    let stop = CancellationToken::new();
-    let server = tokio::spawn(control.run(stop.clone()));
+    let served = collaboration_mcp::test_support::ServedCollaborationApi::start(
+        root.path(),
+        collaboration_service::CollaborationApplication::new(identity),
+    )
+    .await
+    .expect("serve collaboration API");
     let run = |endpoint_id: &str, view: &str, source: Option<&str>| {
         let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_agent-collaboration"));
         command
@@ -193,6 +182,5 @@ async fn cli_dispatches_provider_session_list_by_endpoint_channel() {
             .as_str()
             .is_some_and(|message| message.contains("--source is required for Codex sessions"))
     );
-    stop.cancel();
-    server.await.expect("server task").expect("server");
+    served.stop().await.expect("collaboration API stops");
 }

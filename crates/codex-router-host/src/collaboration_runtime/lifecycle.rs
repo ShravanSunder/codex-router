@@ -16,12 +16,7 @@ impl CollaborationRuntime {
                     Some(Err(_)) => io::Error::other("provider retirement publication task failed"),
                     None => continue,
                 },
-                failure = async {
-                    match &mut self.mcp {
-                        Some(mcp) => mcp.listener_failure().await,
-                        None => std::future::pending().await,
-                    }
-                } => failure,
+                failure = self.collaboration_api.failure() => failure,
             };
             self.manifest.take();
             self.shutdown.cancel();
@@ -39,9 +34,7 @@ impl CollaborationRuntime {
             service.shutdown().await;
         }
         let mut failure = None;
-        if let Some(mcp) = self.mcp.take()
-            && let Err(error) = mcp.shutdown().await
-        {
+        if let Err(error) = self.collaboration_api.stopped().await {
             failure.get_or_insert(error);
         }
         if let Err(error) = self.publication.admission_gate().retire() {

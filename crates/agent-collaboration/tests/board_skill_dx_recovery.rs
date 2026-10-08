@@ -101,7 +101,6 @@ async fn luna_recovers_from_combined_board_argument_diagnostic() -> ProofResult<
     if !successful_project_list {
         return Err("Luna did not recover to a successful board project list containing the existing project".into());
     }
-    proof.client.close().await?;
     Ok(())
 }
 

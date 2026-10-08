@@ -1,9 +1,9 @@
-use collaboration_client::ControlClient;
+use collaboration_client::CollaborationClient;
 use collaboration_client::board::*;
 use collaboration_service::{
-    BoardAvailability, LocalControlService, MachineIdentity, ManifestPublication, ServiceIdentity,
-    SessionDeliveryRouter, SessionMessageDelivery, SubscriptionDeliveryService,
-    SubscriptionDeliveryServiceProps, SystemSubscriptionClock, TargetPresenceProbe,
+    BoardAvailability, MachineIdentity, ServiceIdentity, SessionDeliveryRouter,
+    SessionMessageDelivery, SubscriptionDeliveryService, SubscriptionDeliveryServiceProps,
+    SystemSubscriptionClock, TargetPresenceProbe,
 };
 use message_board_storage::BoardStore;
 use serde_json::Value;
@@ -11,8 +11,8 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio_util::sync::CancellationToken;
 
+mod fake_api_support;
 #[path = "thread_subscription_cli/wait_uncertainty.rs"]
 mod wait_uncertainty;
 
@@ -24,7 +24,7 @@ type TestError = Box<dyn std::error::Error + Send + Sync>;
 type TestResult = Result<(), TestError>;
 
 #[tokio::test]
-async fn subscribe_join_wait_and_cancel_use_real_control_and_sqlite_paths() -> TestResult {
+async fn subscribe_join_wait_and_cancel_use_the_real_api_and_sqlite_paths() -> TestResult {
     let directory = tempfile::tempdir_in("/tmp")?;
     std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700))?;
     let service_directory = directory.path();
@@ -36,7 +36,6 @@ async fn subscribe_join_wait_and_cancel_use_real_control_and_sqlite_paths() -> T
     let push_store = Arc::new(tokio::sync::Mutex::new(
         automation_storage::AutomationStore::open(&automation_path).await?,
     ));
-    let digest = format!("sha256:{}", "a".repeat(64));
     let router = Arc::new(SessionDeliveryRouter::new(Vec::new()));
     let delivery: Arc<dyn SessionMessageDelivery> = router.clone();
     let presence: Arc<dyn TargetPresenceProbe> = router.clone();
@@ -54,26 +53,19 @@ async fn subscribe_join_wait_and_cancel_use_real_control_and_sqlite_paths() -> T
             clock: Arc::new(SystemSubscriptionClock),
         });
     subscription_delivery.start().await?;
-    let identity = ServiceIdentity::new(SERVICE_ID, SERVICE_EPOCH, &digest)
+    let identity = ServiceIdentity::new(SERVICE_ID, SERVICE_EPOCH)
         .map_err(std::io::Error::other)?
         .with_board_store(Arc::clone(&store))
         .with_session_delivery(router)
         .with_subscription_delivery_service(subscription_delivery.clone(), presence);
-    let service = LocalControlService::bind(&service_directory.join("control.sock"), identity)?;
-    let manifest = serde_json::from_value(serde_json::json!({
-        "version":2,
-        "serviceId":SERVICE_ID,
-        "serviceEpoch":SERVICE_EPOCH,
-        "machineLabel":"fixture-host",
-        "control":{"transport":"unixJsonLines","path":"control.sock"},
-        "controlSchemaDigest":digest,
-        "mcp":{"transport":"streamableHttp","url":"http://127.0.0.1:0/mcp"},
-    }))?;
-    let publication = ManifestPublication::publish(service_directory, &manifest)?;
-    let stop = CancellationToken::new();
-    let service_task = tokio::spawn(service.run(stop.clone()));
-    let mut client =
-        ControlClient::connect(service_directory, "thread-subscription-cli-test", "1").await?;
+    let served = collaboration_mcp::test_support::ServedCollaborationApi::start(
+        service_directory,
+        collaboration_service::CollaborationApplication::new(identity),
+    )
+    .await?;
+    let client =
+        CollaborationClient::connect(service_directory, "thread-subscription-cli-test", "1")
+            .await?;
 
     let owner = human_actor("owner")?;
     let reader = session_actor(SESSION_ID)?;
@@ -109,7 +101,7 @@ async fn subscribe_join_wait_and_cancel_use_real_control_and_sqlite_paths() -> T
             acting_for: None,
         })
         .await?;
-    let first_root = post_root(&mut client, &owner, &topic_id, "first root").await?;
+    let first_root = post_root(&client, &owner, &topic_id, "first root").await?;
 
     let join = run_cli(
         service_directory,
@@ -486,10 +478,7 @@ async fn subscribe_join_wait_and_cancel_use_real_control_and_sqlite_paths() -> T
         "subscriptions remained after cancelling every scope",
     )?;
 
-    client.close().await?;
-    stop.cancel();
-    service_task.await??;
-    drop(publication);
+    served.stop().await?;
     subscription_delivery.shutdown().await;
     drop(subscription_delivery);
     Arc::try_unwrap(store)
@@ -508,7 +497,7 @@ async fn subscribe_join_wait_and_cancel_use_real_control_and_sqlite_paths() -> T
 }
 
 async fn post_root(
-    client: &mut ControlClient,
+    client: &CollaborationClient,
     owner: &Identity,
     topic_id: &TopicId,
     text: &str,

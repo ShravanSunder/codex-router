@@ -12,7 +12,6 @@ use collaboration_service::{
     ProviderOperationStore, ServiceIdentity, SessionDeliveryRoute, SessionDeliveryRouter,
     SessionMessageDelivery, SubscriptionDeliveryService, SubscriptionDeliveryServiceProps,
     SystemSubscriptionClock, TargetPresenceProbe, UnmaterializedThreadHolder,
-    serve_control_connection,
 };
 use futures_util::{SinkExt, StreamExt};
 use native_permission_echo::applied_router_sandbox;
@@ -23,6 +22,8 @@ use std::{
 };
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio_tungstenite::tungstenite::Message;
+#[path = "support/served_api.rs"]
+mod served_api;
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
@@ -33,25 +34,8 @@ impl AcpStoredSessions for EmptyStoredSessions {
     }
 }
 
-async fn control_call(
-    reader: &mut BufReader<tokio::net::unix::OwnedReadHalf>,
-    writer: &mut tokio::net::unix::OwnedWriteHalf,
-    id: &str,
-    method: &str,
-    params: Value,
-) -> TestResult<Value> {
-    writer
-        .write_all(
-            format!(
-                "{}\n",
-                json!({"jsonrpc":"2.0","id":id,"method":method,"params":params})
-            )
-            .as_bytes(),
-        )
-        .await?;
-    let mut line = String::new();
-    tokio::time::timeout(Duration::from_secs(3), reader.read_line(&mut line)).await??;
-    Ok(serde_json::from_str(&line)?)
+async fn api_call(served: &served_api::ServedApi, tool: &str, params: Value) -> TestResult<Value> {
+    Ok(tokio::time::timeout(Duration::from_secs(10), served.call(tool, params)).await??)
 }
 
 #[tokio::test]
@@ -149,18 +133,15 @@ async fn detached_create_records_target_and_starts_first_message_without_resume(
             clock: Arc::new(SystemSubscriptionClock),
         });
     subscription_delivery.start().await?;
-    let identity = ServiceIdentity::new(
-        &String::from(service_id.clone()),
-        &String::from(service_id),
-        &format!("sha256:{}", "a".repeat(64)),
-    )?
-    .with_automation_store(Arc::clone(&automation_store))
-    .with_endpoints(vec![description])?
-    .with_native_backend(backend_config)?
-    .with_provider_operation_store(Arc::clone(&store))
-    .with_codex_conversation_recorder(Arc::clone(&recorder))
-    .with_session_delivery(delivery)
-    .with_subscription_delivery_service(subscription_delivery.clone(), presence);
+    let identity =
+        ServiceIdentity::new(&String::from(service_id.clone()), &String::from(service_id))?
+            .with_automation_store(Arc::clone(&automation_store))
+            .with_endpoints(vec![description])?
+            .with_native_backend(backend_config)?
+            .with_provider_operation_store(Arc::clone(&store))
+            .with_codex_conversation_recorder(Arc::clone(&recorder))
+            .with_session_delivery(delivery)
+            .with_subscription_delivery_service(subscription_delivery.clone(), presence);
 
     let (native_started_tx, native_started_rx) = tokio::sync::oneshot::channel();
     let (release_native_tx, release_native_rx) = tokio::sync::oneshot::channel();
@@ -278,20 +259,10 @@ async fn detached_create_records_target_and_starts_first_message_without_resume(
         .send(())
         .map_err(|_| "native response waiter closed")?;
 
-    let (control_client, control_server) = tokio::net::UnixStream::pair()?;
-    let serving_control = tokio::spawn(serve_control_connection(control_server, identity));
-    let (control_read, mut control_write) = control_client.into_split();
-    let mut control_read = BufReader::new(control_read);
-    let initialized = control_call(&mut control_read, &mut control_write, "init", "control/initialize",
-        json!({"version":{"major":1,"minor":0},"client":{"name":"detached-create-test","version":"1"}})).await?;
-    if initialized.get("result").is_none() {
-        return Err(format!("Control initialization failed: {initialized}").into());
-    }
-    let waited = control_call(
-        &mut control_read,
-        &mut control_write,
-        "wait",
-        "conversation/operationWait",
+    let served = served_api::ServedApi::start(identity).await?;
+    let waited = api_call(
+        &served,
+        "conversation_operation_wait",
         json!({"operationId":operation_id,"timeoutSeconds":3}),
     )
     .await?;
@@ -304,24 +275,20 @@ async fn detached_create_records_target_and_starts_first_message_without_resume(
     if !holder.contains("detached-thread") {
         return Err("detached create lost its empty native binding".into());
     }
-    let sent = control_call(
-        &mut control_read,
-        &mut control_write,
-        "message",
-        "message/send",
+    let sent = api_call(
+        &served,
+        "message_send",
         json!({"target":target,"message":{"kind":"humanUser","text":"hello"},
-            "mode":"auto","generationGuard":null}),
+            "delivery":"auto","generationGuard":null}),
     )
     .await?;
     if sent["result"]["receipt"]["outcome"]["kind"] != "started"
         || sent["result"]["receipt"]["client"]["kind"] != "codexAppServer"
         || holder.contains("detached-thread")
     {
-        return Err(format!("first Control message did not start native turn: {sent}").into());
+        return Err(format!("first API message did not start native turn: {sent}").into());
     }
-    drop(control_read);
-    drop(control_write);
-    serving_control.await??;
+    served.stop().await?;
     native.await??;
     subscription_delivery.shutdown().await;
     drop(subscription_delivery);

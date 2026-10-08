@@ -1,7 +1,7 @@
-//! Immediate provider Session settings actions through Control.
+//! Immediate provider Session settings actions through the collaboration API.
 
 use clap::{Args, Subcommand};
-use collaboration_client::ControlClient;
+use collaboration_client::CollaborationClient;
 use collaboration_client::protocol::{
     ProviderIdentity, ProviderSettingName, ProviderSettingsAcceptRequest, ProviderSettingsFailure,
     ProviderSettingsFailureKind, ProviderSettingsSetRequest, SessionRef,
@@ -126,7 +126,7 @@ pub(crate) fn run(arguments: SettingsArguments) -> i32 {
         Err(_) => return 3,
     };
     runtime.block_on(async move {
-        let mut client = match ControlClient::connect(
+        let client = match CollaborationClient::connect(
             &directory,
             "agent-collaboration",
             env!("CARGO_PKG_VERSION"),
@@ -156,7 +156,6 @@ pub(crate) fn run(arguments: SettingsArguments) -> i32 {
                     .await
             }
         };
-        let _ = client.close().await;
         match result {
             Ok(result) => {
                 let rendered = if json_output {

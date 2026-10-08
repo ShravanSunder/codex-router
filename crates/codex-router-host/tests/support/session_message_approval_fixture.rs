@@ -1,6 +1,6 @@
-//! Real Control approval-push and provider-decision observations.
-use super::{provider_prompt_contains, wait_for_prompt_text};
-use collaboration_client::ControlClient;
+//! Real approval-push and provider-decision observations through the collaboration API.
+use super::{provider_prompt_contains, spawn_provider_prompt, wait_for_prompt_text};
+use collaboration_client::CollaborationClient;
 use collaboration_protocol::{
     ApprovalDecideParams, ConversationOperationSettlement, ConversationOperationWaitOutput,
     ConversationOperationWaitRequest, ConversationPromptRequest, MessageContent, MessageText,
@@ -10,7 +10,7 @@ use serde_json::json;
 use std::path::Path;
 
 pub(crate) async fn prompt_and_approve_from_peer_provider(
-    client: &mut ControlClient,
+    client: &CollaborationClient,
     requester: SessionRef,
     approver: SessionRef,
     approver_prompt_log: &Path,
@@ -32,8 +32,10 @@ pub(crate) async fn prompt_and_approve_from_peer_provider(
         })
         .expect("requester generation");
     let operation_id = OperationId::generate();
-    client
-        .prompt_provider_conversation(ConversationPromptRequest {
+    // The prompt settles only after the approval below, so it runs in the background.
+    let prompt = spawn_provider_prompt(
+        client,
+        ConversationPromptRequest {
             input_id: None,
             operation_id: operation_id.clone(),
             target: requester.clone(),
@@ -47,9 +49,8 @@ pub(crate) async fn prompt_and_approve_from_peer_provider(
                 text: MessageText::try_from("request permission".to_owned())
                     .expect("permission prompt"),
             },
-        })
-        .await
-        .expect("permission prompt admitted");
+        },
+    );
     let notice_line = wait_for_prompt_text(approver_prompt_log, "❓ Router approval").await;
     assert_eq!(
         notice_line.lines().count(),
@@ -145,6 +146,10 @@ pub(crate) async fn prompt_and_approve_from_peer_provider(
             settlement: ConversationOperationSettlement::PromptCompleted { .. }
         }
     ));
+    prompt
+        .await
+        .expect("permission prompt task")
+        .expect("permission prompt settled through the API");
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
             let log = std::fs::read_to_string(approver_prompt_log).unwrap_or_default();

@@ -230,8 +230,11 @@ async fn load_codex_target(
     requested_by: &SessionRef,
     target: &SessionRef,
 ) -> ProofResult<()> {
-    let conversation =
-        ConversationClient::connect(&proof.service_directory, &target.endpoint).await?;
+    let conversation = ConversationClient::connect(
+        &collaboration_client::CollaborationAccess::api(&proof.service_directory),
+        &target.endpoint,
+    )
+    .await?;
     let result = conversation
         .load(
             ConversationLoadInput {
@@ -239,7 +242,7 @@ async fn load_codex_target(
                 target: target.clone(),
                 working_directory: proof.workspace.clone(),
                 requested_by: requested_by.clone(),
-                approver: Some(requested_by.clone()),
+                approver: Some(requested_by.clone().into()),
                 access: RouterAccess::WorkspaceWrite,
                 generation: None,
             },

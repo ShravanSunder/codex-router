@@ -5,7 +5,7 @@ use std::os::unix::fs::DirBuilderExt;
 #[tokio::test]
 async fn cli_creates_wakeup_with_harness_sender_and_reads_through_host()
 -> Result<(), Box<dyn std::error::Error>> {
-    // Arrange: a real owned Control service and CLI subprocess; no native process/model.
+    // Arrange: a real owned collaboration API and CLI subprocess; no native process/model.
     let operation_id = OperationId::generate();
     let suffix = operation_id
         .as_str()
@@ -167,6 +167,7 @@ async fn cli_creates_wakeup_with_harness_sender_and_reads_through_host()
     {
         return Err("one-result wait returned before firing receipt".into());
     }
+    pin_first_fire_receipt(&fired, &root).await?;
     let listing = tokio::process::Command::new(env!("CARGO_BIN_EXE_agent-collaboration"))
         .args([
             "wake",
@@ -257,5 +258,66 @@ async fn cli_creates_wakeup_with_harness_sender_and_reads_through_host()
         std::fs::remove_file(entry.path())?;
     }
     std::fs::remove_dir(root)?;
+    Ok(())
+}
+
+/// `wake send --wait-until-first-fire --json` keeps today's output: `result.record` is the
+/// created wake with `firstFire` set to the FireReceipt the wait observed (the tool's
+/// `outcome.fired.fire`), field for field, and it is the receipt the wake stores.
+async fn pin_first_fire_receipt(
+    fired: &serde_json::Value,
+    root: &std::path::Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let first_fire = fired
+        .pointer("/result/record/firstFire")
+        .ok_or("wait output omitted result.record.firstFire")?;
+    let mut fields: Vec<&str> = first_fire
+        .as_object()
+        .ok_or("firstFire is not an object")?
+        .keys()
+        .map(String::as_str)
+        .collect();
+    fields.sort_unstable();
+    if fields != ["dueAt", "firedAt", "kind", "occurrenceId", "wakeupId"] {
+        return Err(format!("firstFire is not today's FireReceipt shape: {first_fire}").into());
+    }
+    let receipt: collaboration_client::protocol::FireReceipt =
+        serde_json::from_value(first_fire.clone())?;
+    if serde_json::to_value(&receipt)? != *first_fire {
+        return Err("firstFire does not round-trip as a FireReceipt".into());
+    }
+    let wakeup_id = fired
+        .pointer("/result/record/definition/wakeupId")
+        .and_then(serde_json::Value::as_str)
+        .ok_or("wait output omitted the created wake")?;
+    if first_fire
+        .pointer("/wakeupId")
+        .and_then(serde_json::Value::as_str)
+        != Some(wakeup_id)
+    {
+        return Err("firstFire names another wake".into());
+    }
+    let shown = tokio::process::Command::new(env!("CARGO_BIN_EXE_agent-collaboration"))
+        .args([
+            "wake",
+            "show",
+            "--wakeup-id",
+            wakeup_id,
+            "--json",
+            "--service-directory",
+        ])
+        .arg(root)
+        .output()
+        .await?;
+    if !shown.status.success() {
+        return Err("wake show after the first fire failed".into());
+    }
+    let shown: serde_json::Value = serde_json::from_slice(&shown.stdout)?;
+    if shown.pointer("/result/record/firstFire") != Some(first_fire) {
+        return Err(format!(
+            "the waited FireReceipt differs from the stored one: {first_fire} vs {shown}"
+        )
+        .into());
+    }
     Ok(())
 }

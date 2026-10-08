@@ -5,10 +5,10 @@ use codex_router_host::{
     CollaborationRuntime, CollaborationRuntimeInputs, ExternalProviderLaunchBinding,
     ExternalProviderStartup,
 };
-use collaboration_client::ControlClient;
+use collaboration_client::CollaborationClient;
 use collaboration_protocol::{
-    NativeSessionScope, NativeSessionSource, NativeSessionView, ProviderIdentity,
-    ProviderSessionListParams, ProviderSessionListenRequest, ProviderSessionSummary, SessionRef,
+    BoundedObservationRequest, NativeSessionScope, NativeSessionSource, NativeSessionView,
+    ProviderIdentity, ProviderSessionListParams, ProviderSessionSummary, SessionRef,
 };
 use serde_json::{Value, json};
 use std::{os::unix::fs::PermissionsExt as _, path::Path, time::Duration};
@@ -64,8 +64,8 @@ async fn cli_human_approver_from_create_can_decide_provider_permission() -> Test
         )],
     )
     .await?;
-    let mut observer = ControlClient::connect(root.path(), "human-approver-observer", "1").await?;
-    let provider = observer
+    let client = CollaborationClient::connect(root.path(), "human-approver-observer", "1").await?;
+    let provider = client
         .list_endpoints()
         .await?
         .endpoints
@@ -129,11 +129,10 @@ async fn cli_human_approver_from_create_can_decide_provider_permission() -> Test
     );
     let created = output_line(&create.stdout, "created")?;
     let target: SessionRef = serde_json::from_value(created["target"].clone())?;
-    observer
-        .listen_provider_session(ProviderSessionListenRequest {
-            target: target.clone(),
-        })
-        .await?;
+    let mut observer = ProviderEvents::new(client.clone(), target.clone());
+    // `events listen` follows the provider Session through events_observe; it is attached
+    // before the message, so it must stream the interaction that follows while it listens.
+    let listened = start_provider_listener(root.path(), &target).await?;
 
     let sent = run_cli(
         root.path(),
@@ -229,7 +228,7 @@ async fn cli_human_approver_from_create_can_decide_provider_permission() -> Test
     );
     let human_target: SessionRef =
         serde_json::from_value(output_line(&human_created.stdout, "created")?["target"].clone())?;
-    let listed = observer
+    let listed = client
         .list_provider_sessions(ProviderSessionListParams {
             endpoint: human_target.endpoint.clone(),
             view: NativeSessionView::Stored,
@@ -290,7 +289,7 @@ async fn cli_human_approver_from_create_can_decide_provider_permission() -> Test
     );
     let owner_target: SessionRef =
         serde_json::from_value(output_line(&owner_created.stdout, "created")?["target"].clone())?;
-    let listed = observer
+    let listed = client
         .list_provider_sessions(ProviderSessionListParams {
             endpoint: owner_target.endpoint.clone(),
             view: NativeSessionView::Stored,
@@ -312,8 +311,58 @@ async fn cli_human_approver_from_create_can_decide_provider_permission() -> Test
     assert!(matches!(approver,
         ProviderIdentity::Human { human_id } if human_id.as_str() == expected_owner.trim()
     ));
+    let listened = listened.await??;
+    assert!(
+        listened
+            .iter()
+            .any(|line| line["kind"] == "providerSessionEvent"
+                && line["message"]["event"]["kind"] == "interactionRequested"),
+        "events listen did not stream the interaction while attached: {listened:?}"
+    );
     runtime.shutdown().await?;
     Ok(())
+}
+
+/// Starts `events listen` on the provider Session and, once it reports readiness, collects
+/// its lines until it streams an interaction request or ten seconds pass.
+async fn start_provider_listener(
+    root: &Path,
+    target: &SessionRef,
+) -> TestResult<tokio::task::JoinHandle<Result<Vec<Value>, String>>> {
+    use tokio::io::AsyncBufReadExt;
+    let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_agent-collaboration"))
+        .args(["events", "listen", "--endpoint"])
+        .arg(String::from(target.endpoint.endpoint_id.clone()))
+        .arg("--session")
+        .arg(String::from(target.session_id.clone()))
+        .args(["--attach", "--timeout-seconds", "30", "--service-directory"])
+        .arg(root)
+        .stdout(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()?;
+    let stdout = child.stdout.take().ok_or("listener stdout")?;
+    let mut lines = tokio::io::BufReader::new(stdout).lines();
+    let ready = tokio::time::timeout(Duration::from_secs(10), lines.next_line())
+        .await
+        .map_err(|_| "events listen never reported readiness")??
+        .ok_or("events listen ended before readiness")?;
+    let ready: Value = serde_json::from_str(&ready)?;
+    assert_eq!(ready["kind"], "listenerReady");
+    assert_eq!(ready["target"], serde_json::to_value(target)?);
+    Ok(tokio::spawn(async move {
+        let mut collected = vec![ready];
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        while let Ok(Ok(Some(line))) = tokio::time::timeout_at(deadline, lines.next_line()).await {
+            let line: Value = serde_json::from_str(&line).map_err(|error| error.to_string())?;
+            let interaction = line["message"]["event"]["kind"] == "interactionRequested";
+            collected.push(line);
+            if interaction {
+                break;
+            }
+        }
+        let _killed = child.kill().await;
+        Ok(collected)
+    }))
 }
 
 async fn run_cli(
@@ -360,24 +409,68 @@ fn output_line(stdout: &[u8], kind: &str) -> TestResult<Value> {
         .ok_or_else(|| format!("CLI omitted {kind}: {}", String::from_utf8_lossy(stdout)).into())
 }
 
-async fn wait_for_interaction(observer: &mut ControlClient) -> TestResult {
+/// Follows a provider Session through one-second events_observe calls that resume after
+/// the last event's sequence within the hub's epoch.
+struct ProviderEvents {
+    client: CollaborationClient,
+    target: SessionRef,
+    after_sequence: Option<u64>,
+    epoch: Option<u64>,
+    pending: std::collections::VecDeque<Value>,
+}
+
+impl ProviderEvents {
+    fn new(client: CollaborationClient, target: SessionRef) -> Self {
+        Self {
+            client,
+            target,
+            after_sequence: None,
+            epoch: None,
+            pending: std::collections::VecDeque::new(),
+        }
+    }
+
+    async fn next_event(&mut self) -> TestResult<Value> {
+        loop {
+            if let Some(event) = self.pending.pop_front() {
+                return Ok(event);
+            }
+            let observed = self
+                .client
+                .observe_provider_session(BoundedObservationRequest {
+                    target: self.target.clone(),
+                    timeout_seconds: 1,
+                    max_events: 4096,
+                    max_bytes: 1_048_576,
+                    after_sequence: self.after_sequence,
+                    epoch: self.epoch,
+                })
+                .await?;
+            self.epoch = observed.epoch.or(self.epoch);
+            for event in observed.events {
+                if let Some(sequence) = event["sequence"].as_u64() {
+                    self.after_sequence = Some(self.after_sequence.unwrap_or(0).max(sequence));
+                }
+                self.pending.push_back(event);
+            }
+        }
+    }
+}
+
+async fn wait_for_interaction(observer: &mut ProviderEvents) -> TestResult {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     loop {
-        let notification =
-            tokio::time::timeout_at(deadline, observer.next_provider_session_notification())
-                .await??;
+        let notification = tokio::time::timeout_at(deadline, observer.next_event()).await??;
         if notification["event"]["kind"] == "interactionRequested" {
             return Ok(());
         }
     }
 }
 
-async fn wait_for_turn_end(observer: &mut ControlClient) -> TestResult {
+async fn wait_for_turn_end(observer: &mut ProviderEvents) -> TestResult {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     loop {
-        let notification =
-            tokio::time::timeout_at(deadline, observer.next_provider_session_notification())
-                .await??;
+        let notification = tokio::time::timeout_at(deadline, observer.next_event()).await??;
         if notification["event"]["kind"] == "turnEnded" {
             assert_eq!(notification["event"]["outcome"]["stop_reason"], "endTurn");
             return Ok(());

@@ -1,7 +1,7 @@
 use super::board_preparation::{self, CommandContext, PreparedBoardCommand};
 use collaboration_client::board::*;
 use collaboration_client::protocol::ThreadSubscriptionWaitFilter;
-use collaboration_client::{BoardClientError, ClientError, ControlClient};
+use collaboration_client::{BoardClientError, ClientError, CollaborationClient};
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::io::{self, Write};
@@ -41,7 +41,7 @@ pub(super) fn execute(command: PreparedBoardCommand, context: CommandContext) ->
         }
     };
     let result = runtime.block_on(async {
-        let mut client = ControlClient::connect(
+        let mut client = CollaborationClient::connect(
             &directory,
             "agent-collaboration-board",
             env!("CARGO_PKG_VERSION"),
@@ -55,21 +55,19 @@ pub(super) fn execute(command: PreparedBoardCommand, context: CommandContext) ->
             PreparedBoardCommand::MessagePost(pending) => pending.text_file.clone(),
             _ => None,
         };
-        let result = dispatch(&mut client, command)
+        dispatch(&mut client, command)
             .await
             .map(CommandExecutionResult::Value)
             .map_err(|error| CommandExecutionError::Request {
                 error,
                 thread_create_text_file,
-            });
-        let _closed = client.close().await;
-        result
+            })
     });
     report(result, context.json)
 }
 
 async fn dispatch(
-    client: &mut ControlClient,
+    client: &mut CollaborationClient,
     command: PreparedBoardCommand,
 ) -> Result<Value, BoardClientError> {
     match command {
@@ -239,7 +237,7 @@ async fn dispatch(
 }
 
 async fn repository_threads(
-    client: &mut ControlClient,
+    client: &mut CollaborationClient,
     repository: collaboration_client::BoardRepositoryLocation,
     reader: Option<Identity>,
     page: PageRequest,
@@ -426,7 +424,7 @@ fn report(result: Result<CommandExecutionResult, CommandExecutionError>, machine
             crate::endpoint_commands::report_failure("invalidField", &message, 2, machine)
         }
         Err(CommandExecutionError::ConnectionBeforeRequest(error)) => {
-            crate::permission_diagnostic_reporting::report_permission_error(
+            crate::permission_diagnostic_reporting::report_actionable_client_error(
                 &error,
                 crate::permission_diagnostic_reporting::PermissionDiagnosticRendering::Command,
                 machine,

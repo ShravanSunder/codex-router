@@ -1,8 +1,10 @@
-use collaboration_client::{ControlClient, WakeWaitError};
+use collaboration_client::WakeWaitError;
 use collaboration_protocol::{OperationId, WakeMutationRequest, WakeSendRequest, WakeShowRequest};
-use collaboration_service::{ServiceIdentity, serve_control_connection};
+use collaboration_service::ServiceIdentity;
 use serde_json::json;
 use std::sync::Arc;
+#[path = "support/served_api.rs"]
+mod served_api;
 #[path = "support/wake_push_draft.rs"]
 mod wake_push_test_support;
 #[tokio::test]
@@ -18,20 +20,17 @@ async fn dedicated_wait_observes_pause_after_immediate_resume()
     let identity = ServiceIdentity::new(
         "00000000-0000-4000-8000-000000000001",
         "00000000-0000-4000-8000-000000000002",
-        &format!("sha256:{}", "a".repeat(64)),
     )
     .map_err(std::io::Error::other)?
     .with_automation_store(store.clone());
-    let (socket, server) = tokio::net::UnixStream::pair()?;
-    let task = tokio::spawn(serve_control_connection(server, identity.clone()));
-    let mut client = ControlClient::initialize(socket, "wake-control", "1").await?;
+    let served = served_api::ServedApi::start(identity).await?;
+    let client = served.client("wake-control").await?;
     let request: WakeSendRequest = serde_json::from_value(
         json!({"operationId":OperationId::generate(),"message":{"target":{"endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"codex-local"},"sessionId":"fixture-only"},"content":{"kind":"humanUser","text":"Check"},"delivery":"auto","generationGuard":null},"timing":{"kind":"interval","seconds":60},"expiry":{"kind":"none"}}),
     )?;
     let wake = client.send_wakeup(request).await?;
-    let (socket, server) = tokio::net::UnixStream::pair()?;
-    let waiter_task = tokio::spawn(serve_control_connection(server, identity.clone()));
-    let wait = ControlClient::initialize(socket, "wake-wait", "1")
+    let wait = served
+        .client("wake-wait")
         .await?
         .subscribe_wakeup(WakeShowRequest {
             wakeup_id: wake.definition.wakeup_id.clone(),
@@ -72,9 +71,8 @@ async fn dedicated_wait_observes_pause_after_immediate_resume()
             wakeup_id: wake.definition.wakeup_id.clone(),
         })
         .await?;
-    let (socket, server) = tokio::net::UnixStream::pair()?;
-    let history_task = tokio::spawn(serve_control_connection(server, identity.clone()));
-    let historical = ControlClient::initialize(socket, "wake-history", "1")
+    let historical = served
+        .client("wake-history")
         .await?
         .subscribe_wakeup(WakeShowRequest {
             wakeup_id: wake.definition.wakeup_id.clone(),
@@ -85,10 +83,8 @@ async fn dedicated_wait_observes_pause_after_immediate_resume()
     if historical.wakeup_id != wake.definition.wakeup_id {
         return Err("historical firing identity changed".into());
     }
-    history_task.await??;
-    let (socket, server) = tokio::net::UnixStream::pair()?;
-    let missing_task = tokio::spawn(serve_control_connection(server, identity));
-    let missing = ControlClient::initialize(socket, "wake-missing", "1")
+    let missing = served
+        .client("wake-missing")
         .await?
         .subscribe_wakeup(WakeShowRequest {
             wakeup_id: collaboration_protocol::WakeupId::generate(),
@@ -97,10 +93,7 @@ async fn dedicated_wait_observes_pause_after_immediate_resume()
     if !matches!(missing, Err(WakeWaitError::NotFound { .. })) {
         return Err("missing wake was confused with unavailable observation".into());
     }
-    missing_task.await??;
-    client.close().await?;
-    task.await??;
-    waiter_task.await??;
+    served.stop().await?;
     drop(store);
     std::fs::remove_file(path)?;
     Ok(())

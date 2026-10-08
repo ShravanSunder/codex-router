@@ -116,7 +116,6 @@ async fn cli_command_entry_authorizes_real_broker_permission_by_actor_target_and
 async fn mcp_call(
     client: &reqwest::Client,
     url: &str,
-    session_id: &reqwest::header::HeaderValue,
     id: u64,
     name: &str,
     arguments: Value,
@@ -125,7 +124,7 @@ async fn mcp_call(
         .post(url)
         .header(CONTENT_TYPE, "application/json")
         .header(ACCEPT, "application/json, text/event-stream")
-        .header("mcp-session-id", session_id)
+        .header("mcp-protocol-version", "2025-11-25")
         .json(&json!({
             "jsonrpc":"2.0", "id":id, "method":"tools/call",
             "params":{"name":name,"arguments":arguments}
@@ -178,47 +177,15 @@ async fn provider_session_approval_uses_legacy_default_list_and_safe_decision() 
         )
         .await
         .expect("provider approval pending");
-    let listener = CollaborationMcpListener::start(CollaborationMcpListenerConfig {
-        bind_address: LoopbackBindAddress::parse("127.0.0.1:0").expect("loopback bind"),
-        service_directory: fixture.service_directory().to_owned(),
-        allowed_origins: vec!["http://localhost".to_owned()],
-    })
-    .await
-    .expect("MCP listener");
+    let listener = ServedApi::tcp(&api_config(
+        fixture.application.clone(),
+        fixture.service_directory(),
+    ))
+    .await;
     let client = reqwest::Client::new();
-    let initialize = client
-        .post(listener.local_url())
-        .header(CONTENT_TYPE, "application/json")
-        .header(ACCEPT, "application/json, text/event-stream")
-        .json(
-            &json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{
-                "protocolVersion":"2025-11-25","capabilities":{},
-                "clientInfo":{"name":"provider-approval-fixture","version":"1"}
-            }}),
-        )
-        .send()
-        .await
-        .expect("initialize");
-    let session_id = initialize
-        .headers()
-        .get("mcp-session-id")
-        .cloned()
-        .expect("MCP session");
-    let _ = initialize.text().await.expect("initialize body");
-    let initialized = client
-        .post(listener.local_url())
-        .header(CONTENT_TYPE, "application/json")
-        .header(ACCEPT, "application/json, text/event-stream")
-        .header("mcp-session-id", session_id.clone())
-        .json(&json!({"jsonrpc":"2.0","method":"notifications/initialized"}))
-        .send()
-        .await
-        .expect("initialized");
-    assert!(initialized.status().is_success());
     let listed = mcp_call(
         &client,
-        &listener.local_url(),
-        &session_id,
+        &listener.url(),
         2,
         "approval_list",
         json!({"pending":true}),
@@ -233,8 +200,7 @@ async fn provider_session_approval_uses_legacy_default_list_and_safe_decision() 
     assert!(row.get("optionsOrigin").is_none());
     let decided = mcp_call(
         &client,
-        &listener.local_url(),
-        &session_id,
+        &listener.url(),
         3,
         "approval_decide",
         json!({"requestId":"provider-legacy-approval",
@@ -246,58 +212,26 @@ async fn provider_session_approval_uses_legacy_default_list_and_safe_decision() 
     assert!(matches!(receiver.await.expect("agent resolution"),
         collaboration_service::TypedApprovalResolution::Selected(selected)
             if selected.option_id.as_str() == "allow-once"));
-    listener.shutdown().await.expect("MCP shutdown");
+    listener.stop().await;
     fixture.shutdown().await;
 }
 
 #[tokio::test]
 async fn streamable_http_entry_authorizes_real_broker_permission_by_actor_target_and_generation() {
     let fixture = ApprovalFixture::start(1).await;
-    let listener = CollaborationMcpListener::start(CollaborationMcpListenerConfig {
-        bind_address: LoopbackBindAddress::parse("127.0.0.1:0").expect("loopback bind"),
-        service_directory: fixture.service_directory().to_owned(),
-        allowed_origins: vec!["http://localhost".to_owned()],
-    })
-    .await
-    .expect("MCP listener");
+    let listener = ServedApi::tcp(&api_config(
+        fixture.application.clone(),
+        fixture.service_directory(),
+    ))
+    .await;
     let client = reqwest::Client::new();
-    let initialize = client
-        .post(listener.local_url())
-        .header(CONTENT_TYPE, "application/json")
-        .header(ACCEPT, "application/json, text/event-stream")
-        .json(&json!({
-            "jsonrpc":"2.0","id":1,"method":"initialize","params":{
-                "protocolVersion":"2025-11-25","capabilities":{},
-                "clientInfo":{"name":"permission-integration","version":"1"}
-            }
-        }))
-        .send()
-        .await
-        .expect("initialize");
-    let session_id = initialize
-        .headers()
-        .get("mcp-session-id")
-        .cloned()
-        .expect("MCP session id");
-    let _initialize_body = initialize.text().await.expect("initialize body");
-    let initialized = client
-        .post(listener.local_url())
-        .header(CONTENT_TYPE, "application/json")
-        .header(ACCEPT, "application/json, text/event-stream")
-        .header("mcp-session-id", session_id.clone())
-        .json(&json!({"jsonrpc":"2.0","method":"notifications/initialized"}))
-        .send()
-        .await
-        .expect("initialized notification");
-    assert!(initialized.status().is_success());
 
     let request = fixture.begin_permission_request("mcp").await;
     let pending = fixture.pending_record().await;
     fixture.await_delivery(0).await;
     let list = mcp_call(
         &client,
-        &listener.local_url(),
-        &session_id,
+        &listener.url(),
         2,
         "approval_list",
         json!({"pending":true}),
@@ -310,8 +244,7 @@ async fn streamable_http_entry_authorizes_real_broker_permission_by_actor_target
     assert!(listed.get("optionsOrigin").is_none());
     let detailed = mcp_call(
         &client,
-        &listener.local_url(),
-        &session_id,
+        &listener.url(),
         20,
         "approval_list",
         json!({"pending":true,"includeOptions":true}),
@@ -345,8 +278,7 @@ async fn streamable_http_entry_authorizes_real_broker_permission_by_actor_target
     .expect("wrong actor");
     let rejected = mcp_call(
         &client,
-        &listener.local_url(),
-        &session_id,
+        &listener.url(),
         3,
         "approval_decide",
         json!({
@@ -362,8 +294,7 @@ async fn streamable_http_entry_authorizes_real_broker_permission_by_actor_target
     );
     let accepted = mcp_call(
         &client,
-        &listener.local_url(),
-        &session_id,
+        &listener.url(),
         4,
         "approval_decide",
         json!({
@@ -390,7 +321,7 @@ async fn streamable_http_entry_authorizes_real_broker_permission_by_actor_target
             option_id: "native-accept-session".to_owned()
         }
     );
-    listener.shutdown().await.expect("MCP shutdown");
+    listener.stop().await;
     fixture.shutdown().await;
 }
 
@@ -417,47 +348,15 @@ async fn streamable_http_question_form_reaches_the_waiting_agent() {
         .await
         .expect("pending question");
     fixture.await_delivery(0).await;
-    let listener = CollaborationMcpListener::start(CollaborationMcpListenerConfig {
-        bind_address: LoopbackBindAddress::parse("127.0.0.1:0").expect("loopback bind"),
-        service_directory: fixture.service_directory().to_owned(),
-        allowed_origins: vec!["http://localhost".to_owned()],
-    })
-    .await
-    .expect("MCP listener");
+    let listener = ServedApi::tcp(&api_config(
+        fixture.application.clone(),
+        fixture.service_directory(),
+    ))
+    .await;
     let client = reqwest::Client::new();
-    let initialize = client
-        .post(listener.local_url())
-        .header(CONTENT_TYPE, "application/json")
-        .header(ACCEPT, "application/json, text/event-stream")
-        .json(
-            &json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{
-                "protocolVersion":"2025-11-25","capabilities":{},
-                "clientInfo":{"name":"question-integration","version":"1"}
-            }}),
-        )
-        .send()
-        .await
-        .expect("initialize");
-    let session_id = initialize
-        .headers()
-        .get("mcp-session-id")
-        .cloned()
-        .expect("MCP session id");
-    let _ = initialize.text().await.expect("initialize body");
-    let initialized = client
-        .post(listener.local_url())
-        .header(CONTENT_TYPE, "application/json")
-        .header(ACCEPT, "application/json, text/event-stream")
-        .header("mcp-session-id", session_id.clone())
-        .json(&json!({"jsonrpc":"2.0","method":"notifications/initialized"}))
-        .send()
-        .await
-        .expect("initialized notification");
-    assert!(initialized.status().is_success());
     let listed = mcp_call(
         &client,
-        &listener.local_url(),
-        &session_id,
+        &listener.url(),
         2,
         "question_list",
         json!({"pending":true}),
@@ -468,8 +367,7 @@ async fn streamable_http_question_form_reaches_the_waiting_agent() {
     assert_eq!(question["fields"][0]["kind"], "number");
     let answered = mcp_call(
         &client,
-        &listener.local_url(),
-        &session_id,
+        &listener.url(),
         3,
         "question_answer",
         json!({
@@ -487,136 +385,25 @@ async fn streamable_http_question_form_reaches_the_waiting_agent() {
             "action":"answered","content":{"count":3,"dryRun":true,"color":{"selectedOptionIds":["blue"]}}
         })
     );
-    listener.shutdown().await.expect("MCP shutdown");
+    listener.stop().await;
     fixture.shutdown().await;
 }
 
 #[tokio::test]
-async fn initialized_http_decision_response_loss_after_real_broker_effect_is_unknown_without_replay()
- {
-    let fixture = ApprovalFixture::start_with_dropped_decision_reply(1, true, false).await;
-    let listener = CollaborationMcpListener::start(CollaborationMcpListenerConfig {
-        bind_address: LoopbackBindAddress::parse("127.0.0.1:0").expect("loopback bind"),
-        service_directory: fixture.service_directory().to_owned(),
-        allowed_origins: vec!["http://localhost".to_owned()],
-    })
-    .await
-    .expect("MCP listener");
-    let client = reqwest::Client::new();
-    let initialize = client
-        .post(listener.local_url())
-        .header(CONTENT_TYPE, "application/json")
-        .header(ACCEPT, "application/json, text/event-stream")
-        .json(&json!({
-            "jsonrpc":"2.0","id":1,"method":"initialize","params":{
-                "protocolVersion":"2025-11-25","capabilities":{},
-                "clientInfo":{"name":"approval-response-loss","version":"1"}
-            }
-        }))
-        .send()
-        .await
-        .expect("initialize");
-    let session_id = initialize
-        .headers()
-        .get("mcp-session-id")
-        .cloned()
-        .expect("MCP session id");
-    let _body = initialize.text().await.expect("initialize body");
-    let initialized = client
-        .post(listener.local_url())
-        .header(CONTENT_TYPE, "application/json")
-        .header(ACCEPT, "application/json, text/event-stream")
-        .header("mcp-session-id", session_id.clone())
-        .json(&json!({"jsonrpc":"2.0","method":"notifications/initialized"}))
-        .send()
-        .await
-        .expect("initialized notification");
-    assert!(initialized.status().is_success());
-
-    let request = fixture.begin_permission_request("mcp-response-loss").await;
-    let pending = fixture.pending_record().await;
-    fixture.await_delivery(0).await;
-    let response = mcp_call(
-        &client,
-        &listener.local_url(),
-        &session_id,
-        2,
-        "approval_decide",
-        json!({
-            "requestId":pending.request_id,"decision":"allow","actor":fixture.approver
-        }),
-    )
-    .await;
-    let failure = &response["result"]["structuredContent"];
-    assert_eq!(response["result"]["isError"], true);
-    assert_eq!(failure["effect"], "unknown");
-    assert_eq!(failure["stage"], "approval-decision");
-    assert_eq!(
-        fixture.forwarded_decision_count(),
-        1,
-        "the SDK did not replay"
-    );
-    assert_eq!(
-        request
-            .await
-            .expect("request join")
-            .expect("broker request"),
-        BrokeredApprovalOutcome::Selected {
-            option_id: "native-accept".to_owned()
-        },
-        "the real broker applied the decision before its Control receipt was lost",
-    );
-    let approvals = fixture.broker.list(false).await.approvals;
-    assert_eq!(approvals.len(), 1);
-    assert_eq!(approvals[0].request_id, pending.request_id);
-    assert_eq!(approvals[0].decision, Some(ApprovalDecision::Allow));
-    listener.shutdown().await.expect("MCP shutdown");
-    fixture.shutdown().await;
-}
-
-#[tokio::test]
-async fn initialized_http_create_reports_manifest_preflight_without_creation_uncertainty() {
-    // The listener is real and initialized, but its service directory deliberately
-    // has no manifest. This reaches the MCP adapter's actual create entry point
-    // while proving that discovery failure occurred before ACP setup/dispatch.
+async fn stateless_http_create_reports_discovery_failure_without_creation_uncertainty() {
+    // The listener is real, but its Router publishes no endpoints and its service directory
+    // has no manifest. The create tool discovers carriers from the Router's own endpoint
+    // directory, never the manifest, so the failure is that discovery, before ACP setup or
+    // dispatch.
     let directory = tempfile::tempdir_in("/tmp").expect("private service directory");
-    let listener = CollaborationMcpListener::start(CollaborationMcpListenerConfig {
-        bind_address: LoopbackBindAddress::parse("127.0.0.1:0").expect("loopback bind"),
-        service_directory: directory.path().to_owned(),
-        allowed_origins: vec!["http://localhost".to_owned()],
-    })
-    .await
-    .expect("MCP listener");
+    let listener = ServedApi::tcp(&api_config(
+        collaboration_service::CollaborationApplication::new(
+            ServiceIdentity::new(SERVICE_ID, SERVICE_EPOCH).expect("service identity"),
+        ),
+        directory.path(),
+    ))
+    .await;
     let client = reqwest::Client::new();
-    let initialize = client
-        .post(listener.local_url())
-        .header(CONTENT_TYPE, "application/json")
-        .header(ACCEPT, "application/json, text/event-stream")
-        .json(&json!({
-            "jsonrpc":"2.0","id":1,"method":"initialize","params":{
-                "protocolVersion":"2025-11-25","capabilities":{},
-                "clientInfo":{"name":"fault-entry-proof","version":"1"}
-            }
-        }))
-        .send()
-        .await
-        .expect("initialize");
-    let session_id = initialize
-        .headers()
-        .get("mcp-session-id")
-        .cloned()
-        .expect("MCP session id");
-    let _body = initialize.text().await.expect("initialize body");
-    let initialized = client
-        .post(listener.local_url())
-        .header(CONTENT_TYPE, "application/json")
-        .header(ACCEPT, "application/json, text/event-stream")
-        .header("mcp-session-id", session_id.clone())
-        .json(&json!({"jsonrpc":"2.0","method":"notifications/initialized"}))
-        .send()
-        .await
-        .expect("initialized notification");
-    assert!(initialized.status().is_success());
 
     let endpoint = json!({"serviceId":SERVICE_ID,"endpointId":"codex-local"});
     let local_identity = json!({"endpoint":endpoint,"sessionId":"mcp-caller"});
@@ -631,8 +418,7 @@ async fn initialized_http_create_reports_manifest_preflight_without_creation_unc
         let missing_creator = created_by.is_null();
         let response = mcp_call(
             &client,
-            &listener.local_url(),
-            &session_id,
+            &listener.url(),
             id,
             "conversation_create",
             json!({
@@ -651,7 +437,10 @@ async fn initialized_http_create_reports_manifest_preflight_without_creation_unc
                     .is_some_and(|message| message.contains("expected struct SessionRef")),
                 "{response}"
             );
-            assert!(response["result"].get("structuredContent").is_none());
+            let refusal = &response["result"]["structuredContent"];
+            assert_eq!(refusal["kind"], "protocolViolation", "{response}");
+            assert_eq!(refusal["stage"], "validation", "{response}");
+            assert_eq!(refusal["effect"], "none", "{response}");
             continue;
         }
         let failure = &response["result"]["structuredContent"];
@@ -663,8 +452,7 @@ async fn initialized_http_create_reports_manifest_preflight_without_creation_unc
 
     let response = mcp_call(
         &client,
-        &listener.local_url(),
-        &session_id,
+        &listener.url(),
         4,
         "conversation_create",
         json!({
@@ -676,23 +464,25 @@ async fn initialized_http_create_reports_manifest_preflight_without_creation_unc
     )
     .await;
     let failure = &response["result"]["structuredContent"];
-    assert_eq!(failure["effect"], "none");
-    assert_eq!(failure["stage"], "manifest-read");
+    assert_eq!(failure["effect"], "none", "{response}");
+    assert_eq!(failure["kind"], "protocolViolation", "{response}");
+    assert!(
+        failure["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("conversation endpoint not found")),
+        "{response}"
+    );
 
     let wake_response = mcp_call(
         &client,
-        &listener.local_url(),
-        &session_id,
+        &listener.url(),
         5,
         "wake_wait_until_first_fire",
         json!({"wakeupId":"01985b1e-8d90-7fff-8000-000000000099"}),
     )
     .await;
     let wake_failure = &wake_response["result"]["structuredContent"];
-    assert_eq!(
-        wake_failure["kind"], "connectionUnavailable",
-        "{wake_response}"
-    );
+    assert_eq!(wake_failure["kind"], "waitUnavailable", "{wake_response}");
     assert_eq!(wake_failure["effect"], "none");
-    listener.shutdown().await.expect("MCP shutdown");
+    listener.stop().await;
 }

@@ -1,17 +1,16 @@
 //! Native preparation through real SDK/SQLite/WebSocket fixture; no Codex binary or model.
 use automation_storage::AutomationStore;
-use collaboration_client::ControlClient;
 use collaboration_protocol::{
     CodexGeneration, EndpointDescription, InstructionCreateParams, InstructionText, OperationId,
     ScheduleCreateRequest, SchedulePrepareRequest, SessionRef,
 };
-use collaboration_service::{
-    NativeControlBackend, NativeGenerationGate, ServiceIdentity, serve_control_connection,
-};
+use collaboration_service::{NativeControlBackend, NativeGenerationGate, ServiceIdentity};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, os::unix::fs::DirBuilderExt, sync::Arc, time::Duration};
 use tokio_tungstenite::tungstenite::Message;
+#[path = "support/served_api.rs"]
+mod served_api;
 #[tokio::test]
 async fn preparation_replay_uses_recorded_native_thread_without_forking_again()
 -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -85,23 +84,18 @@ async fn exercise_preparation(
         gate,
         codex_home: root.clone(),
     };
-    let identity = ServiceIdentity::new(
-        service_id,
-        service_id,
-        &format!("sha256:{}", "a".repeat(64)),
-    )?
-    .with_endpoints(vec![description])?
-    .with_automation_store(store.clone())
-    .with_scheduled_run_execution(Arc::new(
-        collaboration_service::CodexAppServerScheduledRuns::new(
-            native_backend.clone(),
-            Arc::new(collaboration_service::UnmaterializedThreadHolder::new()),
-        ),
-    ))
-    .with_native_backend(native_backend)?;
-    let (socket, server) = tokio::net::UnixStream::pair()?;
-    let service = tokio::spawn(serve_control_connection(server, identity.clone()));
-    let mut client = ControlClient::initialize(socket, "prepare-fixture", "1").await?;
+    let identity = ServiceIdentity::new(service_id, service_id)?
+        .with_endpoints(vec![description])?
+        .with_automation_store(store.clone())
+        .with_scheduled_run_execution(Arc::new(
+            collaboration_service::CodexAppServerScheduledRuns::new(
+                native_backend.clone(),
+                Arc::new(collaboration_service::UnmaterializedThreadHolder::new()),
+            ),
+        ))
+        .with_native_backend(native_backend)?;
+    let served = served_api::ServedApi::start(identity.clone()).await?;
+    let client = served.client("prepare-fixture").await?;
     let instruction = client
         .create_instruction(InstructionCreateParams {
             operation_id: OperationId::generate(),
@@ -232,10 +226,8 @@ async fn exercise_preparation(
         if !correct_error {
             return Err("known preparation rejection became unrecoverable uncertainty".into());
         }
-        let (retry_socket, retry_server) = tokio::net::UnixStream::pair()?;
-        let retry_service = tokio::spawn(serve_control_connection(retry_server, identity.clone()));
-        let mut retry_client =
-            ControlClient::initialize(retry_socket, "ownership-recovery", "1").await?;
+        let served_retry_client = served_api::ServedApi::start(identity.clone()).await?;
+        let retry_client = served_retry_client.client("ownership-recovery").await?;
         let retry = retry_client.prepare_schedule(serde_json::from_value(json!({
             "operationId":OperationId::generate(),"scheduleId":schedule.schedule_id,
             "destination":{"kind":"existing","target":{"endpoint":target.endpoint,"sessionId":"different-thread"},"cwd":"/fresh-fixture"}
@@ -244,8 +236,7 @@ async fn exercise_preparation(
         {
             return Err("different thread could not be prepared after known rejection".into());
         }
-        retry_client.close().await?;
-        retry_service.await??;
+        served_retry_client.stop().await?;
     } else if lose_response {
         let error = match first {
             Err(collaboration_client::ScheduleClientError::Rejected(error)) => error,
@@ -255,9 +246,8 @@ async fn exercise_preparation(
         {
             return Err("lost allocation response invented no effect".into());
         }
-        let (socket, server) = tokio::net::UnixStream::pair()?;
-        let replay_service = tokio::spawn(serve_control_connection(server, identity));
-        let mut replay_client = ControlClient::initialize(socket, "prepare-replay", "1").await?;
+        let served_replay_client = served_api::ServedApi::start(identity).await?;
+        let replay_client = served_replay_client.client("prepare-replay").await?;
         let replay = replay_client.prepare_schedule(request).await;
         let replay = match replay {
             Err(collaboration_client::ScheduleClientError::Rejected(error)) => error,
@@ -266,8 +256,7 @@ async fn exercise_preparation(
         if serde_json::to_value(error)? != serde_json::to_value(replay)? {
             return Err("retained preparation failure changed on replay".into());
         }
-        replay_client.close().await?;
-        replay_service.await??;
+        served_replay_client.stop().await?;
     } else {
         let first = first?;
         let replay = client.prepare_schedule(request).await?;
@@ -282,8 +271,7 @@ async fn exercise_preparation(
             _ => return Err("native thread identity not bound".into()),
         }
     }
-    client.close().await?;
-    service.await??;
+    served.stop().await?;
     backend.await??;
     drop(store);
     for entry in std::fs::read_dir(&root)? {

@@ -1,6 +1,6 @@
 use super::owner_fixture::*;
-use crate::control_service_context::subscription_delivery::subscription_service::OwnerObservation;
-use crate::control_service_context::subscription_delivery::{
+use crate::service_identity::subscription_delivery::subscription_service::OwnerObservation;
+use crate::service_identity::subscription_delivery::{
     SubscriptionClock, SubscriptionWaitFilter, SubscriptionWaitResult,
 };
 use message_board::{EndReason, SubscriptionMode, SubscriptionScope, WhenIdle};

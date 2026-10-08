@@ -2,7 +2,7 @@
 use crate::endpoint_commands::{report_failure, resolve_directory};
 use clap::{Parser, Subcommand};
 use collaboration_client::protocol::{EndpointRef, JournalPosition};
-use collaboration_client::{ClientError, ControlClient};
+use collaboration_client::{ClientError, CollaborationClient};
 use serde_json::{Value, json};
 use std::{
     ffi::OsString,
@@ -90,9 +90,12 @@ pub fn run_journal_command(arguments: Vec<OsString>) -> i32 {
         Err(_) => return report_failure("unavailable", "Client runtime unavailable", 3, args.json),
     };
     let result = runtime.block_on(async {
-        let mut client =
-            ControlClient::connect(&directory, "agent-collaboration", env!("CARGO_PKG_VERSION"))
-                .await?;
+        let client = CollaborationClient::connect(
+            &directory,
+            "agent-collaboration",
+            env!("CARGO_PKG_VERSION"),
+        )
+        .await?;
         let result = if let Some((endpoint_id, after, page_size, wait)) = read {
             let endpoint = EndpointRef {
                 service_id: client.identity().service_id.clone(),
@@ -106,7 +109,6 @@ pub fn run_journal_command(arguments: Vec<OsString>) -> i32 {
         } else {
             json!(client.journal_status().await?)
         };
-        let _closed = client.close().await;
         Ok::<_, ClientError>(result)
     });
     match result {
@@ -157,7 +159,7 @@ pub fn run_journal_command(arguments: Vec<OsString>) -> i32 {
                 )
             }
         }
-        Err(error) => crate::permission_diagnostic_reporting::report_permission_error(
+        Err(error) => crate::permission_diagnostic_reporting::report_actionable_client_error(
             &error,
             crate::permission_diagnostic_reporting::PermissionDiagnosticRendering::Command,
             args.json,

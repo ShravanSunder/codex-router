@@ -34,9 +34,9 @@ impl OwnedThreadRegistry {
         &mut self,
         client: &mut NativeProtocolConnection,
         cwd: &Path,
-        control_socket: &Path,
+        service_socket: &Path,
     ) -> Result<String, Box<dyn Error>> {
-        let socket = std::fs::canonicalize(control_socket)?;
+        let socket = std::fs::canonicalize(service_socket)?;
         let profile = "debug-agent-collaboration";
         let configuration = json!({
             "permissions":{profile:{"extends":":read-only","network":{

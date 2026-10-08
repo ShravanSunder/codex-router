@@ -1,20 +1,25 @@
-//! Reusable collaboration SDK: operations and the shared RPC contract.
+//! Reusable collaboration SDK: typed calls to the collaboration API and the carrier clients.
 /// Shared request, result, identity and schema definitions used by the service.
 pub use collaboration_protocol as protocol;
 /// Message-board request, result and validated domain types.
 pub use message_board as board;
-mod control_connection;
-mod endpoint_notification_state;
+mod admission_overload;
+mod api_connection;
+mod collaboration_access;
+mod collaboration_client;
 mod message_operation;
+mod provider_conversations;
+pub use collaboration_access::{CollaborationAccess, LocalCollaboration, LocalFuture};
+pub use provider_conversations::ProviderConversations;
 mod operation_error;
+pub use collaboration_client::{ClientError, CollaborationClient, RouterIdentity};
+pub use collaboration_protocol::EndpointInventory;
 pub use collaboration_protocol::{
     AdapterOperationFailure as OperationFailure, OperationEffect, OperationFailureKind,
 };
-pub use collaboration_protocol::{ControlInitializationResult, EndpointInventory, ProtocolVersion};
 pub use collaboration_protocol::{
     PushRecordHistoryParams, PushRecordListParams, PushRecordShowParams,
 };
-pub use control_connection::{ClientError, ControlClient};
 pub use message_operation::{
     MessageReplyError, MessageReplyRequest, MessageSendError, MessageSendRequest,
     PublicMessageContent,
@@ -30,8 +35,8 @@ pub(crate) fn record_service_version(version: &str) {
         *stored = version.to_owned();
     }
 }
-/// The service version this process actually observed, or `None` before any
-/// Control handshake. An empty string is not a version.
+/// The service version this process read from the manifest, or `None` before any
+/// client connected. An empty string is not a version.
 #[must_use]
 pub fn observed_service_version() -> Option<String> {
     OBSERVED_SERVICE_VERSION
@@ -81,6 +86,11 @@ fn router_version_warning(
         })
 }
 
+/// The scripted API the integration tests also use, for this crate's unit tests.
+#[cfg(test)]
+#[path = "../tests/support/scripted_api.rs"]
+mod scripted_api;
+
 #[cfg(test)]
 mod router_version_warning_tests {
     use super::router_version_warning;
@@ -112,7 +122,6 @@ mod router_version_warning_tests {
         );
     }
 }
-mod service_discovery;
 
 pub use collaboration_protocol::JournalStatus;
 
@@ -123,8 +132,9 @@ mod observation_session;
 mod provider_session_observation;
 pub use collaboration_protocol::{
     BoundedObservationRequest, BoundedObservationResult, ObservationEndReason,
+    ObservationEventNotification,
 };
-pub use observation_session::NativeObservation;
+pub use observation_session::{NativeObservation, ObservationEventSink};
 pub use provider_session_observation::SessionObservation;
 
 mod acp_conversation;

@@ -8,7 +8,7 @@ use collaboration_client::protocol::{
     ScheduleCreateRequest, ScheduleDefinition, ScheduleEnableRequest, SchedulePrepareRequest,
     SessionMessageSendParams, SessionRef, TimingRequest,
 };
-use collaboration_client::{ClientError, ControlClient};
+use collaboration_client::{ClientError, CollaborationClient};
 use serde_json::{Value, json};
 use std::time::Duration;
 
@@ -245,7 +245,6 @@ pub async fn exercise() -> ProofResult<()> {
         "unloadedQueueRejectedWithoutResume",
         json!({"target":target}),
     )?;
-    proof.client.close().await?;
     Ok(())
 }
 
@@ -257,10 +256,10 @@ struct MessageProbeInput<'a> {
 }
 
 async fn send_agent_probe(input: MessageProbeInput<'_>) -> Result<DeliveryReceipt, ClientError> {
-    // Server rejections retire a Control connection; each independent send has its own.
-    let mut client =
-        ControlClient::connect(&input.proof.service_directory, "busy-proof", "1").await?;
-    let result = client
+    // Each independent send uses its own client.
+    let client =
+        CollaborationClient::connect(&input.proof.service_directory, "busy-proof", "1").await?;
+    client
         .send_agent_message(SessionMessageSendParams {
             target: input.target.clone(),
             generation_guard: Some(input.proof.generation.clone()),
@@ -274,9 +273,7 @@ async fn send_agent_probe(input: MessageProbeInput<'_>) -> Result<DeliveryReceip
             },
             mode: input.delivery,
         })
-        .await;
-    let _closed = client.close().await;
-    result
+        .await
 }
 
 fn require_rejection(result: Result<DeliveryReceipt, ClientError>, kind: &str) -> ProofResult<()> {

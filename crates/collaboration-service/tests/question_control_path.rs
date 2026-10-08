@@ -1,16 +1,16 @@
-use collaboration_client::ControlClient;
 use collaboration_protocol::{EndpointRef, QuestionAnswerParams, QuestionResponse, QuestionState};
 use collaboration_service::{
     NativeControlBackend, NativeGenerationGate, ServiceIdentity, ServiceInteractionBroker,
-    serve_control_connection,
 };
 use message_board::{HumanId, Identity, SessionEndpointRef, SessionId, SessionRef};
 use serde_json::json;
+#[path = "support/served_api.rs"]
+mod served_api;
 
-// R18: the public Control client and service agree on field projection, actor
+// R18: the public API client and service agree on field projection, actor
 // authorization, and the exact response sent to the waiting agent.
 #[tokio::test]
-async fn question_list_and_answer_cross_the_real_control_connection() {
+async fn question_list_and_answer_cross_the_real_api() {
     let root = tempfile::tempdir().expect("temporary service directory");
     let service_id = "00000000-0000-4000-8000-000000000001";
     let epoch = "00000000-0000-4000-8000-000000000002";
@@ -29,7 +29,7 @@ async fn question_list_and_answer_cross_the_real_control_connection() {
     )
     .await
     .expect("broker");
-    let identity = ServiceIdentity::new(service_id, epoch, &format!("sha256:{}", "a".repeat(64)))
+    let identity = ServiceIdentity::new(service_id, epoch)
         .expect("identity")
         .with_approval_broker(broker.clone());
     let requester = SessionRef {
@@ -53,11 +53,10 @@ async fn question_list_and_answer_cross_the_real_control_connection() {
         .request_question(requester, approver.clone(), request, None)
         .await
         .expect("pending question");
-    let (client_stream, server_stream) = tokio::net::UnixStream::pair().expect("socket pair");
-    let server = tokio::spawn(serve_control_connection(server_stream, identity.clone()));
-    let mut client = ControlClient::initialize(client_stream, "question-test", "1")
+    let served = served_api::ServedApi::start(identity)
         .await
-        .expect("initialize");
+        .expect("serve the API");
+    let client = served.client("question-test").await.expect("initialize");
     let list = client.list_questions(true).await.expect("list");
     assert_eq!(list.questions.len(), 1);
     assert_eq!(list.questions[0].prompt, "Choose launch settings");
@@ -85,19 +84,7 @@ async fn question_list_and_answer_cross_the_real_control_connection() {
         Some("wrongActor"),
         "{failure:?}"
     );
-    // A rejected Control exchange retires its client connection; a fresh
-    // front door can still answer the same pending question.
-    drop(client);
-    server
-        .await
-        .expect("first server task")
-        .expect("first server");
-    let (client_stream, server_stream) =
-        tokio::net::UnixStream::pair().expect("second socket pair");
-    let server = tokio::spawn(serve_control_connection(server_stream, identity));
-    let mut client = ControlClient::initialize(client_stream, "question-test", "1")
-        .await
-        .expect("reinitialize");
+    // A rejection leaves the client usable: each call is its own request.
     let receipt = client
         .answer_question(QuestionAnswerParams {
             request_id: "question-1".into(),
@@ -116,6 +103,5 @@ async fn question_list_and_answer_cross_the_real_control_connection() {
             .questions
             .is_empty()
     );
-    client.close().await.expect("close");
-    server.await.expect("server task").expect("server");
+    served.stop().await.expect("close");
 }

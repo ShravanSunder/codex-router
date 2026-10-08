@@ -1,6 +1,6 @@
 //! Host configuration is changed through the real SDK, then verified after Host restart.
 use codex_router_host::{CollaborationRuntime, CollaborationRuntimeInputs};
-use collaboration_client::ControlClient;
+use collaboration_client::CollaborationClient;
 use collaboration_protocol::{AutomationConfigureRequest, OperationId};
 use std::os::unix::fs::DirBuilderExt;
 #[tokio::test]
@@ -23,7 +23,7 @@ async fn host_persists_configured_budgets_and_loads_them_on_restart()
             owner_human_id: None,
         })
         .await?;
-        let mut client = ControlClient::connect(&root, "configuration-rpc-test", "1").await?;
+        let client = CollaborationClient::connect(&root, "configuration-rpc-test", "1").await?;
         if first {
             client
                 .configure_automation(AutomationConfigureRequest {
@@ -40,7 +40,6 @@ async fn host_persists_configured_budgets_and_loads_them_on_restart()
         {
             return Err("configured budgets lost across restart".into());
         }
-        client.close().await?;
         runtime.shutdown().await?;
     }
     for entry in std::fs::read_dir(&root)? {

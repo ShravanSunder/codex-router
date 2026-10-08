@@ -1,4 +1,4 @@
-//! Control subscription requests and service-assembled observation views.
+//! Thread subscription requests and service-assembled observation views.
 use chrono::{DateTime, Utc};
 use message_board::{
     EndReason, Identity, SubscriptionDeliveryOutcome, SubscriptionPolicy, SubscriptionPolicyPatch,

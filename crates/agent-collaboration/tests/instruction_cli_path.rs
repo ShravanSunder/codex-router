@@ -5,7 +5,7 @@ use std::os::unix::fs::DirBuilderExt;
 #[tokio::test]
 async fn cli_creates_and_reads_instruction_through_host() -> Result<(), Box<dyn std::error::Error>>
 {
-    // Arrange: a real owned Control service and CLI subprocess; no native process/model.
+    // Arrange: a real owned collaboration API and CLI subprocess; no native process/model.
     let root = std::path::PathBuf::from(format!(
         "/tmp/instruction-cli-{}",
         OperationId::generate().as_str()

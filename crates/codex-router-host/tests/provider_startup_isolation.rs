@@ -5,7 +5,7 @@ use codex_router_host::{
     CollaborationRuntime, CollaborationRuntimeInputs, ExternalProviderLaunchBinding,
     ExternalProviderStartup,
 };
-use collaboration_client::ControlClient;
+use collaboration_client::CollaborationClient;
 use collaboration_protocol::{EndpointAvailability, EndpointDescription, ObservationTimestamp};
 use std::{os::unix::fs::PermissionsExt as _, path::Path};
 
@@ -77,9 +77,9 @@ async fn missing_executable_isolated_from_other_provider_and_codex() {
         )
         .await
         .expect("Codex endpoint ready");
-    let mut client = ControlClient::connect(root.path(), "startup-isolation", "1")
+    let client = CollaborationClient::connect(root.path(), "startup-isolation", "1")
         .await
-        .expect("Control client");
+        .expect("collaboration API client");
     let inventory = client.list_endpoints().await.expect("endpoint inventory");
 
     assert!(
@@ -137,9 +137,9 @@ async fn failed_initialize_isolated_from_other_provider() {
     )
     .await
     .expect("Host survives initialization failure");
-    let mut client = ControlClient::connect(root.path(), "initialize-isolation", "1")
+    let client = CollaborationClient::connect(root.path(), "initialize-isolation", "1")
         .await
-        .expect("Control client");
+        .expect("collaboration API client");
     let inventory = client.list_endpoints().await.expect("endpoint inventory");
 
     assert!(matches!(
@@ -188,9 +188,9 @@ async fn disabled_provider_is_listed_without_a_transport() {
     )
     .await
     .expect("Host with disabled Claude");
-    let mut client = ControlClient::connect(root.path(), "disabled-provider", "1")
+    let client = CollaborationClient::connect(root.path(), "disabled-provider", "1")
         .await
-        .expect("Control client");
+        .expect("collaboration API client");
     let inventory = client.list_endpoints().await.expect("endpoint inventory");
 
     let claude = endpoint(&inventory.endpoints, "claude-local");

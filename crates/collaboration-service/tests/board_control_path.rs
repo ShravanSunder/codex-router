@@ -1,9 +1,10 @@
-use collaboration_client::{BoardClientError, ControlClient};
-use collaboration_service::{ServiceIdentity, serve_control_connection};
+use collaboration_client::BoardClientError;
+use collaboration_service::ServiceIdentity;
 use message_board::*;
 use message_board_storage::BoardStore;
 use std::sync::Arc;
 mod board_control_support;
+use board_control_support::served_api;
 
 fn maximum_escape_heavy_session(index: usize) -> Result<Identity, Box<dyn std::error::Error>> {
     let prefix = format!("{index:04}");
@@ -32,13 +33,11 @@ async fn board_control_roundtrip_preserves_root_thread_and_actor()
     let identity = ServiceIdentity::new(
         "00000000-0000-4000-8000-000000000001",
         "00000000-0000-4000-8000-000000000002",
-        &format!("sha256:{}", "a".repeat(64)),
     )
     .map_err(std::io::Error::other)?
     .with_board_store(store.clone());
-    let (socket, server) = tokio::net::UnixStream::pair()?;
-    let task = tokio::spawn(serve_control_connection(server, identity));
-    let mut client = ControlClient::initialize(socket, "board-test", "1").await?;
+    let served = served_api::ServedApi::start(identity).await?;
+    let client = served.client("board-test").await?;
     let actor = Identity::Human {
         human_id: HumanId::try_from("reader-one".to_owned())?,
     };
@@ -168,8 +167,7 @@ async fn board_control_roundtrip_preserves_root_thread_and_actor()
     if thread.thread.state != ThreadState::Unresolved {
         return Err("new thread was not unresolved".into());
     }
-    drop(client);
-    task.await??;
+    served.stop().await?;
     drop(store);
     std::fs::remove_file(path)?;
     Ok(())
@@ -241,13 +239,11 @@ async fn control_thread_list_pages_escape_heavy_holders_without_skips_or_repeats
     let identity = ServiceIdentity::new(
         "00000000-0000-4000-8000-000000000001",
         "00000000-0000-4000-8000-000000000002",
-        &format!("sha256:{}", "a".repeat(64)),
     )
     .map_err(std::io::Error::other)?
     .with_board_store(store.clone());
-    let (socket, server) = tokio::net::UnixStream::pair()?;
-    let task = tokio::spawn(serve_control_connection(server, identity));
-    let mut client = ControlClient::initialize(socket, "thread-list-frame-budget", "1").await?;
+    let served = served_api::ServedApi::start(identity).await?;
+    let client = served.client("thread-list-frame-budget").await?;
     let mut cursor = None;
     let mut observed_roots = Vec::new();
     loop {
@@ -294,8 +290,7 @@ async fn control_thread_list_pages_escape_heavy_holders_without_skips_or_repeats
     if observed_roots != expected_roots {
         return Err("Control Thread list cursor traversal skipped or repeated a Thread".into());
     }
-    client.close().await?;
-    task.await??;
+    served.stop().await?;
     drop(store);
     std::fs::remove_file(path)?;
     Ok(())
@@ -312,7 +307,6 @@ async fn malformed_board_requests_return_safe_specific_failures()
     let identity = ServiceIdentity::new(
         "00000000-0000-4000-8000-000000000001",
         "00000000-0000-4000-8000-000000000002",
-        &format!("sha256:{}", "a".repeat(64)),
     )
     .map_err(std::io::Error::other)?
     .with_board_store(store.clone());
@@ -436,24 +430,14 @@ async fn control_board_failures_pagination_and_inbox_use_the_public_path()
     let identity = ServiceIdentity::new(
         "00000000-0000-4000-8000-000000000001",
         "00000000-0000-4000-8000-000000000002",
-        &format!("sha256:{}", "a".repeat(64)),
     )
     .map_err(std::io::Error::other)?
     .with_board_store(store.clone());
-    let (socket, server) = tokio::net::UnixStream::pair()?;
-    let task = tokio::spawn(serve_control_connection(server, identity.clone()));
-    let mut client = ControlClient::initialize(socket, "board-behavior-test", "1").await?;
-    macro_rules! rejected_on_fresh_connection {
-        ($method:ident, $request:expr) => {{
-            let (socket, server) = tokio::net::UnixStream::pair()?;
-            let temporary_task = tokio::spawn(serve_control_connection(server, identity.clone()));
-            let mut temporary_client =
-                ControlClient::initialize(socket, "board-rejection-test", "1").await?;
-            let result = temporary_client.$method($request).await;
-            drop(temporary_client);
-            temporary_task.await??;
-            rejected_error(result)?
-        }};
+    let served = served_api::ServedApi::start(identity).await?;
+    let client = served.client("board-behavior-test").await?;
+    // Each call is its own request; a rejection leaves the client usable.
+    macro_rules! rejected_call {
+        ($method:ident, $request:expr) => {{ rejected_error(client.$method($request).await)? }};
     }
     let alice = Identity::Human {
         human_id: HumanId::try_from("alice".to_owned())?,
@@ -470,7 +454,7 @@ async fn control_board_failures_pagination_and_inbox_use_the_public_path()
         acting_for: None,
     };
     client.board_project_create(project_request.clone()).await?;
-    if rejected_on_fresh_connection!(board_project_create, project_request).kind
+    if rejected_call!(board_project_create, project_request).kind
         != BoardFailureKind::ResourceAlreadyExists
     {
         return Err("duplicate project did not return resourceAlreadyExists".into());
@@ -497,7 +481,7 @@ async fn control_board_failures_pagination_and_inbox_use_the_public_path()
             acting_for: None,
         })
         .await?;
-    if rejected_on_fresh_connection!(
+    if rejected_call!(
         board_topic_create,
         TopicCreateRequest {
             topic_id: TopicId::generate(),
@@ -535,7 +519,7 @@ async fn control_board_failures_pagination_and_inbox_use_the_public_path()
             references: vec![].try_into()?,
         })
         .await?;
-    let cooldown = rejected_on_fresh_connection!(
+    let cooldown = rejected_call!(
         board_message_post,
         MessagePostRequest {
             message_id: MessageId::generate(),
@@ -623,7 +607,7 @@ async fn control_board_failures_pagination_and_inbox_use_the_public_path()
             acting_for: None,
         })
         .await?;
-    let resolved = rejected_on_fresh_connection!(
+    let resolved = rejected_call!(
         board_message_post,
         MessagePostRequest {
             message_id: MessageId::generate(),
@@ -700,7 +684,7 @@ async fn control_board_failures_pagination_and_inbox_use_the_public_path()
             acting_for: None,
         })
         .await?;
-    if rejected_on_fresh_connection!(
+    if rejected_call!(
         board_message_post,
         MessagePostRequest {
             message_id: MessageId::generate(),
@@ -718,8 +702,7 @@ async fn control_board_failures_pagination_and_inbox_use_the_public_path()
     {
         return Err("archived board post did not return archivedBoard".into());
     }
-    client.close().await?;
-    task.await??;
+    served.stop().await?;
     drop(store);
     std::fs::remove_file(path)?;
     Ok(())
@@ -746,24 +729,14 @@ async fn control_participant_operations_preserve_typed_state_and_authorization()
     let identity = ServiceIdentity::new(
         "00000000-0000-4000-8000-000000000001",
         "00000000-0000-4000-8000-000000000002",
-        &format!("sha256:{}", "a".repeat(64)),
     )
     .map_err(std::io::Error::other)?
     .with_board_store(store.clone());
-    let (socket, server) = tokio::net::UnixStream::pair()?;
-    let task = tokio::spawn(serve_control_connection(server, identity.clone()));
-    let mut client = ControlClient::initialize(socket, "participant-control-test", "1").await?;
-    macro_rules! rejected_on_fresh_connection {
-        ($method:ident, $request:expr) => {{
-            let (socket, server) = tokio::net::UnixStream::pair()?;
-            let temporary_task = tokio::spawn(serve_control_connection(server, identity.clone()));
-            let mut temporary_client =
-                ControlClient::initialize(socket, "participant-rejection-test", "1").await?;
-            let result = temporary_client.$method($request).await;
-            drop(temporary_client);
-            temporary_task.await??;
-            rejected_error(result)?
-        }};
+    let served = served_api::ServedApi::start(identity).await?;
+    let client = served.client("participant-control-test").await?;
+    // Each call is its own request; a rejection leaves the client usable.
+    macro_rules! rejected_call {
+        ($method:ident, $request:expr) => {{ rejected_error(client.$method($request).await)? }};
     }
     let owner = Identity::Human {
         human_id: HumanId::try_from("owner".to_owned())?,
@@ -862,7 +835,7 @@ async fn control_participant_operations_preserve_typed_state_and_authorization()
         return Err("Control participant list did not return both Participants and holder".into());
     }
 
-    let unjoined_post = rejected_on_fresh_connection!(
+    let unjoined_post = rejected_call!(
         board_message_post,
         MessagePostRequest {
             message_id: MessageId::generate(),
@@ -885,7 +858,7 @@ async fn control_participant_operations_preserve_typed_state_and_authorization()
     {
         return Err("Control session refusal lost flattened Participant details".into());
     }
-    let session_resolve = rejected_on_fresh_connection!(
+    let session_resolve = rejected_call!(
         board_thread_resolve,
         ThreadResolveRequest {
             root_message_id: root_message_id.clone(),
@@ -950,8 +923,7 @@ async fn control_participant_operations_preserve_typed_state_and_authorization()
             acting_for: None,
         })
         .await?;
-    client.close().await?;
-    task.await??;
+    served.stop().await?;
     drop(store);
     std::fs::remove_file(path)?;
     Ok(())

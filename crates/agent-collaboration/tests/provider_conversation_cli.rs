@@ -1,9 +1,17 @@
-#![allow(clippy::expect_used, clippy::indexing_slicing)]
-//! Compiled-CLI fixture assertions deliberately fail fast at the exact wire boundary.
+#![allow(clippy::expect_used, clippy::indexing_slicing, clippy::panic)]
+//! Compiled-CLI conversations against the real collaboration API, whose in-Host composition
+//! drives a scripted provider backend; fixture assertions fail fast at that boundary.
 
+use collaboration_mcp::test_support::ServedCollaborationApi;
+use collaboration_service::{CollaborationApplication, ServiceIdentity};
 use serde_json::{Value, json};
-use std::os::unix::fs::DirBuilderExt;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use std::{os::unix::fs::DirBuilderExt, sync::Arc};
+
+mod fake_api_support;
+#[path = "provider_conversation_cli/scripted_provider_backend.rs"]
+mod scripted_provider_backend;
+use fake_api_support::{FakeCollaborationApi, FakeReply};
+use scripted_provider_backend::{ScriptedAnswer, ScriptedProviderBackend, ScriptedStep};
 
 const SERVICE_ID: &str = "00000000-0000-4000-8000-000000000001";
 const SERVICE_EPOCH: &str = "00000000-0000-4000-8000-000000000002";
@@ -104,24 +112,24 @@ async fn provider_create_accepts_mode_model_and_effort_past_local_preflight() {
 
 #[tokio::test]
 async fn external_provider_create_then_prompt_preserves_target_and_supplied_operations() {
-    let root = fixture_directory("create-prompt");
-    let listener = publish_fixture(&root);
-    let fixture = tokio::spawn(async move {
-        let create = serve_one(&listener, "conversation/create", |request| {
-            assert_eq!(request["params"]["operationId"], CREATE_OPERATION);
-            assert_eq!(request["params"]["generation"]["generation"], 7);
-            json!({"admission":"admitted","operation":operation_snapshot(CREATE_OPERATION, "conversationCreate", Some(target()), "terminal", "applied")})
-        })
-        .await;
-        let expected_target = target();
-        serve_one(&listener, "conversation/prompt", move |request| {
-            assert_eq!(request["params"]["operationId"], PROMPT_OPERATION);
-            assert_eq!(request["params"]["target"], expected_target);
-            json!({"admission":"admitted","operation":operation_snapshot(PROMPT_OPERATION, "conversationPrompt", Some(target()), "admitted", "none")})
-        })
-        .await;
-        create
-    });
+    let fixture = ProviderFixture::start(
+        "create-prompt",
+        [
+            create_steps(|request| {
+                assert_eq!(request["operationId"], CREATE_OPERATION);
+                assert_eq!(request["generation"]["generation"], 7);
+            }),
+            prompt_steps(|request| {
+                assert_eq!(request["operationId"], PROMPT_OPERATION);
+                assert_eq!(request["target"], target());
+            }),
+        ]
+        .into_iter()
+        .flatten()
+        .collect(),
+    )
+    .await;
+    let root = fixture.root().to_owned();
 
     let create = run_cli(&root, create_arguments(CREATE_OPERATION)).await;
     assert_eq!(
@@ -152,26 +160,15 @@ async fn external_provider_create_then_prompt_preserves_target_and_supplied_oper
         "providerPrompt"
     );
 
-    fixture.await.expect("fixture");
-    cleanup_fixture(&root);
+    fixture.finish().await;
 }
 
 #[tokio::test]
 async fn wrong_generation_is_no_effect_response_loss_retains_id_and_show_is_read_only() {
-    let wrong_root = fixture_directory("wrong-generation");
-    let wrong_listener = publish_fixture(&wrong_root);
-    let wrong_fixture = tokio::spawn(async move {
-        serve_one_error(
-            &wrong_listener,
-            "conversation/prompt",
-            json!({
-                "kind":"staleGeneration","stage":"binding","effect":"none",
-                "message":"provider binding generation changed",
-                "operationId":WRONG_GENERATION_OPERATION,"target":target()
-            }),
-        )
-        .await;
-    });
+    // The CLI read generation 7, but the binding has moved on: the Router refuses the
+    // prompt before the provider sees it.
+    let wrong_fixture = ProviderFixture::start_with("wrong-generation", Vec::new(), 8).await;
+    let wrong_root = wrong_fixture.root().to_owned();
     let wrong = run_cli(&wrong_root, prompt_arguments(WRONG_GENERATION_OPERATION)).await;
     assert_eq!(
         wrong.status.code(),
@@ -187,38 +184,43 @@ async fn wrong_generation_is_no_effect_response_loss_retains_id_and_show_is_read
         wrong_json["error"]["operationId"],
         WRONG_GENERATION_OPERATION
     );
-    wrong_fixture.await.expect("wrong-generation fixture");
-    cleanup_fixture(&wrong_root);
+    wrong_fixture.finish().await;
 
-    let lost_root = fixture_directory("lost-response");
-    let lost_listener = publish_fixture(&lost_root);
-    let lost_fixture = tokio::spawn(async move {
-        serve_one_without_response(&lost_listener, "conversation/prompt").await;
-    });
+    // The provider never answers the prompt, so the Router's one-second wait ends pending.
+    let lost_fixture = ProviderFixture::start(
+        "lost-response",
+        vec![ScriptedStep::new(
+            "prompt",
+            |request| assert_eq!(request["operationId"], LOST_RESPONSE_OPERATION),
+            ScriptedAnswer::Never,
+        )],
+    )
+    .await;
+    let lost_root = lost_fixture.root().to_owned();
     let lost = run_cli(&lost_root, prompt_arguments(LOST_RESPONSE_OPERATION)).await;
     assert_eq!(lost.status.code(), Some(0));
     let lost_json = common_result(&lost.stdout);
     assert_eq!(lost_json["kind"], "pending");
     assert_eq!(lost_json["operationId"], LOST_RESPONSE_OPERATION);
     assert_eq!(lost_json["target"], target());
-    lost_fixture.await.expect("lost-response fixture");
-    cleanup_fixture(&lost_root);
+    lost_fixture.finish().await;
 
-    let show_root = fixture_directory("operation-show");
-    let show_listener = publish_fixture(&show_root);
-    let show_fixture = tokio::spawn(async move {
-        serve_one(&show_listener, "conversation/operationShow", |request| {
-            assert_eq!(request["params"]["operationId"], CREATE_OPERATION);
-            operation_snapshot(
+    let show_fixture = ProviderFixture::start(
+        "operation-show",
+        vec![ScriptedStep::new(
+            "show",
+            |request| assert_eq!(request["operationId"], CREATE_OPERATION),
+            ScriptedAnswer::Answer(operation_snapshot(
                 CREATE_OPERATION,
                 "conversationCreate",
                 Some(target()),
                 "terminal",
                 "applied",
-            )
-        })
-        .await;
-    });
+            )),
+        )],
+    )
+    .await;
+    let show_root = show_fixture.root().to_owned();
     let show = run_cli(
         &show_root,
         vec![
@@ -241,23 +243,18 @@ async fn wrong_generation_is_no_effect_response_loss_retains_id_and_show_is_read
         CREATE_OPERATION
     );
     assert_eq!(show_json["result"]["record"]["effect"], "applied");
-    show_fixture.await.expect("show fixture");
-    cleanup_fixture(&show_root);
+    show_fixture.finish().await;
 
-    for (fixture_name, method, command) in [
-        ("show-response-loss", "conversation/operationShow", "show"),
-        ("wait-response-loss", "conversation/operationWait", "wait"),
-        (
-            "reconcile-response-loss",
-            "conversation/operationReconcile",
-            "reconcile",
-        ),
+    // The API connection drops after the read was sent.
+    for (tool, command) in [
+        ("conversation_operation_show", "show"),
+        ("conversation_operation_wait", "wait"),
+        ("conversation_operation_reconcile", "reconcile"),
     ] {
-        let read_root = fixture_directory(fixture_name);
-        let read_listener = publish_fixture(&read_root);
-        let read_fixture = tokio::spawn(async move {
-            serve_one_without_response(&read_listener, method).await;
-        });
+        let mut read_fixture =
+            FakeCollaborationApi::new(SERVICE_ID, SERVICE_EPOCH).expect("stand-in API");
+        let read_calls = read_fixture.serve(vec![FakeReply::Disconnect]);
+        let read_root = read_fixture.directory().to_owned();
         let mut arguments = vec![
             "conversation".to_owned(),
             "operation".to_owned(),
@@ -278,30 +275,47 @@ async fn wrong_generation_is_no_effect_response_loss_retains_id_and_show_is_read
             read_json["error"]["operationId"], CREATE_OPERATION,
             "{command}"
         );
-        read_fixture.await.expect("read failure fixture");
-        cleanup_fixture(&read_root);
+        let calls = read_calls
+            .await
+            .expect("read failure fixture")
+            .expect("read failure fixture");
+        assert_eq!(calls[0]["tool"], tool, "{command}");
+        assert_eq!(calls[0]["arguments"]["operationId"], CREATE_OPERATION);
     }
 }
 
 #[tokio::test]
 async fn unavailable_provider_prompt_prints_catalog_reason_and_fix() {
-    let root = fixture_directory("unavailable-provider");
-    let listener = publish_fixture(&root);
     let availability = json!({
         "state":"unavailable","observedAt":"2026-09-24T00:00:00Z",
         "reason":"provider executable is missing","fix":"install the provider binary"
     });
     let expected_availability = availability.clone();
-    let fixture = tokio::spawn(async move {
-        serve_one_error(&listener, "conversation/prompt", json!({
-            "kind":"unavailable","stage":"binding","effect":"none",
-            "message":"provider conversation endpoint claude-local unavailable: provider executable is missing",
-            "operationId":PROMPT_OPERATION,"target":target(),
-            "endpoint":endpoint(),"availability":availability
-        })).await;
-    });
+    // The catalog still read the endpoint as available; the provider's binding refuses the
+    // prompt as unavailable, with the catalog's reason and fix.
+    let fixture = ProviderFixture::start(
+        "unavailable-provider",
+        vec![ScriptedStep::new(
+            "prompt",
+            |request| assert_eq!(request["operationId"], PROMPT_OPERATION),
+            ScriptedAnswer::Failure(json!({
+                "kind":"unavailable","stage":"binding","effect":"none",
+                "message":"provider conversation endpoint claude-local unavailable: provider executable is missing",
+                "operationId":PROMPT_OPERATION,"target":target(),
+                "endpoint":endpoint(),"availability":availability
+            })),
+        )],
+    )
+    .await;
+    let root = fixture.root().to_owned();
     let output = run_cli(&root, prompt_arguments(PROMPT_OPERATION)).await;
-    assert_eq!(output.status.code(), Some(3));
+    assert_eq!(
+        output.status.code(),
+        Some(3),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
     let result = common_result(&output.stdout);
     assert_eq!(result["error"]["kind"], "unavailable");
     assert_eq!(result["error"]["endpoint"], endpoint());
@@ -311,8 +325,7 @@ async fn unavailable_provider_prompt_prints_catalog_reason_and_fix() {
             .as_str()
             .is_some_and(|message| message.contains("claude-local"))
     );
-    fixture.await.expect("fixture");
-    cleanup_fixture(&root);
+    fixture.finish().await;
 }
 
 #[tokio::test]
@@ -321,7 +334,7 @@ async fn live_cursor_create_wait_prompt_wait_through_compiled_cli() {
     use codex_router_host::{
         CollaborationRuntime, CollaborationRuntimeInputs, ExternalProviderLaunchBinding,
     };
-    use collaboration_client::ControlClient;
+    use collaboration_client::CollaborationClient;
     use collaboration_client::protocol::{
         ChannelDescription, CodexGeneration, EndpointId, EndpointRef, OperationId, SessionId,
         SessionRef,
@@ -363,9 +376,9 @@ async fn live_cursor_create_wait_prompt_wait_through_compiled_cli() {
     .await
     .expect("collaboration runtime");
 
-    let mut control = ControlClient::connect(&service_directory, "live-cli-setup", "1")
+    let control = CollaborationClient::connect(&service_directory, "live-cli-setup", "1")
         .await
-        .expect("Control setup client");
+        .expect("API setup client");
     let inventory = control.list_endpoints().await.expect("endpoint inventory");
     let provider = inventory
         .endpoints
@@ -393,7 +406,7 @@ async fn live_cursor_create_wait_prompt_wait_through_compiled_cli() {
         },
         session_id: SessionId::try_from("live-cli-caller".to_owned()).expect("actor session"),
     };
-    let _closed = control.close().await;
+    drop(control);
 
     let create_operation = OperationId::generate();
     let create = run_cli(
@@ -521,173 +534,147 @@ fn fixture_directory(label: &str) -> std::path::PathBuf {
     root
 }
 
-fn publish_fixture(root: &std::path::Path) -> tokio::net::UnixListener {
-    let listener = tokio::net::UnixListener::bind(root.join("control.sock")).expect("listener");
-    let digest = format!("sha256:{}", "a".repeat(64));
-    let manifest = serde_json::from_value(json!({
-        "version":2,"serviceId":SERVICE_ID,"serviceEpoch":SERVICE_EPOCH,
-        "machineLabel":"fixture-host","control":{"transport":"unixJsonLines","path":"control.sock"},
-        "controlSchemaDigest":digest,
-        "mcp":{"transport":"streamableHttp","url":"http://127.0.0.1:0/mcp"}
-    }))
-    .expect("manifest");
-    let publication =
-        collaboration_service::ManifestPublication::publish(root, &manifest).expect("publish");
-    Box::leak(Box::new(publication));
-    listener
+/// The real collaboration API on a private directory, with the provider endpoint published
+/// and its backend answering from `steps`.
+struct ProviderFixture {
+    root: std::path::PathBuf,
+    served: ServedCollaborationApi,
+    backend: ScriptedProviderBackend,
 }
 
-async fn serve_one(
-    listener: &tokio::net::UnixListener,
-    method: &str,
-    result: impl FnOnce(&Value) -> Value,
-) {
-    let (stream, _) = listener.accept().await.expect("accept");
-    let (read, mut write) = stream.into_split();
-    let mut lines = BufReader::new(read).lines();
-    let initialize: Value =
-        serde_json::from_str(&lines.next_line().await.expect("read").expect("initialize"))
-            .expect("initialize JSON");
-    write_response(
-        &mut write,
-        &initialize,
-        json!({"version":{"major":1,"minor":0},"serviceId":SERVICE_ID,"serviceEpoch":SERVICE_EPOCH,"controlSchemaDigest":format!("sha256:{}", "a".repeat(64))}),
-    )
-    .await;
-    let request = read_operation_request(&mut lines, &mut write).await;
-    assert_eq!(request["method"], method);
-    write_response(&mut write, &request, result(&request)).await;
-    if method == "conversation/create" {
-        let wait: Value = serde_json::from_str(
-            &lines
-                .next_line()
-                .await
-                .expect("create wait read")
-                .expect("create wait frame"),
-        )
-        .expect("create wait JSON");
-        assert_eq!(wait["method"], "conversation/operationWait");
-        write_response(&mut write, &wait, json!({
-            "operation":operation_snapshot(CREATE_OPERATION, "conversationCreate", Some(target()), "terminal", "applied"),
-            "output":{"kind":"available","settlement":{"kind":"created","target":target(),
-                "effectiveSettings":{"requestedPolicy":{"access":"workspace-write"},"mappingStatus":"verified","authentication":"authenticated"}}}
-        })).await;
-    } else if method == "conversation/prompt" {
-        let wait: Value = serde_json::from_str(
-            &lines
-                .next_line()
-                .await
-                .expect("wait read")
-                .expect("wait frame"),
-        )
-        .expect("wait JSON");
-        assert_eq!(wait["method"], "conversation/operationWait");
-        write_response(&mut write, &wait, json!({
-            "operation":operation_snapshot(PROMPT_OPERATION, "conversationPrompt", Some(target()), "terminal", "applied"),
-            "output":{"kind":"available","settlement":{"kind":"promptCompleted","target":target(),"stopReason":"end_turn","response":"fixture reply"}}
-        })).await;
-    } else if method == "conversation/load" {
-        let wait: Value = serde_json::from_str(
-            &lines
-                .next_line()
-                .await
-                .expect("wait read")
-                .expect("wait frame"),
-        )
-        .expect("wait JSON");
-        assert_eq!(wait["method"], "conversation/operationWait");
-        write_response(&mut write, &wait, json!({
-            "operation":operation_snapshot(LOAD_OPERATION, "conversationLoad", Some(target()), "terminal", "applied"),
-            "output":{"kind":"available","settlement":{"kind":"loaded","target":target(),"effectiveSettings":{
-                "requestedPolicy":{"access":"workspace-write"},"mappingStatus":"verified","authentication":"authenticated"
-            }}}
-        })).await;
+impl ProviderFixture {
+    async fn start(label: &str, steps: Vec<ScriptedStep>) -> Self {
+        Self::start_with(label, steps, 7).await
     }
-}
 
-async fn serve_one_error(listener: &tokio::net::UnixListener, method: &str, data: Value) {
-    let (stream, _) = listener.accept().await.expect("accept");
-    let (read, mut write) = stream.into_split();
-    let mut lines = BufReader::new(read).lines();
-    initialize_fixture(&mut lines, &mut write).await;
-    let request = read_operation_request(&mut lines, &mut write).await;
-    assert_eq!(request["method"], method);
-    write
-        .write_all(
-            format!(
-                "{}\n",
-                json!({"jsonrpc":"2.0","id":request["id"],"error":{"code":-32050,"message":"fixture rejection","data":data}})
-            )
-            .as_bytes(),
-        )
-        .await
-        .expect("error response");
-}
-
-async fn serve_one_without_response(listener: &tokio::net::UnixListener, method: &str) {
-    let (stream, _) = listener.accept().await.expect("accept");
-    let (read, mut write) = stream.into_split();
-    let mut lines = BufReader::new(read).lines();
-    initialize_fixture(&mut lines, &mut write).await;
-    let request = read_operation_request(&mut lines, &mut write).await;
-    assert_eq!(request["method"], method);
-    if method == "conversation/prompt" {
-        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-    }
-}
-
-async fn read_operation_request(
-    lines: &mut tokio::io::Lines<BufReader<tokio::net::unix::OwnedReadHalf>>,
-    write: &mut tokio::net::unix::OwnedWriteHalf,
-) -> Value {
-    let request: Value =
-        serde_json::from_str(&lines.next_line().await.expect("read").expect("request"))
-            .expect("request JSON");
-    if request["method"] != "endpoint/list" {
-        return request;
-    }
-    write_response(write, &request, json!({"serviceEpoch":SERVICE_EPOCH,"sequence":1,"endpoints":[{
-        "endpoint":endpoint(),"label":"Claude fixture",
-        "availability":{"state":"available","observedAt":"2026-09-24T00:00:00Z"},
-        "channels":[{"kind":"externalProvider","transport":"stdioAcp","bindingId":"fixture-binding","bindingGeneration":7,
+    /// `binding_generation` is the backend's current binding; the published endpoint always
+    /// advertises generation 7, as the CLI reads it.
+    async fn start_with(label: &str, steps: Vec<ScriptedStep>, binding_generation: u64) -> Self {
+        let root = fixture_directory(label);
+        let binding = serde_json::from_value(json!({
+            "endpoint":endpoint(),"bindingId":"fixture-binding",
             "runtime":{"provider":"claudeCode","runtimeName":"fixture"},
-            "capabilities":[{"name":"create","status":"supported","evidence":"advertised"},
+            "transport":"stdioAcp",
+            "generation":{"serviceEpoch":SERVICE_EPOCH,"generation":binding_generation},
+            "capabilities":[
+                {"name":"create","status":"supported","evidence":"advertised"},
                 {"name":"prompt","status":"supported","evidence":"advertised"},
                 {"name":"load","status":"supported","evidence":"advertised"},
-                {"name":"cancel","status":"supported","evidence":"advertised"}]}]
-    }]})).await;
-    serde_json::from_str(
-        &lines
-            .next_line()
+                {"name":"cancel","status":"supported","evidence":"advertised"}
+            ]
+        }))
+        .expect("provider binding");
+        let backend = ScriptedProviderBackend::new(binding, steps);
+        let description = serde_json::from_value(json!({
+            "endpoint":endpoint(),"label":"Claude fixture",
+            "availability":{"state":"available","observedAt":"2026-09-24T00:00:00Z"},
+            "channels":[{"kind":"externalProvider","transport":"stdioAcp","bindingId":"fixture-binding","bindingGeneration":7,
+                "runtime":{"provider":"claudeCode","runtimeName":"fixture"},
+                "capabilities":[{"name":"create","status":"supported","evidence":"advertised"},
+                    {"name":"prompt","status":"supported","evidence":"advertised"},
+                    {"name":"load","status":"supported","evidence":"advertised"},
+                    {"name":"cancel","status":"supported","evidence":"advertised"}]}]
+        }))
+        .expect("provider endpoint");
+        let identity = ServiceIdentity::new(SERVICE_ID, SERVICE_EPOCH)
+            .expect("service identity")
+            .with_endpoints(vec![description])
+            .expect("endpoint inventory")
+            .with_provider_conversation_backend(Arc::new(backend.clone()));
+        let served = ServedCollaborationApi::start(&root, CollaborationApplication::new(identity))
             .await
-            .expect("operation read")
-            .expect("operation frame"),
-    )
-    .expect("operation JSON")
+            .expect("served collaboration API");
+        Self {
+            root,
+            served,
+            backend,
+        }
+    }
+
+    fn root(&self) -> &std::path::Path {
+        &self.root
+    }
+
+    /// Stops the API, requires every scripted provider operation to have run, and removes
+    /// the directory.
+    async fn finish(self) {
+        self.served.stop().await.expect("collaboration API stops");
+        assert!(
+            self.backend.remaining().is_empty(),
+            "unperformed provider operations: {:?}",
+            self.backend.remaining()
+        );
+        std::fs::remove_dir(&self.root).expect("directory cleanup");
+    }
 }
 
-async fn serve_inventory_only(listener: &tokio::net::UnixListener) {
-    let (stream, _) = listener.accept().await.expect("inventory accept");
-    let (read, mut write) = stream.into_split();
-    let mut lines = BufReader::new(read).lines();
-    initialize_fixture(&mut lines, &mut write).await;
-    let request: Value = serde_json::from_str(
-        &lines
-            .next_line()
-            .await
-            .expect("inventory read")
-            .expect("inventory frame"),
-    )
-    .expect("inventory JSON");
-    assert_eq!(request["method"], "endpoint/list");
-    write_response(&mut write, &request, json!({"serviceEpoch":SERVICE_EPOCH,"sequence":1,"endpoints":[{
-        "endpoint":endpoint(),"label":"Claude fixture",
-        "availability":{"state":"available","observedAt":"2026-09-24T00:00:00Z"},
-        "channels":[{"kind":"externalProvider","transport":"stdioAcp","bindingId":"fixture-binding","bindingGeneration":7,
-            "runtime":{"provider":"claudeCode","runtimeName":"fixture"},
-            "capabilities":[{"name":"create","status":"supported","evidence":"advertised"},
-                {"name":"prompt","status":"supported","evidence":"advertised"}]}]
-    }]})).await;
+/// A create the provider admits, then settles with the created target.
+fn create_steps(check: impl FnOnce(&Value) + Send + 'static) -> Vec<ScriptedStep> {
+    vec![
+        ScriptedStep::new(
+            "create",
+            check,
+            ScriptedAnswer::Answer(
+                json!({"admission":"admitted","operation":operation_snapshot(
+                CREATE_OPERATION, "conversationCreate", None, "admitted", "none")}),
+            ),
+        ),
+        ScriptedStep::new(
+            "wait",
+            |request| assert_eq!(request["operationId"], CREATE_OPERATION),
+            ScriptedAnswer::Answer(json!({
+                "operation":operation_snapshot(CREATE_OPERATION, "conversationCreate", Some(target()), "terminal", "applied"),
+                "output":{"kind":"available","settlement":{"kind":"created","target":target(),
+                    "effectiveSettings":{"requestedPolicy":{"access":"workspace-write"},"mappingStatus":"verified","authentication":"authenticated"}}}
+            })),
+        ),
+    ]
+}
+
+/// A prompt the provider admits, then completes.
+fn prompt_steps(check: impl FnOnce(&Value) + Send + 'static) -> Vec<ScriptedStep> {
+    vec![
+        ScriptedStep::new(
+            "prompt",
+            check,
+            ScriptedAnswer::Answer(
+                json!({"admission":"admitted","operation":operation_snapshot(
+                PROMPT_OPERATION, "conversationPrompt", Some(target()), "admitted", "none")}),
+            ),
+        ),
+        ScriptedStep::new(
+            "wait",
+            |request| assert_eq!(request["operationId"], PROMPT_OPERATION),
+            ScriptedAnswer::Answer(json!({
+                "operation":operation_snapshot(PROMPT_OPERATION, "conversationPrompt", Some(target()), "terminal", "applied"),
+                "output":{"kind":"available","settlement":{"kind":"promptCompleted","target":target(),"stopReason":"end_turn","response":"fixture reply"}}
+            })),
+        ),
+    ]
+}
+
+/// A load the provider admits, then settles with the loaded target.
+fn load_steps(check: impl FnOnce(&Value) + Send + 'static) -> Vec<ScriptedStep> {
+    vec![
+        ScriptedStep::new(
+            "load",
+            check,
+            ScriptedAnswer::Answer(
+                json!({"admission":"admitted","operation":operation_snapshot(
+                LOAD_OPERATION, "conversationLoad", Some(target()), "admitted", "none")}),
+            ),
+        ),
+        ScriptedStep::new(
+            "wait",
+            |request| assert_eq!(request["operationId"], LOAD_OPERATION),
+            ScriptedAnswer::Answer(json!({
+                "operation":operation_snapshot(LOAD_OPERATION, "conversationLoad", Some(target()), "terminal", "applied"),
+                "output":{"kind":"available","settlement":{"kind":"loaded","target":target(),"effectiveSettings":{
+                    "requestedPolicy":{"access":"workspace-write"},"mappingStatus":"verified","authentication":"authenticated"
+                }}}
+            })),
+        ),
+    ]
 }
 
 fn common_result(stdout: &[u8]) -> Value {
@@ -707,38 +694,6 @@ fn common_result(stdout: &[u8]) -> Value {
         assert_eq!(lines[1]["kind"], "conversationOperationStarted");
     }
     lines.last().expect("result line").clone()
-}
-
-async fn initialize_fixture(
-    lines: &mut tokio::io::Lines<BufReader<tokio::net::unix::OwnedReadHalf>>,
-    write: &mut tokio::net::unix::OwnedWriteHalf,
-) {
-    let initialize: Value =
-        serde_json::from_str(&lines.next_line().await.expect("read").expect("initialize"))
-            .expect("initialize JSON");
-    write_response(
-        write,
-        &initialize,
-        json!({"version":{"major":1,"minor":0},"serviceId":SERVICE_ID,"serviceEpoch":SERVICE_EPOCH,"controlSchemaDigest":format!("sha256:{}", "a".repeat(64))}),
-    )
-    .await;
-}
-
-async fn write_response(
-    write: &mut tokio::net::unix::OwnedWriteHalf,
-    request: &Value,
-    result: Value,
-) {
-    write
-        .write_all(
-            format!(
-                "{}\n",
-                json!({"jsonrpc":"2.0","id":request["id"],"result":result})
-            )
-            .as_bytes(),
-        )
-        .await
-        .expect("response");
 }
 
 fn operation_snapshot(
@@ -844,12 +799,6 @@ async fn run_cli(root: &std::path::Path, arguments: Vec<String>) -> std::process
         .output()
         .await
         .expect("CLI")
-}
-
-fn cleanup_fixture(root: &std::path::Path) {
-    std::fs::remove_file(root.join("control.sock")).expect("socket cleanup");
-    std::fs::remove_file(root.join("service.json")).expect("manifest cleanup");
-    std::fs::remove_dir(root).expect("directory cleanup");
 }
 
 fn cleanup_unpublished_fixture(root: &std::path::Path) {
