@@ -9,6 +9,7 @@ mod legacy_schema_v1to5;
 mod legacy_schema_v6to10;
 mod policy_mutation;
 mod quota_history;
+mod quota_refresh_status;
 mod quota_snapshots;
 mod repository_contracts;
 mod selector_windows;
