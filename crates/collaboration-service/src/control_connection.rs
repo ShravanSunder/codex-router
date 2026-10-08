@@ -26,7 +26,7 @@ pub async fn serve_control_connection(
     let mut subscription = identity.directory.subscribe()?;
     let mut wake_subscription: Option<crate::wakeup_subscription::WakeSubscriptionState> = None;
     let mut provider_subscription: Option<
-        crate::provider_session_observation_dispatch::ProviderSessionSubscription,
+        crate::collaboration_application::ProviderSessionSubscription,
     > = None;
     let mut wake_poll = tokio::time::interval(std::time::Duration::from_millis(50));
     wake_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -99,45 +99,31 @@ pub async fn serve_control_connection(
                             "Provide exact wakeupId for first-fire subscription",
                         ),
                         Ok(params) => {
-                            let wakeup_id = params.wakeup_id.clone();
-                            let permit = std::sync::Arc::clone(&identity.wake_wait_permits)
-                                .try_acquire_owned();
                             if wake_subscription.is_some() {
+                                // One first-fire wait per Control connection.
                                 crate::wakeup_subscription::unavailable(
                                     json!(request.id),
-                                    wakeup_id,
+                                    params.wakeup_id,
                                 )
-                            } else if let (Some(store), Ok(permit)) =
-                                (identity.automation.as_ref(), permit)
-                            {
-                                match crate::wakeup_subscription::start(
-                                    std::sync::Arc::clone(store),
-                                    identity.service_id.clone(),
-                                    params,
-                                    permit,
+                            } else {
+                                match crate::collaboration_application::WakeOperations::new(
+                                    &identity.service_id,
+                                    identity.automation.as_ref(),
                                 )
+                                .wake_wait_start(params, &identity.wake_wait_permits)
                                 .await
                                 {
                                     Ok((state, result)) => {
                                         wake_subscription = Some(state);
                                         json!({"jsonrpc":"2.0","id":request.id,"result":result})
                                     }
-                                    Err(automation_storage::StorageError::WakeNotFound) => {
-                                        crate::wakeup_subscription::not_found(
+                                    Err(failure) => {
+                                        crate::wakeup_subscription::wait_failure_response(
                                             json!(request.id),
-                                            wakeup_id,
+                                            failure,
                                         )
                                     }
-                                    Err(_) => crate::wakeup_subscription::unavailable(
-                                        json!(request.id),
-                                        wakeup_id,
-                                    ),
                                 }
-                            } else {
-                                crate::wakeup_subscription::unavailable(
-                                    json!(request.id),
-                                    wakeup_id,
-                                )
                             }
                         }
                     }
@@ -224,7 +210,12 @@ pub async fn serve_control_connection(
                             provider_subscription = Some(subscription);
                             response
                         }
-                        Err(error) => error.response(json!(id)),
+                        Err(error) => {
+                            crate::provider_session_observation_dispatch::failure_response(
+                                json!(id),
+                                error,
+                            )
+                        }
                     }
                 }
                 Ok(request) if request.method == "provider/sessionObserve" => {
@@ -334,15 +325,10 @@ pub async fn serve_control_connection(
                     pending.spawn(async move {
                         let id = request.id.clone();
                         let response = crate::automation_configuration_dispatch::dispatch(
-                            crate::automation_configuration_dispatch::ConfigurationRequest {
-                                id: json!(id),
-                                method: &request.method,
-                                params: request.params,
-                                handle: &identity.configuration,
-                                backend: identity.configuration_backend.as_ref(),
-                                store: identity.automation.as_ref(),
-                                service_id: &identity.service_id,
-                            },
+                            json!(id),
+                            &request.method,
+                            request.params,
+                            &identity,
                         )
                         .await;
                         (id, response)
@@ -358,15 +344,13 @@ pub async fn serve_control_connection(
                     let identity = identity.clone();
                     pending.spawn(async move {
                         let id = request.id.clone();
-                        let response =
-                            crate::run_dispatch::dispatch(crate::run_dispatch::RunRequest {
-                                configuration: &identity.configuration,
-                                id: json!(id),
-                                method: &request.method,
-                                params: request.params,
-                                store: identity.automation.as_ref(),
-                            })
-                            .await;
+                        let response = crate::run_dispatch::dispatch(
+                            json!(id),
+                            &request.method,
+                            request.params,
+                            &identity,
+                        )
+                        .await;
                         (id, response)
                     });
                     continue;
@@ -385,13 +369,10 @@ pub async fn serve_control_connection(
                     pending.spawn(async move {
                         let id = request.id.clone();
                         let response = crate::automation_collection_dispatch::dispatch(
-                            crate::automation_collection_dispatch::CollectionRequest {
-                                id: json!(id),
-                                method: &request.method,
-                                params: request.params,
-                                service_id: &identity.service_id,
-                                store: identity.automation.as_ref(),
-                            },
+                            json!(id),
+                            &request.method,
+                            request.params,
+                            &identity,
                         )
                         .await;
                         (id, response)
@@ -408,13 +389,10 @@ pub async fn serve_control_connection(
                     pending.spawn(async move {
                         let id = request.id.clone();
                         let response = crate::attempt_history_dispatch::dispatch(
-                            crate::attempt_history_dispatch::AttemptRequest {
-                                id: json!(id),
-                                method: &request.method,
-                                params: request.params,
-                                service_id: &identity.service_id,
-                                store: identity.automation.as_ref(),
-                            },
+                            json!(id),
+                            &request.method,
+                            request.params,
+                            &identity,
                         )
                         .await;
                         (id, response)
@@ -426,12 +404,9 @@ pub async fn serve_control_connection(
                     pending.spawn(async move {
                         let id = request.id.clone();
                         let response = crate::automation_event_dispatch::dispatch(
-                            crate::automation_event_dispatch::EventRequest {
-                                id: json!(id),
-                                params: request.params,
-                                service_id: &identity.service_id,
-                                store: identity.automation.as_ref(),
-                            },
+                            json!(id),
+                            request.params,
+                            &identity,
                         )
                         .await;
                         (id, response)
@@ -476,14 +451,10 @@ pub async fn serve_control_connection(
                     pending.spawn(async move {
                         let id = request.id.clone();
                         let response = crate::operation_inspection_dispatch::dispatch(
-                            crate::operation_inspection_dispatch::OperationRequest {
-                                reconcile: request.method == "operation/reconcile",
-                                configuration_backend: identity.configuration_backend.as_ref(),
-                                id: json!(id),
-                                params: request.params,
-                                service_id: &identity.service_id,
-                                store: identity.automation.as_ref(),
-                            },
+                            json!(id),
+                            request.method == "operation/reconcile",
+                            request.params,
+                            &identity,
                         )
                         .await;
                         (id, response)
@@ -509,17 +480,9 @@ pub async fn serve_control_connection(
                     let identity = identity.clone();
                     pending.spawn(async move {
                         let id = request.id.clone();
-                        let response = crate::schedule_preparation_dispatch::dispatch(
-                            crate::schedule_preparation_dispatch::PreparationRequest {
-                                configuration: &identity.configuration,
-                                id: json!(id),
-                                params: request.params,
-                                service_id: &identity.service_id,
-                                execution: identity.scheduled_run_execution.as_ref(),
-                                store: identity.automation.as_ref(),
-                            },
-                        )
-                        .await;
+                        let response =
+                            crate::schedule_dispatch::prepare(json!(id), request.params, &identity)
+                                .await;
                         (id, response)
                     });
                     continue;
@@ -540,14 +503,10 @@ pub async fn serve_control_connection(
                     pending.spawn(async move {
                         let id = request.id.clone();
                         let response = crate::schedule_dispatch::dispatch(
-                            crate::schedule_dispatch::ScheduleRequest {
-                                service_id: &identity.service_id,
-                                execution: identity.scheduled_run_execution.as_ref(),
-                                id: json!(id),
-                                method: &request.method,
-                                params: request.params,
-                                store: identity.automation.as_ref(),
-                            },
+                            json!(id),
+                            &request.method,
+                            request.params,
+                            &identity,
                         )
                         .await;
                         (id, response)
@@ -564,12 +523,10 @@ pub async fn serve_control_connection(
                     pending.spawn(async move {
                         let id = request.id.clone();
                         let response = crate::instruction_dispatch::dispatch(
-                            crate::instruction_dispatch::InstructionRequest {
-                                id: json!(id),
-                                method: &request.method,
-                                params: request.params,
-                                store: identity.automation.as_ref(),
-                            },
+                            json!(id),
+                            &request.method,
+                            request.params,
+                            &identity,
                         )
                         .await;
                         (id, response)
@@ -600,26 +557,16 @@ pub async fn serve_control_connection(
                     ) =>
                 {
                     let identity = identity.clone();
-                    let endpoints = subscription.snapshot()?.endpoints;
+                    // A connection whose endpoint subscription overflowed closes before serving
+                    // a directory-backed read.
+                    subscription.snapshot()?;
                     pending.spawn(async move {
                         let id = request.id.clone();
                         let response = crate::native_control_dispatch::dispatch_native(
-                            crate::native_control_request::NativeControlRequest {
-                                method: &request.method,
-                                params: request.params,
-                                id: json!(id),
-                                service_id: &identity.service_id,
-                                display_names: &identity.display_names,
-                                backend: identity.native_backend.as_ref(),
-                                endpoints: &endpoints,
-                                stored_observation: identity.journal.as_deref().map(|store| {
-                                    crate::stored_inventory_observation::StoredInventoryObservation {
-                                        store,
-                                        observer_id: &identity.service_epoch,
-                                    }
-                                }),
-                                access_routes: identity.approval_broker.as_deref(),
-                            },
+                            json!(id),
+                            &request.method,
+                            request.params,
+                            &identity,
                         )
                         .await;
                         (id, response)
@@ -633,16 +580,16 @@ pub async fn serve_control_connection(
                     ) =>
                 {
                     let identity = identity.clone();
-                    let endpoints = subscription.snapshot()?.endpoints;
+                    // A connection whose endpoint subscription overflowed closes before serving
+                    // a directory-backed read.
+                    subscription.snapshot()?;
                     pending.spawn(async move {
                         let id = request.id.clone();
                         let response = crate::journal_dispatch::dispatch_journal(
                             &request.method,
                             request.params,
                             json!(id),
-                            identity.service_id,
-                            identity.journal,
-                            endpoints,
+                            &identity,
                         )
                         .await;
                         (id, response)
@@ -663,24 +610,18 @@ async fn dispatch_interaction(
     id: Value,
     identity: &ServiceIdentity,
 ) -> Value {
-    let Some(broker) = identity.approval_broker.as_ref() else {
-        return json!({"jsonrpc":"2.0","id":id,"error":{"code":-32050,"message":"Approval service unavailable","data":{"kind":"unavailable","stage":"inspect","message":"Approval service unavailable"}}});
-    };
-    match method {
+    let interactions = crate::collaboration_application::InteractionOperations::new(identity);
+    let result = match method {
         "approval/list" => {
             let Ok(params) =
                 serde_json::from_value::<collaboration_protocol::ApprovalListParams>(params)
             else {
                 return error(id, -32602, "Invalid params");
             };
-            if params.include_options {
-                match broker.list_detailed(params.pending).await {
-                    Ok(result) => json!({"jsonrpc":"2.0","id":id,"result":result}),
-                    Err(_) => error(id, -32050, "Approval service unavailable"),
-                }
-            } else {
-                json!({"jsonrpc":"2.0","id":id,"result":broker.list(params.pending).await})
-            }
+            interactions
+                .approval_list(params)
+                .await
+                .map(|result| json!(result))
         }
         "approval/decide" => {
             let Ok(params) =
@@ -688,18 +629,10 @@ async fn dispatch_interaction(
             else {
                 return error(id, -32602, "Invalid params");
             };
-            match broker.decide(params).await {
-                Ok(result) => json!({"jsonrpc":"2.0","id":id,"result":result}),
-                Err(failure) => {
-                    let mut data = json!({"kind":failure.code(),"stage":"inspect","message":"Approval decision rejected"});
-                    if let (Some(data), serde_json::Value::Object(detail)) =
-                        (data.as_object_mut(), failure.detail())
-                    {
-                        data.extend(detail);
-                    }
-                    json!({"jsonrpc":"2.0","id":id,"error":{"code":-32050,"message":"Approval decision rejected","data":data}})
-                }
-            }
+            interactions
+                .approval_decide(params)
+                .await
+                .map(|result| json!(result))
         }
         "question/list" => {
             let Ok(params) =
@@ -707,15 +640,10 @@ async fn dispatch_interaction(
             else {
                 return error(id, -32602, "Invalid params");
             };
-            let records = broker.list_questions(params.pending).await;
-            let Ok(questions) = records
-                .into_iter()
-                .map(question_record_view)
-                .collect::<Result<Vec<_>, _>>()
-            else {
-                return error(id, -32050, "Question service unavailable");
-            };
-            json!({"jsonrpc":"2.0","id":id,"result":collaboration_protocol::QuestionListResult { questions }})
+            interactions
+                .question_list(params)
+                .await
+                .map(|result| json!(result))
         }
         "question/answer" => {
             let Ok(params) =
@@ -723,91 +651,49 @@ async fn dispatch_interaction(
             else {
                 return error(id, -32602, "Invalid params");
             };
-            let state = match &params.response {
-                collaboration_protocol::QuestionResponse::Answered { .. } => {
-                    collaboration_protocol::QuestionState::Answered
-                }
-                collaboration_protocol::QuestionResponse::Declined => {
-                    collaboration_protocol::QuestionState::Declined
-                }
-                collaboration_protocol::QuestionResponse::Cancelled => {
-                    collaboration_protocol::QuestionState::Cancelled
-                }
-            };
-            match broker
-                .respond_question(&params.request_id, &params.actor, params.response)
+            interactions
+                .question_answer(params)
                 .await
-            {
-                Ok(()) => {
-                    json!({"jsonrpc":"2.0","id":id,"result":collaboration_protocol::QuestionAnswerResult { request_id: params.request_id, state }})
-                }
-                Err(failure) => {
-                    let (kind, field_id) = match failure {
-                        crate::interaction_broker::InteractionHistoryError::WrongActor => {
-                            ("wrongActor", None)
-                        }
-                        crate::interaction_broker::InteractionHistoryError::NotPending => {
-                            ("questionNotPending", None)
-                        }
-                        crate::interaction_broker::InteractionHistoryError::AlreadySettled => {
-                            ("alreadySettled", None)
-                        }
-                        crate::interaction_broker::InteractionHistoryError::InvalidAnswer {
-                            field_id,
-                        } => ("invalidAnswer", Some(field_id)),
-                        _ => ("unavailable", None),
-                    };
-                    let mut data = json!({"kind":kind,"stage":"inspect","message":"Question response rejected"});
-                    if let Some(field_id) = field_id
-                        && let Some(fields) = data.as_object_mut()
-                    {
-                        fields.insert("fieldId".to_owned(), json!(field_id));
-                    }
-                    json!({"jsonrpc":"2.0","id":id,"error":{"code":-32050,"message":"Question response rejected","data":data}})
-                }
-            }
+                .map(|result| json!(result))
         }
-        _ => error(id, -32601, "Method not found"),
+        _ => return error(id, -32601, "Method not found"),
+    };
+    match result {
+        Ok(result) => json!({"jsonrpc":"2.0","id":id,"result":result}),
+        Err(failure) => interaction_failure(id, &failure),
     }
 }
 
-fn question_record_view(
-    record: crate::interaction_broker::InteractionHistoryRecord,
-) -> Result<collaboration_protocol::QuestionRecord, ()> {
-    use crate::interaction_broker::{InteractionHistoryRecord, QuestionHistoryState};
-    let InteractionHistoryRecord::Question {
-        requester,
-        approver,
-        request,
-        state,
-    } = record
-    else {
-        return Err(());
-    };
-    let requester =
-        serde_json::from_value(serde_json::to_value(requester).map_err(|_| ())?).map_err(|_| ())?;
-    let fields = request
-        .fields
-        .iter()
-        .map(|field| {
-            serde_json::from_value(serde_json::to_value(field).map_err(|_| ())?).map_err(|_| ())
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    let state = match state {
-        QuestionHistoryState::Pending => collaboration_protocol::QuestionState::Pending,
-        QuestionHistoryState::Answered { .. } => collaboration_protocol::QuestionState::Answered,
-        QuestionHistoryState::Declined => collaboration_protocol::QuestionState::Declined,
-        QuestionHistoryState::Cancelled { .. } => collaboration_protocol::QuestionState::Cancelled,
-    };
-    Ok(collaboration_protocol::QuestionRecord {
-        request_id: request.request_id,
-        requester,
-        approver,
-        prompt: request.prompt,
-        fields,
-        state,
-    })
+/// Control encodes a missing detailed list or question projection without a data payload.
+fn interaction_failure(
+    id: Value,
+    failure: &crate::collaboration_application::InteractionFailure,
+) -> Value {
+    use crate::collaboration_application::InteractionFailure;
+    let message = failure.to_string();
+    match failure {
+        InteractionFailure::ApprovalListUnavailable
+        | InteractionFailure::QuestionListUnavailable => error(id, -32050, &message),
+        InteractionFailure::BrokerUnavailable
+        | InteractionFailure::ApprovalRejected(_)
+        | InteractionFailure::QuestionRejected(_) => {
+            json!({"jsonrpc":"2.0","id":id,"error":{"code":-32050,"message":message,"data":failure.payload()}})
+        }
+    }
 }
+
+/// The response bound for a result sent back to `id`: one Control frame, envelope included.
+pub(crate) fn control_result_budget(id: &Value) -> crate::ResultByteBudget {
+    let envelope_bytes = serde_json::to_vec(&json!({"jsonrpc":"2.0","id":id,"result":null}))
+        .map_or(collaboration_protocol::MAX_CONTROL_FRAME_BYTES, |bytes| {
+            bytes.len().saturating_sub("null".len())
+        });
+    crate::ResultByteBudget::new(
+        collaboration_protocol::MAX_CONTROL_FRAME_BYTES,
+        envelope_bytes,
+    )
+}
+
 fn error(id: Value, code: i64, message: &str) -> Value {
     json!({"jsonrpc":"2.0","id":id,"error":{"code":code,"message":message}})
 }
@@ -900,3 +786,7 @@ fn initialize(
 #[cfg(test)]
 #[path = "control_connection/admission_error_tests.rs"]
 mod admission_error_tests;
+
+#[cfg(test)]
+#[path = "control_connection/result_budget_tests.rs"]
+mod result_budget_tests;

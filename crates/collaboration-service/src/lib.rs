@@ -1,4 +1,6 @@
 //! Owner-local communication service, independent of the Host executable.
+pub mod collaboration_application;
+pub use collaboration_application::{CollaborationApplication, ResultByteBudget};
 mod control_connection;
 mod control_overload_response;
 pub use control_connection::serve_control_connection;
@@ -128,7 +130,6 @@ mod control_schema_publication;
 mod journal_dispatch;
 pub use control_schema_publication::publish_control_schema;
 mod native_control_dispatch;
-mod native_control_request;
 mod session_display_name_cache;
 pub use session_display_name_cache::SessionDisplayNameCache;
 mod push_record_delivery;
@@ -160,9 +161,11 @@ mod unmaterialized_thread_holder;
 pub use codex_acp_adapter::{ACP_SCHEMA_DIGEST, NativeStoredSessions};
 pub use unmaterialized_thread_holder::UnmaterializedThreadHolder;
 
+mod codex_session_inventory;
 mod instruction_dispatch;
+mod instruction_projection;
+mod provider_session_inventory;
 mod provider_session_inventory_dispatch;
-mod session_inventory_dispatch;
 mod stored_inventory_observation;
 
 mod wakeup_dispatch;
@@ -180,7 +183,6 @@ mod wakeup_subscription;
 mod wakeup_list_dispatch;
 
 mod schedule_dispatch;
-mod schedule_package_dispatch;
 mod schedule_projection;
 
 mod native_thread_preparation;

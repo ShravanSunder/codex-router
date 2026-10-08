@@ -92,7 +92,7 @@ fn success(
             Ok(OperationSuccess::Instruction {
                 method: decode(method_value)?,
                 result: Box::new(
-                    crate::instruction_dispatch::snapshot(decode(result)?)
+                    crate::instruction_projection::snapshot(decode(result)?)
                         .map_err(|_| StorageError::InvalidRecord)?,
                 ),
             })
@@ -136,7 +136,7 @@ fn success(
             Ok(OperationSuccess::WakeChanged {
                 method: decode(method_value)?,
                 result: Box::new(
-                    crate::wakeup_lifecycle_dispatch::project_mutation(decode(result)?, service)
+                    crate::wakeup_projection::project_mutation(decode(result)?, service)
                         .map_err(|_| StorageError::InvalidRecord)?,
                 ),
             })

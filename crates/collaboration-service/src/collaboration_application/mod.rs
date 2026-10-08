@@ -1,0 +1,176 @@
+//! The typed collaboration application service.
+//!
+//! One public async method per collaboration operation, grouped by family. Each family takes
+//! the existing typed `collaboration-protocol` and `message-board` requests and returns their
+//! typed results or the family's typed failure. Transport adapters only decode requests, call
+//! these methods and encode what comes back; no operation logic lives in a transport.
+//!
+//! Each family is a handle that borrows the Router's dependencies, handed out by
+//! [`CollaborationApplication`]: board (`board_operations`); messages (`message_operations`);
+//! conversations (`conversation_operations`); wakes (`wake_operations`); schedules, runs,
+//! instructions and automation inspection (`automation_operations`, `schedule_operations`,
+//! `automation_inspection_operations`, `automation_history_operations`); approvals and
+//! questions (`interaction_operations`); sessions, the journal and the address book
+//! (`session_operations`, `journal_operations`); provider observation
+//! (`provider_observation_operations`). Heavier paging logic stays in the crate's domain modules
+//! (`codex_session_inventory`, `provider_session_inventory`, `schedule_preparation_dispatch`).
+#![expect(
+    clippy::result_large_err,
+    reason = "typed failures are the published payloads, returned once per IO-bound request"
+)]
+mod automation_history_operations;
+mod automation_inspection_operations;
+mod automation_operations;
+mod board_operations;
+mod collaboration_rejection;
+mod conversation_operations;
+mod interaction_operations;
+mod journal_operations;
+mod message_operations;
+mod provider_observation_operations;
+mod schedule_operations;
+mod session_operations;
+mod wake_operations;
+
+pub use automation_operations::AutomationOperations;
+pub(crate) use automation_operations::{
+    InstructionContext, InstructionFailureReason, instruction_failure, run_failure_context,
+};
+pub use board_operations::BoardOperations;
+pub use collaboration_rejection::{CollaborationRejection, CollaborationRejectionReason};
+pub use conversation_operations::{ConversationFailure, ConversationOperations};
+pub use interaction_operations::{InteractionFailure, InteractionOperations, QuestionRejection};
+pub use journal_operations::{JournalCursorInvalidation, JournalFailure, JournalUnavailableKind};
+pub use message_operations::{
+    MessageFailure, MessageFailureKind, MessageFailureStage, MessageOperations,
+};
+pub use provider_observation_operations::{
+    ObservationFailure, ObservationOperations, ProviderSessionSubscription,
+};
+pub use schedule_operations::ScheduleOperationFailure;
+pub(crate) use schedule_operations::{ScheduleFailureContext, invalid_schedule_request};
+pub use session_operations::{
+    NativeSessionFailure, NativeSessionFailureKind, NativeSessionStage, ProviderInventoryFailure,
+    ProviderInventoryFailureKind, SessionOperations,
+};
+#[cfg(test)]
+pub(crate) use session_operations::{
+    classify_native_call_failure, rename_method_unsupported, valid_session_rename_name,
+};
+pub(crate) use wake_operations::{
+    WakeFailureContext, invalid_field as wake_invalid_field, wake_failure,
+};
+pub use wake_operations::{WakeOperations, WakeWaitFailure};
+
+use crate::ServiceIdentity;
+
+/// The application service over one Router's composed collaboration dependencies.
+#[derive(Clone)]
+pub struct CollaborationApplication {
+    identity: ServiceIdentity,
+}
+
+impl CollaborationApplication {
+    #[must_use]
+    pub fn new(identity: ServiceIdentity) -> Self {
+        Self { identity }
+    }
+
+    /// Projects, boards, topics, threads, posts, inbox and thread subscriptions.
+    #[must_use]
+    pub fn board(&self) -> BoardOperations<'_> {
+        BoardOperations::new(&self.identity)
+    }
+
+    /// Provider conversations and recorded Codex conversation operations.
+    #[must_use]
+    pub fn conversations(&self) -> ConversationOperations<'_> {
+        ConversationOperations::new(&self.identity)
+    }
+
+    /// Direct messages: sends, replies, push inspection, inbox and history.
+    #[must_use]
+    pub fn messages(&self) -> MessageOperations<'_> {
+        MessageOperations::new(&self.identity)
+    }
+
+    /// Provider Session observation.
+    #[must_use]
+    pub fn observation(&self) -> ObservationOperations<'_> {
+        ObservationOperations::new(&self.identity)
+    }
+
+    /// Codex and provider sessions, the lifecycle journal and the address book.
+    #[must_use]
+    pub fn sessions(&self) -> SessionOperations<'_> {
+        SessionOperations::new(&self.identity)
+    }
+
+    /// Automation configuration, runs, instructions, schedules and automation inspection.
+    #[must_use]
+    pub fn automation(&self) -> AutomationOperations<'_> {
+        AutomationOperations::new(&self.identity)
+    }
+
+    /// Wakes and their deliveries.
+    #[must_use]
+    pub fn wakes(&self) -> WakeOperations<'_> {
+        WakeOperations::new(&self.identity.service_id, self.identity.automation.as_ref())
+    }
+
+    /// Approvals and questions held by the interaction broker.
+    #[must_use]
+    pub fn interactions(&self) -> InteractionOperations<'_> {
+        InteractionOperations::new(&self.identity)
+    }
+}
+
+/// The response bound an operation's result must fit.
+///
+/// A response is the encoded result inside its transport's envelope. Paged operations trim
+/// their page until the response fits; single results that cannot fit fail. The bound belongs
+/// to the caller's transport, so the same operation serves any carrier.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ResultByteBudget {
+    response_limit_bytes: usize,
+    envelope_bytes: usize,
+}
+
+impl ResultByteBudget {
+    /// A response of at most `response_limit_bytes`, of which `envelope_bytes` frame the result.
+    #[must_use]
+    pub const fn new(response_limit_bytes: usize, envelope_bytes: usize) -> Self {
+        Self {
+            response_limit_bytes,
+            envelope_bytes,
+        }
+    }
+
+    #[must_use]
+    pub const fn response_limit_bytes(self) -> usize {
+        self.response_limit_bytes
+    }
+
+    /// The bytes of the whole response carrying `result`, or `None` when it cannot be encoded.
+    #[must_use]
+    pub fn response_bytes<TResult: serde::Serialize>(self, result: &TResult) -> Option<usize> {
+        serde_json::to_vec(result)
+            .ok()
+            .map(|bytes| bytes.len().saturating_add(self.envelope_bytes))
+    }
+
+    /// Whether the response carrying `result` fits. An unencodable result never fits.
+    #[must_use]
+    pub fn admits<TResult: serde::Serialize>(self, result: &TResult) -> bool {
+        self.response_bytes(result)
+            .is_some_and(|bytes| bytes <= self.response_limit_bytes)
+    }
+}
+
+#[cfg(test)]
+#[path = "collaboration_rejection_tests.rs"]
+mod collaboration_rejection_tests;
+
+#[cfg(test)]
+#[path = "result_byte_budget_tests.rs"]
+mod result_byte_budget_tests;

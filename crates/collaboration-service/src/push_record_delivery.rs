@@ -1,13 +1,12 @@
 //! Store-first direct-message delivery through Layer 0's PreparedPush path.
 use crate::ServiceIdentity;
+use crate::collaboration_application::MessageOperations;
 use automation_storage::StorageError;
 use collaboration_protocol::{
-    CodexGeneration, MessageContent, MessageDelivery, PushId, PushIdError, PushKind, PushOrigin,
-    PushRecord, PushRecordDraft, PushRecordValidationError, SessionDisplayNameLookup,
-    SessionMessageReplyParams, SessionMessageReplyResult, SessionMessageSendParams, SessionRef,
-    session_identity,
+    CodexGeneration, MessageDelivery, PushId, PushRecord, PushRecordDraft,
+    PushRecordValidationError, SessionMessageSendParams,
 };
-use serde_json::{Value, json};
+use serde_json::Value;
 
 pub(crate) enum PushDeliveryFailure {
     StoreUnavailable,
@@ -17,191 +16,16 @@ pub(crate) enum PushDeliveryFailure {
     DeliveryUnknown(PushId),
 }
 
+/// Control entry point for an already-decoded `message/send`.
 pub(crate) async fn dispatch_message(
     id: Value,
     params: SessionMessageSendParams,
     identity: &ServiceIdentity,
 ) -> Value {
-    if params.target.endpoint.service_id != identity.service_id {
-        return crate::push_record_resolver::failure(
-            id,
-            -32602,
-            "wrongService",
-            "discovery",
-            "Message target belongs to another Router",
-        );
-    }
-    let (origin, sender_display_name, text) = match params.message {
-        MessageContent::Agent { sender, text } => {
-            if sender.endpoint.service_id != identity.service_id {
-                return crate::push_record_resolver::failure(
-                    id,
-                    -32602,
-                    "wrongService",
-                    "discovery",
-                    "Message sender belongs to another Router",
-                );
-            }
-            (
-                PushOrigin::Session(sender.clone()),
-                identity
-                    .display_names
-                    .display_name_for(&sender)
-                    .ok()
-                    .flatten(),
-                text.as_str().to_owned(),
-            )
-        }
-        MessageContent::HumanUser { text } => {
-            (PushOrigin::OwnerUnverified, None, text.as_str().to_owned())
-        }
-        MessageContent::Router { .. } => {
-            return crate::push_record_resolver::failure(
-                id,
-                -32602,
-                "invalidField",
-                "discovery",
-                "Router-authored content is internal-only",
-            );
-        }
-    };
-    let target = params.target.clone();
-    let push_id = match next_push_id() {
-        Ok(push_id) => push_id,
-        Err(_) => {
-            return crate::push_record_resolver::failure(
-                id,
-                -32050,
-                "unavailable",
-                "discovery",
-                "A push id could not be generated",
-            );
-        }
-    };
-    let draft = PushRecordDraft {
-        push_id,
-        kind: PushKind::DirectMessage,
-        origin,
-        origin_router_ref: None,
-        target: target.clone(),
-        reply_to_push_id: None,
-        header_facts: collaboration_protocol::PushHeaderFacts::DirectMessage {
-            sender_display_name,
-        },
-        body: Some(text),
-        activity: None,
-        mode: Some(params.mode),
-        guard: params.generation_guard.clone(),
-        created_at: chrono::Utc::now(),
-    };
-    let target_identity = target_identity(&target, identity);
-    match store_first_and_deliver(draft, params.mode, params.generation_guard, identity).await {
-        Ok(record) => {
-            match crate::push_record_resolver::delivery_result(&record, target_identity, identity) {
-                Ok(result) => json!({"jsonrpc":"2.0","id":id,"result":result}),
-                Err(_) => crate::push_record_resolver::failure(
-                    id,
-                    -32050,
-                    "unavailable",
-                    "inspect",
-                    "Stored push could not be rendered",
-                ),
-            }
-        }
-        Err(error) => delivery_failure(id, error, identity),
-    }
-}
-
-pub(crate) async fn dispatch_reply(
-    id: Value,
-    params: SessionMessageReplyParams,
-    source_record: PushRecord,
-    identity: &ServiceIdentity,
-) -> Value {
-    if source_record.kind != PushKind::DirectMessage {
-        return crate::push_record_resolver::failure(
-            id,
-            -32050,
-            "notDirectMessage",
-            "discovery",
-            "This push is not a direct message; use the command for its push kind",
-        );
-    }
-    let PushOrigin::Session(origin) = source_record.origin.clone() else {
-        return crate::push_record_resolver::failure(
-            id,
-            -32050,
-            "ownerReplyUnsupported",
-            "discovery",
-            "This message has no reply session; use message send --to <SessionRef>",
-        );
-    };
-    if source_record.target != params.caller {
-        return crate::push_record_resolver::failure(
-            id,
-            -32050,
-            "notPermitted",
-            "discovery",
-            "Only the target session can reply to this direct message",
-        );
-    }
-    let reply_text = params.text.as_str().to_owned();
-    let reply_push_id = match next_push_id() {
-        Ok(push_id) => push_id,
-        Err(_) => {
-            return crate::push_record_resolver::failure(
-                id,
-                -32050,
-                "unavailable",
-                "discovery",
-                "A push id could not be generated",
-            );
-        }
-    };
-    let draft = PushRecordDraft {
-        push_id: reply_push_id.clone(),
-        kind: PushKind::DirectMessage,
-        origin: PushOrigin::Session(params.caller.clone()),
-        origin_router_ref: None,
-        target: origin.clone(),
-        reply_to_push_id: Some(source_record.push_id.clone()),
-        header_facts: collaboration_protocol::PushHeaderFacts::DirectMessage {
-            sender_display_name: identity
-                .display_names
-                .display_name_for(&params.caller)
-                .ok()
-                .flatten(),
-        },
-        body: Some(reply_text),
-        activity: None,
-        mode: Some(MessageDelivery::Auto),
-        guard: None,
-        created_at: chrono::Utc::now(),
-    };
-    let target_identity = target_identity(&origin, identity);
-    match store_first_and_deliver(draft, MessageDelivery::Auto, None, identity).await {
-        Ok(record) => {
-            let Some(receipt) = record.last_outcome.clone() else {
-                return crate::push_record_resolver::failure(
-                    id,
-                    -32050,
-                    "outcomeUnknown",
-                    "discovery",
-                    "Reply was stored but its delivery result is unavailable",
-                );
-            };
-            let result = SessionMessageReplyResult {
-                target: origin,
-                target_identity,
-                push_id: record.push_id.clone(),
-                link: crate::push_record_resolver::link_for(&record, identity),
-                delivery_state: record.delivery_state,
-                receipt,
-            };
-            json!({"jsonrpc":"2.0","id":id,"result":result})
-        }
-        Err(error) => delivery_failure(id, error, identity),
-    }
+    crate::push_record_resolver::message_response(
+        id,
+        MessageOperations::new(identity).message_send(params).await,
+    )
 }
 
 pub(crate) async fn store_first_and_deliver(
@@ -240,69 +64,6 @@ pub(crate) async fn store_first_and_deliver(
         .deliver_direct_message(target, push_id.clone())
         .await
         .map_err(|_| PushDeliveryFailure::DeliveryUnknown(push_id))
-}
-
-fn next_push_id() -> Result<PushId, PushIdError> {
-    PushId::try_from(uuid::Uuid::now_v7().to_string())
-}
-
-fn target_identity(target: &SessionRef, identity: &ServiceIdentity) -> String {
-    let display_name = identity
-        .display_names
-        .display_name_for(target)
-        .ok()
-        .flatten();
-    session_identity(target, display_name.as_ref())
-}
-
-fn delivery_failure(id: Value, failure: PushDeliveryFailure, identity: &ServiceIdentity) -> Value {
-    match failure {
-        PushDeliveryFailure::StoreUnavailable => crate::push_record_resolver::failure(
-            id,
-            -32050,
-            "unavailable",
-            "discovery",
-            "Push storage is unavailable",
-        ),
-        PushDeliveryFailure::DeliveryUnavailable => crate::push_record_resolver::failure(
-            id,
-            -32050,
-            "unavailable",
-            "discovery",
-            "Session delivery is unavailable",
-        ),
-        PushDeliveryFailure::InvalidRecord(error) => crate::push_record_resolver::failure(
-            id,
-            -32602,
-            "invalidField",
-            "discovery",
-            &error.to_string(),
-        ),
-        PushDeliveryFailure::StoreFailed => crate::push_record_resolver::failure(
-            id,
-            -32050,
-            "unavailable",
-            "store",
-            "Push record could not be stored",
-        ),
-        PushDeliveryFailure::DeliveryUnknown(push_id) => {
-            let link = collaboration_protocol::RouterLink::new(
-                collaboration_protocol::MachineId::from(
-                    identity.machine_identity.service_id().clone(),
-                ),
-                push_id,
-            );
-            crate::push_record_resolver::failure(
-                id,
-                -32050,
-                "outcomeUnknown",
-                "inspect",
-                &format!(
-                    "Push was stored; delivery outcome is unknown. Inspect {link} before retrying."
-                ),
-            )
-        }
-    }
 }
 
 #[cfg(test)]

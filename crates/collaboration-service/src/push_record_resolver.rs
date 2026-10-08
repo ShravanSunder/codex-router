@@ -1,11 +1,12 @@
 //! Resolves local push links, applies reported-caller access rules, and expands stored ranges.
+//! The `show`, `inbox` and `history` Control entry points decode requests for the typed
+//! message operations.
 use crate::ServiceIdentity;
-use automation_storage::{DirectMessageHistoryQuery, PushInboxQuery, StorageError};
+use crate::collaboration_application::{MessageFailure, MessageFailureKind, MessageOperations};
 use collaboration_protocol::{
     MachineId, PushActivityRangeRead, PushId, PushKind, PushLineInput, PushMessageSendResult,
-    PushOrigin, PushRecord, PushRecordHistoryParams, PushRecordListParams, PushRecordListResult,
-    PushRecordNotice, PushRecordShowParams, PushRecordShowResult, RouterLink, SessionRef,
-    render_push_line,
+    PushOrigin, PushRecord, PushRecordHistoryParams, PushRecordListParams, PushRecordNotice,
+    PushRecordShowParams, RouterLink, SessionRef, render_push_line,
 };
 use message_board::{
     MessageListRequest, MessageListScope, MessageSelection, PageLimit, PageRequest,
@@ -55,281 +56,72 @@ pub(crate) fn delivery_result(
 }
 
 pub(crate) async fn show(id: Value, params: Value, identity: &ServiceIdentity) -> Value {
-    let params = match serde_json::from_value::<PushRecordShowParams>(params) {
-        Ok(params) => params,
-        Err(_) => {
-            return failure(
-                id,
-                -32602,
-                "invalidField",
-                "inspect",
-                "Invalid push show request",
-            );
-        }
-    };
-    if !caller_is_local(&params.caller, identity) {
+    let Ok(params) = serde_json::from_value::<PushRecordShowParams>(params) else {
         return failure(
             id,
             -32602,
-            "wrongService",
+            "invalidField",
             "inspect",
-            "Caller belongs to another Router",
-        );
-    }
-    let push_id = match resolve_reference(&params.reference, identity) {
-        Ok(push_id) => push_id,
-        Err(ReferenceError::Invalid) => {
-            return failure(
-                id,
-                -32602,
-                "invalidField",
-                "inspect",
-                "Invalid push id or Router link",
-            );
-        }
-        Err(ReferenceError::Foreign(machine_id)) => {
-            return failure(
-                id,
-                -32050,
-                "foreignMachine",
-                "inspect",
-                &format!("lives on {machine_id}; cross-machine fetch not available yet"),
-            );
-        }
-    };
-    let Some(store) = identity.automation.as_ref() else {
-        return failure(
-            id,
-            -32050,
-            "unavailable",
-            "inspect",
-            "Push storage is unavailable",
+            "Invalid push show request",
         );
     };
-    let mut record = match store.lock().await.get_push_record(&push_id).await {
-        Ok(Some(record)) => record,
-        Ok(None) | Err(StorageError::PushNotFound) => {
-            return not_found(id, "inspect");
-        }
-        Err(_) => {
-            return failure(
-                id,
-                -32050,
-                "unavailable",
-                "inspect",
-                "Push storage could not be read",
-            );
-        }
-    };
-    if !can_read(&record, &params.caller) {
-        return failure(
-            id,
-            -32050,
-            "notPermitted",
-            "inspect",
-            "Not permitted to read this push",
-        );
-    }
-    if record.kind == PushKind::DirectMessage && record.target == params.caller {
-        record = match store
-            .lock()
-            .await
-            .mark_push_read(&push_id, &params.caller, chrono::Utc::now())
-            .await
-        {
-            Ok(record) => record,
-            Err(StorageError::PushNotFound) => return not_found(id, "inspect"),
-            Err(StorageError::PushNotPermitted) => {
-                return failure(
-                    id,
-                    -32050,
-                    "notPermitted",
-                    "inspect",
-                    "Not permitted to read this push",
-                );
-            }
-            Err(_) => {
-                return failure(
-                    id,
-                    -32050,
-                    "unavailable",
-                    "inspect",
-                    "Push read state could not be recorded",
-                );
-            }
-        };
-    }
-    let activity_ranges = match expand_activity_ranges(&record, identity).await {
-        Ok(ranges) => ranges,
-        Err(ActivityReadError::Unavailable) => {
-            return failure(
-                id,
-                -32050,
-                "unavailable",
-                "inspect",
-                "Board range storage is unavailable",
-            );
-        }
-        Err(ActivityReadError::Failed) => {
-            return failure(
-                id,
-                -32050,
-                "unavailable",
-                "inspect",
-                "Board activity range could not be read",
-            );
-        }
-    };
-    let result = PushRecordShowResult {
-        link: link_for(&record, identity),
-        record,
-        activity_ranges,
-    };
-    json!({"jsonrpc":"2.0","id":id,"result":result})
+    message_response(id, MessageOperations::new(identity).push_show(params).await)
 }
 
 pub(crate) async fn inbox(id: Value, params: Value, identity: &ServiceIdentity) -> Value {
-    let params = match serde_json::from_value::<PushRecordListParams>(params) {
-        Ok(params) => params,
-        Err(_) => {
-            return failure(
-                id,
-                -32602,
-                "invalidField",
-                "discovery",
-                "Invalid message inbox request",
-            );
-        }
-    };
-    if !caller_is_local(&params.caller, identity) {
+    let Ok(params) = serde_json::from_value::<PushRecordListParams>(params) else {
         return failure(
             id,
             -32602,
-            "wrongService",
+            "invalidField",
             "discovery",
-            "Caller belongs to another Router",
-        );
-    }
-    let Some(store) = identity.automation.as_ref() else {
-        return failure(
-            id,
-            -32050,
-            "unavailable",
-            "discovery",
-            "Push storage is unavailable",
+            "Invalid message inbox request",
         );
     };
-    let records = match store
-        .lock()
-        .await
-        .list_direct_message_inbox(&PushInboxQuery {
-            target: params.caller,
-            limit: params.limit,
-        })
-        .await
-    {
-        Ok(records) => records,
-        Err(StorageError::InvalidRecord) => {
-            return failure(
-                id,
-                -32602,
-                "invalidField",
-                "discovery",
-                "Inbox limit must be between 1 and 100",
-            );
-        }
-        Err(_) => {
-            return failure(
-                id,
-                -32050,
-                "unavailable",
-                "discovery",
-                "Push inbox could not be read",
-            );
-        }
-    };
-    match make_notice_list(records, identity) {
-        Ok(records) => json!({"jsonrpc":"2.0","id":id,"result":PushRecordListResult { records }}),
-        Err(_) => failure(
-            id,
-            -32050,
-            "unavailable",
-            "discovery",
-            "Push notice could not be rendered",
-        ),
-    }
+    message_response(
+        id,
+        MessageOperations::new(identity).message_inbox(params).await,
+    )
 }
 
 pub(crate) async fn history(id: Value, params: Value, identity: &ServiceIdentity) -> Value {
-    let params = match serde_json::from_value::<PushRecordHistoryParams>(params) {
-        Ok(params) => params,
-        Err(_) => {
-            return failure(
-                id,
-                -32602,
-                "invalidField",
-                "discovery",
-                "Invalid message history request",
-            );
-        }
-    };
-    if !caller_is_local(&params.caller, identity) || !caller_is_local(&params.with, identity) {
+    let Ok(params) = serde_json::from_value::<PushRecordHistoryParams>(params) else {
         return failure(
             id,
             -32602,
-            "wrongService",
+            "invalidField",
             "discovery",
-            "Both sessions must belong to this Router",
-        );
-    }
-    let Some(store) = identity.automation.as_ref() else {
-        return failure(
-            id,
-            -32050,
-            "unavailable",
-            "discovery",
-            "Push storage is unavailable",
+            "Invalid message history request",
         );
     };
-    let records = match store
-        .lock()
-        .await
-        .list_direct_message_history(&DirectMessageHistoryQuery {
-            caller: params.caller,
-            with: params.with,
-            limit: params.limit,
-        })
-        .await
-    {
-        Ok(records) => records,
-        Err(StorageError::InvalidRecord) => {
-            return failure(
-                id,
-                -32602,
-                "invalidField",
-                "discovery",
-                "History limit must be between 1 and 100",
-            );
+    message_response(
+        id,
+        MessageOperations::new(identity)
+            .message_history(params)
+            .await,
+    )
+}
+
+/// Control encodes a refused request field or service as invalid params, other failures as -32050.
+pub(crate) fn message_response(
+    id: Value,
+    result: Result<impl serde::Serialize, MessageFailure>,
+) -> Value {
+    match result {
+        Ok(result) => json!({"jsonrpc":"2.0","id":id,"result":result}),
+        Err(failure) => {
+            let code = match failure.kind {
+                MessageFailureKind::InvalidField | MessageFailureKind::WrongService => -32602,
+                MessageFailureKind::ForeignMachine
+                | MessageFailureKind::Unavailable
+                | MessageFailureKind::NotFound
+                | MessageFailureKind::NotPermitted
+                | MessageFailureKind::NotDirectMessage
+                | MessageFailureKind::OwnerReplyUnsupported
+                | MessageFailureKind::OutcomeUnknown => -32050,
+            };
+            json!({"jsonrpc":"2.0","id":id,"error":{"code":code,"message":failure.message,"data":failure}})
         }
-        Err(_) => {
-            return failure(
-                id,
-                -32050,
-                "unavailable",
-                "discovery",
-                "Push history could not be read",
-            );
-        }
-    };
-    match make_notice_list(records, identity) {
-        Ok(records) => json!({"jsonrpc":"2.0","id":id,"result":PushRecordListResult { records }}),
-        Err(_) => failure(
-            id,
-            -32050,
-            "unavailable",
-            "discovery",
-            "Push notice could not be rendered",
-        ),
     }
 }
 
@@ -358,11 +150,11 @@ pub(crate) fn can_read(record: &PushRecord, caller: &SessionRef) -> bool {
         && matches!(&record.origin, PushOrigin::Session(origin) if origin == caller)
 }
 
-fn caller_is_local(caller: &SessionRef, identity: &ServiceIdentity) -> bool {
+pub(crate) fn caller_is_local(caller: &SessionRef, identity: &ServiceIdentity) -> bool {
     caller.endpoint.service_id == identity.service_id
 }
 
-fn make_notice_list(
+pub(crate) fn make_notice_list(
     records: Vec<PushRecord>,
     identity: &ServiceIdentity,
 ) -> Result<Vec<PushRecordNotice>, collaboration_protocol::PushLineError> {
@@ -384,12 +176,12 @@ fn make_notice_list(
         .collect()
 }
 
-enum ActivityReadError {
+pub(crate) enum ActivityReadError {
     Unavailable,
     Failed,
 }
 
-async fn expand_activity_ranges(
+pub(crate) async fn expand_activity_ranges(
     record: &PushRecord,
     identity: &ServiceIdentity,
 ) -> Result<Vec<PushActivityRangeRead>, ActivityReadError> {
@@ -448,14 +240,4 @@ pub(crate) fn failure(id: Value, code: i64, kind: &str, stage: &str, message: &s
         "id":id,
         "error":{"code":code,"message":message,"data":{"kind":kind,"stage":stage,"message":message}}
     })
-}
-
-pub(crate) fn not_found(id: Value, stage: &str) -> Value {
-    failure(
-        id,
-        -32050,
-        "notFound",
-        stage,
-        "not found (expired after 30 days, or never existed)",
-    )
 }

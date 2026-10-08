@@ -129,12 +129,25 @@ impl WakeSubscriptionState {
         Ok(changes)
     }
 }
-pub(crate) fn unavailable(id: Value, wakeup_id: WakeupId) -> Value {
-    let data=collaboration_protocol::WaitUnavailable{kind:collaboration_protocol::WaitUnavailableKind::WaitUnavailable,stage:collaboration_protocol::WaitStage::WaitForFirstFire,message:"Wake wait unavailable; reconnect the wait without recreating or cancelling the reminder.".into(),wakeup_id,first_occurrence_id:None,effects:collaboration_protocol::WaitUnavailableEffects{first_fire:collaboration_protocol::UnknownFire::Unknown,wakeup_mutation:collaboration_protocol::NoMutation::None},next_action:collaboration_protocol::WaitNextAction::ReconnectWait};
-    json!({"jsonrpc":"2.0","id":id,"error":{"code":-32050,"message":"Wake wait unavailable","data":data}})
+/// Control's answer when a first-fire wait cannot start.
+pub(crate) fn wait_failure_response(
+    id: Value,
+    failure: crate::collaboration_application::WakeWaitFailure,
+) -> Value {
+    use crate::collaboration_application::WakeWaitFailure;
+    match failure {
+        WakeWaitFailure::Unavailable(data) => {
+            json!({"jsonrpc":"2.0","id":id,"error":{"code":-32050,"message":"Wake wait unavailable","data":data}})
+        }
+        WakeWaitFailure::NotFound(data) => {
+            json!({"jsonrpc":"2.0","id":id,"error":{"code":-32050,"message":"Wake not found","data":data}})
+        }
+    }
 }
 
-pub(crate) fn not_found(id: Value, wakeup_id: WakeupId) -> Value {
-    let data=collaboration_protocol::WakeNotFound{kind:collaboration_protocol::WakeNotFoundKind::WakeNotFound,stage:collaboration_protocol::WaitStage::WaitForFirstFire,message:"Wake-up was not found in this service; verify the wake identity. Historical firing is unknown.".into(),wakeup_id,first_occurrence_id:None,effects:collaboration_protocol::UnknownFirstFire{first_fire:collaboration_protocol::UnknownFire::Unknown},next_action:collaboration_protocol::VerifyWakeupAddress::VerifyWakeupAddress};
-    json!({"jsonrpc":"2.0","id":id,"error":{"code":-32050,"message":"Wake not found","data":data}})
+pub(crate) fn unavailable(id: Value, wakeup_id: WakeupId) -> Value {
+    wait_failure_response(
+        id,
+        crate::collaboration_application::WakeWaitFailure::unavailable(wakeup_id),
+    )
 }

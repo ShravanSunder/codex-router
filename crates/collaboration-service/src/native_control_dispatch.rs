@@ -1,368 +1,103 @@
-//! Generation-scoped Control calls; no provider policy or native process ownership.
-use crate::{NativeGenerationGate, native_control_request::NativeControlRequest};
-use codex_native_integration::{NativeConnectionError, NativeOperation, NativeProtocolConnection};
-use collaboration_protocol::{
-    CodexGeneration, EndpointRef, NativeInspectParams, NativeInterruptParams, SessionRef,
-};
+//! Codex native session Control dispatch: decodes each request and calls the typed session
+//! operations. No provider policy or native process ownership.
+use crate::ServiceIdentity;
+use crate::collaboration_application::{NativeSessionFailure, SessionOperations};
+use collaboration_protocol::EndpointRef;
 use serde_json::{Value, json};
+#[cfg(test)]
+use {
+    crate::collaboration_application::{
+        NativeSessionStage, classify_native_call_failure, valid_session_rename_name,
+    },
+    codex_native_integration::NativeConnectionError,
+};
 
 #[derive(Clone)]
 pub struct NativeControlBackend {
     pub endpoint: EndpointRef,
-    pub gate: NativeGenerationGate,
+    pub gate: crate::NativeGenerationGate,
     pub codex_home: std::path::PathBuf,
 }
 
-pub(crate) async fn dispatch_native(request: NativeControlRequest<'_>) -> Value {
-    if request.method == "codex/sessionList" {
-        return crate::session_inventory_dispatch::dispatch_inventory(request).await;
+pub(crate) async fn dispatch_native(
+    id: Value,
+    method: &str,
+    params: Value,
+    identity: &ServiceIdentity,
+) -> Value {
+    let sessions = SessionOperations::new(identity);
+    let budget = crate::control_connection::control_result_budget(&id);
+    macro_rules! decode {
+        ($request:ty, $invalid_message:expr) => {
+            match serde_json::from_value::<$request>(params) {
+                Ok(request) => request,
+                Err(_) => return invalid(id, $invalid_message),
+            }
+        };
     }
-    if request.method == "codex/sessionRename" {
-        return dispatch_rename(request).await;
-    }
-    let NativeControlRequest {
-        method,
-        params,
-        id,
-        service_id,
-        backend,
-        endpoints,
-        access_routes,
-        ..
-    } = request;
-    let stage = if method == "codex/sessionInspect" {
-        "inspect"
-    } else {
-        "interrupt"
-    };
-    let (target, generation, operation, native_params, turn_id) = match method {
-        "codex/sessionInspect" => {
-            let Ok(params) = serde_json::from_value::<NativeInspectParams>(params) else {
-                return invalid(id);
+    let result = match method {
+        "codex/sessionList" => {
+            let request = decode!(
+                collaboration_protocol::NativeSessionListParams,
+                INVALID_INVENTORY_MESSAGE
+            );
+            return match sessions.codex_session_list(request, budget).await {
+                Ok(result) => json!({"jsonrpc":"2.0","id":id,"result":result}),
+                Err(failure) => failure_response(id, &failure, INVALID_INVENTORY_MESSAGE),
             };
-            let native = json!({"threadId":String::from(params.target.session_id.clone()),"includeTurns":false});
-            (
-                params.target,
-                None,
-                NativeOperation::ReadThread,
-                native,
-                None,
-            )
+        }
+        "codex/sessionInspect" => {
+            let request = decode!(collaboration_protocol::NativeInspectParams, INVALID_MESSAGE);
+            sessions
+                .codex_session_inspect(request, budget)
+                .await
+                .map(|result| json!(result))
         }
         "codex/turnInterrupt" => {
-            let Ok(params) = serde_json::from_value::<NativeInterruptParams>(params) else {
-                return invalid(id);
-            };
-            let native = json!({"threadId":String::from(params.target.session_id.clone()),"turnId":String::from(params.turn_id.clone())});
-            (
-                params.target,
-                Some(params.generation),
-                NativeOperation::InterruptTurn,
-                native,
-                Some(params.turn_id),
-            )
+            let request = decode!(
+                collaboration_protocol::NativeInterruptParams,
+                INVALID_MESSAGE
+            );
+            sessions
+                .codex_turn_interrupt(request, budget)
+                .await
+                .map(|result| json!(result))
         }
-        _ => return invalid(id),
-    };
-    if &target.endpoint.service_id != service_id {
-        return failure(id, "wrongService", stage);
-    }
-    let Some(endpoint) = endpoints
-        .iter()
-        .find(|endpoint| endpoint.endpoint == target.endpoint)
-    else {
-        return failure(id, "endpointNotFound", stage);
-    };
-    let Some((advertised_digest, advertised_generation)) =
-        endpoint.channels.iter().find_map(|channel| match channel {
-            collaboration_protocol::ChannelDescription::NativeCodex {
-                schema_digest,
-                generation,
-                ..
-            } => Some((schema_digest, generation)),
-            _ => None,
-        })
-    else {
-        return failure(id, "unsupportedCapability", stage);
-    };
-    let Some(backend) = backend.filter(|backend| backend.endpoint == target.endpoint) else {
-        return failure(id, "unsupportedCapability", stage);
-    };
-    let Ok(admission) = backend.gate.acquire() else {
-        return failure(id, "unavailable", stage);
-    };
-    if generation
-        .as_ref()
-        .is_some_and(|generation| generation != admission.generation())
-    {
-        return failure(id, "staleGeneration", stage);
-    }
-    let Some(schemas) = admission.schemas() else {
-        return failure(id, "unsupportedCapability", stage);
-    };
-    if advertised_generation.as_ref() != Some(admission.generation()) {
-        return failure(id, "unavailable", stage);
-    }
-    if advertised_digest
-        .as_ref()
-        .map(|digest| String::from(digest.clone()))
-        .as_deref()
-        != Some(schemas.schema_digest())
-    {
-        return failure(id, "unsupportedCapability", stage);
-    }
-    let retired = admission.retirement();
-    let connection = tokio::select! {
-        biased;
-        _ = retired.cancelled() => return failure(id, "unavailable", stage),
-        connection = NativeProtocolConnection::connect(admission.backend_path()) => connection,
-    };
-    let Ok(mut connection) = connection else {
-        return failure(id, "unavailable", stage);
-    };
-    if retired.is_cancelled() {
-        return failure(id, "unavailable", stage);
-    }
-    let result = tokio::select! {
-        biased;
-        result = connection.request_validated(&schemas, operation, native_params) => result,
-        _ = retired.cancelled() => Err(NativeConnectionError::OutcomeUnknown),
-    };
-    let effective_access = match access_routes {
-        Some(routes) if stage == "inspect" => {
-            recorded_access(routes, String::from(target.session_id.clone()).as_str()).await
+        "codex/sessionRename" => {
+            let request = decode!(collaboration_protocol::NativeRenameParams, INVALID_MESSAGE);
+            sessions
+                .codex_session_rename(request)
+                .await
+                .map(|result| json!(result))
         }
-        _ => None,
+        _ => return invalid(id, INVALID_MESSAGE),
     };
     match result {
-        Ok(result) => success(NativeControlSuccess {
-            id,
-            stage,
-            target,
-            generation: admission.generation().clone(),
-            turn_id,
-            result,
-            effective_access,
-        }),
-        Err(error) => {
-            let native = connection.take_last_rejection();
-            native_call_failure(id, stage, stage != "inspect", &error, native.as_ref())
+        Ok(result) => json!({"jsonrpc":"2.0","id":id,"result":result}),
+        Err(failure) => failure_response(id, &failure, INVALID_MESSAGE),
+    }
+}
+
+const INVALID_MESSAGE: &str = "Invalid native control parameters";
+const INVALID_INVENTORY_MESSAGE: &str = "Invalid session inventory parameters or cursor";
+
+fn invalid(id: Value, message: &str) -> Value {
+    json!({"jsonrpc":"2.0","id":id,"error":{"code":-32602,"message":message}})
+}
+
+/// Control encodes an invalid request as -32602 without data, every other failure as -32050.
+fn failure_response(id: Value, failure: &NativeSessionFailure, invalid_message: &str) -> Value {
+    match failure {
+        NativeSessionFailure::InvalidRequest => invalid(id, invalid_message),
+        NativeSessionFailure::Refused { .. }
+        | NativeSessionFailure::NativeRejected { .. }
+        | NativeSessionFailure::NameMismatch { .. } => {
+            json!({"jsonrpc":"2.0","id":id,"error":{"code":-32050,"message":failure.to_string(),"data":failure}})
         }
     }
 }
 
-fn valid_session_rename_name(name: &str) -> bool {
-    let scalar_count = name.chars().count();
-    name.trim() == name
-        && (1..=120).contains(&scalar_count)
-        && collaboration_protocol::SessionDisplayName::try_from(name.to_owned()).is_ok()
-}
-
-async fn dispatch_rename(request: NativeControlRequest<'_>) -> Value {
-    let Ok(params) =
-        serde_json::from_value::<collaboration_protocol::NativeRenameParams>(request.params)
-    else {
-        return invalid(request.id);
-    };
-    if !valid_session_rename_name(&params.name) {
-        return invalid(request.id);
-    }
-    if &params.target.endpoint.service_id != request.service_id {
-        return failure(request.id, "wrongService", "rename");
-    }
-    let Some(endpoint) = request
-        .endpoints
-        .iter()
-        .find(|entry| entry.endpoint == params.target.endpoint)
-    else {
-        return failure(request.id, "endpointNotFound", "rename");
-    };
-    let Some((advertised_digest, advertised_generation)) =
-        endpoint.channels.iter().find_map(|channel| match channel {
-            collaboration_protocol::ChannelDescription::NativeCodex {
-                schema_digest,
-                generation,
-                ..
-            } => Some((schema_digest, generation)),
-            _ => None,
-        })
-    else {
-        return failure(request.id, "unsupportedCapability", "rename");
-    };
-    let Some(backend) = request
-        .backend
-        .filter(|backend| backend.endpoint == params.target.endpoint)
-    else {
-        return failure(request.id, "unsupportedCapability", "rename");
-    };
-    let Ok(admission) = backend.gate.acquire() else {
-        return failure(request.id, "unavailable", "rename");
-    };
-    let Some(schemas) = admission.schemas() else {
-        return failure(request.id, "unsupportedCapability", "rename");
-    };
-    if advertised_generation.as_ref() != Some(admission.generation())
-        || advertised_digest
-            .as_ref()
-            .map(|value| String::from(value.clone()))
-            .as_deref()
-            != Some(schemas.schema_digest())
-    {
-        return failure(request.id, "unsupportedCapability", "rename");
-    }
-    if !schemas.supports_operation(NativeOperation::SetThreadName) {
-        return rename_method_unsupported(request.id);
-    }
-    let Ok(mut connection) = NativeProtocolConnection::connect(admission.backend_path()).await
-    else {
-        return failure(request.id, "unavailable", "rename");
-    };
-    let thread_id = String::from(params.target.session_id.clone());
-    let before = connection
-        .request_validated(
-            &schemas,
-            NativeOperation::ReadThread,
-            json!({"threadId":thread_id,"includeTurns":false}),
-        )
-        .await;
-    let before = match before {
-        Ok(before) => before,
-        Err(error) => {
-            let native = connection.take_last_rejection();
-            return native_call_failure(request.id, "rename", false, &error, native.as_ref());
-        }
-    };
-    let previous_name = before
-        .pointer("/thread/name")
-        .and_then(Value::as_str)
-        .map(str::to_owned);
-    if let Err(error) = connection
-        .request_validated(
-            &schemas,
-            NativeOperation::SetThreadName,
-            json!({"threadId":thread_id,"name":params.name}),
-        )
-        .await
-    {
-        let native = connection.take_last_rejection();
-        return native_call_failure(request.id, "rename", true, &error, native.as_ref());
-    }
-    let after = connection
-        .request_validated(
-            &schemas,
-            NativeOperation::ReadThread,
-            json!({"threadId":thread_id,"includeTurns":false}),
-        )
-        .await;
-    let after = match after {
-        Ok(after) => after,
-        Err(error) => {
-            let native = connection.take_last_rejection();
-            return native_call_failure(request.id, "rename", true, &error, native.as_ref());
-        }
-    };
-    let Some(name) = after.pointer("/thread/name").and_then(Value::as_str) else {
-        return failure(request.id, "outcomeUnknown", "rename");
-    };
-    if name != params.name {
-        return rename_echo_mismatch(request.id, &params.name, name);
-    }
-    request.display_names.remember(params.target.clone(), name);
-    let result = collaboration_protocol::NativeRenameResult {
-        target: params.target,
-        name: name.to_owned(),
-        previous_name,
-    };
-    json!({"jsonrpc":"2.0","id":request.id,"result":result})
-}
-
-/// Returns the access Router recorded for this thread, if the broker holds one.
-async fn recorded_access(
-    routes: &crate::ServiceInteractionBroker,
-    thread_id: &str,
-) -> Option<collaboration_protocol::RouterAccess> {
-    use codex_acp_adapter::ApprovalBroker;
-    routes
-        .route(thread_id)
-        .await
-        .ok()
-        .flatten()
-        .map(|route| route.access)
-}
-
-struct NativeControlSuccess {
-    id: Value,
-    stage: &'static str,
-    target: SessionRef,
-    generation: CodexGeneration,
-    turn_id: Option<collaboration_protocol::NonEmptyText>,
-    result: Value,
-    effective_access: Option<collaboration_protocol::RouterAccess>,
-}
-fn success(success: NativeControlSuccess) -> Value {
-    let NativeControlSuccess {
-        id,
-        stage,
-        target,
-        generation,
-        turn_id,
-        result,
-        effective_access,
-    } = success;
-    let result = if stage == "inspect" {
-        let Some(thread) = result.get("thread") else {
-            return failure(id, "outcomeUnknown", stage);
-        };
-        if thread.get("id").and_then(Value::as_str)
-            != Some(String::from(target.session_id.clone()).as_str())
-        {
-            return failure(id, "outcomeUnknown", stage);
-        }
-        json!(collaboration_protocol::NativeInspectResult {
-            target,
-            generation,
-            effective_access,
-            settings_observation: collaboration_protocol::SettingsObservation::Unavailable {
-                reason: collaboration_protocol::SettingsUnavailableReason::ThreadReadOmitsSettings,
-            },
-            thread: thread.clone()
-        })
-    } else {
-        let Some(turn_id) = turn_id else {
-            return failure(id, "outcomeUnknown", stage);
-        };
-        if result != json!({}) {
-            return failure(id, "outcomeUnknown", stage);
-        }
-        json!(collaboration_protocol::NativeInterruptResult {
-            target,
-            generation,
-            turn_id,
-            kind: collaboration_protocol::NativeInterruptKind::InterruptCompleted
-        })
-    };
-    let response = json!({"jsonrpc":"2.0","id":id,"result":result});
-    if serde_json::to_vec(&response)
-        .is_ok_and(|bytes| bytes.len() <= collaboration_protocol::MAX_CONTROL_FRAME_BYTES)
-    {
-        response
-    } else {
-        failure(id, "overloaded", stage)
-    }
-}
-/// The name the runtime echoed is not the name Router asked for: report both.
-fn rename_echo_mismatch(id: Value, requested: &str, effective: &str) -> Value {
-    json!({"jsonrpc":"2.0","id":id,"error":{"code":-32050,"message":"Native session rename failed","data":{"kind":"nameMismatch","requested":requested,"effective":effective,"stage":"rename"}}})
-}
-
-fn invalid(id: Value) -> Value {
-    json!({"jsonrpc":"2.0","id":id,"error":{"code":-32602,"message":"Invalid native control parameters"}})
-}
-/// Projects one failed native control call.
-///
-/// A refusal keeps its reason and corrective action from the shared closed set.
-/// After a dispatched mutation, a lost or unreadable outcome is unknown, never a
-/// refusal; before one, it is plain unavailability.
+#[cfg(test)]
 fn native_call_failure(
     id: Value,
     stage: &'static str,
@@ -370,68 +105,28 @@ fn native_call_failure(
     error: &NativeConnectionError,
     native: Option<&Value>,
 ) -> Value {
-    match error {
-        NativeConnectionError::InvalidInput => invalid(id),
-        NativeConnectionError::Rejected { code } => {
-            let (reason, next_action) =
-                crate::message_effect_state::classify_native_rejection(*code, native);
-            let native_message = native
-                .and_then(|value| value.get("message"))
-                .and_then(Value::as_str)
-                .filter(|message| !message.is_empty());
-            let message = native_message.unwrap_or("Native control operation failed");
-            let mut data = json!({"kind":"nativeRejected","stage":stage,
-                "message":message,
-                "reason":reason,"nextAction":next_action});
-            if reason == "unknown"
-                && let Some(fields) = data.as_object_mut()
-            {
-                fields.insert("nativeCode".into(), json!(code));
-            }
-            json!({"jsonrpc":"2.0","id":id,"error":{"code":-32050,"message":message,"data":data}})
-        }
-        NativeConnectionError::Unavailable if !mutation => failure(id, "unavailable", stage),
-        NativeConnectionError::UnavailableWithCause(cause) if !mutation => failure_with_message(
-            id,
-            "unavailable",
-            stage,
-            &format!("Native {stage} failed before dispatch: {cause}"),
-        ),
-        error if mutation => failure_with_message(
-            id,
-            "outcomeUnknown",
-            stage,
-            &format!(
-                "Native {stage} outcome is unknown after dispatch: {error}; no request was replayed"
-            ),
-        ),
-        error => failure_with_message(
-            id,
-            "unavailable",
-            stage,
-            &format!("Native {stage} read did not complete: {error}"),
-        ),
-    }
+    let stage = match stage {
+        "inspect" => NativeSessionStage::Inspect,
+        "interrupt" => NativeSessionStage::Interrupt,
+        _ => NativeSessionStage::Rename,
+    };
+    let failure = classify_native_call_failure(stage, mutation, error, native);
+    failure_response(id, &failure, INVALID_MESSAGE)
 }
 
-fn failure(id: Value, kind: &str, stage: &str) -> Value {
-    failure_with_message(id, kind, stage, "Native control operation failed")
+#[cfg(test)]
+fn rename_echo_mismatch(id: Value, requested: &str, effective: &str) -> Value {
+    let failure = NativeSessionFailure::NameMismatch {
+        requested: requested.to_owned(),
+        effective: effective.to_owned(),
+    };
+    failure_response(id, &failure, INVALID_MESSAGE)
 }
 
+#[cfg(test)]
 fn rename_method_unsupported(id: Value) -> Value {
-    let method_name = NativeOperation::SetThreadName.method_name();
-    failure_with_message(
-        id,
-        "unsupportedCapability",
-        "rename",
-        &format!(
-            "Codex app-server method `{method_name}` is missing from its cached schema; update Codex so its app-server schema defines ThreadSetNameParams and ThreadSetNameResponse, then restart the Router Host"
-        ),
-    )
-}
-
-fn failure_with_message(id: Value, kind: &str, stage: &str, message: &str) -> Value {
-    json!({"jsonrpc":"2.0","id":id,"error":{"code":-32050,"message":message,"data":{"kind":kind,"stage":stage,"message":message}}})
+    let failure = crate::collaboration_application::rename_method_unsupported();
+    failure_response(id, &failure, INVALID_MESSAGE)
 }
 
 #[cfg(test)]

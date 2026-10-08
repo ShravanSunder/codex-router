@@ -1,22 +1,10 @@
-//! Board-family Control dispatch; typed domain requests enter one serialized store.
+//! Board-family Control dispatch: decodes each request and calls the typed board operations.
 use crate::ServiceIdentity;
+use crate::collaboration_application::BoardOperations;
 use message_board::*;
 use serde_json::{Value, json};
 pub(crate) fn failure(id: Value, error: BoardError) -> Value {
     json!({"jsonrpc":"2.0","id":id,"error":{"code":-32050,"message":error.message,"data":error}})
-}
-pub(crate) fn unavailable(id: Value) -> Value {
-    failure(
-        id,
-        BoardError {
-            kind: BoardFailureKind::BoardUnavailable,
-            stage: BoardFailureStage::Admission,
-            message: "Board storage unavailable; inspect the selected debug/service profile."
-                .into(),
-            next_action: BoardNextAction::RetryLater,
-            details: BoardErrorDetails::None,
-        },
-    )
 }
 pub(crate) fn overloaded(id: Value) -> Value {
     failure(
@@ -37,56 +25,24 @@ pub(crate) async fn dispatch(
     params: Value,
     identity: &ServiceIdentity,
 ) -> Value {
-    let Some(store) = identity.board.as_ref() else {
-        return unavailable(id);
-    };
-    if let Some(repository) = params.get("repository")
-        && let Ok(RepositoryRef::Local { service_id, .. }) =
-            serde_json::from_value::<RepositoryRef>(repository.clone())
-        && service_id.as_str() != String::from(identity.service_id.clone())
-    {
-        return failure(
-            id,
-            BoardError::invalid_field(
-                "repository.serviceId",
-                "must match the selected board service",
-            ),
-        );
-    }
-
+    let board = BoardOperations::new(identity);
     macro_rules! call {
- ($request:ty,$method:ident)=>{{
- let request=match serde_json::from_value::<$request>(params.clone()) {
-     Ok(request)=>request,
-     Err(_error)=>return failure(id,crate::board_request_validation::classify(method,&params)),
- };
- let result=store.lock().await.$method(request).await;
- match result { Ok(result)=>json!({"jsonrpc":"2.0","id":id,"result":result}),Err(error)=>failure(id,error) }
- }};
- }
-    // Lifecycle writes use the same clock as the delivery owner for durable window deadlines.
-    macro_rules! call_with_subscription_now_and_reconcile {
- ($request:ty,$method:ident)=>{{
- let request=match serde_json::from_value::<$request>(params.clone()) {
-     Ok(request)=>request,
-     Err(_error)=>return failure(id,crate::board_request_validation::classify(method,&params)),
- };
- let reader=request.actor.clone();
- let result=store.lock().await.$method(request,identity.subscription_clock.now()).await;
- match result {
-     Ok(result)=>{
-         if let Some(service)=identity.subscription_delivery.as_ref()
-             && let Err(error)=service.reconcile_reader(reader).await
-         {
-             tracing::warn!(error=%error,"subscription owner reconciliation failed after a board write");
-             return failure(id,subscription_reconciliation_failed());
-         }
-         json!({"jsonrpc":"2.0","id":id,"result":result})
-     },
-     Err(error)=>failure(id,error)
- }
- }};
- }
+        ($request:ty, $operation:ident) => {{
+            let request = match serde_json::from_value::<$request>(params.clone()) {
+                Ok(request) => request,
+                Err(_error) => {
+                    return failure(
+                        id,
+                        crate::board_request_validation::classify(method, &params),
+                    );
+                }
+            };
+            match board.$operation(request).await {
+                Ok(result) => json!({"jsonrpc":"2.0","id":id,"result":result}),
+                Err(error) => failure(id, error),
+            }
+        }};
+    }
     match method {
         "board/threadSubscribe"
         | "board/threadUnsubscribe"
@@ -94,69 +50,45 @@ pub(crate) async fn dispatch(
         | "board/threadWait" => {
             crate::thread_subscription_dispatch::dispatch(id, method, params, identity).await
         }
-        "board/discoverySearch" => call!(DiscoverySearchRequest, search_discovery),
-        "board/messageSearch" => call!(MessageSearchRequest, search_messages),
-        "board/projectCreate" => call!(ProjectCreateRequest, create_project),
-        "board/projectUpdate" => call!(ProjectUpdateRequest, update_project),
-        "board/projectShow" => call!(ProjectShowRequest, show_project),
-        "board/projectList" => call!(ProjectListRequest, list_projects),
-        "board/repositoryAttach" => call!(RepositoryAttachRequest, attach_repository),
-        "board/repositoryDetach" => call!(RepositoryDetachRequest, detach_repository),
-        "board/repositoryList" => call!(RepositoryListRequest, list_repositories),
-        "board/create" => call!(BoardCreateRequest, create_board),
-        "board/update" => call!(BoardUpdateRequest, update_board),
-        "board/show" => call!(BoardShowRequest, show_board),
-        "board/list" => call!(BoardListRequest, list_boards),
-        "board/archive" => call!(BoardArchiveRequest, archive_board),
-        "board/topicCreate" => call!(TopicCreateRequest, create_topic),
-        "board/topicUpdate" => call!(TopicUpdateRequest, update_topic),
-        "board/topicList" => call!(TopicListRequest, list_topics),
-        "board/messagePost" => {
-            call_with_subscription_now_and_reconcile!(MessagePostRequest, post_message)
-        }
-        "board/messageShow" => call!(MessageShowRequest, show_message),
-        "board/messageList" => call!(MessageListRequest, list_messages),
-        "board/threadShow" => call!(ThreadShowRequest, show_thread),
-        "board/threadResolve" => {
-            call_with_subscription_now_and_reconcile!(ThreadResolveRequest, resolve_thread)
-        }
-        "board/threadUnresolve" => call!(ThreadUnresolveRequest, unresolve_thread),
-        "board/threadWatch" => call!(ThreadWatchRequest, watch_thread),
-        "board/threadUnwatch" => {
-            call_with_subscription_now_and_reconcile!(ThreadUnwatchRequest, unwatch_thread)
-        }
-        "board/topicWatch" => call!(TopicWatchRequest, watch_topic),
-        "board/topicUnwatch" => {
-            call_with_subscription_now_and_reconcile!(TopicWatchRequest, unwatch_topic)
-        }
-        "board/threadList" => call!(ThreadListRequest, list_threads),
-        "board/threadCreate" => {
-            call_with_subscription_now_and_reconcile!(ThreadCreateRequest, create_thread)
-        }
-        "board/threadJoin" => {
-            call_with_subscription_now_and_reconcile!(ThreadJoinRequest, join_thread)
-        }
-        "board/threadLeave" => {
-            call_with_subscription_now_and_reconcile!(ThreadLeaveRequest, leave_thread)
-        }
+        "board/discoverySearch" => call!(DiscoverySearchRequest, discovery_search),
+        "board/messageSearch" => call!(MessageSearchRequest, message_search),
+        "board/projectCreate" => call!(ProjectCreateRequest, project_create),
+        "board/projectUpdate" => call!(ProjectUpdateRequest, project_update),
+        "board/projectShow" => call!(ProjectShowRequest, project_show),
+        "board/projectList" => call!(ProjectListRequest, project_list),
+        "board/repositoryAttach" => call!(RepositoryAttachRequest, repository_attach),
+        "board/repositoryDetach" => call!(RepositoryDetachRequest, repository_detach),
+        "board/repositoryList" => call!(RepositoryListRequest, repository_list),
+        "board/create" => call!(BoardCreateRequest, board_create),
+        "board/update" => call!(BoardUpdateRequest, board_update),
+        "board/show" => call!(BoardShowRequest, board_show),
+        "board/list" => call!(BoardListRequest, board_list),
+        "board/archive" => call!(BoardArchiveRequest, board_archive),
+        "board/topicCreate" => call!(TopicCreateRequest, topic_create),
+        "board/topicUpdate" => call!(TopicUpdateRequest, topic_update),
+        "board/topicList" => call!(TopicListRequest, topic_list),
+        "board/messagePost" => call!(MessagePostRequest, message_post),
+        "board/messageShow" => call!(MessageShowRequest, message_show),
+        "board/messageList" => call!(MessageListRequest, message_list),
+        "board/threadShow" => call!(ThreadShowRequest, thread_show),
+        "board/threadResolve" => call!(ThreadResolveRequest, thread_resolve),
+        "board/threadUnresolve" => call!(ThreadUnresolveRequest, thread_unresolve),
+        "board/threadWatch" => call!(ThreadWatchRequest, thread_watch),
+        "board/threadUnwatch" => call!(ThreadUnwatchRequest, thread_unwatch),
+        "board/topicWatch" => call!(TopicWatchRequest, topic_watch),
+        "board/topicUnwatch" => call!(TopicWatchRequest, topic_unwatch),
+        "board/threadList" => call!(ThreadListRequest, thread_list),
+        "board/threadCreate" => call!(ThreadCreateRequest, thread_create),
+        "board/threadJoin" => call!(ThreadJoinRequest, thread_join),
+        "board/threadLeave" => call!(ThreadLeaveRequest, thread_leave),
         "board/threadParticipantList" => {
-            call!(ThreadParticipantListRequest, list_thread_participants)
+            call!(ThreadParticipantListRequest, thread_participant_list)
         }
-        "board/inboxFetch" => call!(InboxFetchRequest, fetch_inbox),
-        "board/inboxAcknowledge" => call!(InboxAcknowledgeRequest, acknowledge_inbox),
-        "board/inboxProjects" => call!(InboxProjectsRequest, list_inbox_projects),
+        "board/inboxFetch" => call!(InboxFetchRequest, inbox_fetch),
+        "board/inboxAcknowledge" => call!(InboxAcknowledgeRequest, inbox_acknowledge),
+        "board/inboxProjects" => call!(InboxProjectsRequest, inbox_projects),
         _ => {
             json!({"jsonrpc":"2.0","id":id,"error":{"code":-32601,"message":"Unknown board method"}})
         }
-    }
-}
-
-fn subscription_reconciliation_failed() -> BoardError {
-    BoardError {
-        kind: BoardFailureKind::OutcomeUnknown,
-        stage: BoardFailureStage::Storage,
-        message: "The board change was saved, but subscription delivery could not synchronize. Inspect the current subscription state before retrying.".to_owned(),
-        next_action: BoardNextAction::RetryLater,
-        details: BoardErrorDetails::None,
     }
 }

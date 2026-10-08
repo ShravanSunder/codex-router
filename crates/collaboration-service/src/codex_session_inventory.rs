@@ -1,5 +1,8 @@
 //! Stored catalog and live native inventory keep separate, endpoint-bound pagination.
-use crate::native_control_request::NativeControlRequest;
+use crate::ServiceIdentity;
+use crate::collaboration_application::{
+    NativeSessionFailure, NativeSessionFailureKind, NativeSessionStage, ResultByteBudget,
+};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use codex_native_integration::{
     NativeConnectionError, NativeOperation, NativeProtocolConnection, StoredThreadCatalog,
@@ -7,8 +10,8 @@ use codex_native_integration::{
     StoredThreadSort, StoredThreadSource,
 };
 use collaboration_protocol::{
-    CodexGeneration, NativeSessionListParams, NativeSessionScope, NativeSessionSource,
-    NativeSessionView,
+    CodexGeneration, NativeSessionListParams, NativeSessionListResult, NativeSessionScope,
+    NativeSessionSource, NativeSessionView,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -51,11 +54,8 @@ struct InventoryCursor {
     source: NativeSessionSource,
     query: Option<String>,
 }
-fn failed(id: Value, kind: &str) -> Value {
-    json!({"jsonrpc":"2.0","id":id,"error":{"code":-32050,"message":"Session inventory unavailable","data":{"kind":kind,"stage":"discovery","message":"Session inventory unavailable"}}})
-}
-fn invalid(id: Value) -> Value {
-    json!({"jsonrpc":"2.0","id":id,"error":{"code":-32602,"message":"Invalid session inventory parameters or cursor"}})
+fn failed(kind: NativeSessionFailureKind) -> NativeSessionFailure {
+    NativeSessionFailure::refused(kind, NativeSessionStage::Discovery)
 }
 fn classify_source(source: Option<&str>, thread_source: Option<&str>) -> NativeSessionSource {
     if matches!(
@@ -169,26 +169,32 @@ fn active_turn_id(status: &Value) -> Option<&str> {
         .and_then(Value::as_str)
 }
 
-pub(crate) async fn dispatch_inventory(request: NativeControlRequest<'_>) -> Value {
-    let Ok(params) = serde_json::from_value::<NativeSessionListParams>(request.params) else {
-        return invalid(request.id);
-    };
-    let display_names = request.display_names;
+/// Pages one Codex endpoint's stored catalog, or its loaded or active threads.
+///
+/// A stored page is recorded in the lifecycle journal only once it fits `budget`.
+pub(crate) async fn list_codex_sessions(
+    identity: &ServiceIdentity,
+    params: NativeSessionListParams,
+    budget: ResultByteBudget,
+) -> Result<NativeSessionListResult, NativeSessionFailure> {
+    let display_names = &identity.display_names;
     if !(1..=100).contains(&params.page_size) {
-        return invalid(request.id);
+        return Err(NativeSessionFailure::InvalidRequest);
     }
-    if &params.endpoint.service_id != request.service_id {
-        return failed(request.id, "wrongService");
+    if params.endpoint.service_id != identity.service_id {
+        return Err(failed(NativeSessionFailureKind::WrongService));
     }
-    if !request
-        .endpoints
-        .iter()
-        .any(|e| e.endpoint == params.endpoint)
-    {
-        return failed(request.id, "endpointNotFound");
+    match identity.directory.read_endpoint(&params.endpoint) {
+        Ok(Some(_)) => {}
+        Ok(None) => return Err(failed(NativeSessionFailureKind::EndpointNotFound)),
+        Err(_) => return Err(failed(NativeSessionFailureKind::Unavailable)),
     }
-    let Some(backend) = request.backend.filter(|b| b.endpoint == params.endpoint) else {
-        return failed(request.id, "unsupportedCapability");
+    let Some(backend) = identity
+        .native_backend
+        .as_ref()
+        .filter(|b| b.endpoint == params.endpoint)
+    else {
+        return Err(failed(NativeSessionFailureKind::UnsupportedCapability));
     };
     let view = match params.view {
         NativeSessionView::Stored => "stored",
@@ -199,7 +205,7 @@ pub(crate) async fn dispatch_inventory(request: NativeControlRequest<'_>) -> Val
         None => None,
         Some(text) => {
             if text.is_empty() || text.len() > 1024 {
-                return invalid(request.id);
+                return Err(NativeSessionFailure::InvalidRequest);
             }
             let decoded = URL_SAFE_NO_PAD
                 .decode(text)
@@ -213,7 +219,7 @@ pub(crate) async fn dispatch_inventory(request: NativeControlRequest<'_>) -> Val
                     && c.include_empty_sessions == params.include_empty_sessions
                     && c.query == params.query
             }) else {
-                return invalid(request.id);
+                return Err(NativeSessionFailure::InvalidRequest);
             };
             Some(cursor)
         }
@@ -225,15 +231,15 @@ pub(crate) async fn dispatch_inventory(request: NativeControlRequest<'_>) -> Val
                 || c.expires_at.is_some()
                 || c.stored_id.as_ref().is_none_or(String::is_empty)
         }) {
-            return invalid(request.id);
+            return Err(NativeSessionFailure::InvalidRequest);
         }
-        stored_page(&backend.codex_home, &params, cursor, display_names).await
+        stored_page(&backend.codex_home, &params, cursor, display_names, budget).await
     } else {
         let Ok(admission) = backend.gate.acquire() else {
-            return failed(request.id, "unavailable");
+            return Err(failed(NativeSessionFailureKind::Unavailable));
         };
         let Some(schemas) = admission.schemas() else {
-            return failed(request.id, "unsupportedCapability");
+            return Err(failed(NativeSessionFailureKind::UnsupportedCapability));
         };
         if cursor.as_ref().is_some_and(|c| {
             c.generation.as_ref() != Some(admission.generation())
@@ -242,7 +248,7 @@ pub(crate) async fn dispatch_inventory(request: NativeControlRequest<'_>) -> Val
                 || c.stored_id.is_some()
                 || c.stored_time.is_some()
         }) {
-            return invalid(request.id);
+            return Err(NativeSessionFailure::InvalidRequest);
         }
         let retired = admission.retirement();
         tokio::select! {
@@ -250,30 +256,25 @@ pub(crate) async fn dispatch_inventory(request: NativeControlRequest<'_>) -> Val
             result=runtime_page(&params,cursor,&admission,&schemas,display_names)=>result,
         }
     };
-    match result {
-        Ok(result) => {
-            // Admission/rendering must succeed before catalog observations enter the journal.
-            let response = json!({"jsonrpc":"2.0","id":request.id,"result":result});
-            if serde_json::to_vec(&response)
-                .is_ok_and(|bytes| bytes.len() <= collaboration_protocol::MAX_CONTROL_FRAME_BYTES)
-            {
-                if matches!(params.view, NativeSessionView::Stored)
-                    && let Some(observer) = request.stored_observation
-                    && let Ok(page) = serde_json::from_value::<
-                        collaboration_protocol::NativeSessionListResult,
-                    >(result)
-                {
-                    // A storage failure invalidates C10 through LifecycleStore; it does not
-                    // turn a successful read-only catalog operation into a native failure.
-                    let _recorded = observer.record_page(&page).await;
-                }
-                response
-            } else {
-                failed(request.id, "overloaded")
-            }
-        }
-        Err(()) => failed(request.id, "unavailable"),
+    let Ok(page) = result else {
+        return Err(failed(NativeSessionFailureKind::Unavailable));
+    };
+    // Admission/rendering must succeed before catalog observations enter the journal.
+    if !budget.admits(&page) {
+        return Err(failed(NativeSessionFailureKind::ResponseTooLarge));
     }
+    if matches!(params.view, NativeSessionView::Stored)
+        && let Some(store) = identity.journal.as_deref()
+    {
+        let observer = crate::stored_inventory_observation::StoredInventoryObservation {
+            store,
+            observer_id: &identity.service_epoch,
+        };
+        // A storage failure invalidates C10 through LifecycleStore; it does not
+        // turn a successful read-only catalog operation into a native failure.
+        let _recorded = observer.record_page(&page).await;
+    }
+    Ok(page)
 }
 fn encode(cursor: InventoryCursor) -> Result<String, ()> {
     let value = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&cursor).map_err(|_| ())?);
@@ -288,7 +289,8 @@ async fn stored_page(
     params: &NativeSessionListParams,
     cursor: Option<InventoryCursor>,
     display_names: &crate::SessionDisplayNameCache,
-) -> Result<Value, ()> {
+    budget: ResultByteBudget,
+) -> Result<NativeSessionListResult, ()> {
     let catalog = StoredThreadCatalog::open(home).await.map_err(|_| ())?;
     let query = StoredThreadQuery {
         root: match &params.scope {
@@ -331,9 +333,9 @@ async fn stored_page(
     let mut has_more = rows.len() == params.page_size as usize;
     let mut sessions = Vec::new();
     let mut last = None;
-    // Reserve room for the endpoint, timestamp, maximum cursor and escaped
-    // Control request ID. The final full-envelope check remains authoritative.
-    let page_budget = collaboration_protocol::MAX_CONTROL_FRAME_BYTES.saturating_sub(4096);
+    // Reserve room for the endpoint, timestamp, maximum cursor and the response envelope.
+    // The caller's final budget check remains authoritative.
+    let page_budget = budget.response_limit_bytes().saturating_sub(4096);
     let mut page_bytes = 0usize;
     for row in rows {
         let id: String = row.try_get("id").map_err(|_| ())?;
@@ -422,7 +424,7 @@ async fn runtime_page(
     admission: &crate::NativeAdmission,
     schemas: &codex_native_integration::NativePayloadSchemas,
     display_names: &crate::SessionDisplayNameCache,
-) -> Result<Value, ()> {
+) -> Result<NativeSessionListResult, ()> {
     let mut native = NativeProtocolConnection::connect(admission.backend_path())
         .await
         .map_err(|_| ())?;
@@ -604,7 +606,7 @@ fn page(
     generation: Option<&CodexGeneration>,
     sessions: Vec<Value>,
     next: Option<String>,
-) -> Result<Value, ()> {
+) -> Result<NativeSessionListResult, ()> {
     let mut result = json!({"endpoint":params.endpoint,"observedAt":chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis,true),"generation":generation,"sessions":sessions});
     if let Some(next) = next {
         result
@@ -612,7 +614,5 @@ fn page(
             .ok_or(())?
             .insert("nextCursor".into(), json!(next));
     }
-    let _: collaboration_protocol::NativeSessionListResult =
-        serde_json::from_value(result.clone()).map_err(|_| ())?;
-    Ok(result)
+    serde_json::from_value(result).map_err(|_| ())
 }
