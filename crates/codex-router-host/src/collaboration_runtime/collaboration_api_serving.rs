@@ -112,3 +112,41 @@ impl ServedCollaborationApi {
         first_failure.map_or(Ok(()), Err)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::ServedCollaborationApi;
+    use std::{io, time::Duration};
+    use tokio_util::sync::CancellationToken;
+
+    #[tokio::test]
+    async fn reported_listener_failure_stops_without_repolling_the_failed_task() {
+        // Arrange: one listener fails at once; the other serves until shutdown.
+        let shutdown = CancellationToken::new();
+        let serving = shutdown.clone();
+        let mut served = ServedCollaborationApi {
+            tasks: vec![
+                tokio::spawn(async { Err(io::Error::other("listener failed")) }),
+                tokio::spawn(async move {
+                    serving.cancelled().await;
+                    Ok(())
+                }),
+            ],
+            _socket_cleanup: None,
+        };
+
+        // Act
+        let failure = tokio::time::timeout(Duration::from_secs(1), served.failure())
+            .await
+            .expect("the failed listener is reported");
+        shutdown.cancel();
+        let stopped = tokio::time::timeout(Duration::from_secs(1), served.stopped())
+            .await
+            .expect("stopping does not wait on the failed task again");
+
+        // Assert
+        assert_eq!(failure.to_string(), "listener failed");
+        assert!(stopped.is_ok(), "{stopped:?}");
+        assert!(served.tasks.is_empty());
+    }
+}

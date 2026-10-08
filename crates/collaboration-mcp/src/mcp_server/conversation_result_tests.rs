@@ -1,5 +1,5 @@
 //! Common conversation completion and failure projection tests.
-use collaboration_protocol::OperationId;
+use collaboration_protocol::{OperationEffect, OperationId};
 
 #[test]
 fn codex_running_prompt_is_a_successful_typed_tool_result() {
@@ -349,4 +349,23 @@ fn resumed_prompt_load_response_loss_retains_target_with_unknown_effect() {
     assert_eq!(structured["kind"], "unavailable");
     assert_eq!(structured["stage"], "load");
     assert_eq!(structured["data"]["ioKind"], "ConnectionReset");
+}
+
+#[test]
+fn caller_cancellation_effect_reflects_the_submission_boundary() {
+    // A composite cancelled before it submits leaves nothing behind; after it submits, the
+    // provider work may continue, so the effect is unknown and the operation is named.
+    let operation_id = OperationId::generate();
+    let before = super::conversation_call_cancelled(OperationEffect::None, Some(&operation_id))
+        .structured_content
+        .expect("pre-submission cancellation");
+    let after = super::conversation_call_cancelled(OperationEffect::Unknown, Some(&operation_id))
+        .structured_content
+        .expect("post-submission cancellation");
+
+    for (presented, effect) in [(before, "none"), (after, "unknown")] {
+        assert_eq!(presented["kind"], "callerCancelled");
+        assert_eq!(presented["effect"], effect);
+        assert_eq!(presented["operationId"], serde_json::json!(operation_id));
+    }
 }

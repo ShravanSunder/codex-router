@@ -193,3 +193,7 @@ mod collaboration_rejection_tests;
 #[cfg(test)]
 #[path = "result_byte_budget_tests.rs"]
 mod result_byte_budget_tests;
+
+#[cfg(test)]
+#[path = "thread_wait_budget_tests.rs"]
+mod thread_wait_budget_tests;
