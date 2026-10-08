@@ -23,9 +23,10 @@ Structure: [program-design.md](program-design.md).
   `turso::memory:` (or `?mode=memory`) opens a private memory database. Each connection applies
   `busy_timeout` and `PRAGMA foreign_keys` (ON by default) before it is returned.
 - **Execute and fetch.** Literal and prepared SQL, positional (`?`, `?N`, `$N`) arguments,
-  multi-statement batches without arguments, streamed rows, dropped streams leaving the
-  connection reusable, a bounded statement cache, SQLite-compatible error codes and SQLx error
-  kinds (unique, foreign key, not null, check).
+  multi-statement batches without arguments, streamed rows (each delivered before the next is
+  stepped), dropped streams leaving the connection reusable with their statement reset, a bounded
+  statement cache that is emptied when the schema changes, SQLite-compatible error codes and SQLx
+  error kinds (unique, foreign key, not null, check).
 - **Values.** NULL, INTEGER, REAL, TEXT and BLOB storage; `bool`, signed and unsigned integers,
   floats, `String`/`&str`, `Vec<u8>`/`&[u8]`, `Option<T>`; chrono date, time and datetime types,
   with UTC datetimes encoded as RFC 3339 text.
@@ -39,8 +40,8 @@ Structure: [program-design.md](program-design.md).
   `query_file_scalar!` describe against the native engine online, or read committed metadata
   offline. Parameter checking stays weak (no arity check).
 - **Sync.** A synced connection pushes local changes and pulls remote ones on the same handle; a
-  persistent reader sees pulled rows through its existing connection and cached statements. The
-  whole database replicates; there is no table selector.
+  persistent reader sees pulled rows and pulled schema changes through its existing connection
+  and cached statements. The whole database replicates; there is no table selector.
 
 ## S3. Surfaces removed (hard cutover)
 

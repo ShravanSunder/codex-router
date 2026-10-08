@@ -40,9 +40,9 @@ Line counts are targets after trimming; every file stays at or under about 600.
 | `connect_options/sync_options.rs` | `TursoSyncOptions` | `options.rs` 44–52, 791–860 |
 | `connect_options/connection_url.rs` | `turso:` URL parsing (`FromStr`) and `to_url_lossy` rendering | `options.rs` 514–529, 565–789 |
 | `engine_connection.rs` | Open the local or synced `turso::Database`, connect, apply `busy_timeout` and `foreign_keys` | `driver.rs` (renamed: it opens the engine connection) |
-| `connection.rs` | `TursoConnection`, `Connection` impl, transaction-depth state, statement cache, Sync operations | `connection.rs` |
+| `connection.rs` | `TursoConnection`, `Connection` impl, transaction-depth state, statement cache and its schema-cookie check, Sync operations | `connection.rs` |
 | `executor/mod.rs` | `Executor` impl: fetch, prepare, describe | `executor.rs` 1–116, 192–265 |
-| `executor/row_stream.rs` | The row stream state machine over `turso::Rows` | `executor.rs` 118–190 |
+| `executor/row_stream.rs` | The row stream state machine over `turso::Rows`; resets its statement when it ends or is dropped | `executor.rs` 118–190 |
 | `executor/sql_inspection.rs` | Multi-statement and named-placeholder inspection | `executor.rs` 267–409 |
 | `executor/tests.rs` | Executor behaviour tests | `executor.rs` 423–866, trimmed |
 | `transaction.rs` | `TursoTransactionManager` | unchanged, MVCC tests removed |
@@ -67,10 +67,10 @@ condition the driver raises: URL (`MissingTursoScheme`, `InvalidUrlPath`,
 `sqlx::Error::Configuration`; decode variants travel SQLx's decode path. Callers downcast the
 boxed source to match a variant.
 
-`to_url_lossy` keeps the one production `expect`: `ConnectOptions::to_url_lossy` cannot fail,
-every `Url` constructor is fallible, so the constant `turso:` literal is parsed with
-`#[expect(clippy::expect_used, reason = …)]`. The alternative, leaving SQLx's default
-`unimplemented!()`, would be a reachable panic.
+`to_url_lossy` keeps the one production `expect`, approved by the owner on 2026-10-08:
+`ConnectOptions::to_url_lossy` cannot fail, every `Url` constructor is fallible, so the constant
+`turso:` literal is parsed with `#[expect(clippy::expect_used, reason = …)]`. The alternative,
+leaving SQLx's default `unimplemented!()`, would be a reachable panic.
 
 ### `crates/sqlx-turso-macros/src/lib.rs`
 
@@ -283,7 +283,7 @@ barriers (need the PoC gateway).
 | `macros` feature links `sqlx-macros-core` into the runtime graph (upstream design) | `DatabaseExt` can live where orphan rules allow | Larger dependency graph for applications that enable `macros`. Narrowing it is follow-up work. |
 | Workspace `sqlx` without `sqlite` | Turso crates stay Turso-only; exact SQLx pin visible | Thirteen existing manifests each gain `features = ["sqlite"]` |
 | Crate-local `.sqlx` plus a second prep script | Zero interaction with the stock cache and script | Two prep commands; CI runs both |
-| Required `tursodb` binary for tests | Sync proof runs in every CI run, against the exact release | A download step in CI and a one-time local install |
+| Required `tursodb` binary for tests (CI download approved by the owner, 2026-10-08) | Sync proof runs in every CI run, against the exact release | A download step in CI and a one-time local install |
 </content>
 </invoke>
 
@@ -365,3 +365,12 @@ passed 3 of 3 runs, interleaved under the same load, from plain source copies of
 branch at an earlier commit, of the current HEAD, and of the worktree's own files including its
 `.git` pointer. `codex-router-auth` resolves to exactly `main`'s graph and features. The failure
 follows the checkout's on-disk location, not the code; its root cause is not identified.
+
+### 12.5 Second independent review findings and fixes (Sol, 2026-10-08)
+
+| Finding | Fix |
+|---|---|
+| F1: cached statements kept obsolete result columns across schema changes | Confirmed: after `ADD COLUMN` a cached `SELECT *` returned `["id"]`, after `RENAME COLUMN` the old name. The engine reprepares only on the first step (`turso_core` `statement.rs` 646–663), after the driver and the SDK took the column list (`turso` `rows.rs` 48–74). Before reusing the cache the connection reads `PRAGMA schema_version` through one held statement and empties the cache when the cookie changed. Tests: add, rename, unchanged schema keeps the cache, another connection's `ADD COLUMN`, and a column pulled by Sync into a persistent reader |
+| — (found while fixing F1) | A stream abandoned after its first row (`fetch_one`, `fetch_optional`) left a cached statement unfinished: the engine resets a statement only when it is dropped (`Drop for Statement` → `reset_best_effort`), and the cache kept it alive. A read pinned the connection to its old snapshot and schema (the pulled column stayed invisible); `INSERT … RETURNING` read with `fetch_one` stayed uncommitted (another connection counted 0 rows). The row stream now resets its statement when it ends or is dropped, while the SDK's operation guard is still held; a test covers each case |
+| F2: the row lookahead could discard a valid row when the following row errored | Confirmed: the stream stepped one row ahead and returned that row's error in place of the row it held. The lookahead is gone; each row is yielded before the next is stepped, and completion yields the change count. Test: the first row arrives, then the overflow error, and `fetch_optional` returns the first row |
+| F3: the Sync harness accepted any version sharing the `0.8.1` prefix | Confirmed (`contains`); the trimmed output must equal `Turso 0.8.1`. Test rejects `0.8.10`, `0.8.1-dev`, `0.8.12`, trailing text and empty output |
