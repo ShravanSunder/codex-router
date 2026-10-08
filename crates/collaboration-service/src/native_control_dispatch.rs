@@ -1,14 +1,14 @@
 //! Codex native session Control dispatch: decodes each request and calls the typed session
 //! operations. No provider policy or native process ownership.
 use crate::ServiceIdentity;
-use crate::collaboration_application::{NativeSessionFailure, SessionOperations};
+use crate::collaboration_application::{
+    NativeSessionFailure, NativeSessionFailureKind, NativeSessionStage, SessionOperations,
+};
 use collaboration_protocol::EndpointRef;
 use serde_json::{Value, json};
 #[cfg(test)]
 use {
-    crate::collaboration_application::{
-        NativeSessionStage, classify_native_call_failure, valid_session_rename_name,
-    },
+    crate::collaboration_application::{classify_native_call_failure, valid_session_rename_name},
     codex_native_integration::NativeConnectionError,
 };
 
@@ -42,7 +42,18 @@ pub(crate) async fn dispatch_native(
                 INVALID_INVENTORY_MESSAGE
             );
             return match sessions.codex_session_list(request, budget).await {
-                Ok(result) => json!({"jsonrpc":"2.0","id":id,"result":result}),
+                Ok(page) => {
+                    let page = published_session_page(&page);
+                    if budget.admits(&page) {
+                        json!({"jsonrpc":"2.0","id":id,"result":page})
+                    } else {
+                        let failure = NativeSessionFailure::refused(
+                            NativeSessionFailureKind::ResponseTooLarge,
+                            NativeSessionStage::Discovery,
+                        );
+                        failure_response(id, &failure, INVALID_INVENTORY_MESSAGE)
+                    }
+                }
                 Err(failure) => failure_response(id, &failure, INVALID_INVENTORY_MESSAGE),
             };
         }
@@ -79,7 +90,41 @@ pub(crate) async fn dispatch_native(
 }
 
 const INVALID_MESSAGE: &str = "Invalid native control parameters";
+/// The fields Control has always published for each listed session, in their written order.
+const PUBLISHED_SESSION_FIELDS: [&str; 10] = [
+    "target",
+    "name",
+    "title",
+    "source",
+    "gitBranch",
+    "workingDirectory",
+    "observation",
+    "model",
+    "reasoningEffort",
+    "idleSeconds",
+];
 const INVALID_INVENTORY_MESSAGE: &str = "Invalid session inventory parameters or cursor";
+
+/// Control's published session page: every session carries every field, with an absent model
+/// or reasoning effort as `null`. Its size is checked again, since the nulls add bytes.
+fn published_session_page(page: &collaboration_protocol::NativeSessionListResult) -> Value {
+    let mut published = json!(page);
+    if let Some(sessions) = published.get_mut("sessions").and_then(Value::as_array_mut) {
+        for session in sessions {
+            let fields = PUBLISHED_SESSION_FIELDS
+                .iter()
+                .map(|field| {
+                    (
+                        (*field).to_owned(),
+                        session.get(*field).cloned().unwrap_or(Value::Null),
+                    )
+                })
+                .collect::<serde_json::Map<_, _>>();
+            *session = Value::Object(fields);
+        }
+    }
+    published
+}
 
 fn invalid(id: Value, message: &str) -> Value {
     json!({"jsonrpc":"2.0","id":id,"error":{"code":-32602,"message":message}})

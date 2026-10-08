@@ -79,6 +79,7 @@ impl<'service> BoardOperations<'service> {
         Ok(())
     }
 
+    /// Every request naming a local repository must name one of this Router's.
     fn require_local_repository(&self, repository: &RepositoryRef) -> Result<(), BoardError> {
         if let RepositoryRef::Local { service_id, .. } = repository
             && service_id.as_str() != String::from(self.identity.service_id.clone())
@@ -97,7 +98,6 @@ impl<'service> BoardOperations<'service> {
         project_create(ProjectCreateRequest) -> ProjectCreateResult => create_project;
         project_update(ProjectUpdateRequest) -> ProjectUpdateResult => update_project;
         project_show(ProjectShowRequest) -> ProjectShowResult => show_project;
-        project_list(ProjectListRequest) -> ProjectListResult => list_projects;
         repository_list(RepositoryListRequest) -> RepositoryListResult => list_repositories;
         board_create(BoardCreateRequest) -> BoardCreateResult => create_board;
         board_update(BoardUpdateRequest) -> BoardUpdateResult => update_board;
@@ -128,6 +128,18 @@ impl<'service> BoardOperations<'service> {
         thread_create(ThreadCreateRequest) -> ThreadCreateResult => create_thread;
         thread_join(ThreadJoinRequest) -> ThreadJoinResult => join_thread;
         thread_leave(ThreadLeaveRequest) -> ThreadLeaveResult => leave_thread;
+    }
+
+    /// Lists projects, optionally those attached to one repository of this Router's machine.
+    pub async fn project_list(
+        &self,
+        request: ProjectListRequest,
+    ) -> Result<ProjectListResult, BoardError> {
+        let store = self.store()?;
+        if let Some(repository) = &request.repository {
+            self.require_local_repository(repository)?;
+        }
+        store.lock().await.list_projects(request).await
     }
 
     /// Attaches a repository of this Router's machine to a project.
