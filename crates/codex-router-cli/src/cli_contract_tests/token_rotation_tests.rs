@@ -123,10 +123,12 @@ async fn serve_scopes_claude_token_rotation_and_keeps_codex_optional() {
             secrets,
             move |state_database_path, credential_store, refresh_tasks| async move {
                 let _send_result = serve_ready_sender.send(());
-                credential_upkeep_worker::start_background_credential_upkeep_worker(
+                credential_upkeep_worker::start_background_credential_upkeep_worker_with_client_and_clock(
                     state_database_path,
                     credential_store,
                     refresh_tasks,
+                    codex_router_auth::resolver::NoopCredentialRefreshClient,
+                    || codex_router_auth::resolver::current_unix_seconds().unwrap_or(0),
                 )
                 .await
             },

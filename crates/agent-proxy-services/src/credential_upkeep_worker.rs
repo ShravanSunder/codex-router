@@ -9,9 +9,6 @@ use std::time::Instant;
 use codex_router_auth::resolver::AsyncRouterCredentialResolver;
 use codex_router_auth::resolver::CredentialRefreshClient;
 use codex_router_auth::resolver::CredentialRefreshTaskSupervisor;
-#[cfg(any(test, feature = "test-support"))]
-use codex_router_auth::resolver::NoopCredentialRefreshClient;
-#[cfg(not(any(test, feature = "test-support")))]
 use codex_router_auth::resolver::ProviderCredentialRefreshClients;
 use codex_router_auth::resolver::current_unix_seconds;
 use codex_router_secret_store::encrypted_credential_store::EncryptedCredentialStore;
@@ -40,6 +37,8 @@ pub struct CredentialUpkeepWorker {
     stop_requested: CancellationToken,
     shutdown_deadline: Arc<OnceLock<Instant>>,
     task: Option<JoinHandle<()>>,
+    #[cfg(test)]
+    refresh_client_type: std::any::TypeId,
 }
 
 impl CredentialUpkeepWorker {
@@ -117,16 +116,6 @@ pub async fn start_background_credential_upkeep_worker(
     secret_store: EncryptedCredentialStore,
     refresh_tasks: CredentialRefreshTaskSupervisor,
 ) -> Result<CredentialUpkeepWorker, CredentialUpkeepStartError> {
-    #[cfg(any(test, feature = "test-support"))]
-    return start_background_credential_upkeep_worker_with_client_and_clock(
-        state_db_path,
-        secret_store,
-        refresh_tasks,
-        NoopCredentialRefreshClient,
-        || current_unix_seconds().unwrap_or(0),
-    )
-    .await;
-    #[cfg(not(any(test, feature = "test-support")))]
     start_background_credential_upkeep_worker_with_client_and_clock(
         state_db_path,
         secret_store,
@@ -202,6 +191,8 @@ where
         stop_requested,
         shutdown_deadline,
         task: Some(task),
+        #[cfg(test)]
+        refresh_client_type: std::any::TypeId::of::<C>(),
     })
 }
 

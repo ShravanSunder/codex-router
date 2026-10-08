@@ -8,7 +8,7 @@ publish.workspace = true
 workspace = true
 [features]
 default = []
-test-support = ["codex-router-secret-store/test-support", "codex-router-secret-store/keychain-test-guard", "codex-router-auth/test-support"]
+test-support = ["codex-router-secret-store/test-support", "codex-router-secret-store/keychain-test-guard", "codex-router-auth/test-support", "codex-router-auth/sync-rusqlite-fixtures"]
 keychain-test-support = ["codex-router-secret-store/test-support", "codex-router-secret-store/keychain-test-guard"]
 [dependencies]
 codex-router-auth = { path = "../codex-router-auth", version = "0.1.63" }

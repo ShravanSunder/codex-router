@@ -5,6 +5,10 @@ pub enum ProxyPreparationError {
     #[error(transparent)]
     Secret(#[from] codex_router_secret_store::model::SecretStoreError),
     #[error(transparent)]
+    TokenStore(codex_router_secret_store::model::SecretStoreError),
+    #[error(transparent)]
+    Affinity(codex_router_secret_store::model::SecretStoreError),
+    #[error(transparent)]
     Token(#[from] codex_router_secret_store::local_router_token::LocalRouterTokenError),
     #[error(transparent)]
     Schema(#[from] StateSchemaPreparationError),
@@ -26,6 +30,8 @@ impl ProxyPreparationError {
     pub fn prepare_failure(&self) -> PrepareFailure {
         match self {
             Self::Secret(_)
+            | Self::TokenStore(_)
+            | Self::Affinity(_)
             | Self::Token(_)
             | Self::CredentialsUnavailable
             | Self::CredentialTask(_)

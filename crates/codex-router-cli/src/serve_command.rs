@@ -2,16 +2,29 @@
 
 use super::*;
 use codex_router_auth::resolver::CredentialRefreshTaskSupervisor;
+use codex_router_proxy::server::{LoopbackRouterRuntimeError, ServerBindError};
 
 pub(crate) async fn run_serve_command(
     stdout: &mut impl Write,
     command: cli_argument_parsing::ServeCommand,
 ) -> Result<(), CliError> {
+    #[cfg(test)]
+    let upkeep_start = |path, credentials, supervisor| {
+        credential_upkeep_worker::start_background_credential_upkeep_worker_with_client_and_clock(
+            path,
+            credentials,
+            supervisor,
+            codex_router_auth::resolver::NoopCredentialRefreshClient,
+            || codex_router_auth::resolver::current_unix_seconds().unwrap_or(0),
+        )
+    };
+    #[cfg(not(test))]
+    let upkeep_start = credential_upkeep_worker::start_background_credential_upkeep_worker;
     run_serve_composition(
         stdout,
         command,
         None,
-        credential_upkeep_worker::start_background_credential_upkeep_worker,
+        upkeep_start,
         quota::start_background_quota_refresh_worker,
         |_| {},
     )
@@ -164,31 +177,31 @@ where
         runtime_config = runtime_config.with_quota_clock(now, command.max_snapshot_age_seconds);
     }
     let gate = codex_router_descriptor_boundary::DescriptorGate::global();
-    let listener = codex_router_descriptor_boundary::OwnedListener::bind_tcp(
-        runtime_config.bind_address().socket_addr(),
+    let address = runtime_config.bind_address().socket_addr();
+    let (listener, actual_address) = {
+        let _creation = gate.creation().await;
+        let listener = std::net::TcpListener::bind(address).map_err(|source| {
+            CliError::Runtime(LoopbackRouterRuntimeError::Bind(ServerBindError::Bind {
+                address,
+                source,
+            }))
+        })?;
+        let actual_address = listener.local_addr().map_err(|source| {
+            CliError::Runtime(LoopbackRouterRuntimeError::Bind(ServerBindError::Bind {
+                address,
+                source,
+            }))
+        })?;
+        (listener, actual_address)
+    };
+    let listener = codex_router_descriptor_boundary::OwnedListener::from_tcp_owned(
+        std::os::fd::OwnedFd::from(listener),
+        actual_address,
         gate,
     )
     .await
-    .map_err(|error| {
-        CliError::Runtime(
-            codex_router_proxy::server::LoopbackRouterRuntimeError::ListenerGrant(error),
-        )
-    })?;
-    let config = agent_proxy_services::ProxyRoleConfig {
-        core: runtime_config,
-        local_token: if command.require_local_token {
-            agent_proxy_services::ProxyLocalTokenPolicy::Required
-        } else {
-            agent_proxy_services::ProxyLocalTokenPolicy::Optional
-        },
-        quota_refresh: if command.background_quota_refresh_enabled {
-            agent_proxy_services::ProxyQuotaRefreshPolicy::Enabled
-        } else {
-            agent_proxy_services::ProxyQuotaRefreshPolicy::Disabled
-        },
-        quota_refresh_interval: Duration::from_secs(command.quota_refresh_interval_seconds),
-        max_connections: command.max_connections,
-    };
+    .map_err(|error| CliError::Runtime(LoopbackRouterRuntimeError::ListenerGrant(error)))?;
+    let config = build_serve_role_config(runtime_config, &command);
     #[cfg(test)]
     let prepared = match fixture_credentials {
         Some(credentials) => {
@@ -270,15 +283,24 @@ pub(crate) fn base_serve_runtime_config(
     Ok(runtime_config)
 }
 
-#[cfg(test)]
-pub(crate) fn configure_serve_claude_edge_runtime(
+/// Projects parsed Serve options into the role configuration used by production preparation.
+pub(crate) fn build_serve_role_config(
     runtime_config: LoopbackRouterRuntimeConfig,
     command: &cli_argument_parsing::ServeCommand,
-    local_token: LocalRouterTokenRecord,
-) -> (LoopbackRouterRuntimeConfig, Duration) {
-    let quota_refresh_interval = Duration::from_secs(command.quota_refresh_interval_seconds);
-    (
-        runtime_config.with_claude_edge_local_token(local_token, quota_refresh_interval),
-        quota_refresh_interval,
-    )
+) -> agent_proxy_services::ProxyRoleConfig {
+    agent_proxy_services::ProxyRoleConfig {
+        core: runtime_config,
+        local_token: if command.require_local_token {
+            agent_proxy_services::ProxyLocalTokenPolicy::Required
+        } else {
+            agent_proxy_services::ProxyLocalTokenPolicy::Optional
+        },
+        quota_refresh: if command.background_quota_refresh_enabled {
+            agent_proxy_services::ProxyQuotaRefreshPolicy::Enabled
+        } else {
+            agent_proxy_services::ProxyQuotaRefreshPolicy::Disabled
+        },
+        quota_refresh_interval: Duration::from_secs(command.quota_refresh_interval_seconds),
+        max_connections: command.max_connections,
+    }
 }

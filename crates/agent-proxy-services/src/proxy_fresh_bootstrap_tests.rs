@@ -49,7 +49,7 @@ async fn fresh_recognized_legacy_prepares_without_mutation_then_migrates_and_ser
     );
     let began = Instant::now();
     let mut active = prepared
-        .activate()
+        .activate_for_test()
         .await
         .expect("existing migration authority at Activate");
     let elapsed = began.elapsed();

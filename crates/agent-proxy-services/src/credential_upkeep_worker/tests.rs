@@ -478,3 +478,35 @@ fn overdue_or_failed_cycle_never_restarts_with_zero_wait() {
         Duration::from_secs(60),
     );
 }
+
+#[tokio::test]
+async fn production_upkeep_starter_selects_provider_clients_with_test_support_enabled() {
+    let root = tempfile::tempdir().expect("isolated empty account root");
+    let credentials = codex_router_secret_store::test_support::open_encrypted_credential_store(
+        root.path().join("secrets"),
+    )
+    .expect("explicit external key fixture");
+    let supervisor = CredentialRefreshTaskSupervisor::new();
+    let mut worker = start_background_credential_upkeep_worker(
+        root.path().join("state.sqlite"),
+        credentials,
+        supervisor.clone(),
+    )
+    .await
+    .expect("actual default starter and real empty account store");
+    let selected_actual_type = worker.refresh_client_type;
+    worker.shutdown().await;
+    supervisor.close_admission();
+    assert!(supervisor.wait_for_completion(Duration::from_secs(1)).await);
+    eprintln!(
+        "compiled_upkeep_default selected_provider_clients={}",
+        selected_actual_type
+            == std::any::TypeId::of::<codex_router_auth::resolver::ProviderCredentialRefreshClients>(
+            )
+    );
+    assert_eq!(
+        selected_actual_type,
+        std::any::TypeId::of::<codex_router_auth::resolver::ProviderCredentialRefreshClients>(),
+        "the actual production starter must select provider clients even when test-support is unified"
+    );
+}

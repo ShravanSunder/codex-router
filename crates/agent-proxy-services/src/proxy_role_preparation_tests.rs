@@ -37,7 +37,7 @@ async fn replacement_current_keeps_snapshot_and_old_hyper_usable() {
     let mut old = prepare(root.path(), PrepareMode::Fresh)
         .await
         .expect("Fresh")
-        .activate()
+        .activate_for_test()
         .await
         .expect("old actual runtime");
     let reply = http(old.local_addr(), HEALTH_REQUEST).await;
@@ -120,7 +120,7 @@ async fn replacement_native_prefix_is_unchanged_then_activated_and_preserves_dat
     );
     let began = Instant::now();
     let mut active = prepared
-        .activate()
+        .activate_for_test()
         .await
         .expect("migration-first activation");
     let elapsed = began.elapsed();
@@ -189,7 +189,10 @@ async fn supplied_duplicate_serves_only_after_activate_and_parent_listener_survi
             .is_err(),
         "candidate never accepts while Prepared"
     );
-    let mut active = prepared.activate().await.expect("actual Hyper Activate");
+    let mut active = prepared
+        .activate_for_test()
+        .await
+        .expect("actual Hyper Activate");
     tokio::time::timeout(Duration::from_secs(2), client.read_exact(&mut prefix))
         .await
         .expect("first reply after activation")
@@ -291,7 +294,7 @@ async fn changed_history_is_revalidated_at_activate_without_downgrade() {
     db.close().await.expect("writer closes");
     let before = snapshot(root.path());
     let error = prepared
-        .activate()
+        .activate_for_test()
         .await
         .err()
         .expect("activation refuses changed history");
@@ -305,7 +308,7 @@ async fn replacement_current_freezes_entire_state_and_secret_tree() {
     let mut old = prepare(root.path(), PrepareMode::Fresh)
         .await
         .expect("old role preparation")
-        .activate()
+        .activate_for_test()
         .await
         .expect("actual live old role");
     assert!(
@@ -471,7 +474,7 @@ async fn unlimited_role_reports_malformed_client_and_keeps_accepting() {
     let mut role = prepare(root.path(), PrepareMode::Fresh)
         .await
         .expect("Fresh")
-        .activate()
+        .activate_for_test()
         .await
         .expect("actual role");
     let mut malformed = tokio::net::TcpStream::connect(role.local_addr())
@@ -504,7 +507,7 @@ async fn dropped_shutdown_wait_retains_actual_http_and_worker_owners_for_resumpt
     let mut role = prepare(root.path(), PrepareMode::Fresh)
         .await
         .expect("Fresh")
-        .activate()
+        .activate_for_test()
         .await
         .expect("actual role");
     let mut client = tokio::net::TcpStream::connect(role.local_addr())

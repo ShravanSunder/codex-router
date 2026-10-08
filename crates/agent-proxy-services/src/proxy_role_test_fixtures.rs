@@ -162,3 +162,22 @@ pub(super) fn describe_snapshot_differences(
     }
     paths.into_iter().collect()
 }
+
+impl PreparedProxyRoleRuntime {
+    pub(super) async fn activate_for_test(self) -> Result<ProxyRoleRuntime, ProxyActivationError> {
+        self.activate_with_worker_starts(
+            |path, credentials, supervisor| {
+                crate::credential_upkeep_worker::start_background_credential_upkeep_worker_with_client_and_clock(
+                    path,
+                    credentials,
+                    supervisor,
+                    codex_router_auth::resolver::NoopCredentialRefreshClient,
+                    || codex_router_auth::resolver::current_unix_seconds().unwrap_or(0),
+                )
+            },
+            crate::quota::start_background_quota_refresh_worker,
+            |_| {},
+            |_| Ok(()),
+        ).await
+    }
+}

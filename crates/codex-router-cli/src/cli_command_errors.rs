@@ -217,6 +217,12 @@ impl From<agent_proxy_services::ProxyPreparationError> for CliError {
         match error {
             agent_proxy_services::ProxyPreparationError::Core(error) => Self::from(error),
             agent_proxy_services::ProxyPreparationError::Token(error) => Self::from(error),
+            agent_proxy_services::ProxyPreparationError::TokenStore(error) => {
+                Self::from(TokenCommandError::SecretStore(error))
+            }
+            agent_proxy_services::ProxyPreparationError::Affinity(error) => Self::from(
+                LoopbackRouterRuntimeError::CredentialResources(error.into()),
+            ),
             agent_proxy_services::ProxyPreparationError::Schema(error) => {
                 Self::from(LoopbackRouterRuntimeError::SchemaPreparation(error))
             }

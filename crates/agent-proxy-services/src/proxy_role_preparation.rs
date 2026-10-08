@@ -124,6 +124,11 @@ impl ProxyRoleRuntime {
     }
 }
 impl PreparedProxyRoleRuntime {
+    /// Configuration after role-owned token and quota interval propagation.
+    #[must_use]
+    pub fn core_configuration(&self) -> &codex_router_proxy::server::LoopbackRouterRuntimeConfig {
+        &self.config.core
+    }
     #[must_use]
     pub fn state_schema(&self) -> &ProxyPreparedStateSchema {
         &self.schema

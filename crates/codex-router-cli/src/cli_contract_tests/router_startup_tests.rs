@@ -315,7 +315,15 @@ async fn serve_starts_and_codex_route_fails_closed_for_unavailable_pooled_stores
                 &mut stdout,
                 command,
                 credential_store,
-                credential_upkeep_worker::start_background_credential_upkeep_worker,
+                |path, credentials, supervisor| {
+                    credential_upkeep_worker::start_background_credential_upkeep_worker_with_client_and_clock(
+                        path,
+                        credentials,
+                        supervisor,
+                        codex_router_auth::resolver::NoopCredentialRefreshClient,
+                        || codex_router_auth::resolver::current_unix_seconds().unwrap_or(0),
+                    )
+                },
             )
             .await;
             (result, stdout)

@@ -81,17 +81,20 @@ pub(crate) fn assemble_secrets(
     }
     let (local_token_store, local_token, affinity) = match mode {
         PrepareMode::Fresh => {
-            let store = FileSecretStore::open(root)?;
+            let store = FileSecretStore::open(root).map_err(ProxyPreparationError::TokenStore)?;
             let token = LocalRouterTokenService::new(store.clone()).ensure_local_token(root)?;
-            let affinity = load_or_create_router_affinity_hash_secret(&credentials)?
+            let affinity = load_or_create_router_affinity_hash_secret(&credentials)
+                .map_err(ProxyPreparationError::Affinity)?
                 .secret()
                 .clone();
             (store, token, affinity)
         }
         PrepareMode::Replacement { .. } => {
-            let store = FileSecretStore::open_read_only(root)?;
+            let store =
+                FileSecretStore::open_read_only(root).map_err(ProxyPreparationError::TokenStore)?;
             let token = LocalRouterTokenService::new(store.clone()).load_current()?;
-            let affinity = load_existing_router_affinity_hash_secret(&credentials)?
+            let affinity = load_existing_router_affinity_hash_secret(&credentials)
+                .map_err(ProxyPreparationError::Affinity)?
                 .secret()
                 .clone();
             (store, token, affinity)
