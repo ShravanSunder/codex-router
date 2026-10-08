@@ -1,4 +1,8 @@
 //! Real Host, ACP process, approval broker, and Session hub race proof.
+#[path = "support/global_claude_fixture.rs"]
+mod global_claude_fixture;
+
+use global_claude_fixture::with_global_claude_fixture;
 
 use codex_router_host::{
     CollaborationRuntime, CollaborationRuntimeInputs, ExternalProviderLaunchBinding,
@@ -85,12 +89,13 @@ async fn start_host(root: &Path) -> TestResult<CollaborationRuntime> {
             peer_registry_directory: None,
             remote_control_server_name: None,
         },
-        vec![ExternalProviderStartup::Launch(
+        vec![ExternalProviderStartup::Launch(with_global_claude_fixture(
+            root,
             ExternalProviderLaunchBinding::claude(
                 provider,
                 vec![root.join("exit.sock").display().to_string()],
             )?,
-        )],
+        )?)],
     )
     .await?)
 }

@@ -115,8 +115,8 @@ pub(crate) async fn read_bounded_prompt(
     })
 }
 
-/// The Session actor calls this while idle. Notifications still update the
-/// same projection that the next prompt will use; only requests are refused.
+/// The Session actor calls this while idle. Updates preserve session tool lookup;
+/// failed turns and new prompt admission discard turn-local cursors. Requests are refused.
 pub(crate) async fn observe_idle_session_update(
     message: SessionMessage,
     item_projection: &mut ProviderItemProjection,

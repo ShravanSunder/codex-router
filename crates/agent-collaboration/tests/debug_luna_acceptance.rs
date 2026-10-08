@@ -394,7 +394,7 @@ async fn recorded_test_history_is_readable_without_resume() -> ProofResult<()> {
     let context: Value =
         serde_json::from_slice(&std::fs::read(source.join("debug-host-context.json"))?)?;
     if context.get("profile").and_then(Value::as_str) != Some("codex-router-debug")
-        || context.get("model").and_then(Value::as_str) != Some("gpt-5.6-luna")
+        || context.get("model").and_then(Value::as_str) != Some("gpt-6-luna")
     {
         return Err("Source was not a Luna debug proof".into());
     }

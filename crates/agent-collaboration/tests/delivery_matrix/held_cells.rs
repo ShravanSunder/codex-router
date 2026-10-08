@@ -155,7 +155,7 @@ pub(super) async fn cover_held_dm_cell(
         return Err(format!("S3 send was not held: {receipt}").into());
     }
 
-    let (held, expected_line) = dm_notice_and_show(proof, target, &push_id).await?;
+    let (held, held_line) = dm_notice_and_show(proof, target, &push_id).await?;
     if held.record.delivery_state != PushDeliveryState::Held {
         return Err("S3 show did not preserve the held DM state".into());
     }
@@ -163,11 +163,12 @@ pub(super) async fn cover_held_dm_cell(
     load_codex_target(proof, sender, target).await?;
     let item = super::wait_for_codex_input(proof, target, &marker, OBSERVATION_TIMEOUT).await?;
     let observed_line = super::user_message_text(&item)?;
-    super::assert_exact_notice_line(&observed_line, &expected_line)?;
-    let (delivered, delivered_line) = dm_notice_and_show(proof, target, &push_id).await?;
+    super::assert_exact_notice_line(&observed_line, &held_line)?;
+    let (delivered, delivered_line) =
+        super::dm_history_notice_and_show(proof, sender, target, &push_id).await?;
     if delivered.record.delivery_state != PushDeliveryState::Delivered
         || delivered.record.push_id.as_str() != push_id
-        || delivered_line != expected_line
+        || delivered_line != held_line
     {
         return Err("S3 load did not deliver the original stored DM line".into());
     }

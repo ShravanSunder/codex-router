@@ -48,6 +48,23 @@ async fn cli_human_approver_from_create_can_decide_provider_permission() -> Test
     let provider_path = root.path().join("human-approver-provider.py");
     std::fs::write(&provider_path, PROVIDER)?;
     std::fs::set_permissions(&provider_path, std::fs::Permissions::from_mode(0o700))?;
+    let global_directory = root.path().join("global-bin");
+    std::fs::create_dir(&global_directory)?;
+    std::fs::set_permissions(&global_directory, std::fs::Permissions::from_mode(0o700))?;
+    let global_claude = global_directory.join("claude");
+    std::fs::write(
+        &global_claude,
+        "#!/usr/bin/python3\nimport sys\nassert sys.argv[1:] == ['--version']\nprint('cli-test-global-claude-v1')\n",
+    )?;
+    std::fs::set_permissions(global_claude, std::fs::Permissions::from_mode(0o700))?;
+    let mut provider_binding = ExternalProviderLaunchBinding::claude(provider_path, vec![])?;
+    provider_binding.launch.environment = vec![
+        (
+            "PATH".to_owned(),
+            global_directory.to_string_lossy().into_owned(),
+        ),
+        ("CLAUDE_CODE_EXECUTABLE".to_owned(), String::new()),
+    ];
     let runtime = CollaborationRuntime::start_with_external_providers(
         CollaborationRuntimeInputs {
             directory: root.path().to_owned(),
@@ -59,9 +76,7 @@ async fn cli_human_approver_from_create_can_decide_provider_permission() -> Test
             remote_control_server_name: None,
             owner_human_id: None,
         },
-        vec![ExternalProviderStartup::Launch(
-            ExternalProviderLaunchBinding::claude(provider_path, vec![])?,
-        )],
+        vec![ExternalProviderStartup::Launch(provider_binding)],
     )
     .await?;
     let mut observer = ControlClient::connect(root.path(), "human-approver-observer", "1").await?;

@@ -1,6 +1,6 @@
 # Testing scheduled automation locally
 
-Use the existing `codex-router-debug` profile and fresh test threads. The opt-in acceptance Host selects `gpt-5.6-luna` in memory, keeps normal Codex home, and puts its sockets, automation database and workspace in a new private directory under `/tmp`. It disables home hooks only in its owned test app-server so they cannot inject extra work. It uses the existing debug router credentials. It never edits the home profile or replaces the production router.
+Use the existing `codex-router-debug` profile and fresh test threads. The opt-in acceptance Host selects `gpt-6-luna` in memory, keeps normal Codex home, and puts its sockets, automation database and workspace in a new private directory under `/tmp`. It disables home hooks only in its owned test app-server so they cannot inject extra work. It uses the existing debug router credentials. It never edits the home profile or replaces the production router.
 
 ## Build once
 
@@ -71,7 +71,7 @@ This matrix uses the foreground CLI Host with an isolated `HOME`, `CODEX_HOME`, 
 
 ```sh
 CODEX_AUTOMATION_PROOF_ROOT="$proof_root" \
-  cargo test -p agent-collaboration --test delivery_matrix_debug_acceptance \
+  cargo test -p agent-collaboration --test push_delivery_matrix \
   prepare_delivery_matrix_provider_fixture \
   -- --ignored --exact --nocapture
 ```
@@ -79,10 +79,8 @@ CODEX_AUTOMATION_PROOF_ROOT="$proof_root" \
 Start the Host in a separate foreground terminal after setup:
 
 ```sh
-env HOME="$proof_root/home" CODEX_HOME="$proof_root/codex-home" \
-  CODEX_ROUTER_DEBUG_APP_SERVER_SOCKET="$proof_root/native-socket/app-server.sock" \
-  ./target/debug/codex-router host --router-root "$proof_root" \
-  --port 43127 --mcp-bind 127.0.0.1:43128 --require-debug-isolation
+CODEX_AUTOMATION_PROOF_ROOT="$proof_root" \
+  "$proof_root/foreground-host-launcher.py" "$PWD/target/debug/codex-router"
 ```
 
 Require `codex-router host status --router-root "$proof_root" --port 43127 --require-debug-isolation` to report router and app-server ready, and confirm `cursor-local` advertises the scripted fixture. If the isolated home or private Router lacks model access, report that state without copying account data or switching to the owner Codex home.
@@ -93,8 +91,8 @@ matrix_rustup_home="${RUSTUP_HOME:-$HOME/.rustup}"
 env HOME="$proof_root/home" CODEX_HOME="$proof_root/codex-home" \
   CODEX_AUTOMATION_PROOF_ROOT="$proof_root" \
   CARGO_HOME="$matrix_cargo_home" RUSTUP_HOME="$matrix_rustup_home" \
-  cargo test -p agent-collaboration --test delivery_matrix_debug_acceptance \
-  delivery_matrix_reaches_codex_and_fixture_claude_peer \
+  cargo test -p agent-collaboration --test push_delivery_matrix \
+  push_delivery_matrix_covers_codex_and_claude_peer \
   -- --ignored --exact --nocapture
 ```
 
@@ -102,7 +100,7 @@ The suite exercises CLI and MCP messages, fired wakes, scheduled runs, Board Thr
 
 For a quick load-route regression check, use a separate freshly prepared matrix root and run the ignored `codex_acp_cli_create_then_prompt_load_route` test with the same environment and foreground Host. Its CLI create and prompt calls use separate ACP connections, so a missing `_meta.router.sessionRef` fails at load before the model is invoked.
 
-For the Router-hosted ACP target column, use a **different fresh root** and run `prepare_delivery_matrix_acp_target_fixture` instead of `prepare_delivery_matrix_provider_fixture`. Start the same isolated CLI Host as above, then run `delivery_matrix_reaches_scripted_acp_target` with the same private `HOME`, `CODEX_HOME`, `CODEX_AUTOMATION_PROOF_ROOT`, `CARGO_HOME`, and `RUSTUP_HOME` environment. This variant starts two scripted providers: Cursor receives the six producer inputs, while Claude requests permission from Cursor as Approver. The fixture records each actual `session/prompt` frame and requires each marker in exactly one prompt. The test verifies the approval is still pending after its notice reaches Cursor, then decides deny-once so the requester can settle. The additional busy-target cell requires an `auto` CLI send to return `queued`, then observes its one prompt after the held turn settles, matching the manual's deferred-input contract. Keep the owner settings hash sentinel and stop the foreground Host after the suite.
+For the Router-hosted ACP target column, use a **different fresh root** and run `prepare_delivery_matrix_acp_target_fixture` instead of `prepare_delivery_matrix_provider_fixture`. Start the same isolated CLI Host as above, then run `push_delivery_matrix_reaches_scripted_acp_target` from the `push_delivery_matrix` test target with the same private `HOME`, `CODEX_HOME`, `CODEX_AUTOMATION_PROOF_ROOT`, `CARGO_HOME`, and `RUSTUP_HOME` environment. This variant starts two scripted providers: Cursor receives the six producer inputs, while Claude requests permission from Cursor as Approver. The fixture records each actual `session/prompt` frame and requires each marker in exactly one prompt. The test verifies the approval is still pending after its notice reaches Cursor, then decides deny-once so the requester can settle. The additional busy-target cell requires an `auto` CLI send to return `queued`, then observes its one prompt after the held turn settles, matching the manual's deferred-input contract. Keep the owner settings hash sentinel and stop the foreground Host after the suite.
 
 The ACP column does not attest the Host's `HOME` or `CODEX_HOME`. It relies on `--require-debug-isolation` (launchctl-free), the documented launch environment, and the owner settings hash sentinel; the Host does not yet report its PID or resolved homes (product gap logged).
 
@@ -111,6 +109,68 @@ A Codex thread active in another app-server or desktop client remains a separate
 The materialized existing Codex target is a pending matrix cell in this isolated run: the private Codex home has no model authentication to finish an initial turn and return the thread to idle. A default-run fake app-server integration test covers its declared cwd and scheduled turn/start. Recipient-observed live proof remains for the post-release real-session run.
 
 After the owner replaces production with a release containing this suite's fixes, repeat one documented pass against real sessions: read the Codex recipient's exact input through `thread/read`, and obtain an explicit receipt confirmation from the Claude Code recipient. Keep that live result separate from the isolated fixture matrix.
+
+### Prove owned native app-server restart without a model
+
+This restart-only scenario verifies the foreground CLI PID and argv, private
+fixture root, and resolved native socket, then calls host app-server restart.
+It makes no model request and needs no model account. The app-server generation
+must change while the foreground CLI PID and argv and Router control service
+identity remain. Do not use the separate model-auth root for this fixture.
+
+Build the real CLI and matrix target:
+
+    PATH=/opt/homebrew/opt/rustup/bin:$PATH env -u CC -u CXX -u LDFLAGS -u CPPFLAGS \
+      cargo build -p codex-router-cli --bin codex-router
+    PATH=/opt/homebrew/opt/rustup/bin:$PATH env -u CC -u CXX -u LDFLAGS -u CPPFLAGS \
+      cargo test -p agent-collaboration --test push_delivery_matrix --no-run
+
+Prepare one fresh, short root under /tmp after confirming port 43127 is free:
+
+    proof_root=/tmp/u6rs-my-check
+    PATH=/opt/homebrew/opt/rustup/bin:$PATH env -u CC -u CXX -u LDFLAGS -u CPPFLAGS \
+      CODEX_AUTOMATION_PROOF_ROOT="$proof_root" \
+      cargo test -p agent-collaboration --test push_delivery_matrix \
+      prepare_foreground_cli_restart_fixture -- --ignored --exact --nocapture
+
+Launch the generated real-CLI wrapper in a foreground terminal:
+
+    CODEX_AUTOMATION_PROOF_ROOT="$proof_root" \
+      "$proof_root/foreground-host-launcher.py" "$PWD/target/debug/codex-router"
+
+Wait for router and app-server readiness with codex-router host status using
+that exact root and port. In another terminal, run the no-model child-restart
+scenario with the same fixture environment and the explicit host grant if the
+sandbox denies its private sockets:
+
+    PATH=/opt/homebrew/opt/rustup/bin:$PATH env -u CC -u CXX -u LDFLAGS -u CPPFLAGS \
+      HOME="$proof_root/home" CODEX_HOME="$proof_root/codex-home" \
+      CODEX_AUTOMATION_PROOF_ROOT="$proof_root" \
+      CARGO_HOME="$HOME/.cargo" RUSTUP_HOME="$HOME/.rustup" \
+      cargo test -p agent-collaboration --test push_delivery_matrix \
+      foreground_cli_app_server_restart_preserves_host_and_control_service \
+      -- --ignored --exact --nocapture
+
+The test requires the private marker, native rendezvous alias, foreground PID
+and exact CLI argv to match the isolated fixture. It verifies the owner-private
+alias resolves to the nonsymlink Unix socket named by SHA-256 of the canonical
+requested socket path bytes in Codex's effective-UID daemon directory under
+canonical `/tmp`; the daemon directory and target socket must have the expected
+owner and private modes. This follows Codex's upstream rendezvous mapping while
+keeping the actual operator and Control sockets inside the fixture root. A
+wrong alias target or hash, unsafe daemon parent, foreign PID, or mismatched
+argv is rejected before operator dispatch. The test does not mutate or scan the
+shared daemon directory. Once those checks pass, it invokes only host
+app-server restart with the verified root and port. It then checks that native
+generation changed, the old ControlClient still lists the same service, and
+the same foreground CLI process remains. Run the separate guard-negative tests
+with:
+
+    PATH=/opt/homebrew/opt/rustup/bin:$PATH env -u CC -u CXX -u LDFLAGS -u CPPFLAGS \
+      cargo test -p agent-collaboration --test push_delivery_matrix \
+      debug_backend_restart::tests:: -- --nocapture
+
+Stop only that owned launcher/CLI with Ctrl-C and retain its private artifacts.
 
 ### Restart the Host for board persistence proof
 
@@ -141,11 +201,11 @@ the same binary with the explicit resume option:
 ```
 
 Resume accepts only an existing owner-private direct child of `/tmp` whose
-context marker still identifies the same `codex-router-debug` profile, Luna
-model, port, service directory and workspace. It refuses symlinks, a live old
-Host PID, a still-published service, or a mismatched marker. It preserves the
-service databases and replaces the context marker atomically with the new Host
-PID. Wait for `host status` and endpoint discovery to report readiness again,
+context marker still identifies the same `codex-router-debug` profile,
+`gpt-6-luna` model, port, service directory and workspace. It refuses symlinks,
+a live old Host PID, a still-published service, or a mismatched marker. It
+preserves the service databases and replaces the context marker atomically
+with the new Host PID. Wait for `host status` and endpoint discovery to report readiness again,
 then verify the new PID differs from the recorded PID before reading the board.
 Do not use resume after an indeterminate stop or with a directory from another
 test run.

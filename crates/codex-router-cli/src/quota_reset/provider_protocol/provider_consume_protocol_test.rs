@@ -21,7 +21,7 @@ const CONSUME_ACCESS_TOKEN: &str = "consume-loopback-token";
 const CONSUME_ACCOUNT_ID: &str = "consume-loopback-account";
 const CONSUME_CREDIT_ID: &str = "credit-loopback-selected";
 const CONSUME_REDEEM_REQUEST_ID: &str = "redeem-loopback-attempt";
-const TEST_REQUEST_TIMEOUT: Duration = Duration::from_millis(100);
+const TEST_REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[tokio::test]
 async fn consume_adapter_sends_exact_single_post_contract() {

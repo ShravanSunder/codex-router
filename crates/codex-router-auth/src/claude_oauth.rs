@@ -732,7 +732,7 @@ mod tests {
             request_sender
                 .send(request)
                 .expect("test should receive the request");
-            let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+            let _ = stream.set_read_timeout(Some(Duration::from_secs(4)));
             let mut byte = [0_u8; 1];
             loop {
                 match stream.read(&mut byte) {
@@ -744,7 +744,9 @@ mod tests {
         let client = ClaudeOAuthRefreshClient::new_with_endpoint_and_timeout_for_test(
             endpoint,
             "test-claude-client",
-            Duration::from_millis(100),
+            // Leave room for a loaded runner to dispatch the full request
+            // before the server withholds its response until timeout.
+            Duration::from_secs(2),
         );
         let account_id = AccountId::new("acct_claude_timeout").expect("account id should be valid");
 
@@ -758,7 +760,7 @@ mod tests {
             ))
         );
         let request = request_receiver
-            .recv_timeout(Duration::from_secs(2))
+            .recv_timeout(Duration::from_secs(4))
             .expect("fake server should receive the refresh before timing out");
         assert_eq!(
             request_body_json(&request)

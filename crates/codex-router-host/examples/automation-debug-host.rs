@@ -163,7 +163,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         service_directory: collaboration,
         workspace,
         profile: "codex-router-debug".to_owned(),
-        model: "gpt-5.6-luna".to_owned(),
+        model: "gpt-6-luna".to_owned(),
         port: options.port,
         host_pid: std::process::id(),
     };
@@ -220,7 +220,7 @@ fn luna_profile_from_text(
         "base_url".into(),
         toml::Value::String(format!("http://127.0.0.1:{selected_port}/v1")),
     );
-    profile.insert("model".into(), toml::Value::String("gpt-5.6-luna".into()));
+    profile.insert("model".into(), toml::Value::String("gpt-6-luna".into()));
     profile.insert(
         "model_reasoning_effort".into(),
         toml::Value::String("high".into()),
@@ -328,7 +328,7 @@ fn validate_resume_run_directory(
     let context = read_existing_context(run_directory)?;
     if context.kind != "debugHostPrepared"
         || context.profile != "codex-router-debug"
-        || context.model != "gpt-5.6-luna"
+        || context.model != "gpt-6-luna"
         || context.port != port
         || context.run_directory.canonicalize()? != canonical_root
         || context.service_directory.canonicalize()? != service_directory.canonicalize()?
@@ -471,7 +471,49 @@ supports_websockets = true
 
     #[test]
     fn luna_profile_validates_saved_route_before_in_memory_retargeting() {
-        assert!(luna_profile_from_text(&debug_profile("http://127.0.0.1:18787/v1"), 28787).is_ok());
+        let profile = luna_profile_from_text(&debug_profile("http://127.0.0.1:18787/v1"), 28787)
+            .expect("valid saved debug route should produce an app-server profile");
+        let command = AppServerCommandSpec::new(
+            &CodexPaths::from_codex_home("/unused-native-home".into()),
+            &CodexRouterProfile::new(8787),
+            Path::new("/tmp/automation-debug-host-profile.sock"),
+        )
+        .with_debug_profile(&profile);
+        let arguments = command.arguments();
+        let overrides = arguments
+            .windows(2)
+            .filter(|pair| pair[0] == "-c")
+            .map(|pair| pair[1].to_string_lossy())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let projected: toml::Table = toml::from_str(&overrides)
+            .expect("app-server profile overrides should remain valid TOML");
+        assert_eq!(
+            projected.get("model").and_then(toml::Value::as_str),
+            Some("gpt-6-luna")
+        );
+        assert_eq!(
+            projected
+                .get("model_reasoning_effort")
+                .and_then(toml::Value::as_str),
+            Some("high")
+        );
+        assert_eq!(
+            projected
+                .get("model_provider")
+                .and_then(toml::Value::as_str),
+            Some("codex-router-debug")
+        );
+        assert_eq!(
+            projected
+                .get("model_providers")
+                .and_then(toml::Value::as_table)
+                .and_then(|providers| providers.get("codex-router-debug"))
+                .and_then(toml::Value::as_table)
+                .and_then(|provider| provider.get("base_url"))
+                .and_then(toml::Value::as_str),
+            Some("http://127.0.0.1:28787/v1")
+        );
         for (saved_endpoint, selected_port) in [
             ("http://127.0.0.1:8787/v1", 28787),
             ("http://0.0.0.0:18787/v1", 28787),
@@ -512,7 +554,7 @@ supports_websockets = true
                 service_directory: self.0.join("agent-communication"),
                 workspace: self.0.join("agent-workspace"),
                 profile: "codex-router-debug".to_owned(),
-                model: "gpt-5.6-luna".to_owned(),
+                model: "gpt-6-luna".to_owned(),
                 port: 18787,
                 host_pid: process_id,
             })
@@ -612,7 +654,7 @@ supports_websockets = true
             service_directory: run.0.join("agent-communication"),
             workspace: run.0.join("agent-workspace"),
             profile: "codex-router-debug".to_owned(),
-            model: "gpt-5.6-luna".to_owned(),
+            model: "gpt-6-luna".to_owned(),
             port: 18787,
             host_pid: 4242,
         };

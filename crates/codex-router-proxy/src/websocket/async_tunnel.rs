@@ -197,10 +197,6 @@ where
             selected_account_id,
             self.local_peer_addr,
         );
-        self.revocations.set_capacity_retry_thread_id(
-            session_registration.session_id,
-            capacity_retry_thread_id(&headers),
-        );
         let revocation = session_registration.cancellation().clone();
 
         let mut upstream_request = upstream_url.into_client_request()?;
@@ -272,17 +268,6 @@ where
         .await
     }
 }
-pub(super) fn capacity_retry_thread_id(headers: &HeaderCollection) -> Option<String> {
-    let values = headers.values("thread-id");
-    let [thread_id] = values.as_slice() else {
-        return None;
-    };
-    if thread_id.is_empty() || thread_id.len() > MAX_THREAD_ID_BYTES {
-        return None;
-    }
-    Some((*thread_id).to_owned())
-}
-
 async fn handle_pre_upstream_close_reason<LocalStream>(
     local_websocket: &mut WebSocketStream<LocalStream>,
     close_reason: &WebSocketCloseReason,

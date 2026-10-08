@@ -79,6 +79,19 @@ pub(crate) async fn compose_provider_startup(
             ExternalProviderStartup::Launch(binding) => {
                 let executable = binding.launch.executable.display().to_string();
                 let mut launch = binding.launch;
+                if binding.provider == ProviderKind::ClaudeCode
+                    && !crate::global_claude_executable::bind_global_claude_executable(
+                        &mut launch.environment,
+                    )
+                {
+                    endpoints.push(unavailable_endpoint(
+                        service_id,
+                        binding.provider,
+                        text("global Claude executable is unavailable on the Host launch PATH")?,
+                        text("install Claude Code globally, ensure claude is on the Host PATH, then restart the Host")?,
+                    )?);
+                    continue;
+                }
                 launch.persistence_target = match binding.provider {
                     ProviderKind::Cursor => {
                         acp_client_runtime::ProviderPersistenceTarget::CursorAllowlist

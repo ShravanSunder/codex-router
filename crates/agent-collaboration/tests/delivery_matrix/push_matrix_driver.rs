@@ -11,8 +11,8 @@ use collaboration_client::{
     },
 };
 use collaboration_protocol::{
-    MachineLabel, PushId, PushLineInput, PushRecord, PushRecordNotice, PushRecordShowResult,
-    RouterLink, RouterOriginRef, render_push_line,
+    MachineLabel, PushId, PushLineInput, PushOrigin, PushRecord, PushRecordHistoryParams,
+    PushRecordNotice, PushRecordShowResult, RouterLink, RouterOriginRef, render_push_line,
 };
 use serde_json::{Value, json};
 use std::{path::Path, time::Duration};
@@ -276,7 +276,49 @@ pub(super) async fn dm_notice_and_show(
     }
     let expected = expected_push_line(&show, &machine_label(proof)?)?;
     assert_eq!(notice.line, expected);
-    Ok((show, expected))
+    Ok((show, notice.line))
+}
+
+pub(super) async fn dm_history_notice_and_show(
+    proof: &mut ProofContext,
+    sender: &SessionRef,
+    recipient: &SessionRef,
+    push_id: &str,
+) -> ProofResult<(PushRecordShowResult, String)> {
+    let history = proof
+        .client
+        .message_history(PushRecordHistoryParams {
+            caller: recipient.clone(),
+            with: sender.clone(),
+            limit: 100,
+        })
+        .await?;
+    let notice: PushRecordNotice = history
+        .records
+        .into_iter()
+        .find(|notice| notice.push_id.as_str() == push_id)
+        .ok_or_else(|| format!("push {push_id} is missing from recipient history with sender"))?;
+    let expected_origin = PushOrigin::Session(sender.clone());
+    if notice.target != *recipient || notice.origin != expected_origin {
+        return Err("message/history returned a different DM sender or recipient".into());
+    }
+    let show = proof
+        .client
+        .router_show(PushRecordShowParams {
+            caller: recipient.clone(),
+            reference: notice.link.clone(),
+        })
+        .await?;
+    if show.record.target != *recipient
+        || show.record.push_id.as_str() != push_id
+        || show.record.origin != expected_origin
+        || show.link != notice.link
+    {
+        return Err("router/show returned a different DM identity or link".into());
+    }
+    let expected = expected_push_line(&show, &machine_label(proof)?)?;
+    assert_eq!(notice.line, expected);
+    Ok((show, notice.line))
 }
 
 pub(super) fn machine_label(proof: &ProofContext) -> ProofResult<MachineLabel> {
@@ -464,7 +506,7 @@ pub(super) async fn create_existing_session_schedule(
                 enabled: false,
                 destination: ExecutionDestination::Unprepared,
                 execution_timeout_seconds: Some(120.try_into()?),
-                model: Some("gpt-5.6-luna".to_owned()),
+                model: Some("gpt-6-luna".to_owned()),
                 effort: Some("low".to_owned()),
             },
         })

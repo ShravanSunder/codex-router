@@ -1,5 +1,9 @@
 #![allow(clippy::expect_used, clippy::indexing_slicing)]
 //! Fail-fast fixture assertions at the Host endpoint boundary.
+#[path = "support/global_claude_fixture.rs"]
+mod global_claude_fixture;
+
+use global_claude_fixture::with_global_claude_fixture;
 
 use codex_router_host::{
     CollaborationRuntime, CollaborationRuntimeInputs, ExternalProviderLaunchBinding,
@@ -57,11 +61,15 @@ async fn missing_executable_isolated_from_other_provider_and_codex() {
         runtime_inputs(root.path()),
         vec![
             ExternalProviderStartup::Launch(
-                ExternalProviderLaunchBinding::claude(
-                    root.path().join("missing-claude-agent-acp"),
-                    Vec::new(),
+                with_global_claude_fixture(
+                    root.path(),
+                    ExternalProviderLaunchBinding::claude(
+                        root.path().join("missing-claude-agent-acp"),
+                        Vec::new(),
+                    )
+                    .expect("Claude binding"),
                 )
-                .expect("Claude binding"),
+                .expect("global Claude fixture"),
             ),
             ExternalProviderStartup::Launch(
                 ExternalProviderLaunchBinding::cursor(cursor, Vec::new()).expect("Cursor binding"),
@@ -128,7 +136,12 @@ async fn failed_initialize_isolated_from_other_provider() {
         runtime_inputs(root.path()),
         vec![
             ExternalProviderStartup::Launch(
-                ExternalProviderLaunchBinding::claude(failing, Vec::new()).expect("Claude binding"),
+                with_global_claude_fixture(
+                    root.path(),
+                    ExternalProviderLaunchBinding::claude(failing, Vec::new())
+                        .expect("Claude binding"),
+                )
+                .expect("global Claude fixture"),
             ),
             ExternalProviderStartup::Launch(
                 ExternalProviderLaunchBinding::cursor(cursor, Vec::new()).expect("Cursor binding"),

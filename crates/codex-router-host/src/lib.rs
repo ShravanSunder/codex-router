@@ -40,6 +40,7 @@ mod external_provider_supervisor;
 pub use external_provider_supervisor::{
     ExternalProviderBinding, ExternalProviderSupervisor, ProviderPromptContentsRequest,
 };
+mod global_claude_executable;
 mod host_configuration;
 mod host_replacement_activation;
 mod host_singleton_authority;

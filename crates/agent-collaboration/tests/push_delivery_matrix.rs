@@ -36,6 +36,29 @@ const OBSERVATION_TIMEOUT: Duration = Duration::from_secs(120);
 const ACP_TARGET_EXPECTED_PROMPTS: usize = 9;
 const SUBSCRIPTION_NOTICE_LABEL: &str = "🧵 Router: new thread activity";
 
+fn expected_long_preview_literal(body: &str) -> ProofResult<String> {
+    let total_scalars = body.chars().count();
+    let source_prefix = body.chars().take(100).collect::<String>();
+    let omitted_scalars = total_scalars.saturating_sub(source_prefix.chars().count());
+    if omitted_scalars == 0 {
+        return Err("long-preview proof requires an omitted source scalar".into());
+    }
+    Ok(format!(
+        "\"{source_prefix}…\" (+{omitted_scalars} more chars)"
+    ))
+}
+
+fn assert_long_preview_literal(observed: &str, body: &str) -> ProofResult<()> {
+    let expected_preview = expected_long_preview_literal(body)?;
+    if !observed.contains(&expected_preview) {
+        return Err(format!(
+            "observed output omitted the source-derived preview literal {expected_preview:?}: {observed:?}"
+        )
+        .into());
+    }
+    Ok(())
+}
+
 #[test]
 #[ignore = "creates an isolated debug Host root and scripted ACP provider fixture"]
 fn prepare_delivery_matrix_provider_fixture() -> ProofResult<()> {
@@ -46,6 +69,62 @@ fn prepare_delivery_matrix_provider_fixture() -> ProofResult<()> {
 #[ignore = "creates a fresh isolated Host root with two scripted ACP provider runtimes"]
 fn prepare_delivery_matrix_acp_target_fixture() -> ProofResult<()> {
     delivery_matrix_support::prepare_acp_target_fixture()
+}
+
+#[test]
+#[ignore = "creates a fresh isolated foreground CLI Host fixture without model accounts"]
+fn prepare_foreground_cli_restart_fixture() -> ProofResult<()> {
+    delivery_matrix_support::prepare_foreground_cli_restart_fixture()
+}
+
+#[tokio::test]
+#[ignore = "requires the documented isolated foreground CLI Host; does not call a model"]
+async fn foreground_cli_app_server_restart_preserves_host_and_control_service() -> ProofResult<()> {
+    let config_guard = delivery_matrix_support::ConfigHashGuard::capture()?;
+    let mut proof = ProofContext::connect().await?;
+    let previous_generation = proof.generation.clone();
+    let service_id = proof.client.identity().service_id.clone();
+    let result: ProofResult<()> = async {
+        debug_backend_restart::restart(&mut proof).await?;
+        if proof.generation == previous_generation {
+            return Err("app-server restart did not publish a new native generation".into());
+        }
+        let inventory = proof.client.list_endpoints().await?;
+        if proof.client.identity().service_id != service_id
+            || !inventory.endpoints.iter().any(|endpoint| {
+                endpoint.endpoint == proof.endpoint
+                    && endpoint.endpoint.service_id == service_id
+                    && endpoint.channels.iter().any(|channel| {
+                        matches!(
+                            channel,
+                            collaboration_client::protocol::ChannelDescription::NativeCodex {
+                                generation: Some(generation),
+                                ..
+                            } if generation == &proof.generation
+                        )
+                    })
+            })
+        {
+            return Err(
+                "Host control service identity did not remain ready after app-server restart"
+                    .into(),
+            );
+        }
+        proof.record(
+            "foregroundCliRestartScenarioPassed",
+            json!({
+                "kind":"nativeAppServerOnly",
+                "serviceId":service_id,
+                "generationBefore":previous_generation,
+                "generationAfter":proof.generation,
+            }),
+        )?;
+        Ok(())
+    }
+    .await;
+    config_guard.verify()?;
+    proof.client.close().await?;
+    result
 }
 
 #[tokio::test]
@@ -73,14 +152,34 @@ async fn exercise_push_delivery_matrix(
 
     // S1: an agent DM reaches a real Codex app-server and matches its inbox line.
     let codex_recipient = proof.start_thread("S1 Codex recipient").await?;
-    let s1_body = "S1 is green";
-    let s1_receipt = cli_send(&proof, Some(&sender), &codex_recipient, s1_body, false).await?;
+    let s1_prefix = matrix_marker("native-long");
+    let s1_body = format!(
+        "{s1_prefix} {}",
+        "N".repeat(1_339 - s1_prefix.chars().count())
+    );
+    assert_eq!(s1_body.chars().count(), 1_340);
+    let s1_receipt = cli_send(&proof, Some(&sender), &codex_recipient, &s1_body, false).await?;
     let s1_push_id = receipt_push_id(&s1_receipt)?;
-    let (_, s1_expected) = dm_notice_and_show(&mut proof, &codex_recipient, &s1_push_id).await?;
-    let s1_item =
-        wait_for_codex_input(&mut proof, &codex_recipient, s1_body, OBSERVATION_TIMEOUT).await?;
-    assert_exact_notice_line(&user_message_text(&s1_item)?, &s1_expected)?;
-    record_passed_matrix_cell(&proof, config_guard, "S1", &[user_message_text(&s1_item)?])?;
+    let (s1_show, s1_notice) =
+        dm_history_notice_and_show(&mut proof, &sender, &codex_recipient, &s1_push_id).await?;
+    let s1_item = wait_for_codex_input(
+        &mut proof,
+        &codex_recipient,
+        &s1_prefix,
+        OBSERVATION_TIMEOUT,
+    )
+    .await?;
+    let s1_observed = user_message_text(&s1_item)?;
+    assert_exact_notice_line(&s1_observed, &s1_notice)?;
+    assert_long_preview_literal(&s1_notice, &s1_body)?;
+    assert_long_preview_literal(&s1_observed, &s1_body)?;
+    let s1_fetched = cli_show(&proof, &codex_recipient, &s1_show.link).await?;
+    assert_eq!(
+        s1_fetched.pointer("/result/record/body"),
+        Some(&json!(s1_body))
+    );
+    assert!(s1_fetched.pointer("/result/record/preview").is_none());
+    record_passed_matrix_cell(&proof, config_guard, "S1", &[s1_observed])?;
     covered_cells.push("S1 Codex app-server");
 
     // S2: a long receipt is shortened to 100 Unicode scalars, linked, and fetchable in full.
@@ -92,21 +191,19 @@ async fn exercise_push_delivery_matrix(
     assert_eq!(s2_body.chars().count(), 1_340);
     let s2_receipt = cli_send(&proof, Some(&sender), &peer.target, &s2_body, false).await?;
     let s2_push_id = receipt_push_id(&s2_receipt)?;
-    let (s2_show, s2_expected) = dm_notice_and_show(&mut proof, &peer.target, &s2_push_id).await?;
+    let (s2_show, s2_notice) = dm_notice_and_show(&mut proof, &peer.target, &s2_push_id).await?;
     let s2_observed = peer
         .expect_text_with_timeout(&s2_prefix, OBSERVATION_TIMEOUT)
         .await?;
-    assert_exact_notice_line(&s2_observed, &s2_expected)?;
-    assert!(s2_expected.contains(&format!(
-        "\"{}\" (+1240)",
-        s2_body.chars().take(100).collect::<String>()
-    )));
-    assert!(s2_expected.contains("(+1240)"));
+    assert_exact_notice_line(&s2_observed, &s2_notice)?;
+    assert_long_preview_literal(&s2_notice, &s2_body)?;
+    assert_long_preview_literal(&s2_observed, &s2_body)?;
     let s2_fetched = cli_show(&proof, &peer.target, &s2_show.link).await?;
     assert_eq!(
         s2_fetched.pointer("/result/record/body"),
         Some(&json!(s2_body))
     );
+    assert!(s2_fetched.pointer("/result/record/preview").is_none());
     record_passed_matrix_cell(&proof, config_guard, "S2", &[s2_observed])?;
     covered_cells.push("S2 Claude peer");
 
@@ -258,7 +355,9 @@ async fn exercise_scripted_acp_target(
     let sender = proof.start_thread("ACP push matrix sender").await?;
     let target = create_provider_session(&mut proof, &sender).await?;
     let marker = matrix_marker("acp-target");
-    delivery_matrix_support::mcp_send(&proof, &sender, &target, &marker).await?;
+    let body = format!("{marker} {}", "A".repeat(1_339 - marker.chars().count()));
+    assert_eq!(body.chars().count(), 1_340);
+    delivery_matrix_support::mcp_send(&proof, &sender, &target, &body).await?;
 
     let inbox = proof
         .client
@@ -273,6 +372,7 @@ async fn exercise_scripted_acp_target(
         .find(|notice| notice.line.contains(&marker))
         .cloned()
         .ok_or("ACP target push is missing from the recipient inbox")?;
+    assert_long_preview_literal(&notice.line, &body)?;
     let show = proof
         .client
         .router_show(PushRecordShowParams {
@@ -280,6 +380,11 @@ async fn exercise_scripted_acp_target(
             reference: notice.push_id.as_str().to_owned(),
         })
         .await?;
+    assert_eq!(show.record.body.as_deref(), Some(body.as_str()));
+    let show_json = serde_json::to_value(&show)?;
+    if show_json.pointer("/record/preview").is_some() {
+        return Err("router/show introduced an unsupported preview field".into());
+    }
     let expected = expected_push_line(&show, &machine_label(&proof)?)?;
     assert_eq!(notice.line, expected);
     let observed = wait_for_acp_input(
@@ -290,6 +395,7 @@ async fn exercise_scripted_acp_target(
     )
     .await?;
     assert_exact_notice_line(&observed, &expected)?;
+    assert_long_preview_literal(&observed, &body)?;
     proof.record(
         "pushDeliveryMatrixAcp",
         json!({"pushId":show.record.push_id,"target":target,"firstLine":observed}),

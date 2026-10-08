@@ -10,7 +10,7 @@ use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use std::{
     collections::BTreeMap,
-    os::unix::fs::DirBuilderExt,
+    os::unix::fs::PermissionsExt,
     sync::{Arc, Mutex},
 };
 use tokio_tungstenite::tungstenite::Message;
@@ -18,14 +18,28 @@ use tokio_tungstenite::tungstenite::Message;
 /// A fixed instant well in the past, so a computed idle time can only be positive.
 const BUSY_THREAD_UPDATED_AT_SECONDS: i64 = 1_700_000_000;
 
+// Fixture setup failures must abort the scenario with their specific cause.
+#[allow(clippy::expect_used, clippy::panic)]
+fn workspace_native_control_tempdir(prefix: &str) -> tempfile::TempDir {
+    let workspace_tmp = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tmp");
+    std::fs::create_dir_all(&workspace_tmp)
+        .unwrap_or_else(|error| panic!("workspace tmp directory: {error}"));
+    let workspace_tmp = std::fs::canonicalize(workspace_tmp)
+        .unwrap_or_else(|error| panic!("canonical workspace tmp directory: {error}"));
+    let temporary = tempfile::Builder::new()
+        .prefix(prefix)
+        .tempdir_in(workspace_tmp)
+        .unwrap_or_else(|error| panic!("private fixture directory: {error}"));
+    std::fs::set_permissions(temporary.path(), std::fs::Permissions::from_mode(0o700))
+        .unwrap_or_else(|error| panic!("private fixture permissions: {error}"));
+    temporary
+}
+
 #[tokio::test]
 async fn sdk_inspection_and_exact_interrupt_use_native_backend_with_generation_guards() {
     // Arrange: isolated Control and backend sockets plus explicitly fixture-only schemas.
-    let root = std::env::temp_dir().join(format!("native-control-{}", std::process::id()));
-    std::fs::DirBuilder::new()
-        .mode(0o700)
-        .create(&root)
-        .unwrap_or_else(|error| panic!("directory: {error}"));
+    let temporary = workspace_native_control_tempdir("n1-");
+    let root = temporary.path().to_path_buf();
     let backend_path = root.join("backend.sock");
     let listener = tokio::net::UnixListener::bind(&backend_path)
         .unwrap_or_else(|error| panic!("backend: {error}"));
@@ -617,7 +631,9 @@ async fn sdk_inspection_and_exact_interrupt_use_native_backend_with_generation_g
         .unwrap_or_else(|error| panic!("automation database cleanup: {error}"));
     std::fs::remove_file(backend_path).unwrap_or_else(|error| panic!("socket cleanup: {error}"));
     std::fs::remove_file(routes_path).unwrap_or_else(|error| panic!("routes cleanup: {error}"));
-    std::fs::remove_dir(root).unwrap_or_else(|error| panic!("directory cleanup: {error}"));
+    temporary
+        .close()
+        .unwrap_or_else(|error| panic!("directory cleanup: {error}"));
     // Assert.
     assert_eq!(inspection.target, target);
     assert_eq!(inspection.generation, generation);
@@ -644,12 +660,8 @@ async fn sdk_inspection_and_exact_interrupt_use_native_backend_with_generation_g
 
 #[tokio::test]
 async fn inspect_control_response_preserves_native_fake_rejection_message() {
-    let root =
-        std::env::temp_dir().join(format!("native-inspect-rejection-{}", std::process::id()));
-    std::fs::DirBuilder::new()
-        .mode(0o700)
-        .create(&root)
-        .unwrap_or_else(|error| panic!("directory: {error}"));
+    let temporary = workspace_native_control_tempdir("n2-");
+    let root = temporary.path().to_path_buf();
     let backend_path = root.join("backend.sock");
     let backend_listener = tokio::net::UnixListener::bind(&backend_path)
         .unwrap_or_else(|error| panic!("backend: {error}"));
@@ -787,5 +799,11 @@ async fn inspect_control_response_preserves_native_fake_rejection_message() {
     service_task.abort();
     let _ = service_task.await;
     std::fs::remove_file(backend_path).unwrap_or_else(|error| panic!("socket cleanup: {error}"));
-    std::fs::remove_dir(root).unwrap_or_else(|error| panic!("directory cleanup: {error}"));
+    temporary
+        .close()
+        .unwrap_or_else(|error| panic!("directory cleanup: {error}"));
 }
+
+// Source/filter map: tests/native_control_calls/interrupt_refusal.rs; focused by the leaf name.
+#[path = "native_control_calls/interrupt_refusal.rs"]
+mod interrupt_refusal;

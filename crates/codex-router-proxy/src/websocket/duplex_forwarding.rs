@@ -160,13 +160,36 @@ pub(super) async fn supervise_websocket_pumps(
                 abort_websocket_pump(&mut upstream_to_local).await;
                 local_result
             } else {
-                flatten_websocket_pump_join((&mut upstream_to_local).await)
+                await_websocket_cleanup_pump(revocation, session_shutdown, &mut upstream_to_local).await
             }
         }
         result = &mut upstream_to_local => {
-            abort_websocket_pump(&mut local_to_upstream).await;
-            flatten_websocket_pump_join(result)
+            let upstream_result = flatten_websocket_pump_join(result);
+            if upstream_result.is_err() || !tunnel_shutdown.is_cancelled() {
+                abort_websocket_pump(&mut local_to_upstream).await;
+                upstream_result
+            } else {
+                await_websocket_cleanup_pump(revocation, session_shutdown, &mut local_to_upstream).await
+            }
         }
+    }
+}
+
+async fn await_websocket_cleanup_pump(
+    revocation: &CancellationToken,
+    session_shutdown: &CancellationToken,
+    survivor: &mut JoinHandle<Result<(), WebSocketTunnelError>>,
+) -> Result<(), WebSocketTunnelError> {
+    tokio::select! {
+        () = revocation.cancelled() => {
+            abort_websocket_pump(survivor).await;
+            Ok(())
+        }
+        () = session_shutdown.cancelled() => {
+            abort_websocket_pump(survivor).await;
+            Ok(())
+        }
+        result = &mut *survivor => flatten_websocket_pump_join(result),
     }
 }
 pub(super) struct LocalToUpstreamPumpContext {
@@ -242,7 +265,12 @@ where
                 let is_close = matches!(local_message, Message::Close(_));
                 let is_response_create = is_response_create(&local_message);
                 if is_response_create {
-                    if account_turn_admission.before_next_create().await {
+                    let reconnect_before_create = tokio::select! {
+                        biased;
+                        () = tunnel_shutdown.cancelled() => true,
+                        reconnect = account_turn_admission.before_next_create() => reconnect,
+                    };
+                    if reconnect_before_create {
                         tunnel_shutdown.cancel();
                         let _ = close_websocket_sink_best_effort(&mut upstream_write).await;
                         return Ok(());
@@ -370,7 +398,6 @@ where
                                 .session_registry
                                 .note_upstream_message_forwarded(context.session_id);
                             if is_completed {
-                                context.session_registry.clear_capacity_retry(context.session_id);
                                 context.session_registry.note_response_completed(context.session_id);
                             }
                             context.active_turn_reservation.release_current();

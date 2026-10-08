@@ -1,5 +1,7 @@
 #![allow(clippy::expect_used, clippy::indexing_slicing, clippy::panic)]
 //! The Host's real router selects provider and peer clients through Control.
+#[path = "support/global_claude_fixture.rs"]
+mod global_claude_fixture;
 #[path = "support/session_message_route_fixture.rs"]
 mod route_fixture;
 use codex_router_host::{
@@ -12,6 +14,7 @@ use collaboration_protocol::{
     ProviderWorkingDirectory, RouterAccess, SessionId, SessionRef,
 };
 use collaboration_service::{ProviderOperationStore, ProviderSessionRecord};
+use global_claude_fixture::with_global_claude_fixture;
 use route_fixture::{
     create_provider_target, load_provider_target, message, post_thread_activity_for_sessions,
     prompt_and_approve_from_peer_provider, provider_fixture, publish_peer, send_and_wait_wake,
@@ -47,15 +50,19 @@ async fn host_router_selects_peer_and_provider_without_cross_loading() {
         },
         vec![
             ExternalProviderStartup::Launch(
-                ExternalProviderLaunchBinding::claude(
-                    executable.clone(),
-                    vec![
-                        "claude-held".to_owned(),
-                        claude_loads.display().to_string(),
-                        claude_prompts.display().to_string(),
-                    ],
+                with_global_claude_fixture(
+                    root.path(),
+                    ExternalProviderLaunchBinding::claude(
+                        executable.clone(),
+                        vec![
+                            "claude-held".to_owned(),
+                            claude_loads.display().to_string(),
+                            claude_prompts.display().to_string(),
+                        ],
+                    )
+                    .expect("Claude binding"),
                 )
-                .expect("Claude binding"),
+                .expect("global Claude fixture"),
             ),
             ExternalProviderStartup::Launch(
                 ExternalProviderLaunchBinding::cursor(
@@ -275,18 +282,22 @@ async fn host_composed_permission_push_preserves_selected_option_through_provide
         },
         vec![
             ExternalProviderStartup::Launch(
-                ExternalProviderLaunchBinding::claude(
-                    executable.clone(),
-                    vec![
-                        "permission-requester".to_owned(),
-                        root.path()
-                            .join("requester-loads.log")
-                            .display()
-                            .to_string(),
-                        requester_prompts.display().to_string(),
-                    ],
+                with_global_claude_fixture(
+                    root.path(),
+                    ExternalProviderLaunchBinding::claude(
+                        executable.clone(),
+                        vec![
+                            "permission-requester".to_owned(),
+                            root.path()
+                                .join("requester-loads.log")
+                                .display()
+                                .to_string(),
+                            requester_prompts.display().to_string(),
+                        ],
+                    )
+                    .expect("requester binding"),
                 )
-                .expect("requester binding"),
+                .expect("global Claude fixture"),
             ),
             ExternalProviderStartup::Launch(
                 ExternalProviderLaunchBinding::cursor(

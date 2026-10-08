@@ -197,6 +197,68 @@ fn notice_ids(records: &[PushRecordNotice]) -> Vec<PushId> {
 }
 
 #[tokio::test]
+async fn inbox_and_history_use_literal_short_preview_while_show_keeps_full_body() {
+    let mut fixture = BoardControlFixture::start().await;
+    let sender = session("claude-local", "preview-sender");
+    let caller = session("codex-local", "preview-recipient");
+    let body = "🪿".repeat(1_340);
+    let sent = fixture
+        .control
+        .call("message/send", send_params(&caller, &sender, &body))
+        .await;
+    let push_id = PushId::try_from(
+        sent.pointer("/result/pushId")
+            .and_then(Value::as_str)
+            .expect("message send returns push id")
+            .to_owned(),
+    )
+    .expect("valid push id");
+    let link = sent
+        .pointer("/result/link")
+        .and_then(Value::as_str)
+        .expect("message send returns full link")
+        .to_owned();
+    let expected_preview = format!("\"{}…\" (+1240 more chars)", "🪿".repeat(100));
+
+    let inbox = notices(
+        fixture
+            .control
+            .call("message/inbox", json!({"caller":caller,"limit":50}))
+            .await,
+    );
+    let inbox_notice = inbox
+        .iter()
+        .find(|record| record.push_id == push_id)
+        .expect("inbox retains the push notice");
+    assert!(inbox_notice.line.contains(&expected_preview));
+    assert!(inbox_notice.line.ends_with(&link));
+
+    let history = notices(
+        fixture
+            .control
+            .call(
+                "message/history",
+                json!({"caller":caller,"with":sender,"limit":50}),
+            )
+            .await,
+    );
+    let history_notice = history
+        .iter()
+        .find(|record| record.push_id == push_id)
+        .expect("history retains the same push notice");
+    assert_eq!(history_notice.line, inbox_notice.line);
+    assert!(history_notice.line.contains(&expected_preview));
+
+    let shown = fixture
+        .control
+        .call("router/show", json!({"caller":caller,"reference":link}))
+        .await;
+    assert_eq!(shown.pointer("/result/record/body"), Some(&json!(body)));
+    assert!(shown.pointer("/result/record/preview").is_none());
+    fixture.close().await;
+}
+
+#[tokio::test]
 async fn control_inbox_and_history_order_retained_dms_and_omit_expired_records() {
     let mut fixture = BoardControlFixture::start().await;
     // Maintenance accepts an injected wall time; no real-time wait drives expiry.

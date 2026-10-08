@@ -1,4 +1,6 @@
 use super::*;
+#[path = "../../tests/support/global_claude_fixture.rs"]
+mod global_claude_fixture;
 use collaboration_client::ControlClient;
 use collaboration_protocol::{
     ApprovalDecideParams, ApprovalDecision, EndpointDescription, EndpointId, EndpointRef,
@@ -616,9 +618,12 @@ async fn live_composed_cursor_native_mcp_requires_typed_call_and_router_result()
             owner_human_id: None,
         },
         vec![crate::ExternalProviderStartup::Launch(
-            crate::ExternalProviderLaunchBinding::claude(
-                owned_host_endpoint_fixture().executable,
-                owned_host_endpoint_fixture().arguments,
+            global_claude_fixture::with_global_claude_fixture(
+                &host_directory,
+                crate::ExternalProviderLaunchBinding::claude(
+                    owned_host_endpoint_fixture().executable,
+                    owned_host_endpoint_fixture().arguments,
+                )?,
             )?,
         )],
     )

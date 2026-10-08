@@ -6,8 +6,6 @@ mod retry;
 
 pub use hostile_and_state::run_hostile_no_token_smoke;
 pub use retry::run_all_weekly_exhausted_terminal;
-pub use retry::run_capacity_retry_limit_terminal;
-pub use retry::run_model_capacity_reconnect;
 pub use retry::run_three_account_short_quota_reconnect;
 pub use smoke_modes::{
     InstalledCodexSmokeReport, run_installed_codex_http_sse_mock_smoke,

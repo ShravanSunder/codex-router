@@ -593,8 +593,13 @@ fn method_error(method: &str, failures: &[&str]) -> Value {
         stages.push("rename");
     }
     let text = json!({"type":"string","minLength":1,"maxLength":1024,"x-maxUtf8Bytes":1024});
-    let native_control_diagnostics =
-        matches!(method, "codex/sessionInspect" | "codex/sessionRename");
+    let native_control_stage = match method {
+        "codex/sessionInspect" => Some("inspect"),
+        "codex/sessionRename" => Some("rename"),
+        "codex/turnInterrupt" => Some("interrupt"),
+        _ => None,
+    };
+    let native_control_diagnostics = native_control_stage.is_some();
     let general_failures: Vec<_> = failures
         .iter()
         .copied()
@@ -621,13 +626,13 @@ fn method_error(method: &str, failures: &[&str]) -> Value {
     let method_data = json!({"type":"object","required":required,
         "additionalProperties":false,"properties":properties});
     let mut data = vec![method_data];
-    if native_control_diagnostics {
+    if let Some(stage) = native_control_stage {
         data.push(json!({"type":"object",
             "required":["kind","stage","message","reason","nextAction"],
             "additionalProperties":false,
             "properties":{
                 "kind":{"const":"nativeRejected"},
-                "stage":{"enum":if method == "codex/sessionInspect" { vec!["inspect"] } else { vec!["rename"] }},
+                "stage":{"enum":[stage]},
                 "message":text,
                 "reason":{"enum":["childThread","busy","heldByAnotherClient","notResumable","permissionDenied","unsupportedCapability","unknown"]},
                 "nextAction":{"enum":["inspectTarget","useDeliverySteer","messageFromHoldingCodexClient","requestApproval","correctRequest","retryLater"]},

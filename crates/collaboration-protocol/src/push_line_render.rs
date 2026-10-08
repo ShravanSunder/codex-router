@@ -6,7 +6,6 @@ struct DisplayLimits {
     machine_label: usize,
     name: Option<usize>,
     preview: Option<usize>,
-    preview_initial: Option<usize>,
 }
 
 impl DisplayLimits {
@@ -51,7 +50,6 @@ impl DisplayLimits {
             machine_label: machine_label(input).chars().count(),
             name,
             preview,
-            preview_initial: preview,
         }
     }
 
@@ -168,14 +166,13 @@ impl DisplayLimits {
         if let Some(body) = &input.body {
             let total_scalars = body.chars().count();
             let shown_scalars = self.preview.unwrap_or_default().min(total_scalars);
-            let initial_preview = self.preview_initial.unwrap_or_default().min(total_scalars);
-            let preview = escaped_prefix(body, shown_scalars, shown_scalars < initial_preview);
+            let preview = escaped_prefix(body, shown_scalars, shown_scalars < total_scalars);
             header.push_str(" · \"");
             header.push_str(&preview);
             header.push('\"');
             let omitted_scalars = total_scalars.saturating_sub(shown_scalars);
             if omitted_scalars > 0 {
-                header.push_str(&format!(" (+{omitted_scalars})"));
+                header.push_str(&format!(" (+{omitted_scalars} more chars)"));
             }
         }
         header.push_str(" · ");
