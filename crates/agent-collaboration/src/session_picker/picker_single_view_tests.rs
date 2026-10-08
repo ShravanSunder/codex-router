@@ -88,6 +88,10 @@ async fn assert_held_switch(result: SwitchResult) {
     });
     let mut outcome: Option<SessionsPickerOutcome> = None;
     let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+    // Live-width mocks otherwise inherit the OS TTY or the 24-column headless
+    // fallback. Set fixture geometry before using rendered text as an event oracle.
+    sender.send(TerminalEvent::Resize(24, 40)).unwrap();
+    sender.send(TerminalEvent::Resize(130, 40)).unwrap();
     sender.send(key(KeyCode::F(2), KeyModifiers::NONE)).unwrap();
     let input = futures_util::stream::unfold(receiver, |mut receiver| async {
         receiver.recv().await.map(|event| (event, receiver))
