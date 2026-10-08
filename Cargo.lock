@@ -876,7 +876,7 @@ dependencies = [
 
 [[package]]
 name = "codex-router-descriptor-boundary"
-version = "0.1.63"
+version = "0.1.66"
 dependencies = [
  "rustix",
  "serde",
@@ -930,7 +930,7 @@ dependencies = [
 
 [[package]]
 name = "codex-router-keeper"
-version = "0.1.63"
+version = "0.1.66"
 dependencies = [
  "codex-router-descriptor-boundary",
  "codex-router-keeper-protocol",
@@ -944,7 +944,7 @@ dependencies = [
 
 [[package]]
 name = "codex-router-keeper-protocol"
-version = "0.1.63"
+version = "0.1.66"
 dependencies = [
  "codex-native-integration",
  "codex-router-descriptor-boundary",
