@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO interaction_history_import (metadata_id, source_present, source_sha256, revision) VALUES (1, ?, ?, 0)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "94b4f4969c3c9a6b7945470ee56dde7bc6af7af1627870f76915a0ed4c06c0b0"
+}

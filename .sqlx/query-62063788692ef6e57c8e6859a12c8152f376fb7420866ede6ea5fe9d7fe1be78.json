@@ -1,0 +1,71 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT request_id, record_json, created_at, typeof(request_id) AS \"request_storage!: String\", typeof(record_json) AS \"record_storage!: String\", typeof(created_at) AS \"timestamp_storage!: String\" FROM interaction_history_records ORDER BY request_id",
+  "describe": {
+    "columns": [
+      {
+        "name": "request_id",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "interaction_history_records",
+            "name": "request_id"
+          }
+        }
+      },
+      {
+        "name": "record_json",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "interaction_history_records",
+            "name": "record_json"
+          }
+        }
+      },
+      {
+        "name": "created_at",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "interaction_history_records",
+            "name": "created_at"
+          }
+        }
+      },
+      {
+        "name": "request_storage!: String",
+        "ordinal": 3,
+        "type_info": "Null",
+        "origin": "Expression"
+      },
+      {
+        "name": "record_storage!: String",
+        "ordinal": 4,
+        "type_info": "Null",
+        "origin": "Expression"
+      },
+      {
+        "name": "timestamp_storage!: String",
+        "ordinal": 5,
+        "type_info": "Null",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "62063788692ef6e57c8e6859a12c8152f376fb7420866ede6ea5fe9d7fe1be78"
+}

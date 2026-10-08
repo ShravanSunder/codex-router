@@ -18,6 +18,20 @@ async fn question_list_and_answer_cross_the_real_control_connection() {
         "serviceId":service_id,"endpointId":"claude-local"
     }))
     .expect("endpoint");
+    let imported = collaboration_service::InteractionHistoryRecord::RefusedApproval {
+        requester: serde_json::from_value(json!({"endpoint":{"serviceId":service_id,"endpointId":"claude-local"},"sessionId":"imported-requester"})).expect("imported identity"),
+        approver: Identity::Human { human_id: HumanId::try_from("owner".to_owned()).expect("human") },
+        refusal: collaboration_service::RefusedTypedApproval { request_id:"imported-refusal".into(),
+            title:"Imported refusal".into(), description:None, subject:None, options:vec![], reason:"fixture".into() }
+    };
+    let original = serde_json::to_vec_pretty(&std::collections::BTreeMap::from([(
+        "imported-refusal",
+        imported,
+    )]))
+    .expect("preexisting typed JSON");
+    tokio::fs::write(root.path().join("interaction-history.json"), &original)
+        .await
+        .expect("source before broker load");
     let broker = ServiceInteractionBroker::load(
         service_id.to_owned().try_into().expect("service ID"),
         NativeControlBackend {
@@ -108,6 +122,40 @@ async fn question_list_and_answer_cross_the_real_control_connection() {
         .expect("answer");
     assert_eq!(receipt.state, QuestionState::Answered);
     assert_eq!(agent_reply.await.expect("agent reply"), answer);
+    let mut observer = <sqlx::SqliteConnection as sqlx::Connection>::connect_with(
+        &sqlx::sqlite::SqliteConnectOptions::new()
+            .filename(root.path().join("interaction.sqlite"))
+            .read_only(true),
+    )
+    .await
+    .expect("independent durable observation");
+    let record_json: String = sqlx::query_scalar(
+        "SELECT record_json FROM interaction_history_records WHERE request_id='question-1'",
+    )
+    .fetch_one(&mut observer)
+    .await
+    .expect("actual answer persisted through Control route");
+    let stored: collaboration_service::InteractionHistoryRecord =
+        serde_json::from_str(&record_json).expect("typed stored answer");
+    let collaboration_service::InteractionHistoryRecord::Question {
+        state: collaboration_service::QuestionHistoryState::Answered { content },
+        ..
+    } = stored
+    else {
+        panic!("durable Question must be answered");
+    };
+    assert_eq!(QuestionResponse::Answered { content }, answer);
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM interaction_history_records")
+        .fetch_one(&mut observer)
+        .await
+        .expect("import plus real route mutation");
+    assert_eq!(count, 2);
+    assert_eq!(
+        tokio::fs::read(root.path().join("interaction-history.json"))
+            .await
+            .expect("recovery bytes"),
+        original
+    );
     assert!(
         client
             .list_questions(true)

@@ -1,4 +1,4 @@
-//! File-backed interaction history lifecycle and 30-day retention.
+//! Serialized typed-history transactions and acknowledged cache with creation-time retention.
 use super::*;
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use std::{
@@ -41,8 +41,9 @@ impl InteractionHistoryData {
 }
 
 pub(in crate::interaction_broker) struct InteractionHistoryStore {
-    path: PathBuf,
-    data: Mutex<InteractionHistoryData>,
+    data: Mutex<HistoryDatabaseState>,
+    #[cfg(test)]
+    cache_publication_pause: Mutex<Option<CachePublicationPause>>,
 }
 
 fn parse_history_timestamp(value: &str) -> Result<DateTime<Utc>, InteractionHistoryError> {
@@ -54,77 +55,117 @@ fn parse_history_timestamp(value: &str) -> Result<DateTime<Utc>, InteractionHist
         .map_err(|_| InteractionHistoryError::Unavailable)
 }
 
+#[path = "interaction_history_codec.rs"]
+mod interaction_history_codec;
+#[path = "interaction_history_database.rs"]
+mod interaction_history_database;
+use interaction_history_database::{
+    HistoryDatabaseState, commit_delta, initialize_history, read_metadata, read_records,
+};
+use sqlx::Connection;
+
+#[cfg(test)]
+struct CachePublicationPause {
+    committed: tokio::sync::oneshot::Sender<()>,
+    resume: tokio::sync::oneshot::Receiver<()>,
+}
+
 impl InteractionHistoryStore {
     pub(in crate::interaction_broker) async fn load(
         path: PathBuf,
     ) -> Result<Self, InteractionHistoryError> {
-        let upgraded_at = Utc::now();
-        let (mut data, had_undated_records) = match tokio::fs::read(&path).await {
-            Ok(bytes) => {
-                let stored_values: BTreeMap<String, serde_json::Value> =
-                    serde_json::from_slice(&bytes)
-                        .map_err(|_| InteractionHistoryError::Unavailable)?;
-                let mut data = InteractionHistoryData::default();
-                let mut had_undated_records = false;
-                for (request_id, mut value) in stored_values {
-                    let object = value
-                        .as_object_mut()
-                        .ok_or(InteractionHistoryError::Unavailable)?;
-                    let created_at = match object.remove("createdAt") {
-                        Some(serde_json::Value::String(value)) => parse_history_timestamp(&value)?,
-                        None => {
-                            had_undated_records = true;
-                            upgraded_at
-                        }
-                        Some(_) => return Err(InteractionHistoryError::Unavailable),
-                    };
-                    let record: InteractionHistoryRecord = serde_json::from_value(value)
-                        .map_err(|_| InteractionHistoryError::Unavailable)?;
-                    if request_id != record.request_id() || !record.is_valid_stored_value() {
-                        return Err(InteractionHistoryError::Unavailable);
-                    }
-                    data.insert_with_timestamp(request_id, record, created_at);
-                }
-                (data, had_undated_records)
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                (InteractionHistoryData::default(), false)
-            }
-            Err(_) => return Err(InteractionHistoryError::Unavailable),
-        };
-        let store = Self {
-            path,
-            data: Mutex::new(data.clone()),
-        };
-        let mut had_pending = false;
-        for record in data.values_mut() {
-            match record {
-                InteractionHistoryRecord::Approval { state, .. }
-                    if state == &InteractionHistoryState::Pending =>
-                {
-                    *state = InteractionHistoryState::Cancelled {
-                        reason: InteractionCancelReason::HostRestarted,
-                    };
-                    had_pending = true;
-                }
-                InteractionHistoryRecord::Question { state, .. }
-                    if state == &QuestionHistoryState::Pending =>
-                {
-                    *state = QuestionHistoryState::Cancelled {
-                        reason: InteractionCancelReason::HostRestarted,
-                    };
-                    had_pending = true;
-                }
-                _ => {}
-            }
-        }
-        if had_pending || had_undated_records {
-            store.persist(&data).await?;
-            *store.data.lock().await = data;
-        }
-        Ok(store)
+        let state = initialize_history(&path.with_file_name("interaction.sqlite"), &path)
+            .await
+            .map_err(|failure| failure.public_error(true))?;
+        Ok(Self {
+            data: Mutex::new(state),
+            #[cfg(test)]
+            cache_publication_pause: Mutex::new(None),
+        })
     }
 
+    pub(in crate::interaction_broker) async fn reconcile_pending_on_startup(
+        &self,
+    ) -> Result<(), InteractionHistoryError> {
+        self.mutate_history(|records| {
+            let mut next = records.clone();
+            for record in next.records.values_mut() {
+                match record {
+                    InteractionHistoryRecord::Approval { state, .. }
+                        if *state == InteractionHistoryState::Pending =>
+                    {
+                        *state = InteractionHistoryState::Cancelled {
+                            reason: InteractionCancelReason::HostRestarted,
+                        };
+                    }
+                    InteractionHistoryRecord::Question { state, .. }
+                        if *state == QuestionHistoryState::Pending =>
+                    {
+                        *state = QuestionHistoryState::Cancelled {
+                            reason: InteractionCancelReason::HostRestarted,
+                        };
+                    }
+                    _ => {}
+                }
+            }
+            Ok((next, ()))
+        })
+        .await
+    }
+
+    async fn mutate_history<MutationResult>(
+        &self,
+        stage: impl FnOnce(
+            &InteractionHistoryData,
+        )
+            -> Result<(InteractionHistoryData, MutationResult), InteractionHistoryError>,
+    ) -> Result<MutationResult, InteractionHistoryError> {
+        let mut state = self.data.lock().await;
+        let previous_revision = state.revision;
+        let previous_cache = state.cache.clone();
+        let mut transaction = state
+            .connection
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(|_| {
+                interaction_history_database::HistoryStorageFailure::StorageUnavailable
+                    .public_error(false)
+            })?;
+        let metadata = read_metadata(&mut transaction)
+            .await
+            .map_err(|failure| failure.public_error(false))?;
+        let baseline = if metadata.revision == previous_revision {
+            previous_cache
+        } else {
+            read_records(&mut transaction)
+                .await
+                .map_err(|failure| failure.public_error(false))?
+        };
+        let (next, outcome) = match stage(&baseline) {
+            Ok((next, outcome)) => (next, Ok(outcome)),
+            Err(error) => (baseline.clone(), Err(error)),
+        };
+        let revision = if outcome.is_ok() {
+            commit_delta(&mut transaction, &baseline, &next, metadata.revision)
+                .await
+                .map_err(|failure| failure.public_error(false))?
+        } else {
+            metadata.revision
+        };
+        transaction.commit().await.map_err(|_| {
+            interaction_history_database::HistoryStorageFailure::StorageUnavailable
+                .public_error(false)
+        })?;
+        // This test-only pause proves durable commit without cache publication. Production has no await here.
+        #[cfg(test)]
+        if let Some(pause) = self.cache_publication_pause.lock().await.take() {
+            let _ = pause.committed.send(());
+            let _ = pause.resume.await;
+        }
+        state.cache = next;
+        state.revision = revision;
+        outcome
+    }
     pub(in crate::interaction_broker) async fn record(
         &self,
         record: InteractionHistoryRecord,
@@ -143,15 +184,15 @@ impl InteractionHistoryStore {
         {
             return Err(InteractionHistoryError::NotPending);
         }
-        let mut records = self.data.lock().await;
-        if records.contains_key(record.request_id()) {
-            return Err(InteractionHistoryError::AlreadyExists);
-        }
-        let mut next = records.clone();
-        next.insert_with_timestamp(record.request_id().to_owned(), record, Utc::now());
-        self.persist(&next).await?;
-        *records = next;
-        Ok(())
+        self.mutate_history(|records| {
+            if records.contains_key(record.request_id()) {
+                return Err(InteractionHistoryError::AlreadyExists);
+            }
+            let mut next = records.clone();
+            next.insert_with_timestamp(record.request_id().to_owned(), record, Utc::now());
+            Ok((next, ()))
+        })
+        .await
     }
 
     pub(in crate::interaction_broker) async fn record_refused_approval(
@@ -168,15 +209,15 @@ impl InteractionHistoryStore {
         if !record.is_valid_stored_value() {
             return Err(InteractionHistoryError::Unavailable);
         }
-        let mut records = self.data.lock().await;
-        if records.contains_key(record.request_id()) {
-            return Err(InteractionHistoryError::AlreadyExists);
-        }
-        let mut next = records.clone();
-        next.insert_with_timestamp(record.request_id().to_owned(), record, Utc::now());
-        self.persist(&next).await?;
-        *records = next;
-        Ok(())
+        self.mutate_history(|records| {
+            if records.contains_key(record.request_id()) {
+                return Err(InteractionHistoryError::AlreadyExists);
+            }
+            let mut next = records.clone();
+            next.insert_with_timestamp(record.request_id().to_owned(), record, Utc::now());
+            Ok((next, ()))
+        })
+        .await
     }
 
     pub(in crate::interaction_broker) async fn record_cancelled_approval(
@@ -199,15 +240,15 @@ impl InteractionHistoryStore {
         if !record.is_valid_stored_value() {
             return Err(InteractionHistoryError::Unavailable);
         }
-        let mut records = self.data.lock().await;
-        if records.contains_key(record.request_id()) {
-            return Err(InteractionHistoryError::AlreadyExists);
-        }
-        let mut next = records.clone();
-        next.insert_with_timestamp(record.request_id().to_owned(), record, Utc::now());
-        self.persist(&next).await?;
-        *records = next;
-        Ok(())
+        self.mutate_history(|records| {
+            if records.contains_key(record.request_id()) {
+                return Err(InteractionHistoryError::AlreadyExists);
+            }
+            let mut next = records.clone();
+            next.insert_with_timestamp(record.request_id().to_owned(), record, Utc::now());
+            Ok((next, ()))
+        })
+        .await
     }
 
     pub(in crate::interaction_broker) async fn cancel_approval(
@@ -218,21 +259,21 @@ impl InteractionHistoryStore {
         if reason.trim().is_empty() {
             return Err(InteractionHistoryError::Unavailable);
         }
-        let mut records = self.data.lock().await;
-        let mut next = records.clone();
-        let Some(InteractionHistoryRecord::Approval { state, .. }) = next.get_mut(request_id)
-        else {
-            return Err(InteractionHistoryError::NotPending);
-        };
-        if state != &InteractionHistoryState::Pending {
-            return Err(InteractionHistoryError::AlreadySettled);
-        }
-        *state = InteractionHistoryState::Cancelled {
-            reason: reason.to_owned().into(),
-        };
-        self.persist(&next).await?;
-        *records = next;
-        Ok(())
+        self.mutate_history(|records| {
+            let mut next = records.clone();
+            let Some(InteractionHistoryRecord::Approval { state, .. }) = next.get_mut(request_id)
+            else {
+                return Err(InteractionHistoryError::NotPending);
+            };
+            if state != &InteractionHistoryState::Pending {
+                return Err(InteractionHistoryError::AlreadySettled);
+            }
+            *state = InteractionHistoryState::Cancelled {
+                reason: reason.to_owned().into(),
+            };
+            Ok((next, ()))
+        })
+        .await
     }
 
     pub(in crate::interaction_broker) async fn cancel_approval_as_approver(
@@ -240,33 +281,33 @@ impl InteractionHistoryStore {
         request_id: &str,
         actor: &Identity,
     ) -> Result<(), InteractionHistoryError> {
-        let mut records = self.data.lock().await;
-        let record = records
-            .get(request_id)
-            .ok_or(InteractionHistoryError::NotPending)?;
-        let InteractionHistoryRecord::Approval {
-            approver, state, ..
-        } = record
-        else {
-            return Err(InteractionHistoryError::NotPending);
-        };
-        if approver != actor {
-            return Err(InteractionHistoryError::WrongActor);
-        }
-        if state != &InteractionHistoryState::Pending {
-            return Err(InteractionHistoryError::AlreadySettled);
-        }
-        let mut next = records.clone();
-        let Some(InteractionHistoryRecord::Approval { state, .. }) = next.get_mut(request_id)
-        else {
-            return Err(InteractionHistoryError::NotPending);
-        };
-        *state = InteractionHistoryState::Cancelled {
-            reason: InteractionCancelReason::ApproverCancelled,
-        };
-        self.persist(&next).await?;
-        *records = next;
-        Ok(())
+        self.mutate_history(|records| {
+            let record = records
+                .get(request_id)
+                .ok_or(InteractionHistoryError::NotPending)?;
+            let InteractionHistoryRecord::Approval {
+                approver, state, ..
+            } = record
+            else {
+                return Err(InteractionHistoryError::NotPending);
+            };
+            if approver != actor {
+                return Err(InteractionHistoryError::WrongActor);
+            }
+            if state != &InteractionHistoryState::Pending {
+                return Err(InteractionHistoryError::AlreadySettled);
+            }
+            let mut next = records.clone();
+            let Some(InteractionHistoryRecord::Approval { state, .. }) = next.get_mut(request_id)
+            else {
+                return Err(InteractionHistoryError::NotPending);
+            };
+            *state = InteractionHistoryState::Cancelled {
+                reason: InteractionCancelReason::ApproverCancelled,
+            };
+            Ok((next, ()))
+        })
+        .await
     }
 
     pub(in crate::interaction_broker) async fn cancel_approvals(
@@ -277,30 +318,30 @@ impl InteractionHistoryStore {
         if reason.trim().is_empty() {
             return Err(InteractionHistoryError::Unavailable);
         }
-        let mut records = self.data.lock().await;
-        let mut next = records.clone();
-        let mut cancelled = Vec::new();
-        for (request_id, record) in &mut next.records {
-            if let InteractionHistoryRecord::Approval {
-                requester: owner,
-                state,
-                ..
-            } = record
-                && owner == requester
-                && state == &InteractionHistoryState::Pending
-            {
-                *state = InteractionHistoryState::Cancelled {
-                    reason: reason.to_owned().into(),
-                };
-                cancelled.push(request_id.clone());
+        self.mutate_history(|records| {
+            let mut next = records.clone();
+            let mut cancelled = Vec::new();
+            for (request_id, record) in &mut next.records {
+                if let InteractionHistoryRecord::Approval {
+                    requester: owner,
+                    state,
+                    ..
+                } = record
+                    && owner == requester
+                    && state == &InteractionHistoryState::Pending
+                {
+                    *state = InteractionHistoryState::Cancelled {
+                        reason: reason.to_owned().into(),
+                    };
+                    cancelled.push(request_id.clone());
+                }
             }
-        }
-        if cancelled.is_empty() {
-            return Ok(cancelled);
-        }
-        self.persist(&next).await?;
-        *records = next;
-        Ok(cancelled)
+            if cancelled.is_empty() {
+                return Ok((records.clone(), cancelled));
+            }
+            Ok((next, cancelled))
+        })
+        .await
     }
 
     pub(in crate::interaction_broker) async fn list_approvals(
@@ -351,15 +392,15 @@ impl InteractionHistoryStore {
         if !record.is_valid_stored_value() {
             return Err(InteractionHistoryError::InvalidQuestion);
         }
-        let mut records = self.data.lock().await;
-        if records.contains_key(record.request_id()) {
-            return Err(InteractionHistoryError::AlreadyExists);
-        }
-        let mut next = records.clone();
-        next.insert_with_timestamp(record.request_id().to_owned(), record, Utc::now());
-        self.persist(&next).await?;
-        *records = next;
-        Ok(())
+        self.mutate_history(|records| {
+            if records.contains_key(record.request_id()) {
+                return Err(InteractionHistoryError::AlreadyExists);
+            }
+            let mut next = records.clone();
+            next.insert_with_timestamp(record.request_id().to_owned(), record, Utc::now());
+            Ok((next, ()))
+        })
+        .await
     }
 
     pub(in crate::interaction_broker) async fn record_cancelled_question(
@@ -380,15 +421,15 @@ impl InteractionHistoryStore {
         if !record.is_valid_stored_value() {
             return Err(InteractionHistoryError::InvalidQuestion);
         }
-        let mut records = self.data.lock().await;
-        if records.contains_key(record.request_id()) {
-            return Err(InteractionHistoryError::AlreadyExists);
-        }
-        let mut next = records.clone();
-        next.insert_with_timestamp(record.request_id().to_owned(), record, Utc::now());
-        self.persist(&next).await?;
-        *records = next;
-        Ok(())
+        self.mutate_history(|records| {
+            if records.contains_key(record.request_id()) {
+                return Err(InteractionHistoryError::AlreadyExists);
+            }
+            let mut next = records.clone();
+            next.insert_with_timestamp(record.request_id().to_owned(), record, Utc::now());
+            Ok((next, ()))
+        })
+        .await
     }
 
     pub(in crate::interaction_broker) async fn list_questions(
@@ -406,28 +447,28 @@ impl InteractionHistoryStore {
         actor: &Identity,
         response: &QuestionResponse,
     ) -> Result<(), InteractionHistoryError> {
-        let mut records = self.data.lock().await;
-        let record = records
-            .get(request_id)
-            .ok_or(InteractionHistoryError::NotPending)?;
-        validate_question_response_record(record, actor, response)?;
-        let mut next = records.clone();
-        let Some(InteractionHistoryRecord::Question { state, .. }) = next.get_mut(request_id)
-        else {
-            return Err(InteractionHistoryError::NotPending);
-        };
-        *state = match response {
-            QuestionResponse::Answered { content } => QuestionHistoryState::Answered {
-                content: content.clone(),
-            },
-            QuestionResponse::Declined => QuestionHistoryState::Declined,
-            QuestionResponse::Cancelled => QuestionHistoryState::Cancelled {
-                reason: InteractionCancelReason::ApproverCancelled,
-            },
-        };
-        self.persist(&next).await?;
-        *records = next;
-        Ok(())
+        self.mutate_history(|records| {
+            let record = records
+                .get(request_id)
+                .ok_or(InteractionHistoryError::NotPending)?;
+            validate_question_response_record(record, actor, response)?;
+            let mut next = records.clone();
+            let Some(InteractionHistoryRecord::Question { state, .. }) = next.get_mut(request_id)
+            else {
+                return Err(InteractionHistoryError::NotPending);
+            };
+            *state = match response {
+                QuestionResponse::Answered { content } => QuestionHistoryState::Answered {
+                    content: content.clone(),
+                },
+                QuestionResponse::Declined => QuestionHistoryState::Declined,
+                QuestionResponse::Cancelled => QuestionHistoryState::Cancelled {
+                    reason: InteractionCancelReason::ApproverCancelled,
+                },
+            };
+            Ok((next, ()))
+        })
+        .await
     }
 
     pub(in crate::interaction_broker) async fn validate_question_response(
@@ -436,11 +477,14 @@ impl InteractionHistoryStore {
         actor: &Identity,
         response: &QuestionResponse,
     ) -> Result<(), InteractionHistoryError> {
-        let records = self.data.lock().await;
-        let record = records
-            .get(request_id)
-            .ok_or(InteractionHistoryError::NotPending)?;
-        validate_question_response_record(record, actor, response)
+        self.mutate_history(|records| {
+            let record = records
+                .get(request_id)
+                .ok_or(InteractionHistoryError::NotPending)?;
+            validate_question_response_record(record, actor, response)?;
+            Ok((records.clone(), ()))
+        })
+        .await
     }
     pub(in crate::interaction_broker) async fn cancel_questions(
         &self,
@@ -450,30 +494,30 @@ impl InteractionHistoryStore {
         if reason.trim().is_empty() {
             return Err(InteractionHistoryError::Unavailable);
         }
-        let mut records = self.data.lock().await;
-        let mut next = records.clone();
-        let mut cancelled = Vec::new();
-        for (request_id, record) in &mut next.records {
-            if let InteractionHistoryRecord::Question {
-                requester: owner,
-                state,
-                ..
-            } = record
-                && owner == requester
-                && state == &QuestionHistoryState::Pending
-            {
-                *state = QuestionHistoryState::Cancelled {
-                    reason: reason.to_owned().into(),
-                };
-                cancelled.push(request_id.clone());
+        self.mutate_history(|records| {
+            let mut next = records.clone();
+            let mut cancelled = Vec::new();
+            for (request_id, record) in &mut next.records {
+                if let InteractionHistoryRecord::Question {
+                    requester: owner,
+                    state,
+                    ..
+                } = record
+                    && owner == requester
+                    && state == &QuestionHistoryState::Pending
+                {
+                    *state = QuestionHistoryState::Cancelled {
+                        reason: reason.to_owned().into(),
+                    };
+                    cancelled.push(request_id.clone());
+                }
             }
-        }
-        if cancelled.is_empty() {
-            return Ok(cancelled);
-        }
-        self.persist(&next).await?;
-        *records = next;
-        Ok(cancelled)
+            if cancelled.is_empty() {
+                return Ok((records.clone(), cancelled));
+            }
+            Ok((next, cancelled))
+        })
+        .await
     }
 
     pub(in crate::interaction_broker) async fn cancel_question(
@@ -484,21 +528,21 @@ impl InteractionHistoryStore {
         if reason.trim().is_empty() {
             return Err(InteractionHistoryError::Unavailable);
         }
-        let mut records = self.data.lock().await;
-        let mut next = records.clone();
-        let Some(InteractionHistoryRecord::Question { state, .. }) = next.get_mut(request_id)
-        else {
-            return Err(InteractionHistoryError::NotPending);
-        };
-        if state != &QuestionHistoryState::Pending {
-            return Err(InteractionHistoryError::AlreadySettled);
-        }
-        *state = QuestionHistoryState::Cancelled {
-            reason: reason.to_owned().into(),
-        };
-        self.persist(&next).await?;
-        *records = next;
-        Ok(())
+        self.mutate_history(|records| {
+            let mut next = records.clone();
+            let Some(InteractionHistoryRecord::Question { state, .. }) = next.get_mut(request_id)
+            else {
+                return Err(InteractionHistoryError::NotPending);
+            };
+            if state != &QuestionHistoryState::Pending {
+                return Err(InteractionHistoryError::AlreadySettled);
+            }
+            *state = QuestionHistoryState::Cancelled {
+                reason: reason.to_owned().into(),
+            };
+            Ok((next, ()))
+        })
+        .await
     }
 
     pub(in crate::interaction_broker) async fn decide(
@@ -511,51 +555,51 @@ impl InteractionHistoryStore {
         if option_id.is_empty() {
             return Err(InteractionHistoryError::InvalidOptionId);
         }
-        let mut records = self.data.lock().await;
-        let record = records
-            .get(request_id)
-            .ok_or(InteractionHistoryError::NotPending)?;
-        if record.approver() != actor {
-            return Err(InteractionHistoryError::WrongActor);
-        }
-        if record.approval_state() != Some(&InteractionHistoryState::Pending) {
-            return Err(InteractionHistoryError::AlreadySettled);
-        }
-        let request = record
-            .approval_request()
-            .ok_or(InteractionHistoryError::NotPending)?;
-        let option = request
-            .options
-            .iter()
-            .find(|option| option.option_id.as_str() == option_id)
-            .ok_or_else(|| InteractionHistoryError::OptionNotOffered {
-                offered: request
-                    .options
-                    .iter()
-                    .map(|option| option.option_id.as_str().to_owned())
-                    .collect(),
-            })?;
-        if let ApprovalScope::Persistent { where_stored } = &option.choice.scope
-            && !acknowledge_persistent
-        {
-            return Err(InteractionHistoryError::PersistentChoiceNotAcknowledged {
-                persistent_target: where_stored.as_str().to_owned(),
-            });
-        }
-        let selected = option.option_id.clone();
-        let mut next = records.clone();
-        let updated = next
-            .get_mut(request_id)
-            .ok_or(InteractionHistoryError::NotPending)?;
-        let InteractionHistoryRecord::Approval { state, .. } = updated else {
-            return Err(InteractionHistoryError::NotPending);
-        };
-        *state = InteractionHistoryState::Decided {
-            option_id: selected.clone(),
-        };
-        self.persist(&next).await?;
-        *records = next;
-        Ok(selected)
+        self.mutate_history(|records| {
+            let record = records
+                .get(request_id)
+                .ok_or(InteractionHistoryError::NotPending)?;
+            if record.approver() != actor {
+                return Err(InteractionHistoryError::WrongActor);
+            }
+            if record.approval_state() != Some(&InteractionHistoryState::Pending) {
+                return Err(InteractionHistoryError::AlreadySettled);
+            }
+            let request = record
+                .approval_request()
+                .ok_or(InteractionHistoryError::NotPending)?;
+            let option = request
+                .options
+                .iter()
+                .find(|option| option.option_id.as_str() == option_id)
+                .ok_or_else(|| InteractionHistoryError::OptionNotOffered {
+                    offered: request
+                        .options
+                        .iter()
+                        .map(|option| option.option_id.as_str().to_owned())
+                        .collect(),
+                })?;
+            if let ApprovalScope::Persistent { where_stored } = &option.choice.scope
+                && !acknowledge_persistent
+            {
+                return Err(InteractionHistoryError::PersistentChoiceNotAcknowledged {
+                    persistent_target: where_stored.as_str().to_owned(),
+                });
+            }
+            let selected = option.option_id.clone();
+            let mut next = records.clone();
+            let updated = next
+                .get_mut(request_id)
+                .ok_or(InteractionHistoryError::NotPending)?;
+            let InteractionHistoryRecord::Approval { state, .. } = updated else {
+                return Err(InteractionHistoryError::NotPending);
+            };
+            *state = InteractionHistoryState::Decided {
+                option_id: selected.clone(),
+            };
+            Ok((next, selected))
+        })
+        .await
     }
 
     pub(in crate::interaction_broker) async fn prune_expired(
@@ -569,57 +613,28 @@ impl InteractionHistoryStore {
         let cutoff = now
             .checked_sub_signed(ChronoDuration::days(30))
             .ok_or(InteractionHistoryError::Unavailable)?;
-        let mut data = self.data.lock().await;
-        let mut expired = data
-            .created_at
-            .iter()
-            .filter(|(_, created_at)| **created_at < cutoff)
-            .map(|(request_id, created_at)| (created_at.to_owned(), request_id.clone()))
-            .collect::<Vec<_>>();
-        expired.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
-        expired.truncate(batch_size);
-        if expired.is_empty() {
-            return Ok(0);
-        }
-        let mut next = data.clone();
-        for (_, request_id) in &expired {
-            next.records.remove(request_id);
-            next.created_at.remove(request_id);
-        }
-        self.persist(&next).await?;
-        *data = next;
-        u64::try_from(expired.len()).map_err(|_| InteractionHistoryError::Unavailable)
-    }
-
-    async fn persist(&self, data: &InteractionHistoryData) -> Result<(), InteractionHistoryError> {
-        let mut records = serde_json::Map::new();
-        for (request_id, record) in &data.records {
-            let created_at = data
+        self.mutate_history(|data| {
+            let mut expired = data
                 .created_at
-                .get(request_id)
-                .ok_or(InteractionHistoryError::Unavailable)?;
-            let mut value =
-                serde_json::to_value(record).map_err(|_| InteractionHistoryError::Unavailable)?;
-            let object = value
-                .as_object_mut()
-                .ok_or(InteractionHistoryError::Unavailable)?;
-            object.insert(
-                "createdAt".to_owned(),
-                serde_json::Value::String(
-                    created_at.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true),
-                ),
-            );
-            records.insert(request_id.clone(), value);
-        }
-        let bytes = serde_json::to_vec_pretty(&records)
-            .map_err(|_| InteractionHistoryError::Unavailable)?;
-        let temporary = self.path.with_extension("json.tmp");
-        tokio::fs::write(&temporary, bytes)
-            .await
-            .map_err(|_| InteractionHistoryError::Unavailable)?;
-        tokio::fs::rename(&temporary, &self.path)
-            .await
-            .map_err(|_| InteractionHistoryError::Unavailable)
+                .iter()
+                .filter(|(_, created_at)| **created_at < cutoff)
+                .map(|(request_id, created_at)| (created_at.to_owned(), request_id.clone()))
+                .collect::<Vec<_>>();
+            expired.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
+            expired.truncate(batch_size);
+            if expired.is_empty() {
+                return Ok((data.clone(), 0));
+            }
+            let mut next = data.clone();
+            for (_, request_id) in &expired {
+                next.records.remove(request_id);
+                next.created_at.remove(request_id);
+            }
+            let count =
+                u64::try_from(expired.len()).map_err(|_| InteractionHistoryError::Unavailable)?;
+            Ok((next, count))
+        })
+        .await
     }
 }
 

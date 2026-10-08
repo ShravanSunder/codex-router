@@ -409,23 +409,30 @@ async fn human_and_old_provider_approval_rows_stay_detailed_only() {
         2
     );
     drop(broker);
-    let history_path = directory.join("interaction-history.json");
-    let mut stored: serde_json::Value = serde_json::from_slice(
-        &tokio::fs::read(&history_path)
-            .await
-            .expect("stored history"),
+    let mut observer = <sqlx::SqliteConnection as sqlx::Connection>::connect_with(
+        &sqlx::sqlite::SqliteConnectOptions::new().filename(directory.join("interaction.sqlite")),
     )
-    .expect("history JSON");
-    stored["old-row"]["legacy_metadata"]
+    .await
+    .expect("owned SQLite history");
+    let record_json: String = sqlx::query_scalar(
+        "SELECT record_json FROM interaction_history_records WHERE request_id='old-row'",
+    )
+    .fetch_one(&mut observer)
+    .await
+    .expect("stored old row");
+    let mut stored: serde_json::Value = serde_json::from_str(&record_json).expect("stored record");
+    stored["legacy_metadata"]
         .as_object_mut()
         .expect("legacy metadata")
         .remove("requestedBy");
-    tokio::fs::write(
-        &history_path,
-        serde_json::to_vec(&stored).expect("history bytes"),
-    )
-    .await
-    .expect("older history row");
+    sqlx::query("UPDATE interaction_history_records SET record_json=? WHERE request_id='old-row'")
+        .bind(serde_json::to_string(&stored).expect("old record bytes"))
+        .execute(&mut observer)
+        .await
+        .expect("older record shape");
+    sqlx::Connection::close(observer)
+        .await
+        .expect("close observer");
     let reloaded = ServiceInteractionBroker::load(
         target.endpoint.service_id.clone(),
         NativeControlBackend {
@@ -762,20 +769,9 @@ fn legacy_presentation_maps_only_fields_retained_by_typed_subjects() {
     );
 }
 
-fn interaction_records_without_timestamps(
-    bytes: &[u8],
-) -> std::collections::BTreeMap<String, crate::interaction_broker::InteractionHistoryRecord> {
-    let mut values: serde_json::Value =
-        serde_json::from_slice(bytes).expect("interaction history JSON");
-    let records = values.as_object_mut().expect("interaction history map");
-    for record in records.values_mut() {
-        record
-            .as_object_mut()
-            .expect("interaction record object")
-            .remove("createdAt");
-    }
-    serde_json::from_value(values).expect("typed interaction history records")
-}
+#[path = "interaction_broker_tests/history_fixtures.rs"]
+mod history_fixtures;
+use history_fixtures::stored_interaction_records;
 
 fn select_typed(option_id: &str) -> crate::interaction_broker::TypedInteractionDecision {
     crate::interaction_broker::TypedInteractionDecision::SelectApproval {

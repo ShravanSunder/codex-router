@@ -301,6 +301,10 @@ impl ServiceInteractionBroker {
             InteractionHistoryStore::load(routes_path.with_file_name("interaction-history.json"))
                 .await
                 .map_err(|_| ApprovalBrokerError::Unavailable)?;
+        interaction_history
+            .reconcile_pending_on_startup()
+            .await
+            .map_err(|_| ApprovalBrokerError::Unavailable)?;
         Ok(Arc::new(Self {
             service_id,
             backend,

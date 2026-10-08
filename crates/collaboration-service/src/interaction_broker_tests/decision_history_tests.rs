@@ -424,10 +424,7 @@ async fn populated_old_approval_reader_survives_human_interaction_history() {
         default_list,
         json!({"approvals":[serde_json::to_value(&old_records[0]).expect("old record")]})
     );
-    let new_bytes = tokio::fs::read(directory.join("interaction-history.json"))
-        .await
-        .expect("new interaction history");
-    let new_records = interaction_records_without_timestamps(&new_bytes);
+    let new_records = stored_interaction_records(&directory).await;
     assert!(matches!(
         new_records["human-approval-1"].approval_state(),
         Some(crate::interaction_broker::InteractionHistoryState::Decided { option_id })
@@ -458,10 +455,13 @@ async fn typed_interaction_rejects_self_approver_and_corrupt_stored_rows() {
             .await,
         Err(crate::interaction_broker::InteractionHistoryError::SelfApprover)
     ));
-    let history_path = directory.join("interaction-history.json");
-    tokio::fs::write(&history_path, br#"{"bad":{"requestId":"other"}}"#)
-        .await
-        .expect("write corrupt stored row");
+    let mut observer = <sqlx::SqliteConnection as sqlx::Connection>::connect_with(
+        &sqlx::sqlite::SqliteConnectOptions::new().filename(directory.join("interaction.sqlite")),
+    )
+    .await
+    .expect("owned history observer");
+    sqlx::query("INSERT INTO interaction_history_records VALUES ('bad', '{\"requestId\":\"other\"}', '2026-10-01T00:00:00.000000000Z')")
+        .execute(&mut observer).await.expect("corrupt actual SQLite record");
     let reload = ServiceInteractionBroker::load(
         broker.service_id.clone(),
         broker.backend.clone(),
