@@ -932,8 +932,10 @@ dependencies = [
 name = "codex-router-keeper"
 version = "0.1.72"
 dependencies = [
+ "codex-native-integration",
  "codex-router-descriptor-boundary",
  "codex-router-keeper-protocol",
+ "futures-util",
  "rustix",
  "serde",
  "serde_json",
@@ -941,6 +943,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-tungstenite",
  "tokio-util",
  "uuid",
 ]

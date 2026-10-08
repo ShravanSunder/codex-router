@@ -39,3 +39,28 @@ pub use slot_image_state::{ImageCommitRelease, SlotImageState};
 
 #[cfg(test)]
 mod owned_launch_test_support;
+
+mod native_probe_deadline;
+mod native_probe_error;
+mod native_probe_launch;
+mod native_probe_receiver;
+pub use native_probe_error::NativeProbeError;
+pub use native_probe_receiver::{run_native_probe_receiver, validate_native_probe_launch};
+
+mod native_probe_channel;
+mod native_probe_process;
+pub use native_probe_process::NativeProbeProcess;
+
+#[cfg(test)]
+mod native_probe_process_tests;
+#[cfg(test)]
+mod native_probe_test_support;
+
+#[cfg(test)]
+mod native_probe_backend_tests;
+
+#[cfg(test)]
+mod native_probe_poison_tests;
+
+#[cfg(test)]
+mod native_probe_job_pipe_tests;

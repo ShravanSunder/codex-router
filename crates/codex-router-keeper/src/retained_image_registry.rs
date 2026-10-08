@@ -350,17 +350,13 @@ impl ImageRegistry {
         Ok(lease)
     }
     async fn validate_record_path(&self, record: &SlotImage) -> Result<(), ImageError> {
-        let parent = self.images_root.join(digest_hex(record.file_sha256()));
-        if record.retained_path() != parent.join("codex-router") {
-            return Err(ImageError::ForeignNode);
-        }
-        let root = self.images_root.clone();
-        tokio::task::spawn_blocking(move || {
-            validate_root(&root)?;
-            private_directory(root.parent().ok_or(ImageError::PrivateDirectory)?)?;
-            private_directory(&parent)
-        })
-        .await?
+        validate_launch_record(&self.images_root, record).await
+    }
+    pub(crate) fn native_probe_launcher(
+        &self,
+        image: &ImageLease,
+    ) -> crate::native_probe_launch::ProbeLauncher {
+        crate::native_probe_launch::ProbeLauncher::new(self.images_root.clone(), image.clone())
     }
     pub async fn spawn(
         &self,
@@ -515,4 +511,21 @@ pub enum ImageLaunchOutcome {
         cleanup: OwnedSpawnCleanup,
         image: ImageLease,
     },
+}
+
+pub(crate) async fn validate_launch_record(
+    images_root: &Path,
+    record: &SlotImage,
+) -> Result<(), ImageError> {
+    let parent = images_root.join(digest_hex(record.file_sha256()));
+    if record.retained_path() != parent.join("codex-router") {
+        return Err(ImageError::ForeignNode);
+    }
+    let root = images_root.to_owned();
+    tokio::task::spawn_blocking(move || {
+        validate_root(&root)?;
+        private_directory(root.parent().ok_or(ImageError::PrivateDirectory)?)?;
+        private_directory(&parent)
+    })
+    .await?
 }
