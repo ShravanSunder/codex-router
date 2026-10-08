@@ -1,18 +1,25 @@
-//! The collaboration API on the Host's localhost listener.
+//! The collaboration API on the Host's two listeners: localhost TCP for models and the
+//! owner-only `control.sock` for the CLIs.
 //!
-//! The listener is bound first, so its URL can be handed to provider launches and the manifest
-//! before the Router's dependencies are composed; it starts serving once the application over
-//! those dependencies exists.
+//! The TCP listener is bound first, so its URL can be handed to provider launches and the
+//! manifest before the Router's dependencies are composed; the socket is bound before the
+//! manifest is published. Both start serving once the application over those dependencies
+//! exists.
 use collaboration_mcp::{
     COLLABORATION_API_PATH, CollaborationApiConfig, CollaborationApiListener, LoopbackBindAddress,
 };
-use std::{io, net::SocketAddr};
-use tokio::{net::TcpListener, task::JoinHandle};
+use collaboration_service::{OwnerOnlySocket, SocketCleanup};
+use std::{io, net::SocketAddr, path::Path};
+use tokio::{
+    net::{TcpListener, UnixListener},
+    task::JoinHandle,
+};
 
-/// The bound localhost listener, not yet serving.
+/// The bound listeners, not yet serving.
 pub(super) struct BoundCollaborationApi {
     listener: TcpListener,
     local_address: SocketAddr,
+    service_socket: Option<(UnixListener, SocketCleanup)>,
 }
 
 impl BoundCollaborationApi {
@@ -23,42 +30,66 @@ impl BoundCollaborationApi {
         Ok(Self {
             listener,
             local_address,
+            service_socket: None,
         })
+    }
+
+    /// Binds the owner-only service socket the CLIs reach the API on.
+    pub(super) fn with_service_socket(mut self, path: &Path) -> io::Result<Self> {
+        self.service_socket = Some(OwnerOnlySocket::bind(path)?.into_parts());
+        Ok(self)
     }
 
     pub(super) fn url(&self) -> String {
         format!("http://{}{COLLABORATION_API_PATH}", self.local_address)
     }
 
-    /// Serves the API until the configuration's shutdown token is cancelled.
+    /// Serves the API on every bound listener until the configuration's shutdown token is
+    /// cancelled.
     pub(super) fn serve(self, config: &CollaborationApiConfig) -> ServedCollaborationApi {
-        let api = collaboration_mcp::collaboration_api_router(
+        let loopback = collaboration_mcp::collaboration_api_router(
             config,
             CollaborationApiListener::LoopbackTcp(self.local_address),
         );
-        ServedCollaborationApi {
-            task: Some(tokio::spawn(collaboration_mcp::serve_collaboration_api(
-                self.listener,
-                api,
+        let mut tasks = vec![tokio::spawn(collaboration_mcp::serve_collaboration_api(
+            self.listener,
+            loopback,
+            config.shutdown.clone(),
+        ))];
+        let mut cleanup = None;
+        if let Some((listener, socket_cleanup)) = self.service_socket {
+            let socket = collaboration_mcp::collaboration_api_router(
+                config,
+                CollaborationApiListener::UnixSocket,
+            );
+            tasks.push(tokio::spawn(collaboration_mcp::serve_collaboration_api(
+                listener,
+                socket,
                 config.shutdown.clone(),
-            ))),
+            )));
+            cleanup = Some(socket_cleanup);
+        }
+        ServedCollaborationApi {
+            tasks,
+            _socket_cleanup: cleanup,
         }
     }
 }
 
-/// The serving task; it ends only when shutdown is cancelled or the listener fails.
+/// The serving tasks; they end only when shutdown is cancelled or a listener fails.
 pub(super) struct ServedCollaborationApi {
-    task: Option<JoinHandle<io::Result<()>>>,
+    tasks: Vec<JoinHandle<io::Result<()>>>,
+    _socket_cleanup: Option<SocketCleanup>,
 }
 
 impl ServedCollaborationApi {
-    /// Resolves only when the listener stops on its own.
+    /// Resolves only when a listener stops on its own.
     pub(super) async fn failure(&mut self) -> io::Error {
-        let Some(task) = &mut self.task else {
+        if self.tasks.is_empty() {
             return std::future::pending().await;
-        };
-        let result = task.await;
-        self.task = None;
+        }
+        let (result, index, _) = futures_util::future::select_all(self.tasks.iter_mut()).await;
+        drop(self.tasks.remove(index));
         match result {
             Ok(Err(error)) => error,
             Ok(Ok(())) => io::Error::other("collaboration API listener stopped unexpectedly"),
@@ -66,12 +97,18 @@ impl ServedCollaborationApi {
         }
     }
 
-    /// Waits for the listener to stop after shutdown and for its cancelled calls to settle.
+    /// Waits for the listeners to stop after shutdown and for their cancelled calls to settle.
     pub(super) async fn stopped(&mut self) -> io::Result<()> {
-        let Some(task) = self.task.take() else {
-            return Ok(());
-        };
-        task.await
-            .map_err(|error| io::Error::other(error.to_string()))?
+        let mut first_failure = None;
+        for task in self.tasks.drain(..) {
+            let result = task
+                .await
+                .map_err(|error| io::Error::other(error.to_string()))
+                .and_then(|result| result);
+            if let Err(error) = result {
+                first_failure.get_or_insert(error);
+            }
+        }
+        first_failure.map_or(Ok(()), Err)
     }
 }

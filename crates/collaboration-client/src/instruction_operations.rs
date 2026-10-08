@@ -1,5 +1,5 @@
 //! Typed instruction operations; callers retain operation identity across an uncertain connection.
-use crate::{ClientError, ControlClient};
+use crate::{ClientError, CollaborationClient};
 use collaboration_protocol::{
     InstructionCreateParams, InstructionFailure, InstructionShowParams, InstructionSnapshot,
     InstructionUpdateParams,
@@ -13,27 +13,27 @@ pub enum InstructionClientError {
     #[error(transparent)]
     Connection(#[from] ClientError),
 }
-impl ControlClient {
+impl CollaborationClient {
     pub async fn create_instruction(
-        &mut self,
+        &self,
         params: InstructionCreateParams,
     ) -> Result<InstructionSnapshot, InstructionClientError> {
-        self.instruction_call("instruction/create", params).await
+        self.instruction_call("instruction_create", params).await
     }
     pub async fn update_instruction(
-        &mut self,
+        &self,
         params: InstructionUpdateParams,
     ) -> Result<InstructionSnapshot, InstructionClientError> {
-        self.instruction_call("instruction/update", params).await
+        self.instruction_call("instruction_update", params).await
     }
     pub async fn read_instruction(
-        &mut self,
+        &self,
         params: InstructionShowParams,
     ) -> Result<InstructionSnapshot, InstructionClientError> {
-        self.instruction_call("instruction/show", params).await
+        self.instruction_call("instruction_show", params).await
     }
     async fn instruction_call<TParams: Serialize>(
-        &mut self,
+        &self,
         method: &str,
         params: TParams,
     ) -> Result<InstructionSnapshot, InstructionClientError> {

@@ -248,7 +248,6 @@ async fn provider_create_rejects_codex_only_inputs_before_mutation() {
         let identity = ServiceIdentity::new(
             "019f0000-0000-7000-8000-000000000001",
             "019f0000-0000-7000-8000-000000000002",
-            &format!("sha256:{}", "a".repeat(64)),
         )
         .unwrap_or_else(|error| panic!("service identity: {error}"));
         let serving = tokio::spawn(serve_control_connection(server, identity));
@@ -482,7 +481,6 @@ async fn provider_create_wait_returns_the_target_from_exact_operation()
     let identity = ServiceIdentity::new(
         "019f0000-0000-7000-8000-000000000001",
         "019f0000-0000-7000-8000-000000000002",
-        &format!("sha256:{}", "a".repeat(64)),
     )?
     .with_provider_conversation_backend(Arc::new(backend));
     let (client, server) = tokio::net::UnixStream::pair()?;
@@ -526,7 +524,6 @@ async fn provider_create_wait_returns_the_target_from_exact_operation()
     let identity = ServiceIdentity::new(
         "019f0000-0000-7000-8000-000000000001",
         "019f0000-0000-7000-8000-000000000002",
-        &format!("sha256:{}", "a".repeat(64)),
     )?
     .with_provider_conversation_backend(Arc::new(delayed_backend.clone()));
     let (client, server) = tokio::net::UnixStream::pair()?;

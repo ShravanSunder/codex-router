@@ -1,16 +1,13 @@
 //! Owner-local communication service, independent of the Host executable.
 pub mod collaboration_application;
 pub use collaboration_application::{CollaborationApplication, ResultByteBudget};
-mod control_connection;
-mod control_overload_response;
-pub use control_connection::serve_control_connection;
 mod machine_identity;
 pub use machine_identity::MachineIdentity;
 mod automation_retention_worker;
-mod control_service_context;
+mod service_identity;
 pub use automation_retention_worker::AutomationRetentionWorker;
-pub use control_service_context::ServiceIdentity;
-pub use control_service_context::subscription_delivery::{
+pub use service_identity::ServiceIdentity;
+pub use service_identity::subscription_delivery::{
     BoardAvailability, SubscriptionClock, SubscriptionDeliveryService,
     SubscriptionDeliveryServiceProps, SubscriptionWaitFilter, SubscriptionWaitResult,
     SystemSubscriptionClock,
@@ -19,8 +16,6 @@ mod endpoint_directory;
 pub use endpoint_directory::{
     EndpointDirectory, EndpointSnapshot, EndpointSubscription, EndpointUpdate,
 };
-mod local_control_listener;
-pub use local_control_listener::LocalControlService;
 mod native_channel_relay;
 pub use native_channel_relay::{
     MAX_NATIVE_MESSAGE_BYTES, connect_native_relay, relay_native_channels,
@@ -31,6 +26,7 @@ mod native_relay_listener;
 mod pending_snapshot_interactions;
 mod private_socket_listener;
 pub use native_relay_listener::NativeRelayListener;
+pub use private_socket_listener::{OwnerOnlySocket, SocketCleanup};
 mod conversation_operation_projection;
 mod provider_operation_store;
 pub use conversation_operation_projection::conversation_operation_snapshot;
@@ -40,7 +36,6 @@ pub use codex_conversation_operation_recorder::{
     CodexConversationOperationRecorder, UnavailableConversationOperationRecorder,
 };
 mod provider_session_event_hub;
-mod provider_session_observation_dispatch;
 mod provider_session_record;
 mod session_event_hub;
 pub use provider_operation_store::{
@@ -121,22 +116,16 @@ pub use session_event_hub::{
     HubEvent, HubFuture, HubSessionSummary, SessionEventAttachment, SessionEventHub,
     SessionEventHubError,
 };
-mod provider_conversation_dispatch;
 mod service_identity_storage;
 pub use service_identity_storage::{load_service_identity, new_service_uuid};
 mod manifest_publication;
 pub use manifest_publication::ManifestPublication;
-mod control_schema_publication;
-mod journal_dispatch;
-pub use control_schema_publication::publish_control_schema;
-mod native_control_dispatch;
+mod native_control_backend;
 mod session_display_name_cache;
 pub use session_display_name_cache::SessionDisplayNameCache;
 mod push_record_delivery;
 mod push_record_resolver;
-mod session_message_dispatch;
-mod session_message_reply_dispatch;
-pub use native_control_dispatch::NativeControlBackend;
+pub use native_control_backend::NativeControlBackend;
 
 mod codex_app_server_delivery_route;
 mod codex_app_server_scheduled_runs;
@@ -162,13 +151,10 @@ pub use codex_acp_adapter::{ACP_SCHEMA_DIGEST, NativeStoredSessions};
 pub use unmaterialized_thread_holder::UnmaterializedThreadHolder;
 
 mod codex_session_inventory;
-mod instruction_dispatch;
 mod instruction_projection;
 mod provider_session_inventory;
-mod provider_session_inventory_dispatch;
 mod stored_inventory_observation;
 
-mod wakeup_dispatch;
 mod wakeup_projection;
 mod wakeup_timing_worker;
 pub use wakeup_timing_worker::WakeTimingWorker;
@@ -176,17 +162,12 @@ pub use wakeup_timing_worker::WakeTimingWorker;
 mod delivery_projection;
 mod wakeup_delivery_sender;
 
-mod wakeup_lifecycle_dispatch;
-
 mod wakeup_subscription;
 
-mod wakeup_list_dispatch;
-
-mod schedule_dispatch;
 mod schedule_projection;
 
 mod native_thread_preparation;
-mod schedule_preparation_dispatch;
+mod schedule_preparation;
 
 mod schedule_activation;
 mod schedule_timing_worker;
@@ -198,28 +179,17 @@ pub use schedule_timing_worker::ScheduleTimingWorker;
 mod summary_native_worker;
 
 mod automation_configuration;
-mod run_dispatch;
 mod run_projection;
 pub use automation_configuration::{
     AutomationConfigurationBackend, AutomationConfigurationHandle, ConfigurationAdmissionLease,
 };
-mod automation_configuration_dispatch;
 
-mod attempt_history_dispatch;
 mod attempt_history_projection;
 mod automation_collection_cursor;
-mod automation_collection_dispatch;
 mod automation_collection_projection;
 mod automation_event_cursor;
-mod automation_event_dispatch;
 mod automation_event_projection;
 mod automation_inspection_failure;
-mod automation_reconciliation_dispatch;
 mod delivery_reconciliation;
-mod operation_inspection_dispatch;
 mod operation_receipt_projection;
 mod run_reconciliation;
-
-mod board_request_dispatch;
-mod board_request_validation;
-mod thread_subscription_dispatch;

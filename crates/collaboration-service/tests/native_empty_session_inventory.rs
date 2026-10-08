@@ -79,16 +79,12 @@ async fn runtime_inventory_filters_unmaterialized_threads_and_keeps_rows_on_turn
         gate,
         codex_home: temporary.path().to_owned(),
     };
-    let identity = ServiceIdentity::new(
-        service_id,
-        service_epoch,
-        &format!("sha256:{}", "a".repeat(64)),
-    )
-    .expect("service identity")
-    .with_endpoints(vec![endpoint])
-    .expect("register endpoint")
-    .with_native_backend(native_backend)
-    .expect("register native backend");
+    let identity = ServiceIdentity::new(service_id, service_epoch)
+        .expect("service identity")
+        .with_endpoints(vec![endpoint])
+        .expect("register endpoint")
+        .with_native_backend(native_backend)
+        .expect("register native backend");
     let (client_stream, service_stream) = tokio::net::UnixStream::pair().expect("control pair");
     let service = tokio::spawn(serve_control_connection(service_stream, identity));
     let thread_ids = ["empty-thread", "error-thread", "preview-thread"];

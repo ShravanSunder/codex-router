@@ -1,11 +1,15 @@
-//! First-fire waiting consumes a dedicated initialized client; ordinary calls keep their 30-second deadline.
-use crate::{ClientError, ControlClient};
-use collaboration_protocol::WakeupId;
+//! First-fire waiting: bounded waits chained by their resume cursor; ordinary calls keep their
+//! 30-second deadline.
+use crate::api_connection::ToolAnswer;
+use crate::{ClientError, CollaborationClient};
 use collaboration_protocol::{
-    FireReceipt, WakeChange, WakeChanged, WakeShowRequest, WakeState, WakeSubscription,
+    FireReceipt, UuidIdentity, WakeShowRequest, WakeWaitOutcome, WakeWaitRequest, WakeWaitResult,
+    WakeupId,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, JsonSchema, Serialize, Deserialize)]
@@ -155,142 +159,126 @@ impl WakeWaitError {
         }
     }
 }
+/// A wait for one wake-up's first fire, made of bounded waits that each resume from the
+/// cursor the previous one returned, so no change between them is missed.
 pub struct WakeWaitConnection {
-    client: ControlClient,
-    subscription: WakeSubscription,
+    client: CollaborationClient,
+    wakeup_id: WakeupId,
 }
-impl ControlClient {
+
+/// The longest one bounded wait lasts before it returns its cursor.
+const WAKE_WAIT_CALL_SECONDS: u32 = 1500;
+
+impl CollaborationClient {
     pub async fn subscribe_wakeup(
-        mut self,
+        self,
         request: WakeShowRequest,
     ) -> Result<WakeWaitConnection, WakeWaitError> {
-        let result = match self
-            .connection
-            .call(
-                "wake/subscribe",
-                serde_json::to_value(&request)
-                    .map_err(|_| ClientError::Protocol("invalid wake subscription"))?,
-            )
-            .await
-        {
-            Ok(result) => result,
-            Err(ClientError::Rejected {
-                code: -32050,
-                data: Some(data),
-            }) => {
-                if let Ok(error) =
-                    serde_json::from_value::<collaboration_protocol::WakeNotFound>(data.clone())
-                {
-                    if error.wakeup_id != request.wakeup_id {
-                        return Err(ClientError::Protocol(
-                            "missing wake response identity mismatch",
-                        )
-                        .into());
-                    }
-                    return Err(WakeWaitError::NotFound {
-                        wakeup_id: error.wakeup_id,
-                    });
-                }
-                let error: collaboration_protocol::WaitUnavailable =
-                    serde_json::from_value(data)
-                        .map_err(|_| ClientError::Protocol("invalid wait failure"))?;
-                if error.wakeup_id != request.wakeup_id {
-                    return Err(ClientError::Protocol("wait failure identity mismatch").into());
-                }
-                return Err(WakeWaitError::Unavailable {
-                    wakeup_id: error.wakeup_id,
-                });
-            }
-            Err(error) => return Err(error.into()),
-        };
-        let subscription: WakeSubscription = serde_json::from_value(result)
-            .map_err(|_| ClientError::Protocol("invalid wake subscription response"))?;
-        if subscription.snapshot.definition.wakeup_id != request.wakeup_id {
-            return Err(ClientError::Protocol("wake subscription identity mismatch").into());
-        }
         Ok(WakeWaitConnection {
             client: self,
-            subscription,
+            wakeup_id: request.wakeup_id,
         })
     }
 }
+
 impl WakeWaitConnection {
-    pub fn subscription(&self) -> &WakeSubscription {
-        &self.subscription
-    }
     pub async fn wait_until_first_fire(self) -> Result<FireReceipt, WakeWaitError> {
         self.wait_until_first_fire_with_cancellation(CancellationToken::new())
             .await
     }
 
     pub async fn wait_until_first_fire_with_cancellation(
-        mut self,
+        self,
         cancellation: CancellationToken,
     ) -> Result<FireReceipt, WakeWaitError> {
-        let id = self.subscription.snapshot.definition.wakeup_id.clone();
-        if let Some(fire) = self.subscription.snapshot.first_fire.take() {
-            return Ok(fire);
-        }
-        match self.subscription.snapshot.state {
-            WakeState::Paused => return Err(WakeWaitError::Paused { wakeup_id: id }),
-            WakeState::Cancelled => return Err(WakeWaitError::Cancelled { wakeup_id: id }),
-            WakeState::Expired => return Err(WakeWaitError::Expired { wakeup_id: id }),
-            WakeState::Finished => {
-                return Err(WakeWaitError::FinishedWithoutFiring { wakeup_id: id });
-            }
-            WakeState::Active => {}
-        }
-        let previous = cursor_sequence(&self.subscription.after, self.client.identity())?;
-        {
-            let frame = tokio::select! {
-                _ = cancellation.cancelled() => return Err(WakeWaitError::CallerCancelled { wakeup_id: id.clone() }),
-                frame = self.client.next_wake_notification() => frame?,
+        let id = self.wakeup_id.clone();
+        let mut after = None;
+        loop {
+            let request = WakeWaitRequest {
+                wakeup_id: id.clone(),
+                after: after.clone(),
+                timeout_seconds: Some(WAKE_WAIT_CALL_SECONDS),
             };
-            let changed: WakeChanged = serde_json::from_value(frame.get("params").cloned().ok_or(
-                ClientError::Protocol("wake notification parameters missing"),
-            )?)
-            .map_err(|_| ClientError::Protocol("invalid wake notification"))?;
-            let sequence = cursor_sequence(&changed.cursor, self.client.identity())?;
-            if sequence <= previous
-                || changed.subscription_id != self.subscription.subscription_id
-                || changed.wakeup_id != id
-            {
-                return Err(ClientError::Protocol(
-                    "wake notification identity or sequence mismatch",
-                )
-                .into());
+            let arguments = serde_json::to_value(&request)
+                .map_err(|_| ClientError::Protocol("invalid wake wait"))?;
+            let answer = tokio::select! {
+                () = cancellation.cancelled() => {
+                    return Err(WakeWaitError::CallerCancelled { wakeup_id: id });
+                }
+                answer = self.client.connection.answer_with_timeout(
+                    "wake_wait_until_first_fire",
+                    arguments,
+                    Duration::from_secs(u64::from(WAKE_WAIT_CALL_SECONDS) + 30),
+                ) => answer?,
+            };
+            let waited: WakeWaitResult = match answer {
+                ToolAnswer::Success(value) => serde_json::from_value(value)
+                    .map_err(|_| ClientError::Protocol("invalid wake wait result"))?,
+                ToolAnswer::Failure(failure) => return Err(wait_failure(&id, failure)),
+            };
+            if waited.wakeup_id != id {
+                return Err(ClientError::Protocol("wake wait identity mismatch").into());
             }
-            match changed.change {
-                WakeChange::Fired { fire } => {
+            cursor_sequence(&waited.cursor, &self.client.identity().service_id)?;
+            match waited.outcome {
+                WakeWaitOutcome::Fired { fire } => {
                     if fire.wakeup_id != id {
                         return Err(ClientError::Protocol("firing identity mismatch").into());
                     }
-                    Ok(fire)
+                    return Ok(fire);
                 }
-                WakeChange::Paused => Err(WakeWaitError::Paused { wakeup_id: id }),
-                WakeChange::Cancelled => Err(WakeWaitError::Cancelled { wakeup_id: id }),
-                WakeChange::Expired => Err(WakeWaitError::Expired { wakeup_id: id }),
-                WakeChange::FinishedWithoutFiring => {
-                    Err(WakeWaitError::FinishedWithoutFiring { wakeup_id: id })
+                WakeWaitOutcome::Paused => return Err(WakeWaitError::Paused { wakeup_id: id }),
+                WakeWaitOutcome::Cancelled => {
+                    return Err(WakeWaitError::Cancelled { wakeup_id: id });
                 }
+                WakeWaitOutcome::Expired => return Err(WakeWaitError::Expired { wakeup_id: id }),
+                WakeWaitOutcome::FinishedWithoutFiring => {
+                    return Err(WakeWaitError::FinishedWithoutFiring { wakeup_id: id });
+                }
+                WakeWaitOutcome::TimedOut => after = Some(waited.cursor),
             }
         }
     }
 }
-fn cursor_sequence(
-    cursor: &str,
-    identity: &collaboration_protocol::ControlInitializationResult,
-) -> Result<i64, ClientError> {
-    let (version, service, collection, sequence, at): (
-        u8,
-        collaboration_protocol::UuidIdentity,
-        String,
-        i64,
-        i64,
-    ) = serde_json::from_str(cursor)
-        .map_err(|_| ClientError::Protocol("invalid wake event cursor"))?;
+
+/// The wait error a refused wait reports.
+fn wait_failure(id: &WakeupId, mut failure: Value) -> WakeWaitError {
+    if let Some(fields) = failure.as_object_mut() {
+        fields.remove("mcpResult");
+    }
+    match serde_json::from_value::<WakeWaitFailure>(failure.clone()) {
+        Ok(typed) if typed.wakeup_id.as_ref() == Some(id) => match typed.kind {
+            WakeWaitFailureKind::NotFound => WakeWaitError::NotFound {
+                wakeup_id: id.clone(),
+            },
+            WakeWaitFailureKind::Paused => WakeWaitError::Paused {
+                wakeup_id: id.clone(),
+            },
+            WakeWaitFailureKind::Cancelled => WakeWaitError::Cancelled {
+                wakeup_id: id.clone(),
+            },
+            WakeWaitFailureKind::Expired => WakeWaitError::Expired {
+                wakeup_id: id.clone(),
+            },
+            WakeWaitFailureKind::FinishedWithoutFiring => WakeWaitError::FinishedWithoutFiring {
+                wakeup_id: id.clone(),
+            },
+            WakeWaitFailureKind::Unavailable | WakeWaitFailureKind::Connection => {
+                WakeWaitError::Unavailable {
+                    wakeup_id: id.clone(),
+                }
+            }
+        },
+        _ => crate::api_connection::rejection_from_tool_failure(failure).into(),
+    }
+}
+
+fn cursor_sequence(cursor: &str, service_id: &UuidIdentity) -> Result<i64, ClientError> {
+    let (version, service, collection, sequence, at): (u8, UuidIdentity, String, i64, i64) =
+        serde_json::from_str(cursor)
+            .map_err(|_| ClientError::Protocol("invalid wake event cursor"))?;
     if version != 1
-        || service != identity.service_id
+        || &service != service_id
         || collection != "automation-events"
         || sequence < 0
         || at < 0

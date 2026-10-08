@@ -6,7 +6,7 @@ use collaboration_client::protocol::{
     OperationId, RouterAccess, SessionId, SessionRef,
 };
 use collaboration_client::{
-    AcpConversation, ClientError, ControlClient, ConversationCancelInput, ConversationClient,
+    AcpConversation, ClientError, CollaborationClient, ConversationCancelInput, ConversationClient,
     ConversationClientError, ConversationCreateActor, ConversationCreateInput,
     ConversationCreatePromptInput, ConversationCreatePromptOutcome, ConversationCreateRequest,
     ConversationEnd, ConversationEvent, ConversationLoadInput, ConversationOperationResult,
@@ -308,7 +308,7 @@ fn run_prompt(args: PromptArguments) -> i32 {
             } else {
                 conversation_target(&args).map_err(|_| ClientError::Protocol("invalid session target"))?.endpoint_id()
             };
-            let mut client=match AcpConversation::connect_with_context(&directory,endpoint).await {
+            let mut client=match AcpConversation::connect_with_context(&collaboration_client::CollaborationAccess::api(&directory),endpoint).await {
                 Ok(client) => client,
                 Err(error) => {
                     permission_exit = crate::permission_diagnostic_reporting::report_permission_error(

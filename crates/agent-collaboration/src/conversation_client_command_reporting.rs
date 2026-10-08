@@ -15,12 +15,12 @@ pub(super) async fn resolve_create_endpoint(
         .try_into()
         .map_err(|_| ConversationClientError::InvalidInput("invalid endpoint ID"))?;
     let control =
-        ControlClient::connect(directory, "agent-collaboration", env!("CARGO_PKG_VERSION")).await?;
+        CollaborationClient::connect(directory, "agent-collaboration", env!("CARGO_PKG_VERSION"))
+            .await?;
     let resolved = EndpointRef {
         service_id: control.identity().service_id.clone(),
         endpoint_id,
     };
-    control.close().await?;
     Ok(resolved)
 }
 
@@ -28,8 +28,9 @@ pub(super) async fn endpoint_has_provider_channel(
     directory: &std::path::Path,
     endpoint: &EndpointRef,
 ) -> Result<bool, ConversationClientError> {
-    let mut control =
-        ControlClient::connect(directory, "agent-collaboration", env!("CARGO_PKG_VERSION")).await?;
+    let control =
+        CollaborationClient::connect(directory, "agent-collaboration", env!("CARGO_PKG_VERSION"))
+            .await?;
     if control.identity().service_id != endpoint.service_id {
         return Err(
             ClientError::Protocol("conversation endpoint belongs to another service").into(),
@@ -48,7 +49,6 @@ pub(super) async fn endpoint_has_provider_channel(
             collaboration_client::protocol::ChannelDescription::ExternalProvider { .. }
         )
     });
-    let _closed = control.close().await;
     Ok(provider)
 }
 

@@ -13,7 +13,6 @@ async fn native_bridge_preserves_wire_payload_through_public_discovery() {
     let identity = ServiceIdentity::new(
         "00000000-0000-4000-8000-000000000001",
         "00000000-0000-4000-8000-000000000002",
-        &digest,
     )
     .unwrap_or_else(|e| panic!("identity: {e}"));
     let native_path = root.join("native.sock");

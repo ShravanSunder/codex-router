@@ -236,7 +236,6 @@ mod tests {
     ) -> (ControlClient, tokio::task::JoinHandle<std::io::Result<()>>) {
         let identity = ServiceIdentity::new(
         "00000000-0000-4000-8000-000000000001", "00000000-0000-4000-8000-000000000002",
-        &format!("sha256:{}", "a".repeat(64)),
     ).unwrap_or_else(|error| panic!("identity: {error}"))
     .with_endpoints(vec![serde_json::from_value(json!({"endpoint":scope.endpoint,"label":"Fixture Codex","availability":{"state":"unprobed"},
         "channels":[{"kind":"nativeCodex","transport":"unixWebSocket","path":"native.sock","schemaDigest":null,"generation":null}]}))

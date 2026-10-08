@@ -200,7 +200,7 @@ pub(super) fn run_create(args: CreateArguments) -> i32 {
         if emit_create_start(&operation_id, args.json).is_err() {
             return 3;
         }
-        let client = match ConversationClient::connect(&directory, &endpoint).await {
+        let client = match ConversationClient::connect(&collaboration_client::CollaborationAccess::api(&directory), &endpoint).await {
             Ok(value) => value,
             Err(error) => {
                 return report_create_client_error(error, &operation_id, args.json);
@@ -379,8 +379,13 @@ pub(super) fn run_new_prompt(args: PromptArguments) -> i32 {
             let _signal = tokio::signal::ctrl_c().await;
             signal.cancel();
         });
-        let result =
-            ConversationClient::create_and_prompt(&directory, input, timeout, cancel).await;
+        let result = ConversationClient::create_and_prompt(
+            &collaboration_client::CollaborationAccess::api(&directory),
+            input,
+            timeout,
+            cancel,
+        )
+        .await;
         signal_task.abort();
         let _joined = signal_task.await;
         match result {
@@ -503,7 +508,12 @@ pub(super) fn run_existing_prompt(args: PromptArguments) -> i32 {
                 );
             }
         };
-        let client = match ConversationClient::connect(&directory, &target.endpoint).await {
+        let client = match ConversationClient::connect(
+            &collaboration_client::CollaborationAccess::api(&directory),
+            &target.endpoint,
+        )
+        .await
+        {
             Ok(value) => value,
             Err(error) => return report_create_client_error(error, &operation_id, args.json),
         };
@@ -599,7 +609,12 @@ pub(super) fn run_load(args: LoadArguments) -> i32 {
                 Ok(value) => value,
                 Err(exit) => return exit,
             };
-        let client = match ConversationClient::connect(&directory, &target.endpoint).await {
+        let client = match ConversationClient::connect(
+            &collaboration_client::CollaborationAccess::api(&directory),
+            &target.endpoint,
+        )
+        .await
+        {
             Ok(value) => value,
             Err(error) => return report_create_client_error(error, &operation_id, args.json),
         };
@@ -699,7 +714,12 @@ pub(super) fn run_cancel(args: CancelArguments) -> i32 {
             approver,
             generation,
         };
-        let client = match ConversationClient::connect(&directory, &target.endpoint).await {
+        let client = match ConversationClient::connect(
+            &collaboration_client::CollaborationAccess::api(&directory),
+            &target.endpoint,
+        )
+        .await
+        {
             Ok(value) => value,
             Err(error) => return report_create_client_error(error, &operation_id, args.json),
         };

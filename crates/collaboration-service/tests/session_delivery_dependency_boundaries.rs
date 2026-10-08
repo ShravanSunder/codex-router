@@ -41,7 +41,7 @@ fn message_features_do_not_import_client_routes() {
         ),
         (
             "schedule preparation",
-            include_str!("../src/schedule_preparation_dispatch.rs"),
+            include_str!("../src/schedule_preparation.rs"),
         ),
     ];
     for (feature, source) in features {

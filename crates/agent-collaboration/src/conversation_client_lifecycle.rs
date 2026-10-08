@@ -95,7 +95,7 @@ pub(crate) fn run_resume(args: LoadArguments) -> i32 {
                 );
             }
         };
-        let mut client = match ControlClient::connect(
+        let mut client = match CollaborationClient::connect(
             &directory,
             "agent-collaboration",
             env!("CARGO_PKG_VERSION"),
@@ -138,7 +138,6 @@ pub(crate) fn run_resume(args: LoadArguments) -> i32 {
                 args.json,
             ),
         };
-        let _ = client.close().await;
         exit
     })
 }
@@ -198,7 +197,7 @@ pub(crate) fn run_close(args: CloseArguments) -> i32 {
                 );
             }
         };
-        let mut client = match ControlClient::connect(
+        let mut client = match CollaborationClient::connect(
             &directory,
             "agent-collaboration",
             env!("CARGO_PKG_VERSION"),
@@ -242,13 +241,12 @@ pub(crate) fn run_close(args: CloseArguments) -> i32 {
                 args.json,
             ),
         };
-        let _ = client.close().await;
         exit
     })
 }
 
 async fn report_wait(
-    client: &mut ControlClient,
+    client: &mut CollaborationClient,
     operation_id: OperationId,
     timeout_seconds: PositiveSeconds,
     json_output: bool,

@@ -1,4 +1,4 @@
-//! Portable package text crosses the Control boundary; filesystem paths remain client-local.
+//! Portable package text crosses the API boundary; filesystem paths remain client-local.
 use crate::OperationId;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};

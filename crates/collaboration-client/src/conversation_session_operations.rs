@@ -3,6 +3,10 @@ use crate::conversation_client::{
     ConversationCancelInput, ConversationClient, ConversationClientError, ConversationLoadInput,
     ConversationPromptInput, unsupported,
 };
+use crate::provider_conversations::{
+    CompositeAnswer, LocalProviderOperations, ProviderConversations, composite_arguments,
+    composite_call,
+};
 use crate::{
     ClientError, ConversationEnd, ConversationOperationResult,
     ConversationPromptRequest as CodexPromptRequest, ConversationSettlement,
@@ -77,12 +81,13 @@ impl ConversationClient {
                     },
                 })
             }
-            Self::ExternalProvider(control) => {
+            Self::ExternalProvider(provider) => {
                 let operation_id =
                     operation_id.ok_or_else(|| ConversationClientError::MissingOperationId {
                         endpoint: target.endpoint.clone(),
                         operation: "load",
                     })?;
+                let api_arguments = composite_arguments(&input, timeout)?;
                 let working_directory = provider_working_directory(&input.working_directory)?;
                 let request = ConversationLoadRequest {
                     operation_id: operation_id.clone(),
@@ -96,6 +101,29 @@ impl ConversationClient {
                     },
                 };
                 let wait_seconds = provider_wait_seconds(timeout)?;
+                let router = match provider {
+                    ProviderConversations::Api(client) => {
+                        return match composite_call(
+                            client,
+                            "conversation_load",
+                            api_arguments,
+                            timeout,
+                            None,
+                        )
+                        .await?
+                        {
+                            CompositeAnswer::Settled(result) => Ok(result),
+                            CompositeAnswer::StillRunning => {
+                                Ok(ConversationOperationResult::Pending {
+                                    operation_id,
+                                    target,
+                                })
+                            }
+                        };
+                    }
+                    ProviderConversations::Local(router) => router,
+                };
+                let control = LocalProviderOperations(router.as_ref());
                 let submitted = tokio::time::timeout(timeout, async {
                     control.load_provider_conversation(request).await?;
                     let waited = control
@@ -195,12 +223,13 @@ impl ConversationClient {
                     },
                 })
             }
-            Self::ExternalProvider(control) => {
+            Self::ExternalProvider(provider) => {
                 let operation_id =
                     operation_id.ok_or_else(|| ConversationClientError::MissingOperationId {
                         endpoint: target.endpoint.clone(),
                         operation: "prompt",
                     })?;
+                let api_arguments = composite_arguments(&input, timeout)?;
                 for (field, present) in [
                     ("workingDirectory", input.working_directory.is_some()),
                     ("effort", input.effort.is_some()),
@@ -223,6 +252,29 @@ impl ConversationClient {
                     prompt: input.message.into(),
                 };
                 let wait_seconds = provider_wait_seconds(timeout)?;
+                let router = match provider {
+                    ProviderConversations::Api(client) => {
+                        return match composite_call(
+                            client,
+                            "conversation_prompt",
+                            api_arguments,
+                            timeout,
+                            Some((&cancel, &operation_id)),
+                        )
+                        .await?
+                        {
+                            CompositeAnswer::Settled(result) => Ok(result),
+                            CompositeAnswer::StillRunning => {
+                                Ok(ConversationOperationResult::Pending {
+                                    operation_id,
+                                    target,
+                                })
+                            }
+                        };
+                    }
+                    ProviderConversations::Local(router) => router,
+                };
+                let control = LocalProviderOperations(router.as_ref());
                 let submitted = tokio::time::timeout(timeout, async {
                     control.prompt_provider_conversation(request).await?;
                     let waited = control
@@ -265,16 +317,35 @@ impl ConversationClient {
                 "cancel",
                 "use `turn interrupt` for a Codex session",
             )),
-            Self::ExternalProvider(control) => Ok(control
-                .cancel_provider_conversation_operation(ConversationCancelRequest {
-                    operation_id: input.operation_id,
-                    target_operation_id: input.target_operation_id,
-                    target: input.target,
-                    generation: input.generation,
-                    requested_by: input.requested_by.clone().into(),
-                    approver: input.approver.unwrap_or(input.requested_by).into(),
-                })
-                .await?),
+            Self::ExternalProvider(ProviderConversations::Api(client)) => {
+                let arguments = serde_json::to_value(&input).map_err(|_| {
+                    ConversationClientError::InvalidInput("invalid conversation cancel input")
+                })?;
+                match composite_call(
+                    client,
+                    "conversation_cancel",
+                    arguments,
+                    crate::api_connection::DEFAULT_CALL_TIMEOUT,
+                    None,
+                )
+                .await?
+                {
+                    CompositeAnswer::Settled(submission) => Ok(submission),
+                    CompositeAnswer::StillRunning => Err(ClientError::Timeout.into()),
+                }
+            }
+            Self::ExternalProvider(ProviderConversations::Local(router)) => {
+                Ok(LocalProviderOperations(router.as_ref())
+                    .cancel_provider_conversation_operation(ConversationCancelRequest {
+                        operation_id: input.operation_id,
+                        target_operation_id: input.target_operation_id,
+                        target: input.target,
+                        generation: input.generation,
+                        requested_by: input.requested_by.clone().into(),
+                        approver: input.approver.unwrap_or(input.requested_by).into(),
+                    })
+                    .await?)
+            }
         }
     }
 }

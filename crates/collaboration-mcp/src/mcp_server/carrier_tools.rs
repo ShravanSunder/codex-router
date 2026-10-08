@@ -1,9 +1,9 @@
 //! Conversation tools that open a carrier session: create, load, prompt, cancel,
 //! create-and-prompt and bounded observation.
 //!
-//! These still discover their carrier (the Codex websocket or a provider's ACP connection)
-//! through the service directory until the clients cut over; the call itself runs on the
-//! carrier, never through the collaboration API.
+//! They run the same carrier clients the CLIs do, inside the Host: a Codex conversation or
+//! observation runs on its carrier socket; a provider conversation or observation runs on the
+//! Router's own operations.
 use super::*;
 
 #[tool_router(router = carrier_tool_router, vis = "pub(super)")]
@@ -28,7 +28,7 @@ impl CollaborationMcpServer {
             _ = context.ct.cancelled() => {
                 return conversation_call_cancelled(OperationEffect::None, Some(&operation_id));
             }
-            connected = ConversationClient::connect(&self.service_directory, &endpoint) => connected,
+            connected = ConversationClient::connect(&self.carrier_access, &endpoint) => connected,
         };
         let result = match connected {
             Ok(client) => {
@@ -66,7 +66,7 @@ impl CollaborationMcpServer {
             _ = context.ct.cancelled() => {
                 return conversation_call_cancelled(OperationEffect::None, operation_id.as_ref());
             }
-            connected = ConversationClient::connect(&self.service_directory, &endpoint) => connected,
+            connected = ConversationClient::connect(&self.carrier_access, &endpoint) => connected,
         };
         let result = match connected {
             Ok(client) => {
@@ -107,7 +107,7 @@ impl CollaborationMcpServer {
             _ = context.ct.cancelled() => {
                 return conversation_call_cancelled(OperationEffect::None, operation_id.as_ref());
             }
-            connected = ConversationClient::connect(&self.service_directory, &endpoint) => connected,
+            connected = ConversationClient::connect(&self.carrier_access, &endpoint) => connected,
         };
         let client = match connected {
             Ok(client) => client,
@@ -153,7 +153,7 @@ impl CollaborationMcpServer {
             _ = context.ct.cancelled() => {
                 return conversation_call_cancelled(OperationEffect::None, Some(&operation_id));
             }
-            connected = ConversationClient::connect(&self.service_directory, &endpoint) => connected,
+            connected = ConversationClient::connect(&self.carrier_access, &endpoint) => connected,
         };
         let result = match connected {
             Ok(client) if matches!(&client, ConversationClient::ExternalProvider(_)) => {
@@ -184,7 +184,7 @@ impl CollaborationMcpServer {
         let timeout =
             Duration::from_secs(u64::from(request.timeout_seconds.map_or(300, u32::from)));
         let result = ConversationClient::create_and_prompt(
-            &self.service_directory,
+            &self.carrier_access,
             request.input,
             timeout,
             context.ct,
@@ -200,7 +200,7 @@ impl CollaborationMcpServer {
         context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
     ) -> CallToolResult {
         match collaboration_client::SessionObservation::observe_bounded(
-            &self.service_directory,
+            &self.carrier_access,
             request,
             context.ct,
         )

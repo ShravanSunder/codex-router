@@ -304,7 +304,7 @@ impl<'service> AutomationOperations<'service> {
         &self,
         request: SchedulePrepareRequest,
     ) -> ScheduleResult<ScheduleSnapshot> {
-        crate::schedule_preparation_dispatch::prepare_schedule(self.identity, request).await
+        crate::schedule_preparation::prepare_schedule(self.identity, request).await
     }
 }
 

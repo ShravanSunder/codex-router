@@ -87,7 +87,7 @@ async fn subscription_tools_roundtrip_through_mcp_control_and_sqlite() {
         .await
         .expect("subscription service start");
 
-    let service_identity = ServiceIdentity::new(SERVICE_ID, SERVICE_EPOCH, CONTROL_DIGEST)
+    let service_identity = ServiceIdentity::new(SERVICE_ID, SERVICE_EPOCH)
         .expect("Control service identity")
         .with_board_store(Arc::clone(&board_store))
         .with_subscription_delivery_service(subscription_service.clone(), presence);

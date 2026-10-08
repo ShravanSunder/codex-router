@@ -105,7 +105,6 @@ async fn provider_wait_uses_requested_server_window_plus_transport_allowance() {
     let identity = ServiceIdentity::new(
         "00000000-0000-4000-8000-000000000001",
         "00000000-0000-4000-8000-000000000002",
-        &format!("sha256:{}", "a".repeat(64)),
     )
     .expect("identity")
     .with_provider_conversation_backend(Arc::new(DelayedWaitBackend {
@@ -149,7 +148,6 @@ async fn provider_wait_reports_true_transport_timeout_after_allowance() {
     let identity = ServiceIdentity::new(
         "00000000-0000-4000-8000-000000000001",
         "00000000-0000-4000-8000-000000000002",
-        &format!("sha256:{}", "a".repeat(64)),
     )
     .expect("identity")
     .with_provider_conversation_backend(Arc::new(DelayedWaitBackend {

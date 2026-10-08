@@ -140,7 +140,7 @@ async fn provider_inventory_control_reads_durable_rows_with_hub_state() {
             "capabilities":[{"name":"create","status":"supported","evidence":"advertised"}]}]
     }))
     .expect("Cursor endpoint");
-    let identity = ServiceIdentity::new(service_id, epoch, &format!("sha256:{}", "a".repeat(64)))
+    let identity = ServiceIdentity::new(service_id, epoch)
         .expect("identity")
         .with_endpoints(vec![description, cursor_description, no_channel])
         .expect("endpoint")
@@ -356,7 +356,7 @@ async fn provider_inventory_control_reads_durable_rows_with_hub_state() {
         "availability":{"state":"unavailable","observedAt":"2026-09-26T00:00:00Z","reason":"ACP unavailable"},
         "channels":[]
     })).expect("unavailable Claude endpoint");
-    let identity = ServiceIdentity::new(service_id, epoch, &format!("sha256:{}", "a".repeat(64)))
+    let identity = ServiceIdentity::new(service_id, epoch)
         .expect("identity")
         .with_endpoints(vec![unavailable_claude])
         .expect("endpoint")

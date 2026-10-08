@@ -69,7 +69,7 @@ async fn provider_observers_share_snapshot_and_live_order() {
             "capabilities":[{"name":"create","status":"supported","evidence":"advertised"}]}]
     }))
     .expect("endpoint");
-    let identity = ServiceIdentity::new(service_id, epoch, &format!("sha256:{}", "a".repeat(64)))
+    let identity = ServiceIdentity::new(service_id, epoch)
         .expect("identity")
         .with_provider_session_hub(hub.clone());
     identity

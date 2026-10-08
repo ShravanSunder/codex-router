@@ -1,5 +1,5 @@
 //! Typed schedule administration; operation identity recovers uncertain local mutations.
-use crate::{ClientError, ControlClient};
+use crate::{ClientError, CollaborationClient};
 use collaboration_protocol::{
     ScheduleCreateRequest, ScheduleEnableRequest, ScheduleFailure, ScheduleShowRequest,
     ScheduleSnapshot, ScheduleUpdateRequest,
@@ -11,64 +11,66 @@ pub enum ScheduleClientError {
     #[error(transparent)]
     Connection(#[from] ClientError),
 }
-impl ControlClient {
+impl CollaborationClient {
     pub async fn import_schedule(
-        &mut self,
+        &self,
         request: collaboration_protocol::ScheduleImportRequest,
     ) -> Result<ScheduleSnapshot, ScheduleClientError> {
-        self.schedule_call("schedule/import", request).await
+        self.schedule_call("schedule_import", request).await
     }
     pub async fn export_schedule(
-        &mut self,
+        &self,
         request: ScheduleShowRequest,
     ) -> Result<collaboration_protocol::ScheduleExportResult, ScheduleClientError> {
-        self.schedule_call("schedule/export", request).await
+        self.schedule_call("schedule_export", request).await
     }
     pub async fn create_schedule(
-        &mut self,
+        &self,
         request: ScheduleCreateRequest,
     ) -> Result<ScheduleSnapshot, ScheduleClientError> {
-        self.schedule_call("schedule/create", request).await
+        self.schedule_call("schedule_create", request).await
     }
     pub async fn update_schedule(
-        &mut self,
+        &self,
         request: ScheduleUpdateRequest,
     ) -> Result<ScheduleSnapshot, ScheduleClientError> {
-        self.schedule_call("schedule/update", request).await
+        self.schedule_call("schedule_update", request).await
     }
     pub async fn read_schedule(
-        &mut self,
+        &self,
         request: ScheduleShowRequest,
     ) -> Result<ScheduleSnapshot, ScheduleClientError> {
-        self.schedule_call("schedule/show", request).await
+        self.schedule_call("schedule_show", request).await
     }
     pub async fn enable_schedule(
-        &mut self,
+        &self,
         request: ScheduleEnableRequest,
     ) -> Result<ScheduleSnapshot, ScheduleClientError> {
-        self.schedule_call("schedule/enable", request).await
+        self.schedule_call("schedule_enable", request).await
     }
     pub async fn disable_schedule(
-        &mut self,
+        &self,
         request: ScheduleEnableRequest,
     ) -> Result<ScheduleSnapshot, ScheduleClientError> {
-        self.schedule_call("schedule/disable", request).await
+        self.schedule_call("schedule_disable", request).await
     }
     pub async fn prepare_schedule(
-        &mut self,
+        &self,
         request: collaboration_protocol::SchedulePrepareRequest,
     ) -> Result<ScheduleSnapshot, ScheduleClientError> {
-        self.schedule_call("schedule/prepare", request).await
+        self.schedule_call("schedule_prepare", request).await
     }
     async fn schedule_call<TRequest: serde::Serialize, TResult: serde::de::DeserializeOwned>(
-        &mut self,
+        &self,
         method: &str,
         request: TRequest,
     ) -> Result<TResult, ScheduleClientError> {
         let params = serde_json::to_value(request)
             .map_err(|_| ClientError::Protocol("invalid schedule request"))?;
-        if method == "schedule/import" {
-            let encoded_bytes = self.connection.encoded_request_len(method, &params)?;
+        if method == "schedule_import" {
+            let encoded_bytes = serde_json::to_vec(&params)
+                .map(|bytes| bytes.len())
+                .map_err(|_| ClientError::Protocol("invalid schedule request"))?;
             if encoded_bytes > collaboration_protocol::MAX_CONTROL_FRAME_BYTES {
                 let operation_id = params
                     .get("operationId")

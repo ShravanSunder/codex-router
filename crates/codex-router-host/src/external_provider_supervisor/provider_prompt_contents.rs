@@ -1,8 +1,8 @@
-//! Provider-neutral prompt admission and Control task-input projection.
+//! Provider-neutral prompt admission and API task-input projection.
 
 use super::*;
 
-/// Host-internal prompt admission. Public Control requests keep their prompt
+/// Host-internal prompt admission. Public API requests keep their prompt
 /// text as task input before reaching this boundary.
 #[derive(Clone, Debug)]
 pub struct ProviderPromptContentsRequest {

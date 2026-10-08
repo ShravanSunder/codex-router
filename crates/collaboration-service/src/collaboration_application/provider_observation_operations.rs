@@ -1,16 +1,14 @@
-//! Provider Session observation: bounded, resumable reads of the same hub attached faces use,
-//! and the live stream Control's `provider/sessionListen` still serves.
+//! Provider Session observation: bounded, resumable reads of the same hub attached faces use.
+//! Following a Session is a chain of these reads, each resuming after the last event.
 use super::{CollaborationRejection, CollaborationRejectionReason, PublishedRejection};
 use crate::{HubEvent, ServiceIdentity, SessionEventAttachment, SessionEventHubError};
 use collaboration_protocol::{
     BoundedObservationRequest, BoundedObservationResult, ChannelDescription, CodexGeneration,
     EndpointAvailability, ObservationEndReason, ProviderObservationEventTooLarge,
-    ProviderObservationEventTooLargeKind, ProviderSessionListenReady, ProviderSessionListenRequest,
-    SessionRef,
+    ProviderObservationEventTooLargeKind, SessionRef,
 };
 use serde_json::{Value, json};
 use session_event_model::SessionEvent;
-use std::collections::VecDeque;
 use tokio::sync::broadcast;
 
 /// Observation operations over the provider Session event hub.
@@ -30,27 +28,6 @@ impl<'service> ObservationOperations<'service> {
     ) -> Result<BoundedObservationResult, ObservationFailure> {
         collect(request, self.identity).await
     }
-
-    /// Attaches a live stream to a provider Session.
-    pub async fn session_listen(
-        &self,
-        request: ProviderSessionListenRequest,
-    ) -> Result<ProviderSessionSubscription, ObservationFailure> {
-        let (attachment, generation) = attach(&request.target, self.identity).await?;
-        Ok(ProviderSessionSubscription {
-            ready: ProviderSessionListenReady {
-                target: request.target,
-                generation,
-            },
-            snapshot: attachment
-                .snapshot
-                .into_iter()
-                .map(event_value_bounded)
-                .collect(),
-            receiver: attachment.receiver,
-            closed: false,
-        })
-    }
 }
 
 const MAX_EVENTS: usize = 4096;
@@ -58,67 +35,6 @@ const MAX_BYTES: usize = 1_048_576;
 // A bounded result is one response of at most MAX_BYTES. Leave room for its envelope,
 // target, generation and JSON framing when callers request the full byte bound.
 const MAX_EVENT_BYTES: usize = MAX_BYTES - 65_536;
-
-/// A live provider Session stream: the retained snapshot, then hub events until it ends.
-pub struct ProviderSessionSubscription {
-    pub ready: ProviderSessionListenReady,
-    snapshot: VecDeque<Value>,
-    receiver: broadcast::Receiver<HubEvent>,
-    closed: bool,
-}
-
-impl ProviderSessionSubscription {
-    /// The next event, a resync marker that ends the stream, or `None` once it has ended.
-    pub async fn next_value(&mut self) -> Option<Value> {
-        if let Some(event) = self.snapshot.pop_front() {
-            return Some(self.frame_bounded(event));
-        }
-        if self.closed {
-            return None;
-        }
-        match self.receiver.recv().await {
-            Ok(
-                event @ HubEvent {
-                    event: SessionEvent::ResyncRequired { .. },
-                    ..
-                },
-            ) => {
-                self.closed = true;
-                Some(self.frame_bounded(event_value(event)))
-            }
-            Ok(event) => Some(self.frame_bounded(event_value(event))),
-            Err(broadcast::error::RecvError::Lagged(_)) => {
-                self.closed = true;
-                Some(json!({"kind":"resyncRequired"}))
-            }
-            Err(broadcast::error::RecvError::Closed) => {
-                self.closed = true;
-                None
-            }
-        }
-    }
-
-    fn frame_bounded(&mut self, event: Value) -> Value {
-        if serde_json::to_vec(&event).is_ok_and(|encoded| encoded.len() <= MAX_EVENT_BYTES) {
-            event
-        } else {
-            let sequence = event
-                .get("sequence")
-                .and_then(Value::as_u64)
-                .unwrap_or_default();
-            let item_id = event
-                .pointer("/event/item/itemId")
-                .or_else(|| event.pointer("/event/itemId"))
-                .and_then(Value::as_str)
-                .map(str::to_owned);
-            json!(ProviderObservationEventTooLarge {
-                kind: ProviderObservationEventTooLargeKind::EventTooLarge,
-                sequence,
-                item_id,
-            })
-        }
-    }
-}
 
 async fn collect(
     request: BoundedObservationRequest,

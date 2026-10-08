@@ -1,17 +1,12 @@
 //! Resolves local push links, applies reported-caller access rules, and expands stored ranges.
-//! The `show`, `inbox` and `history` Control entry points decode requests for the typed
-//! message operations.
 use crate::ServiceIdentity;
-use crate::collaboration_application::{MessageFailure, MessageOperations};
 use collaboration_protocol::{
     MachineId, PushActivityRangeRead, PushId, PushKind, PushLineInput, PushMessageSendResult,
-    PushOrigin, PushRecord, PushRecordHistoryParams, PushRecordListParams, PushRecordNotice,
-    PushRecordShowParams, RouterLink, SessionRef, render_push_line,
+    PushOrigin, PushRecord, PushRecordNotice, RouterLink, SessionRef, render_push_line,
 };
 use message_board::{
     MessageListRequest, MessageListScope, MessageSelection, PageLimit, PageRequest,
 };
-use serde_json::{Value, json};
 
 pub(crate) fn link_for(record: &PushRecord, identity: &ServiceIdentity) -> String {
     RouterLink::new(
@@ -53,63 +48,6 @@ pub(crate) fn delivery_result(
             .clone()
             .ok_or(collaboration_protocol::PushLineError::InvalidHeaderFacts)?,
     })
-}
-
-pub(crate) async fn show(id: Value, params: Value, identity: &ServiceIdentity) -> Value {
-    let Ok(params) = serde_json::from_value::<PushRecordShowParams>(params) else {
-        return failure(
-            id,
-            -32602,
-            "invalidField",
-            "inspect",
-            "Invalid push show request",
-        );
-    };
-    message_response(id, MessageOperations::new(identity).push_show(params).await)
-}
-
-pub(crate) async fn inbox(id: Value, params: Value, identity: &ServiceIdentity) -> Value {
-    let Ok(params) = serde_json::from_value::<PushRecordListParams>(params) else {
-        return failure(
-            id,
-            -32602,
-            "invalidField",
-            "discovery",
-            "Invalid message inbox request",
-        );
-    };
-    message_response(
-        id,
-        MessageOperations::new(identity).message_inbox(params).await,
-    )
-}
-
-pub(crate) async fn history(id: Value, params: Value, identity: &ServiceIdentity) -> Value {
-    let Ok(params) = serde_json::from_value::<PushRecordHistoryParams>(params) else {
-        return failure(
-            id,
-            -32602,
-            "invalidField",
-            "discovery",
-            "Invalid message history request",
-        );
-    };
-    message_response(
-        id,
-        MessageOperations::new(identity)
-            .message_history(params)
-            .await,
-    )
-}
-
-pub(crate) fn message_response(
-    id: Value,
-    result: Result<impl serde::Serialize, MessageFailure>,
-) -> Value {
-    match result {
-        Ok(result) => json!({"jsonrpc":"2.0","id":id,"result":result}),
-        Err(failure) => crate::control_connection::rejection_response(id, &failure),
-    }
 }
 
 pub(crate) fn resolve_reference(
@@ -219,12 +157,4 @@ pub(crate) async fn expand_activity_ranges(
 pub(crate) enum ReferenceError {
     Invalid,
     Foreign(String),
-}
-
-pub(crate) fn failure(id: Value, code: i64, kind: &str, stage: &str, message: &str) -> Value {
-    json!({
-        "jsonrpc":"2.0",
-        "id":id,
-        "error":{"code":code,"message":message,"data":{"kind":kind,"stage":stage,"message":message}}
-    })
 }

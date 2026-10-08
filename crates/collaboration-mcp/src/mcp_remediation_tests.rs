@@ -149,11 +149,10 @@ impl ConversationFixture {
         digest: String,
         endpoint: collaboration_protocol::EndpointDescription,
     ) -> Self {
-        let identity =
-            collaboration_service::ServiceIdentity::new(SERVICE_ID, SERVICE_EPOCH, &digest)
-                .expect("identity")
-                .with_endpoints(vec![endpoint])
-                .expect("endpoint directory");
+        let identity = collaboration_service::ServiceIdentity::new(SERVICE_ID, SERVICE_EPOCH)
+            .expect("identity")
+            .with_endpoints(vec![endpoint])
+            .expect("endpoint directory");
         let application = collaboration_service::CollaborationApplication::new(identity.clone());
         let control = collaboration_service::LocalControlService::bind(
             &root.path().join("control.sock"),

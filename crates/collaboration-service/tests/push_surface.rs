@@ -201,14 +201,10 @@ async fn setup() -> (
             .expect("automation store"),
     ));
     let delivery = Arc::new(RecordingDelivery::new(Arc::clone(&store)));
-    let identity = ServiceIdentity::new(
-        SERVICE_ID,
-        SERVICE_ID,
-        &format!("sha256:{}", "a".repeat(64)),
-    )
-    .expect("service identity")
-    .with_automation_store(Arc::clone(&store))
-    .with_session_delivery(delivery.clone());
+    let identity = ServiceIdentity::new(SERVICE_ID, SERVICE_ID)
+        .expect("service identity")
+        .with_automation_store(Arc::clone(&store))
+        .with_session_delivery(delivery.clone());
     let presence = Arc::new(RunningPresence);
     let owner = collaboration_service::SubscriptionDeliveryService::new(
         collaboration_service::SubscriptionDeliveryServiceProps {
@@ -244,13 +240,9 @@ async fn setup_without_automation_store() -> (
             .expect("stand-in database"),
     ));
     let delivery = Arc::new(RecordingDelivery::new(Arc::clone(&store)));
-    let identity = ServiceIdentity::new(
-        SERVICE_ID,
-        SERVICE_ID,
-        &format!("sha256:{}", "a".repeat(64)),
-    )
-    .expect("service identity")
-    .with_session_delivery(delivery.clone());
+    let identity = ServiceIdentity::new(SERVICE_ID, SERVICE_ID)
+        .expect("service identity")
+        .with_session_delivery(delivery.clone());
     let control = ControlHarness::start(identity).await;
     (directory, store, delivery, control)
 }

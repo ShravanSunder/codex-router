@@ -6,7 +6,7 @@ use collaboration_client::protocol::{
     ExpiryRequest, LocalMutationEvidence, LocalMutationState, OperationId, TimingRequest,
     WakeMutationRequest, WakeSendRequest, WakeShowRequest,
 };
-use collaboration_client::{ControlClient, WakeClientError, WakeWaitFailureKind};
+use collaboration_client::{CollaborationClient, WakeClientError, WakeWaitFailureKind};
 use serde_json::json;
 use std::{
     ffi::OsString,
@@ -140,7 +140,7 @@ pub fn run_wakeup_command(arguments: Vec<OsString>) -> i32 {
     };
     let mut dispatched = false;
     let result: Result<serde_json::Value, WakeClientError> = runtime.block_on(async {
-        let mut client = ControlClient::connect(
+        let client = CollaborationClient::connect(
             &invocation.directory,
             "agent-collaboration-wake",
             env!("CARGO_PKG_VERSION"),
@@ -181,7 +181,6 @@ pub fn run_wakeup_command(arguments: Vec<OsString>) -> i32 {
             }
             .and_then(encode_result),
         };
-        let _ = client.close().await;
         result
     });
     if !dispatched

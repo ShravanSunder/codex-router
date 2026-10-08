@@ -1,7 +1,7 @@
 //! Human and agent entrypoints for public native inspection and exact interruption.
 use clap::{Args, Parser, Subcommand};
 use collaboration_client::protocol::{ChannelDescription, EndpointAvailability};
-use collaboration_client::{ClientError, ControlClient};
+use collaboration_client::{ClientError, CollaborationClient};
 use serde_json::{Value, json};
 use std::{
     ffi::OsString,
@@ -134,9 +134,12 @@ pub fn run_native_session_command(arguments: Vec<OsString>) -> i32 {
     };
     let mut mutation_started = false;
     let result = runtime.block_on(async {
-        let mut client =
-            ControlClient::connect(&directory, "agent-collaboration", env!("CARGO_PKG_VERSION"))
-                .await?;
+        let client = CollaborationClient::connect(
+            &directory,
+            "agent-collaboration",
+            env!("CARGO_PKG_VERSION"),
+        )
+        .await?;
         let target = parsed_target
             .resolve(&client.identity().service_id)
             .map_err(|_| ClientError::Protocol("invalid session target"))?;
@@ -202,7 +205,6 @@ pub fn run_native_session_command(arguments: Vec<OsString>) -> i32 {
                 json!(client.interrupt_turn(&target, &generation, &turn).await?)
             }
         };
-        let _closed = client.close().await;
         Ok::<_, ClientError>(result)
     });
     match result {
@@ -244,7 +246,9 @@ pub fn run_native_session_command(arguments: Vec<OsString>) -> i32 {
                 .and_then(Value::as_str)
                 .filter(|message| !message.is_empty())
                 .map(str::to_owned)
-                .unwrap_or_else(|| format!("Control request rejected with code {native_code}"));
+                .unwrap_or_else(|| {
+                    format!("collaboration API request rejected with code {native_code}")
+                });
             let code = match kind {
                 Some("outcomeUnknown") => 5,
                 Some("unavailable") => 3,

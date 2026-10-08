@@ -1,12 +1,10 @@
 //! Store-first direct-message delivery through Layer 0's PreparedPush path.
 use crate::ServiceIdentity;
-use crate::collaboration_application::MessageOperations;
 use automation_storage::StorageError;
 use collaboration_protocol::{
     CodexGeneration, MessageDelivery, PushId, PushRecord, PushRecordDraft,
-    PushRecordValidationError, SessionMessageSendParams,
+    PushRecordValidationError,
 };
-use serde_json::Value;
 
 pub(crate) enum PushDeliveryFailure {
     StoreUnavailable,
@@ -14,18 +12,6 @@ pub(crate) enum PushDeliveryFailure {
     InvalidRecord(PushRecordValidationError),
     StoreFailed,
     DeliveryUnknown(PushId),
-}
-
-/// Control entry point for an already-decoded `message/send`.
-pub(crate) async fn dispatch_message(
-    id: Value,
-    params: SessionMessageSendParams,
-    identity: &ServiceIdentity,
-) -> Value {
-    crate::push_record_resolver::message_response(
-        id,
-        MessageOperations::new(identity).message_send(params).await,
-    )
 }
 
 pub(crate) async fn store_first_and_deliver(
@@ -130,14 +116,10 @@ mod tests {
             .expect("delivery owner starts");
         subscription_service.shutdown().await;
 
-        let identity = ServiceIdentity::new(
-            SERVICE_ID,
-            SERVICE_ID,
-            &format!("sha256:{}", "a".repeat(64)),
-        )
-        .expect("service identity")
-        .with_automation_store(Arc::clone(&automation))
-        .with_subscription_delivery_service(subscription_service, presence);
+        let identity = ServiceIdentity::new(SERVICE_ID, SERVICE_ID)
+            .expect("service identity")
+            .with_automation_store(Arc::clone(&automation))
+            .with_subscription_delivery_service(subscription_service, presence);
         let target = session(&identity.service_id);
         let response = dispatch_message(
             json!("client-1"),

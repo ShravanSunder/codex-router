@@ -62,14 +62,10 @@ async fn subscription_control_methods_roundtrip_through_control_and_sqlite()
             clock: Arc::clone(&clock),
         });
     subscription_delivery.start().await?;
-    let identity = ServiceIdentity::new(
-        SERVICE_ID,
-        "00000000-0000-4000-8000-000000000002",
-        &format!("sha256:{}", "a".repeat(64)),
-    )
-    .map_err(std::io::Error::other)?
-    .with_board_store(Arc::clone(&store))
-    .with_subscription_delivery_service(subscription_delivery.clone(), presence);
+    let identity = ServiceIdentity::new(SERVICE_ID, "00000000-0000-4000-8000-000000000002")
+        .map_err(std::io::Error::other)?
+        .with_board_store(Arc::clone(&store))
+        .with_subscription_delivery_service(subscription_delivery.clone(), presence);
     let (socket, server) = tokio::net::UnixStream::pair()?;
     let rejection_identity = identity.clone();
     let server_task = tokio::spawn(serve_control_connection(server, identity));

@@ -48,8 +48,8 @@ const SHED_REQUEST_READ_LIMIT: usize = 4 * 1024 * 1024;
 #[derive(Clone)]
 pub struct CollaborationApiConfig {
     pub application: CollaborationApplication,
-    /// The service directory. The conversation and observation tools that open carrier
-    /// sessions still discover the carriers through Control until the clients cut over.
+    /// The service directory, where the carrier sockets the conversation and observation
+    /// tools open live.
     pub service_directory: PathBuf,
     /// Codex native schema definitions that tool schemas' native references bind to.
     pub native_definitions: Option<NativeSchemaDefinitions>,

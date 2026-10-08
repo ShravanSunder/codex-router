@@ -9,7 +9,6 @@ async fn client_initializes_and_discovers_over_real_unix_transport() {
     let identity = ServiceIdentity::new(
         "00000000-0000-4000-8000-000000000001",
         "00000000-0000-4000-8000-000000000002",
-        &format!("sha256:{}", "a".repeat(64)),
     )
     .unwrap_or_else(|error| panic!("identity: {error}"));
     let directory = identity.endpoint_directory();

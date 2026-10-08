@@ -1,10 +1,19 @@
-//! Bounded sequential Control calls. No request replay or native process ownership.
-use crate::endpoint_notification_state::EndpointNotificationState;
-use collaboration_protocol::{ControlFrameDecoder, ControlInitializationResult, EndpointInventory};
+//! The typed client for the collaboration API on this machine.
+//!
+//! A client reads the published version 3 manifest for the Router's identity and version,
+//! then calls tools over the owner-only API socket. There is no handshake: each call stands
+//! alone, and nothing is replayed after an uncertain answer.
+use crate::api_connection::{ApiConnection, DEFAULT_CALL_TIMEOUT, ToolAnswer};
+use collaboration_protocol::{
+    EndpointInventory, MachineLabel, SERVICE_MANIFEST_VERSION, SchemaDigest, ServiceManifest,
+    UuidIdentity,
+};
 use serde_json::{Value, json};
-use std::collections::VecDeque;
-use std::time::Duration;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use std::{
+    io::{self, Read},
+    path::{Path, PathBuf},
+    time::Duration,
+};
 use tokio::net::UnixStream;
 
 const PERMISSION_DIAGNOSTIC_MESSAGE: &str = "Request automated approval review through your tool, or ask the user to grant the required command/socket access. Retry only after access is granted.";
@@ -15,18 +24,18 @@ pub enum ClientError {
     InvalidRequest(&'static str),
     #[error("unsupported protocol capability: {0}")]
     UnsupportedCapability(&'static str),
-    #[error("Control discovery failed at {stage}")]
+    #[error("collaboration API discovery failed at {stage}")]
     Discovery {
         stage: &'static str,
         source: std::io::Error,
     },
-    #[error("Control transport failed: {0}")]
+    #[error("collaboration API transport failed: {0}")]
     Transport(#[from] std::io::Error),
-    #[error("Control protocol violation: {0}")]
+    #[error("collaboration API protocol violation: {0}")]
     Protocol(&'static str),
-    #[error("Control request timed out; no request was replayed")]
+    #[error("collaboration API request timed out; no request was replayed")]
     Timeout,
-    #[error("Control request rejected with code {code}")]
+    #[error("collaboration API request rejected with code {code}")]
     Rejected { code: i64, data: Option<Value> },
 }
 
@@ -57,85 +66,99 @@ impl ClientError {
     }
 }
 
-pub struct ControlClient {
-    pub(crate) connection: ClientConnection,
-    identity: ControlInitializationResult,
-    machine_label: Option<collaboration_protocol::MachineLabel>,
-    notification_state: EndpointNotificationState,
+/// The Router a client calls, as its published manifest names it.
+#[derive(Clone, Debug)]
+pub struct RouterIdentity {
+    pub service_id: UuidIdentity,
+    pub service_epoch: UuidIdentity,
+    pub service_version: String,
+    pub machine_label: MachineLabel,
+    pub native_schema_digest: Option<SchemaDigest>,
 }
 
-pub(crate) struct ClientConnection {
-    stream: UnixStream,
-    decoder: ControlFrameDecoder,
-    incoming: VecDeque<Value>,
-    notifications: VecDeque<Value>,
-    next_id: u64,
-    pub(crate) failed: bool,
+/// A client of one Router's collaboration API.
+#[derive(Clone)]
+pub struct CollaborationClient {
+    pub(crate) connection: ApiConnection,
+    identity: RouterIdentity,
+    directory: PathBuf,
 }
-impl ControlClient {
-    pub async fn initialize(
-        stream: UnixStream,
-        name: &str,
-        version: &str,
-    ) -> Result<Self, ClientError> {
-        let mut connection = ClientConnection {
-            stream,
-            decoder: ControlFrameDecoder::default(),
-            incoming: VecDeque::new(),
-            notifications: VecDeque::new(),
-            next_id: 0,
-            failed: false,
-        };
-        let value = connection
-            .call(
-                "control/initialize",
-                json!(collaboration_protocol::ControlInitializationParams {
-                    version: collaboration_protocol::ProtocolVersion { major: 1, minor: 0 },
-                    client: collaboration_protocol::ControlClientInfo {
-                        name: name
-                            .to_owned()
-                            .try_into()
-                            .map_err(|_| ClientError::Protocol("invalid client name"))?,
-                        version: version
-                            .to_owned()
-                            .try_into()
-                            .map_err(|_| ClientError::Protocol("invalid client version"))?,
-                    },
-                }),
-            )
-            .await?;
-        let identity: ControlInitializationResult = serde_json::from_value(value)
-            .map_err(|_| ClientError::Protocol("invalid initialization result"))?;
-        crate::warn_on_router_version_mismatch(name, version, &identity.service_version);
-        if identity.version.major != 1 || identity.version.minor != 0 {
-            return Err(ClientError::Protocol("unsupported negotiated version"));
+
+impl CollaborationClient {
+    /// Reads the manifest in `directory` and checks the API socket it names is reachable.
+    pub async fn connect(directory: &Path, name: &str, version: &str) -> Result<Self, ClientError> {
+        if !directory.is_absolute() {
+            return Err(ClientError::Protocol("service directory must be absolute"));
         }
-        crate::record_service_version(&identity.service_version);
+        let manifest = read_manifest(directory).map_err(|error| match error {
+            ClientError::Transport(source) => ClientError::Discovery {
+                stage: "manifest-read",
+                source,
+            },
+            other => other,
+        })?;
+        let root = std::fs::canonicalize(directory).map_err(|source| ClientError::Discovery {
+            stage: "directory-resolve",
+            source,
+        })?;
+        let socket =
+            std::fs::canonicalize(root.join(manifest.api.path.file_name())).map_err(|source| {
+                ClientError::Discovery {
+                    stage: "socket-resolve",
+                    source,
+                }
+            })?;
+        if socket.parent() != Some(root.as_path()) {
+            return Err(ClientError::Protocol(
+                "API socket escapes service directory",
+            ));
+        }
+        let probe = tokio::time::timeout(DEFAULT_CALL_TIMEOUT, UnixStream::connect(&socket))
+            .await
+            .map_err(|_| ClientError::Timeout)?
+            .map_err(|source| ClientError::Discovery {
+                stage: "socket-connect",
+                source,
+            })?;
+        drop(probe);
+        let socket = socket
+            .to_str()
+            .ok_or(ClientError::Protocol("API socket path must be UTF-8"))?;
+        let service_version = String::from(manifest.service_version);
+        crate::warn_on_router_version_mismatch(name, version, &service_version);
+        crate::record_service_version(&service_version);
         Ok(Self {
-            connection,
-            notification_state: EndpointNotificationState::new(&identity),
-            identity,
-            machine_label: None,
+            connection: ApiConnection::new(socket),
+            identity: RouterIdentity {
+                service_id: manifest.service_id,
+                service_epoch: manifest.service_epoch,
+                service_version,
+                machine_label: manifest.machine_label,
+                native_schema_digest: manifest.native_schema_digest,
+            },
+            directory: root,
         })
     }
+
     #[must_use]
-    pub fn identity(&self) -> &ControlInitializationResult {
+    pub fn identity(&self) -> &RouterIdentity {
         &self.identity
     }
-    /// Machine label read from the same manifest used to discover this service.
+
     #[must_use]
-    pub fn machine_label(&self) -> Option<&collaboration_protocol::MachineLabel> {
-        self.machine_label.as_ref()
+    pub fn machine_label(&self) -> &MachineLabel {
+        &self.identity.machine_label
     }
-    pub(crate) fn set_machine_label_from_manifest(
-        &mut self,
-        machine_label: collaboration_protocol::MachineLabel,
-    ) {
-        self.machine_label = Some(machine_label);
+
+    /// The canonical service directory the manifest was read from.
+    #[must_use]
+    pub fn directory(&self) -> &Path {
+        &self.directory
     }
+
     /// Agent-originated communication; delivery defaults are carried by the typed request.
     pub async fn send_agent_message(
-        &mut self,
+        &self,
         params: collaboration_protocol::SessionMessageSendParams,
     ) -> Result<collaboration_protocol::DeliveryReceipt, ClientError> {
         if !matches!(
@@ -148,9 +171,10 @@ impl ControlClient {
             .await
             .map(|result| result.receipt)
     }
+
     /// Explicit human input; does not manufacture an authenticated human identity.
     pub async fn send_human_input(
-        &mut self,
+        &self,
         params: collaboration_protocol::SessionMessageSendParams,
     ) -> Result<collaboration_protocol::DeliveryReceipt, ClientError> {
         if !matches!(
@@ -163,9 +187,10 @@ impl ControlClient {
             .await
             .map(|result| result.receipt)
     }
+
     /// Replies to one stored direct message using its push id or Router link.
     pub async fn message_reply(
-        &mut self,
+        &self,
         params: collaboration_protocol::SessionMessageReplyParams,
     ) -> Result<collaboration_protocol::SessionMessageReplyResult, ClientError> {
         if params.caller.endpoint.service_id != self.identity().service_id {
@@ -173,14 +198,15 @@ impl ControlClient {
                 "reply caller belongs to another service",
             ));
         }
-        let value = self.connection.call("message/reply", json!(params)).await?;
-        serde_json::from_value(value).map_err(|_| {
-            self.connection.failed = true;
-            ClientError::Protocol("invalid message reply result; acceptance unknown")
-        })
+        let value = self
+            .delivery_receipt("message_reply", json!(params))
+            .await?;
+        serde_json::from_value(value)
+            .map_err(|_| ClientError::Protocol("invalid message reply result; acceptance unknown"))
     }
+
     pub(crate) async fn submit_message_with_push(
-        &mut self,
+        &self,
         params: collaboration_protocol::SessionMessageSendParams,
     ) -> Result<collaboration_protocol::PushMessageSendResult, ClientError> {
         use collaboration_protocol::{
@@ -188,11 +214,21 @@ impl ControlClient {
             MessageInputKind, MessageRepresentation, NativeInputOperation, NativeSendAcceptance,
             SessionReachability,
         };
-        let value = self.connection.call("message/send", json!(params)).await?;
+        let message = crate::PublicMessageContent::try_from(params.message.clone())?;
+        let value = self
+            .delivery_receipt(
+                "message_send",
+                json!({
+                    "target": params.target,
+                    "message": message,
+                    "delivery": params.mode,
+                    "generationGuard": params.generation_guard,
+                }),
+            )
+            .await?;
         let decoded =
             serde_json::from_value::<collaboration_protocol::PushMessageSendResult>(value);
         let Ok(receipt) = decoded else {
-            self.connection.failed = true;
             return Err(ClientError::Protocol(
                 "invalid message receipt; acceptance unknown",
             ));
@@ -284,24 +320,42 @@ impl ControlClient {
                 _ => false,
             };
         if !consistent {
-            self.connection.failed = true;
             return Err(ClientError::Protocol(
                 "inconsistent message receipt; acceptance unknown",
             ));
         }
         Ok(receipt)
     }
+
+    /// A stored push and its delivery receipt. A delivery the tool reports as an error (not
+    /// submitted, refused or unknown) still carries the stored push, which the caller judges.
+    async fn delivery_receipt(&self, tool: &str, arguments: Value) -> Result<Value, ClientError> {
+        match self.connection.answer(tool, arguments).await? {
+            ToolAnswer::Success(value) => Ok(value),
+            ToolAnswer::Failure(mut failure)
+                if failure.get("pushId").is_some() && failure.get("receipt").is_some() =>
+            {
+                if let Some(fields) = failure.as_object_mut() {
+                    for presentation in ["mcpResult", "kind", "message", "effect"] {
+                        fields.remove(presentation);
+                    }
+                }
+                Ok(failure)
+            }
+            ToolAnswer::Failure(failure) => {
+                Err(crate::api_connection::rejection_from_tool_failure(failure))
+            }
+        }
+    }
+
     pub async fn list_sessions(
-        &mut self,
+        &self,
         params: collaboration_protocol::NativeSessionListParams,
     ) -> Result<collaboration_protocol::NativeSessionListResult, ClientError> {
         if !(1..=100).contains(&params.page_size) {
             return Err(ClientError::InvalidRequest("invalid session page size"));
         }
-        let value = self
-            .connection
-            .call("codex/sessionList", json!(params))
-            .await?;
+        let value = self.connection.call("sessions_list", json!(params)).await?;
         let result: collaboration_protocol::NativeSessionListResult = serde_json::from_value(value)
             .map_err(|_| ClientError::Protocol("invalid session inventory"))?;
         if result.endpoint != params.endpoint
@@ -311,13 +365,13 @@ impl ControlClient {
                 .any(|s| s.target.endpoint != params.endpoint)
             || result.sessions.len() > params.page_size as usize
         {
-            self.connection.failed = true;
             return Err(ClientError::Protocol("inconsistent session inventory"));
         }
         Ok(result)
     }
+
     pub async fn list_provider_sessions(
-        &mut self,
+        &self,
         params: collaboration_protocol::ProviderSessionListParams,
     ) -> Result<collaboration_protocol::ProviderSessionListResult, ClientError> {
         if !(1..=100).contains(&params.page_size) {
@@ -327,7 +381,7 @@ impl ControlClient {
         }
         let value = self
             .connection
-            .call("provider/sessionList", json!(params))
+            .call("provider_sessions_list", json!(params))
             .await?;
         let result: collaboration_protocol::ProviderSessionListResult =
             serde_json::from_value(value)
@@ -339,15 +393,15 @@ impl ControlClient {
                 .iter()
                 .any(|row| row.target().endpoint != params.endpoint)
         {
-            self.connection.failed = true;
             return Err(ClientError::Protocol(
                 "inconsistent provider session inventory",
             ));
         }
         Ok(result)
     }
+
     pub async fn inspect_session(
-        &mut self,
+        &self,
         target: &collaboration_protocol::SessionRef,
     ) -> Result<collaboration_protocol::NativeInspectResult, ClientError> {
         let params = collaboration_protocol::NativeInspectParams {
@@ -355,7 +409,7 @@ impl ControlClient {
         };
         let result = self
             .connection
-            .call("codex/sessionInspect", json!(params))
+            .call("session_inspect", json!(params))
             .await?;
         let result: collaboration_protocol::NativeInspectResult = serde_json::from_value(result)
             .map_err(|_| ClientError::Protocol("invalid inspection result"))?;
@@ -364,30 +418,30 @@ impl ControlClient {
             || result.thread.get("id").and_then(Value::as_str)
                 != Some(String::from(target.session_id.clone()).as_str())
         {
-            self.connection.failed = true;
             return Err(ClientError::Protocol("inconsistent inspection result"));
         }
         Ok(result)
     }
+
     pub async fn rename_session(
-        &mut self,
+        &self,
         params: collaboration_protocol::NativeRenameParams,
     ) -> Result<collaboration_protocol::NativeRenameResult, ClientError> {
         let target = params.target.clone();
         let result = self
             .connection
-            .call("codex/sessionRename", json!(params))
+            .call("session_rename", json!(params))
             .await?;
         let result: collaboration_protocol::NativeRenameResult = serde_json::from_value(result)
             .map_err(|_| ClientError::Protocol("invalid rename result"))?;
         if result.target != target {
-            self.connection.failed = true;
             return Err(ClientError::Protocol("inconsistent rename result"));
         }
         Ok(result)
     }
+
     pub async fn interrupt_turn(
-        &mut self,
+        &self,
         target: &collaboration_protocol::SessionRef,
         generation: &collaboration_protocol::CodexGeneration,
         turn_id: &str,
@@ -401,26 +455,26 @@ impl ControlClient {
         };
         let value = self
             .connection
-            .call("codex/turnInterrupt", json!(params))
+            .call("turn_interrupt", json!(params))
             .await?;
         let result: collaboration_protocol::NativeInterruptResult =
             serde_json::from_value(value)
                 .map_err(|_| ClientError::Protocol("invalid interruption result"))?;
         if result.target != *target || result.generation != *generation || result.turn_id != turn_id
         {
-            self.connection.failed = true;
             return Err(ClientError::Protocol("inconsistent interruption result"));
         }
         Ok(result)
     }
+
     pub async fn list_pending_approvals(
-        &mut self,
+        &self,
         pending_only: bool,
     ) -> Result<collaboration_protocol::ApprovalListResult, ClientError> {
         let value = self
             .connection
             .call(
-                "approval/list",
+                "approval_list",
                 json!(collaboration_protocol::ApprovalListParams {
                     pending: pending_only,
                     include_options: false,
@@ -431,13 +485,13 @@ impl ControlClient {
     }
 
     pub async fn list_approvals_with_options(
-        &mut self,
+        &self,
         pending_only: bool,
     ) -> Result<collaboration_protocol::ApprovalDetailedListResult, ClientError> {
         let value = self
             .connection
             .call(
-                "approval/list",
+                "approval_list",
                 json!(collaboration_protocol::ApprovalListParams {
                     pending: pending_only,
                     include_options: true,
@@ -449,7 +503,7 @@ impl ControlClient {
     }
 
     pub async fn decide_approval(
-        &mut self,
+        &self,
         params: collaboration_protocol::ApprovalDecideParams,
     ) -> Result<collaboration_protocol::ApprovalDecideResult, crate::OperationError> {
         let request_id = params.request_id.clone();
@@ -460,14 +514,9 @@ impl ControlClient {
                 ClientError::InvalidRequest("invalid approval decision"),
             )
         })?;
-        self.connection
-            .validate_call_before_transmission("approval/decide", &encoded)
-            .map_err(|source| {
-                crate::OperationError::before_dispatch("approval-decision", None, source)
-            })?;
         let value = self
             .connection
-            .call("approval/decide", encoded)
+            .call("approval_decide", encoded)
             .await
             .map_err(|source| {
                 crate::OperationError::after_dispatch("approval-decision", None, None, source)
@@ -484,7 +533,6 @@ impl ControlClient {
         if result.request_id != request_id
             || result.state != collaboration_protocol::ApprovalState::Decided
         {
-            self.connection.failed = true;
             return Err(crate::OperationError::after_dispatch(
                 "approval-decision",
                 None,
@@ -496,13 +544,13 @@ impl ControlClient {
     }
 
     pub async fn list_questions(
-        &mut self,
+        &self,
         pending_only: bool,
     ) -> Result<collaboration_protocol::QuestionListResult, ClientError> {
         let value = self
             .connection
             .call(
-                "question/list",
+                "question_list",
                 json!(collaboration_protocol::QuestionListParams {
                     pending: pending_only
                 }),
@@ -512,7 +560,7 @@ impl ControlClient {
     }
 
     pub async fn answer_question(
-        &mut self,
+        &self,
         params: collaboration_protocol::QuestionAnswerParams,
     ) -> Result<collaboration_protocol::QuestionAnswerResult, crate::OperationError> {
         let request_id = params.request_id.clone();
@@ -523,14 +571,9 @@ impl ControlClient {
                 ClientError::InvalidRequest("invalid question answer"),
             )
         })?;
-        self.connection
-            .validate_call_before_transmission("question/answer", &encoded)
-            .map_err(|source| {
-                crate::OperationError::before_dispatch("question-answer", None, source)
-            })?;
         let value = self
             .connection
-            .call("question/answer", encoded)
+            .call("question_answer", encoded)
             .await
             .map_err(|source| {
                 crate::OperationError::after_dispatch("question-answer", None, None, source)
@@ -545,7 +588,6 @@ impl ControlClient {
                 )
             })?;
         if result.request_id != request_id {
-            self.connection.failed = true;
             return Err(crate::OperationError::after_dispatch(
                 "question-answer",
                 None,
@@ -555,16 +597,15 @@ impl ControlClient {
         }
         Ok(result)
     }
-    pub async fn journal_status(&mut self) -> Result<crate::JournalStatus, ClientError> {
-        let value = self
-            .connection
-            .call("lifecycleJournal/status", json!({}))
-            .await?;
+
+    pub async fn journal_status(&self) -> Result<crate::JournalStatus, ClientError> {
+        let value = self.connection.call("journal_status", json!({})).await?;
         serde_json::from_value(value).map_err(|_| ClientError::Protocol("invalid journal status"))
     }
+
     /// Reads a captured historical address page without loading any native thread.
     pub async fn list_addresses(
-        &mut self,
+        &self,
         endpoint: &collaboration_protocol::EndpointRef,
         page_size: u32,
         cursor: Option<&str>,
@@ -581,7 +622,7 @@ impl ControlClient {
             page_size,
             cursor: cursor.map(str::to_owned),
         });
-        let value = self.connection.call("addressBook/list", params).await?;
+        let value = self.connection.call("addresses_list", params).await?;
         let page: collaboration_protocol::AddressPage = serde_json::from_value(value)
             .map_err(|_| ClientError::Protocol("invalid address snapshot"))?;
         if page.coverage.endpoint != *endpoint
@@ -597,13 +638,13 @@ impl ControlClient {
                 .as_ref()
                 .is_some_and(|cursor| cursor.is_empty() || cursor.len() > 1024)
         {
-            self.connection.failed = true;
             return Err(ClientError::Protocol("inconsistent address snapshot"));
         }
         Ok(page)
     }
+
     pub async fn read_journal(
-        &mut self,
+        &self,
         endpoint: &collaboration_protocol::EndpointRef,
         after: collaboration_protocol::JournalPosition,
         page_size: u32,
@@ -616,14 +657,15 @@ impl ControlClient {
         }
         let value = self
             .connection
-            .call(
-                "lifecycleJournal/read",
+            .call_with_timeout(
+                "journal_read",
                 json!(collaboration_protocol::JournalReadParams {
                     endpoint: endpoint.clone(),
                     after: after.clone(),
                     page_size,
                     wait_milliseconds,
                 }),
+                DEFAULT_CALL_TIMEOUT.saturating_add(Duration::from_millis(wait_milliseconds)),
             )
             .await?;
         let page: collaboration_protocol::JournalPage = serde_json::from_value(value)
@@ -651,250 +693,84 @@ impl ControlClient {
         }
         Ok(page)
     }
-    pub async fn list_endpoints(&mut self) -> Result<EndpointInventory, ClientError> {
-        let value = self.connection.call("endpoint/list", json!({})).await?;
+
+    pub async fn list_endpoints(&self) -> Result<EndpointInventory, ClientError> {
+        let value = self.connection.call("endpoints_list", json!({})).await?;
         let result: EndpointInventory = serde_json::from_value(value)
             .map_err(|_| ClientError::Protocol("invalid endpoint inventory"))?;
         if result.service_epoch != self.identity.service_epoch
             || result.endpoints.len() > 64
             || result.sequence > 9_007_199_254_740_991
         {
-            self.connection.failed = true;
             return Err(ClientError::Protocol("inconsistent endpoint inventory"));
-        }
-        if let Err(error) = self.reconcile_endpoint_snapshot(result.sequence) {
-            self.connection.failed = true;
-            return Err(error);
         }
         Ok(result)
     }
-    fn reconcile_endpoint_snapshot(&mut self, sequence: u64) -> Result<(), ClientError> {
-        self.notification_state.apply_snapshot(sequence)?;
-        self.notification_state
-            .discard_covered(&mut self.connection.notifications)?;
-        self.notification_state
-            .discard_covered(&mut self.connection.incoming)
-    }
-    /// Waits for a scoped endpoint notification without submitting another request.
-    pub async fn next_notification(&mut self) -> Result<Value, ClientError> {
-        if self.connection.failed {
-            return Err(ClientError::Protocol("connection is retired"));
-        }
-        let result = self.receive_notification().await;
-        if result.is_err() {
-            self.connection.failed = true;
-        }
-        result
-    }
-    async fn receive_notification(&mut self) -> Result<Value, ClientError> {
-        loop {
-            let frame = loop {
-                if let Some(frame) = self.connection.notifications.pop_front() {
-                    break frame;
-                }
-                if let Some(frame) = self.connection.incoming.pop_front() {
-                    break frame;
-                }
-                self.connection.read_frames().await?;
-            };
-            if let Some(frame) = self.notification_state.consume(frame)? {
-                return Ok(frame);
-            }
-        }
-    }
-    pub(crate) async fn next_wake_notification(&mut self) -> Result<Value, ClientError> {
-        if self.connection.failed {
-            return Err(ClientError::Protocol("connection is retired"));
-        }
-        loop {
-            let frame = if let Some(frame) = self.connection.notifications.pop_front() {
-                frame
-            } else if let Some(frame) = self.connection.incoming.pop_front() {
-                frame
-            } else {
-                self.connection.read_frames().await?;
-                continue;
-            };
-            if frame.get("method").and_then(Value::as_str) == Some("endpoint/changed") {
-                self.notification_state.consume(frame)?;
-                continue;
-            }
-            if frame.get("jsonrpc").and_then(Value::as_str) != Some("2.0")
-                || frame.get("method").and_then(Value::as_str) != Some("wake/changed")
-                || frame.get("id").is_some()
-                || frame.as_object().is_none_or(|object| object.len() != 3)
-            {
-                return Err(ClientError::Protocol("invalid wake notification envelope"));
-            }
-            return Ok(frame);
-        }
-    }
-
-    /// Reads one provider Session event on a subscribed Control connection.
-    pub async fn next_provider_session_notification(&mut self) -> Result<Value, ClientError> {
-        if self.connection.failed {
-            return Err(ClientError::Protocol("connection is retired"));
-        }
-        loop {
-            let frame = if let Some(frame) = self.connection.notifications.pop_front() {
-                frame
-            } else if let Some(frame) = self.connection.incoming.pop_front() {
-                frame
-            } else {
-                self.connection.read_frames().await?;
-                continue;
-            };
-            if frame.get("method").and_then(Value::as_str) == Some("endpoint/changed") {
-                self.notification_state.consume(frame)?;
-                continue;
-            }
-            if frame.get("jsonrpc").and_then(Value::as_str) != Some("2.0")
-                || frame.get("method").and_then(Value::as_str) != Some("provider/sessionEvent")
-                || frame.get("id").is_some()
-                || frame.as_object().is_none_or(|object| object.len() != 3)
-            {
-                self.connection.failed = true;
-                return Err(ClientError::Protocol(
-                    "invalid provider Session notification",
-                ));
-            }
-            return frame
-                .get("params")
-                .cloned()
-                .ok_or(ClientError::Protocol("provider Session event missing"));
-        }
-    }
-    pub async fn close(mut self) -> Result<(), ClientError> {
-        self.connection.stream.shutdown().await?;
-        Ok(())
-    }
 }
 
-impl ClientConnection {
-    pub(crate) fn retire(&mut self) {
-        self.failed = true;
+/// Reads the service manifest; only version 3 is read.
+pub(crate) fn read_manifest(directory: &Path) -> Result<ServiceManifest, ClientError> {
+    let path = directory.join("service.json");
+    let metadata = std::fs::symlink_metadata(&path)?;
+    if !metadata.is_file() || metadata.len() > 65536 {
+        return Err(ClientError::Protocol("invalid service manifest file"));
     }
-    pub(crate) async fn call(&mut self, method: &str, params: Value) -> Result<Value, ClientError> {
-        self.call_with_timeout(method, params, Duration::from_secs(30))
-            .await
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)?
+        .take(65537)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > 65536 {
+        return Err(ClientError::Protocol("service manifest too large"));
     }
+    let value: serde_json::Value = serde_json::from_slice(&bytes).map_err(|_| {
+        ClientError::Transport(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid service manifest",
+        ))
+    })?;
+    if value.get("version").and_then(serde_json::Value::as_u64)
+        != Some(u64::from(SERVICE_MANIFEST_VERSION))
+    {
+        return Err(ClientError::Protocol(
+            "unsupported service manifest version; expected version 3",
+        ));
+    }
+    serde_json::from_value(value).map_err(|error| {
+        ClientError::Transport(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("invalid service manifest: {error}"),
+        ))
+    })
+}
 
-    pub(crate) async fn call_with_timeout(
-        &mut self,
-        method: &str,
-        params: Value,
-        timeout: Duration,
-    ) -> Result<Value, ClientError> {
-        if self.failed || self.next_id >= 65_536 {
-            return Err(ClientError::Protocol("connection is retired"));
-        }
-        // Set before awaiting: a dropped future leaves the exchange retired.
-        self.failed = true;
-        let result = tokio::time::timeout(timeout, self.exchange(method, params)).await;
-        match result {
-            Ok(Ok(value)) => {
-                self.failed = false;
-                Ok(value)
-            }
-            Ok(Err(error)) => {
-                self.failed = true;
-                Err(error)
-            }
-            Err(_) => {
-                self.failed = true;
-                Err(ClientError::Timeout)
-            }
-        }
-    }
-    pub(crate) fn encoded_request_len(
-        &self,
-        method: &str,
-        params: &Value,
-    ) -> Result<usize, ClientError> {
-        let id = format!("client-{}", self.next_id);
-        serde_json::to_vec(&json!({"jsonrpc":"2.0","id":id,"method":method,"params":params}))
-            .map(|bytes| bytes.len())
-            .map_err(|_| ClientError::Protocol("request encoding"))
-    }
-    pub(crate) fn validate_call_before_transmission(
-        &self,
-        method: &str,
-        params: &Value,
-    ) -> Result<(), ClientError> {
-        if self.failed || self.next_id >= 65_536 {
-            return Err(ClientError::Protocol("connection is retired"));
-        }
-        if self.encoded_request_len(method, params)?
-            > collaboration_protocol::MAX_CONTROL_FRAME_BYTES
-        {
-            return Err(ClientError::Protocol("request too large"));
-        }
-        Ok(())
-    }
-    async fn exchange(&mut self, method: &str, params: Value) -> Result<Value, ClientError> {
-        let id = format!("client-{}", self.next_id);
-        self.next_id += 1;
-        let mut bytes =
-            serde_json::to_vec(&json!({"jsonrpc":"2.0","id":id,"method":method,"params":params}))
-                .map_err(|_| ClientError::Protocol("request encoding"))?;
-        if bytes.len() > collaboration_protocol::MAX_CONTROL_FRAME_BYTES {
-            return Err(ClientError::Protocol("request too large"));
-        }
-        bytes.push(b'\n');
-        self.stream.write_all(&bytes).await?;
-        loop {
-            if let Some(frame) = self.incoming.pop_front() {
-                if frame.get("jsonrpc") != Some(&json!("2.0")) {
-                    return Err(ClientError::Protocol("invalid envelope version"));
-                }
-                if frame.get("id").is_none() && frame.get("method").is_some() {
-                    if self.notifications.len() >= 1024 {
-                        return Err(ClientError::Protocol("notification overflow"));
-                    }
-                    self.notifications.push_back(frame);
-                    continue;
-                }
-                if frame.get("id") != Some(&json!(id)) {
-                    return Err(ClientError::Protocol("response ID mismatch"));
-                }
-                match (frame.get("result"), frame.get("error")) {
-                    (Some(result), None) => return Ok(result.clone()),
-                    (None, Some(error)) => {
-                        if !collaboration_protocol::control_error_is_valid(method, &frame) {
-                            return Err(ClientError::Protocol("invalid method error response"));
-                        }
-                        return Err(ClientError::Rejected {
-                            code: error
-                                .get("code")
-                                .and_then(Value::as_i64)
-                                .ok_or(ClientError::Protocol("invalid error code"))?,
-                            data: error.get("data").cloned(),
-                        });
-                    }
-                    _ => {
-                        return Err(ClientError::Protocol(
-                            "response must contain result or error",
-                        ));
-                    }
-                }
-            }
-            self.read_frames().await?;
-        }
-    }
-    async fn read_frames(&mut self) -> Result<(), ClientError> {
-        let mut buffer = [0_u8; 8192];
-        let count = self.stream.read(&mut buffer).await?;
-        if count == 0 {
-            return Err(ClientError::Protocol("connection closed"));
-        }
-        let input = buffer
-            .get(..count)
-            .ok_or(ClientError::Protocol("read boundary"))?;
-        self.incoming.extend(
-            self.decoder
-                .push(input)
-                .map_err(|_| ClientError::Protocol("invalid Control framing"))?,
+#[cfg(test)]
+mod tests {
+    use super::CollaborationClient;
+
+    #[tokio::test]
+    async fn a_version_two_manifest_is_refused_before_socket_resolution() {
+        let directory = tempfile::tempdir().expect("temporary service directory");
+        let manifest = serde_json::json!({
+            "version":2,
+            "serviceId":"00000000-0000-4000-8000-000000000001",
+            "serviceEpoch":"00000000-0000-4000-8000-000000000002",
+            "machineLabel":"fixture-host",
+            "control":{"transport":"unixJsonLines","path":"control.sock"},
+            "controlSchemaDigest":format!("sha256:{}", "a".repeat(64)),
+            "mcp":{"transport":"streamableHttp","url":"http://127.0.0.1:0/mcp"}
+        });
+        std::fs::write(
+            directory.path().join("service.json"),
+            serde_json::to_vec(&manifest).expect("manifest JSON"),
+        )
+        .expect("manifest fixture");
+        let error = match CollaborationClient::connect(directory.path(), "test-client", "1").await {
+            Ok(_) => panic!("a version two manifest must fail discovery"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            error.to_string(),
+            "collaboration API protocol violation: unsupported service manifest version; expected version 3"
         );
-        Ok(())
     }
 }

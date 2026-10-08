@@ -188,7 +188,7 @@ mod tests {
             .create(&root)
             .unwrap_or_else(|error| panic!("observation fixture: {error}"));
         let digest = format!("sha256:{}", "a".repeat(64));
-        let identity = ServiceIdentity::new(SERVICE_ID, SERVICE_EPOCH, &digest)
+        let identity = ServiceIdentity::new(SERVICE_ID, SERVICE_EPOCH)
             .unwrap_or_else(|error| panic!("observation fixture: {error}"))
             .with_endpoints(vec![endpoint_description(1)])
             .unwrap_or_else(|error| panic!("observation fixture: {error}"));

@@ -17,8 +17,7 @@ async fn whoami_displays_service_id_and_machine_label_in_text_and_json() {
     std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700))
         .expect("private service directory");
     let digest = format!("sha256:{}", "a".repeat(64));
-    let identity =
-        ServiceIdentity::new(SERVICE_ID, SERVICE_EPOCH, &digest).expect("service identity");
+    let identity = ServiceIdentity::new(SERVICE_ID, SERVICE_EPOCH).expect("service identity");
     let listener = LocalControlService::bind(&root.path().join("control.sock"), identity)
         .expect("Control listener");
     let manifest = ServiceManifest {

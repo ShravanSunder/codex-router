@@ -85,7 +85,7 @@ async fn cli_dispatches_provider_session_list_by_endpoint_channel() {
             "schemaDigest":null,"generation":null}]
     }))
     .expect("native endpoint");
-    let identity = ServiceIdentity::new(service_id, epoch, &digest)
+    let identity = ServiceIdentity::new(service_id, epoch)
         .expect("identity")
         .with_endpoints(vec![endpoint, native_endpoint])
         .expect("endpoint inventory")

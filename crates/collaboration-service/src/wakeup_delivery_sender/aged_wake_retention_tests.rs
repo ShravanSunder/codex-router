@@ -192,14 +192,10 @@ async fn aged_wake_definition_fires_fresh_push_after_old_link_is_pruned() -> Tes
         generation: serde_json::from_value(json!({"serviceEpoch":SERVICE_ID,"generation":1}))?,
     });
     let delivery: Arc<dyn SessionMessageDelivery> = route.clone();
-    let identity = ServiceIdentity::new(
-        SERVICE_ID,
-        SERVICE_ID,
-        "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-    )?
-    .with_machine_identity(machine.clone())?
-    .with_automation_store(Arc::clone(&store))
-    .with_session_delivery(delivery);
+    let identity = ServiceIdentity::new(SERVICE_ID, SERVICE_ID)?
+        .with_machine_identity(machine.clone())?
+        .with_automation_store(Arc::clone(&store))
+        .with_session_delivery(delivery);
     let sender = WakeDeliverySender {
         delivery: identity
             .session_message_delivery()

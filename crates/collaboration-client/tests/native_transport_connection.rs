@@ -14,7 +14,6 @@ async fn client_opens_advertised_native_websocket_without_protocol_initializatio
     let identity = ServiceIdentity::new(
         "00000000-0000-4000-8000-000000000001",
         "00000000-0000-4000-8000-000000000002",
-        &digest,
     )
     .unwrap_or_else(|error| panic!("identity: {error}"));
     let native_path = root.join("native.sock");
@@ -102,7 +101,6 @@ async fn client_rejects_unavailable_and_escaped_native_endpoints_without_connect
     let identity = ServiceIdentity::new(
         "00000000-0000-4000-8000-000000000011",
         "00000000-0000-4000-8000-000000000012",
-        &digest,
     )
     .unwrap_or_else(|error| panic!("identity: {error}"));
     let endpoint_directory = identity.endpoint_directory();

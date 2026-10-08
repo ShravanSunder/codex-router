@@ -66,7 +66,7 @@ mod tests {
             }]
         }))
         .unwrap();
-        let identity = ServiceIdentity::new(id, epoch, &format!("sha256:{}", "a".repeat(64)))
+        let identity = ServiceIdentity::new(id, epoch)
             .unwrap()
             .with_endpoints(vec![description])
             .unwrap()
@@ -187,7 +187,7 @@ mod tests {
         let store = Arc::new(LifecycleStore::new(journal));
         let digest = format!("sha256:{}", "a".repeat(64));
         let description = serde_json::from_value(json!({"endpoint":endpoint,"label":"Stored fixture","availability":{"state":"unprobed"},"channels":[{"kind":"nativeCodex","transport":"unixWebSocket","path":"absent-native.sock","schemaDigest":null,"generation":null}]})).unwrap();
-        let identity = ServiceIdentity::new(id, epoch, &digest)
+        let identity = ServiceIdentity::new(id, epoch)
             .unwrap()
             .with_endpoints(vec![description])
             .unwrap()
@@ -375,7 +375,7 @@ mod tests {
         let store = Arc::new(LifecycleStore::new(journal));
         let digest = format!("sha256:{}", "a".repeat(64));
         let description = serde_json::from_value(json!({"endpoint":endpoint,"label":"Scoped fixture","availability":{"state":"unprobed"},"channels":[{"kind":"nativeCodex","transport":"unixWebSocket","path":"absent-native.sock","schemaDigest":null,"generation":null}]})).unwrap();
-        let identity = ServiceIdentity::new(id, epoch, &digest)
+        let identity = ServiceIdentity::new(id, epoch)
             .unwrap()
             .with_endpoints(vec![description])
             .unwrap()

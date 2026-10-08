@@ -83,7 +83,7 @@ async fn run_stateless_mcp_resumed_prompt_after_load(load_error: Option<Value>) 
         "channels":[{"kind":"acp","transport":"unixJsonLines","path":"acp.sock","schemaDigest":format!("sha256:{}", collaboration_protocol::ACP_SCHEMA_DIGEST)}]
     }))
     .expect("endpoint description");
-    let identity = collaboration_service::ServiceIdentity::new(service_id, epoch, &digest)
+    let identity = collaboration_service::ServiceIdentity::new(service_id, epoch)
         .expect("service identity")
         .with_endpoints(vec![description])
         .expect("endpoint directory");
@@ -265,7 +265,7 @@ async fn stateless_http_observation_attach_failure_retains_target_and_pre_dispat
     let epoch = "00000000-0000-4000-8000-000000000002";
     let digest = format!("sha256:{}", "a".repeat(64));
     let target = json!({"endpoint":{"serviceId":service_id,"endpointId":"codex-local"},"sessionId":"observe-thread"});
-    let identity = collaboration_service::ServiceIdentity::new(service_id, epoch, &digest)
+    let identity = collaboration_service::ServiceIdentity::new(service_id, epoch)
         .expect("service identity")
         .with_endpoints(vec![serde_json::from_value(json!({
             "endpoint":{"serviceId":service_id,"endpointId":"codex-local"}, "label":"MCP observation fixture",
@@ -334,7 +334,7 @@ async fn stateless_http_observation_resume_response_loss_retains_target_and_unkn
     let epoch = "00000000-0000-4000-8000-000000000002";
     let digest = format!("sha256:{}", "a".repeat(64));
     let target = json!({"endpoint":{"serviceId":service_id,"endpointId":"codex-local"},"sessionId":"observe-thread"});
-    let identity = collaboration_service::ServiceIdentity::new(service_id, epoch, &digest).expect("service identity").with_endpoints(vec![serde_json::from_value(json!({
+    let identity = collaboration_service::ServiceIdentity::new(service_id, epoch).expect("service identity").with_endpoints(vec![serde_json::from_value(json!({
         "endpoint":{"serviceId":service_id,"endpointId":"codex-local"}, "label":"MCP observation resume fixture",
         "availability":{"state":"available","observedAt":"2026-09-19T00:00:00Z"},
         "channels":[{"kind":"nativeCodex","transport":"unixWebSocket","path":"native.sock","schemaDigest":null,"generation":{"serviceEpoch":epoch,"generation":1}}]
@@ -454,7 +454,7 @@ async fn run_stateless_mcp_create_response_loss(
         "channels":[{"kind":"acp","transport":"unixJsonLines","path":"acp.sock","schemaDigest":format!("sha256:{}", collaboration_protocol::ACP_SCHEMA_DIGEST)}]
     }))
     .expect("endpoint description");
-    let identity = collaboration_service::ServiceIdentity::new(service_id, epoch, &digest)
+    let identity = collaboration_service::ServiceIdentity::new(service_id, epoch)
         .expect("service identity")
         .with_endpoints(vec![description])
         .expect("endpoint directory");

@@ -8,7 +8,7 @@ use crate::failure_line::{
 use crate::message_input_arguments::prepare_message_send;
 use collaboration_client::protocol::{DeliveryOutcome, MessageText, PushDeliveryState};
 use collaboration_client::{
-    ClientError, ControlClient, MessageReplyError, MessageReplyRequest, MessageSendError,
+    ClientError, CollaborationClient, MessageReplyError, MessageReplyRequest, MessageSendError,
     MessageSendRequest, OperationEffect,
 };
 use serde_json::json;
@@ -33,10 +33,13 @@ pub(super) fn run_message_send(args: MessageSendArguments) -> i32 {
         }
     };
     let outcome = runtime.block_on(async {
-        let mut client =
-            ControlClient::connect(&directory, "agent-collaboration", env!("CARGO_PKG_VERSION"))
-                .await
-                .map_err(|error| MessageSendError::Preparation(Box::new(error)))?;
+        let client = CollaborationClient::connect(
+            &directory,
+            "agent-collaboration",
+            env!("CARGO_PKG_VERSION"),
+        )
+        .await
+        .map_err(|error| MessageSendError::Preparation(Box::new(error)))?;
         let saved = prepared
             .resolve(&client.identity().service_id)
             .map_err(|_| {
@@ -54,7 +57,6 @@ pub(super) fn run_message_send(args: MessageSendArguments) -> i32 {
             generation_guard: saved.generation_guard,
         };
         let result = client.send_message(request).await;
-        let _closed = client.close().await;
         result
     });
     report(outcome, machine)
@@ -99,10 +101,13 @@ pub(super) fn run_message_reply(args: ReplyArguments) -> i32 {
         }
     };
     let outcome = runtime.block_on(async {
-        let mut client =
-            ControlClient::connect(&directory, "agent-collaboration", env!("CARGO_PKG_VERSION"))
-                .await
-                .map_err(|error| MessageReplyError::Preparation(Box::new(error)))?;
+        let client = CollaborationClient::connect(
+            &directory,
+            "agent-collaboration",
+            env!("CARGO_PKG_VERSION"),
+        )
+        .await
+        .map_err(|error| MessageReplyError::Preparation(Box::new(error)))?;
         let caller = harness_identity
             .session_ref(&client.identity().service_id)
             .map_err(|_| {
@@ -117,7 +122,6 @@ pub(super) fn run_message_reply(args: ReplyArguments) -> i32 {
                 text: reply_text,
             })
             .await;
-        let _closed = client.close().await;
         result
     });
     report_reply(outcome, machine)

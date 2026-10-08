@@ -22,7 +22,7 @@ async fn codex_conversation_cancel_names_turn_interrupt_without_sending_acp_canc
             "schemaDigest":format!("sha256:{}", collaboration_protocol::ACP_SCHEMA_DIGEST)}]
     }))
     .expect("Codex endpoint description");
-    let identity = collaboration_service::ServiceIdentity::new(service_id, epoch, &digest)
+    let identity = collaboration_service::ServiceIdentity::new(service_id, epoch)
         .expect("service identity")
         .with_endpoints(vec![description])
         .expect("endpoint directory");

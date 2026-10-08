@@ -62,7 +62,6 @@ async fn executable_discovers_an_isolated_published_service() {
     let identity = ServiceIdentity::new(
         "00000000-0000-4000-8000-000000000001",
         "00000000-0000-4000-8000-000000000002",
-        &digest,
     )
     .unwrap_or_else(|e| panic!("identity: {e}"))
     .with_journal(std::sync::Arc::clone(&store));

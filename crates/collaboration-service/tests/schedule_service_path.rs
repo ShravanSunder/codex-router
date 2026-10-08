@@ -20,7 +20,6 @@ async fn sdk_creates_disabled_schedule_without_native_backend()
     let identity = ServiceIdentity::new(
         "00000000-0000-4000-8000-000000000001",
         "00000000-0000-4000-8000-000000000002",
-        &format!("sha256:{}", "a".repeat(64)),
     )
     .map_err(std::io::Error::other)?
     .with_automation_store(store.clone());
@@ -81,7 +80,6 @@ async fn sdk_rejects_mode_change_and_thread_preparation_with_actionable_feedback
     let identity = ServiceIdentity::new(
         "00000000-0000-4000-8000-000000000001",
         "00000000-0000-4000-8000-000000000002",
-        &format!("sha256:{}", "a".repeat(64)),
     )
     .map_err(std::io::Error::other)?
     .with_automation_store(store.clone());

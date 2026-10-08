@@ -5,7 +5,6 @@ use collaboration_protocol::{
     FireKind, FireReceipt, SavedMessage, UuidIdentity, WakeChange, WakeChanged, WakeShowRequest,
     WakeSubscription,
 };
-use serde_json::Value;
 use std::{io, sync::Arc};
 use tokio::sync::{Mutex, OwnedSemaphorePermit};
 pub(crate) struct WakeSubscriptionState {
@@ -196,18 +195,4 @@ impl WakeSubscriptionState {
         }
         Ok(changes)
     }
-}
-/// Control's answer when a first-fire wait cannot start.
-pub(crate) fn wait_failure_response(
-    id: Value,
-    failure: crate::collaboration_application::WakeWaitFailure,
-) -> Value {
-    crate::control_connection::rejection_response(id, &failure)
-}
-
-pub(crate) fn unavailable(id: Value, wakeup_id: WakeupId) -> Value {
-    wait_failure_response(
-        id,
-        crate::collaboration_application::WakeWaitFailure::unavailable(wakeup_id),
-    )
 }

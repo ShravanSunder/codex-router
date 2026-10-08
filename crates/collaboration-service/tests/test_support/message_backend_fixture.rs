@@ -85,14 +85,10 @@ pub async fn exercise(
     let automation_store = Arc::new(Mutex::new(
         AutomationStore::open(&root.join("automation.sqlite")).await?,
     ));
-    let identity = ServiceIdentity::new(
-        service_id,
-        service_id,
-        &format!("sha256:{}", "a".repeat(64)),
-    )?
-    .with_automation_store(Arc::clone(&automation_store))
-    .with_endpoints(vec![description])?
-    .with_native_backend(native_backend.clone())?;
+    let identity = ServiceIdentity::new(service_id, service_id)?
+        .with_automation_store(Arc::clone(&automation_store))
+        .with_endpoints(vec![description])?
+        .with_native_backend(native_backend.clone())?;
     let route: Arc<dyn SessionDeliveryRoute> = Arc::new(CodexAppServerDeliveryRoute::new(
         service_id.to_owned().try_into()?,
         identity.endpoint_directory(),

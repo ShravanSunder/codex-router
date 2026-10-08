@@ -4,7 +4,7 @@ use collaboration_client::protocol::{
     LocalMutationEvidence, LocalMutationState, OperationId, RunRecoveryRequest, RunShowRequest,
     RunSnapshot,
 };
-use collaboration_client::{ControlClient, RunClientError};
+use collaboration_client::{CollaborationClient, RunClientError};
 use serde_json::json;
 use std::{
     ffi::OsString,
@@ -147,7 +147,7 @@ pub fn run_workflow_command(arguments: Vec<OsString>) -> i32 {
     };
     let mut dispatched = false;
     let result: Result<RunSnapshot, RunClientError> = runtime.block_on(async {
-        let mut client = ControlClient::connect(
+        let client = CollaborationClient::connect(
             &directory,
             "agent-collaboration-run",
             env!("CARGO_PKG_VERSION"),
@@ -159,7 +159,6 @@ pub fn run_workflow_command(arguments: Vec<OsString>) -> i32 {
             PreparedRun::Retry(request) => client.retry_summary(request).await,
             PreparedRun::Skip(request) => client.skip_summary(request).await,
         };
-        let _ = client.close().await;
         result
     });
     if !dispatched

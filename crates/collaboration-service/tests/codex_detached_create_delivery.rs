@@ -149,18 +149,15 @@ async fn detached_create_records_target_and_starts_first_message_without_resume(
             clock: Arc::new(SystemSubscriptionClock),
         });
     subscription_delivery.start().await?;
-    let identity = ServiceIdentity::new(
-        &String::from(service_id.clone()),
-        &String::from(service_id),
-        &format!("sha256:{}", "a".repeat(64)),
-    )?
-    .with_automation_store(Arc::clone(&automation_store))
-    .with_endpoints(vec![description])?
-    .with_native_backend(backend_config)?
-    .with_provider_operation_store(Arc::clone(&store))
-    .with_codex_conversation_recorder(Arc::clone(&recorder))
-    .with_session_delivery(delivery)
-    .with_subscription_delivery_service(subscription_delivery.clone(), presence);
+    let identity =
+        ServiceIdentity::new(&String::from(service_id.clone()), &String::from(service_id))?
+            .with_automation_store(Arc::clone(&automation_store))
+            .with_endpoints(vec![description])?
+            .with_native_backend(backend_config)?
+            .with_provider_operation_store(Arc::clone(&store))
+            .with_codex_conversation_recorder(Arc::clone(&recorder))
+            .with_session_delivery(delivery)
+            .with_subscription_delivery_service(subscription_delivery.clone(), presence);
 
     let (native_started_tx, native_started_rx) = tokio::sync::oneshot::channel();
     let (release_native_tx, release_native_rx) = tokio::sync::oneshot::channel();

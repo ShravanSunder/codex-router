@@ -1,7 +1,7 @@
 //! Configure future worker/summary budgets and inspect automation readiness through the Rust SDK.
 use clap::{Parser, Subcommand};
 use collaboration_client::protocol::{AutomationConfigureRequest, OperationId};
-use collaboration_client::{ConfigurationClientError, ControlClient};
+use collaboration_client::{CollaborationClient, ConfigurationClientError};
 use serde_json::{Value, json};
 use std::{
     ffi::OsString,
@@ -123,7 +123,7 @@ pub fn run_automation_command(arguments: Vec<OsString>) -> i32 {
     };
     let mut dispatched = false;
     let result: Result<Value, ConfigurationClientError> = runtime.block_on(async {
-        let mut client = ControlClient::connect(
+        let client = CollaborationClient::connect(
             &directory,
             "agent-collaboration-automation",
             env!("CARGO_PKG_VERSION"),
@@ -134,7 +134,6 @@ pub fn run_automation_command(arguments: Vec<OsString>) -> i32 {
             Some(request) => client.configure_automation(request).await.and_then(encode),
             None => client.automation_status().await.and_then(encode),
         };
-        let _ = client.close().await;
         result
     });
     if !dispatched

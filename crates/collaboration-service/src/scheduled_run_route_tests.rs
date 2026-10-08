@@ -594,10 +594,9 @@ async fn provider_and_peer_routes_drive_run_show_without_native_turns() -> TestR
                 .await
                 .map_err(|error| format!("fake provider settle: {error}"))?;
         }
-        let identity =
-            crate::ServiceIdentity::new(service, service, &format!("sha256:{}", "a".repeat(64)))?
-                .with_automation_store(Arc::clone(&store))
-                .with_scheduled_run_execution(fake);
+        let identity = crate::ServiceIdentity::new(service, service)?
+            .with_automation_store(Arc::clone(&store))
+            .with_scheduled_run_execution(fake);
         let (socket, server) = tokio::net::UnixStream::pair()?;
         let service_task = tokio::spawn(crate::serve_control_connection(server, identity));
         let mut client = ControlClient::initialize(socket, "fake-run-show", "1").await?;
@@ -694,10 +693,9 @@ async fn provider_existing_preparation_is_inspectable_and_fresh_activation_is_re
             .await?;
         schedules.push(schedule.schedule_id);
     }
-    let identity =
-        crate::ServiceIdentity::new(service, service, &format!("sha256:{}", "a".repeat(64)))?
-            .with_automation_store(Arc::clone(&store))
-            .with_scheduled_run_execution(fake);
+    let identity = crate::ServiceIdentity::new(service, service)?
+        .with_automation_store(Arc::clone(&store))
+        .with_scheduled_run_execution(fake);
     let (socket, server) = tokio::net::UnixStream::pair()?;
     let service_task = tokio::spawn(crate::serve_control_connection(server, identity.clone()));
     let mut client = ControlClient::initialize(socket, "provider-preparation", "1").await?;

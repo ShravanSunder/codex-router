@@ -169,7 +169,7 @@ async fn aggregate_long_turn_settles_through_real_adapter_after_many_native_upda
     let service_id = "00000000-0000-4000-8000-000000000021";
     let digest = format!("sha256:{}", "e".repeat(64));
     let endpoint = json!({"serviceId":service_id,"endpointId":"codex-local"});
-    let identity = ServiceIdentity::new(service_id, service_id, &digest)
+    let identity = ServiceIdentity::new(service_id, service_id)
         .unwrap()
         .with_endpoints(vec![serde_json::from_value(json!({
             "endpoint":endpoint.clone(),

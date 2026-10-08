@@ -1,10 +1,10 @@
-//! Descriptive stored/loaded/active inventory through the public Control client.
+//! Descriptive stored/loaded/active inventory through the collaboration API client.
 use clap::{Parser, Subcommand, ValueEnum};
 use collaboration_client::protocol::{
     ChannelDescription, EndpointDescription, EndpointRef, NativeSessionListParams,
     NativeSessionScope, NativeSessionSource, NativeSessionView, ProviderSessionListParams,
 };
-use collaboration_client::{ClientError, ControlClient};
+use collaboration_client::{ClientError, CollaborationClient};
 use serde_json::json;
 use std::{
     ffi::OsString,
@@ -162,8 +162,8 @@ pub fn run_session_inventory_command(arguments: Vec<OsString>) -> i32 {
         Err(_) => return 3,
     };
     let result = runtime.block_on(async {
-        let mut client =
-            ControlClient::connect(&directory, "sessions-inventory", env!("CARGO_PKG_VERSION"))
+        let client =
+            CollaborationClient::connect(&directory, "sessions-inventory", env!("CARGO_PKG_VERSION"))
                 .await?;
         let endpoint = EndpointRef {
             service_id: client.identity().service_id.clone(),
@@ -223,7 +223,6 @@ pub fn run_session_inventory_command(arguments: Vec<OsString>) -> i32 {
                 data: Some(json!({"kind":"unsupportedCapability","stage":"discovery","message":"Session inventory unsupported on this endpoint"})),
             }),
         };
-        let _closed = client.close().await;
         result
     });
     match result {

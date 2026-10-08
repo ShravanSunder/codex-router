@@ -13,7 +13,7 @@
 //! questions (`interaction_operations`); sessions, the journal and the address book
 //! (`session_operations`, `journal_operations`); provider observation
 //! (`provider_observation_operations`). Heavier paging logic stays in the crate's domain modules
-//! (`codex_session_inventory`, `provider_session_inventory`, `schedule_preparation_dispatch`).
+//! (`codex_session_inventory`, `provider_session_inventory`, `schedule_preparation`).
 #![expect(
     clippy::result_large_err,
     reason = "typed failures are the published payloads, returned once per IO-bound request"
@@ -33,9 +33,6 @@ mod session_operations;
 mod wake_operations;
 
 pub use automation_operations::AutomationOperations;
-pub(crate) use automation_operations::{
-    InstructionContext, InstructionFailureReason, instruction_failure, run_failure_context,
-};
 pub use board_operations::{BoardOperations, ThreadWaitBudgetError, thread_wait_root_notice_limit};
 pub use collaboration_rejection::{
     CollaborationRejection, CollaborationRejectionReason, PublishedRejection,
@@ -46,22 +43,16 @@ pub use journal_operations::{JournalCursorInvalidation, JournalFailure, JournalU
 pub use message_operations::{
     MessageFailure, MessageFailureKind, MessageFailureStage, MessageOperations,
 };
-pub use provider_observation_operations::{
-    ObservationFailure, ObservationOperations, ProviderSessionSubscription,
-};
+pub use provider_observation_operations::{ObservationFailure, ObservationOperations};
 pub use schedule_operations::ScheduleOperationFailure;
-pub(crate) use schedule_operations::{ScheduleFailureContext, invalid_schedule_request};
+pub(crate) use session_operations::INVALID_INVENTORY_PARAMETERS;
 pub use session_operations::{
     EndpointDirectoryUnavailable, NativeSessionFailure, NativeSessionFailureKind,
     NativeSessionStage, ProviderInventoryFailure, ProviderInventoryFailureKind, SessionOperations,
 };
-pub(crate) use session_operations::{INVALID_INVENTORY_PARAMETERS, INVALID_NATIVE_PARAMETERS};
 #[cfg(test)]
 pub(crate) use session_operations::{
     classify_native_call_failure, rename_method_unsupported, valid_session_rename_name,
-};
-pub(crate) use wake_operations::{
-    WakeFailureContext, invalid_field as wake_invalid_field, wake_failure,
 };
 pub use wake_operations::{WakeOperations, WakeWaitFailure};
 
@@ -77,6 +68,24 @@ impl CollaborationApplication {
     #[must_use]
     pub fn new(identity: ServiceIdentity) -> Self {
         Self { identity }
+    }
+
+    /// The Router this application serves.
+    #[must_use]
+    pub fn service_id(&self) -> &collaboration_protocol::UuidIdentity {
+        &self.identity.service_id
+    }
+
+    /// This run of the Router; a restart starts a new epoch.
+    #[must_use]
+    pub fn service_epoch(&self) -> &collaboration_protocol::UuidIdentity {
+        &self.identity.service_epoch
+    }
+
+    /// The machine label the Router publishes and writes into push lines.
+    #[must_use]
+    pub fn machine_label(&self) -> &collaboration_protocol::MachineLabel {
+        self.identity.machine_identity.machine_label()
     }
 
     /// Projects, boards, topics, threads, posts, inbox and thread subscriptions.

@@ -29,7 +29,7 @@ async fn question_list_and_answer_cross_the_real_control_connection() {
     )
     .await
     .expect("broker");
-    let identity = ServiceIdentity::new(service_id, epoch, &format!("sha256:{}", "a".repeat(64)))
+    let identity = ServiceIdentity::new(service_id, epoch)
         .expect("identity")
         .with_approval_broker(broker.clone());
     let requester = SessionRef {

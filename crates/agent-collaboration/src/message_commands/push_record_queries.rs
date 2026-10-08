@@ -7,7 +7,7 @@ use collaboration_client::protocol::{
     PushRecordShowResult, SessionRef,
 };
 use collaboration_client::{
-    ClientError, ControlClient, OperationEffect, operation_failure_from_client_error,
+    ClientError, CollaborationClient, OperationEffect, operation_failure_from_client_error,
 };
 use serde_json::json;
 use std::{
@@ -99,9 +99,12 @@ fn run_push_record_query(
         }
     };
     let outcome = runtime.block_on(async {
-        let mut client =
-            ControlClient::connect(&directory, "agent-collaboration", env!("CARGO_PKG_VERSION"))
-                .await?;
+        let client = CollaborationClient::connect(
+            &directory,
+            "agent-collaboration",
+            env!("CARGO_PKG_VERSION"),
+        )
+        .await?;
         let caller = harness_identity
             .session_ref(&client.identity().service_id)
             .map_err(|_| ClientError::InvalidRequest("invalid current session identity"))?;
@@ -124,7 +127,6 @@ fn run_push_record_query(
                 .await
                 .map(PushRecordReadResult::List),
         };
-        let _closed = client.close().await;
         result
     });
     report_push_record_read(outcome, machine)

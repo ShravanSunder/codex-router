@@ -19,13 +19,9 @@ async fn foreign_local_repositories_are_refused_on_every_request_that_names_one(
         MessageId::generate().as_str()
     ));
     let store = Arc::new(tokio::sync::Mutex::new(BoardStore::open(&path).await?));
-    let identity = ServiceIdentity::new(
-        SERVICE_ID,
-        "00000000-0000-4000-8000-000000000002",
-        &format!("sha256:{}", "a".repeat(64)),
-    )
-    .map_err(std::io::Error::other)?
-    .with_board_store(Arc::clone(&store));
+    let identity = ServiceIdentity::new(SERVICE_ID, "00000000-0000-4000-8000-000000000002")
+        .map_err(std::io::Error::other)?
+        .with_board_store(Arc::clone(&store));
     let actor = json!({"kind":"human","humanId":"owner"});
     let project_id = ProjectId::generate();
     let foreign =

@@ -1,6 +1,6 @@
 //! Shared message request preparation for CLI and MCP callers.
 use crate::{
-    ClientError, ControlClient, OperationEffect, OperationFailure,
+    ClientError, CollaborationClient, OperationEffect, OperationFailure,
     operation_failure_from_client_error,
 };
 use collaboration_protocol::{
@@ -118,9 +118,9 @@ impl From<PublicMessageContent> for MessageContent {
     }
 }
 
-impl ControlClient {
+impl CollaborationClient {
     pub async fn send_message(
-        &mut self,
+        &self,
         request: MessageSendRequest,
     ) -> Result<PushMessageSendResult, MessageSendError> {
         if request.target.endpoint.service_id != self.identity().service_id {
@@ -144,7 +144,7 @@ impl ControlClient {
     }
 
     pub async fn reply_to_push(
-        &mut self,
+        &self,
         request: MessageReplyRequest,
     ) -> Result<SessionMessageReplyResult, MessageReplyError> {
         let caller = request.caller.clone();
@@ -166,7 +166,7 @@ impl ControlClient {
     }
 
     pub async fn router_show(
-        &mut self,
+        &self,
         request: collaboration_protocol::PushRecordShowParams,
     ) -> Result<collaboration_protocol::PushRecordShowResult, ClientError> {
         if request.caller.endpoint.service_id != self.identity().service_id {
@@ -176,14 +176,14 @@ impl ControlClient {
         }
         let value = self
             .connection
-            .call("router/show", serde_json::json!(request))
+            .call("router_show", serde_json::json!(request))
             .await?;
         serde_json::from_value(value)
             .map_err(|_| ClientError::Protocol("invalid Router push show result"))
     }
 
     pub async fn message_inbox(
-        &mut self,
+        &self,
         request: collaboration_protocol::PushRecordListParams,
     ) -> Result<collaboration_protocol::PushRecordListResult, ClientError> {
         if request.caller.endpoint.service_id != self.identity().service_id {
@@ -193,14 +193,14 @@ impl ControlClient {
         }
         let value = self
             .connection
-            .call("message/inbox", serde_json::json!(request))
+            .call("message_inbox", serde_json::json!(request))
             .await?;
         serde_json::from_value(value)
             .map_err(|_| ClientError::Protocol("invalid message inbox result"))
     }
 
     pub async fn message_history(
-        &mut self,
+        &self,
         request: collaboration_protocol::PushRecordHistoryParams,
     ) -> Result<collaboration_protocol::PushRecordListResult, ClientError> {
         if request.caller.endpoint.service_id != self.identity().service_id
@@ -212,7 +212,7 @@ impl ControlClient {
         }
         let value = self
             .connection
-            .call("message/history", serde_json::json!(request))
+            .call("message_history", serde_json::json!(request))
             .await?;
         serde_json::from_value(value)
             .map_err(|_| ClientError::Protocol("invalid message history result"))
@@ -248,7 +248,7 @@ fn is_reply_pre_dispatch_rejection(error: &ClientError) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{MessageSendError, MessageSendRequest, PublicMessageContent};
-    use crate::{ClientError, ControlClient};
+    use crate::{ClientError, CollaborationClient};
     use collaboration_protocol::{
         CodexGeneration, EndpointId, EndpointRef, MessageDelivery, MessageText, SessionId,
         SessionRef, UuidIdentity,
@@ -287,7 +287,7 @@ mod tests {
                 .expect("write init");
             assert!(lines.next_line().await.expect("read close").is_none());
         });
-        let mut client = ControlClient::initialize(client_stream, "message-test", "1")
+        let mut client = CollaborationClient::initialize(client_stream, "message-test", "1")
             .await
             .expect("initialize");
         let request = MessageSendRequest {
@@ -353,7 +353,7 @@ mod tests {
                     .expect("message frame"),
             )
             .expect("message JSON");
-            assert_eq!(sent["method"], "message/send");
+            assert_eq!(sent["method"], "message_send");
             assert_eq!(sent["params"]["generationGuard"]["generation"], 1);
             let response = json!({"jsonrpc":"2.0","id":sent["id"],"result":{
                 "pushId":PUSH_ID,
@@ -372,7 +372,7 @@ mod tests {
                 .expect("write receipt");
             assert!(lines.next_line().await.expect("read close").is_none());
         });
-        let mut client = ControlClient::initialize(client_stream, "message-test", "1")
+        let mut client = CollaborationClient::initialize(client_stream, "message-test", "1")
             .await
             .expect("initialize");
         let request: MessageSendRequest = serde_json::from_value(json!({
@@ -424,7 +424,7 @@ mod tests {
                     .expect("message frame"),
             )
             .expect("message JSON");
-            assert_eq!(sent["method"], "message/send");
+            assert_eq!(sent["method"], "message_send");
             assert!(sent["params"]["generationGuard"].is_null());
             let response = json!({"jsonrpc":"2.0","id":sent["id"],"result":{
                 "pushId":PUSH_ID,
@@ -442,7 +442,7 @@ mod tests {
                 .await
                 .expect("write receipt");
         });
-        let mut client = ControlClient::initialize(client_stream, "message-test", "1")
+        let mut client = CollaborationClient::initialize(client_stream, "message-test", "1")
             .await
             .expect("initialize");
         let request = fixture_request(None);
@@ -493,7 +493,7 @@ mod tests {
                     .expect("message frame"),
             )
             .expect("message JSON");
-            assert_eq!(sent["method"], "message/send");
+            assert_eq!(sent["method"], "message_send");
             let response = json!({"jsonrpc":"2.0","id":sent["id"],"error":{
                 "code":-32050,"message":"Native backend unavailable",
                 "data":{"kind":"unavailable","stage":"start","message":"Native backend unavailable"}
@@ -504,7 +504,7 @@ mod tests {
                 .expect("write unavailable response");
             assert!(lines.next_line().await.expect("read close").is_none());
         });
-        let mut client = ControlClient::initialize(client_stream, "message-test", "1")
+        let mut client = CollaborationClient::initialize(client_stream, "message-test", "1")
             .await
             .expect("initialize");
         let request = fixture_request(None);
@@ -554,9 +554,9 @@ mod tests {
                     .expect("send frame"),
             )
             .expect("send JSON");
-            assert_eq!(send["method"], "message/send");
+            assert_eq!(send["method"], "message_send");
         });
-        let mut client = ControlClient::initialize(client_stream, "message-test", "1")
+        let mut client = CollaborationClient::initialize(client_stream, "message-test", "1")
             .await
             .expect("initialize");
         let error = client
@@ -682,7 +682,9 @@ mod tests {
         .expect("message request")
     }
 
-    async fn control_client_with_send_result(result: Value) -> (ControlClient, JoinHandle<()>) {
+    async fn control_client_with_send_result(
+        result: Value,
+    ) -> (CollaborationClient, JoinHandle<()>) {
         let (client_stream, server_stream) = tokio::net::UnixStream::pair().expect("stream pair");
         let peer = tokio::spawn(async move {
             let (read, mut write) = server_stream.into_split();
@@ -718,7 +720,7 @@ mod tests {
                     .expect("message send frame"),
             )
             .expect("message send JSON");
-            assert_eq!(send["method"], "message/send");
+            assert_eq!(send["method"], "message_send");
             let response = json!({"jsonrpc":"2.0","id":send["id"],"result":result});
             write
                 .write_all(format!("{response}\n").as_bytes())
@@ -726,7 +728,7 @@ mod tests {
                 .expect("write push result");
             assert!(lines.next_line().await.expect("read close").is_none());
         });
-        let client = ControlClient::initialize(client_stream, "message-test", "1")
+        let client = CollaborationClient::initialize(client_stream, "message-test", "1")
             .await
             .expect("initialize");
         (client, peer)

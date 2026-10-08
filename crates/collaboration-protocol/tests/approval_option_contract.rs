@@ -78,18 +78,3 @@ fn detailed_option_names_the_persistent_target() {
     let encoded = serde_json::to_value(option).expect("encode option");
     assert_eq!(encoded["persistentTarget"], "Cursor allowlist");
 }
-
-#[test]
-fn structured_approval_rejections_match_the_published_control_schema() {
-    for data in [
-        json!({"kind":"decisionNotOffered","stage":"inspect","message":"Approval decision rejected","offeredOptions":["allow-once","reject-once"]}),
-        json!({"kind":"persistentChoiceNotAcknowledged","stage":"inspect","message":"Approval decision rejected","persistentTarget":"Cursor allowlist"}),
-        json!({"kind":"alreadySettled","stage":"inspect","message":"Approval decision rejected"}),
-    ] {
-        let frame = json!({"jsonrpc":"2.0","id":"client-1","error":{"code":-32050,"message":"Approval decision rejected","data":data}});
-        assert!(collaboration_protocol::control_error_is_valid(
-            "approval/decide",
-            &frame
-        ));
-    }
-}

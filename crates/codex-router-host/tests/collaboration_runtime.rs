@@ -1,5 +1,5 @@
 use codex_router_host::{CollaborationRuntime, CollaborationRuntimeInputs};
-use collaboration_client::ControlClient;
+use collaboration_client::CollaborationClient;
 use collaboration_protocol::{EndpointAvailability, ObservationTimestamp};
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 
@@ -165,28 +165,27 @@ async fn host_composes_discovery_and_retires_only_owned_communication_sockets() 
     .unwrap_or_else(|e| panic!("manifest decode: {e}"));
     assert_eq!(&manifest.service_id, runtime.service_id());
     assert_eq!(manifest.machine_label.as_str(), "remote-control-fixture");
-    assert_eq!(manifest.version, 2);
+    assert_eq!(manifest.version, 3);
+    assert_eq!(
+        manifest.api.path,
+        collaboration_protocol::ApiSocketPath::ServiceSocket
+    );
+    assert_eq!(manifest.native_schema_digest, None);
     assert_eq!(
         manifest.mcp.transport,
         collaboration_protocol::McpTransport::StreamableHttp
     );
     assert!(manifest.mcp.url.starts_with("http://127.0.0.1:"));
     assert!(manifest.mcp.url.ends_with("/mcp"));
-    let control_digest = String::from(manifest.control_schema_digest.clone());
-    let control_schema_path = root.join(format!(
-        "control-schema-{}.json",
-        control_digest.trim_start_matches("sha256:")
-    ));
-    let control_schema = collaboration_protocol::ControlSchema::generate(None)
-        .unwrap_or_else(|error| panic!("control schema: {error}"));
-    assert_eq!(
-        std::fs::read(&control_schema_path)
-            .unwrap_or_else(|error| panic!("published Control schema: {error}")),
-        control_schema.bytes()
-    );
+    let control_schema_files = std::fs::read_dir(&root)
+        .unwrap_or_else(|error| panic!("service directory: {error}"))
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_name().to_string_lossy().starts_with("control-schema-"))
+        .count();
+    assert_eq!(control_schema_files, 0, "no Control schema is published");
     let original_id = runtime.service_id().clone();
     let original_epoch = runtime.service_epoch().clone();
-    let mut client = ControlClient::connect(&root, "host-proof", "1")
+    let client = CollaborationClient::connect(&root, "host-proof", "1")
         .await
         .unwrap_or_else(|e| panic!("discovery: {e}"));
     let executable = root.join("schema-generator");
@@ -402,8 +401,6 @@ async fn host_composes_discovery_and_retires_only_owned_communication_sockets() 
         .unwrap_or_else(|e| panic!("database cleanup: {e}"));
     std::fs::remove_file(root.join("service-identity.json"))
         .unwrap_or_else(|e| panic!("identity cleanup: {e}"));
-    std::fs::remove_file(control_schema_path)
-        .unwrap_or_else(|error| panic!("Control schema cleanup: {error}"));
     std::fs::remove_file(schema_path).unwrap_or_else(|error| panic!("schema cleanup: {error}"));
     std::fs::remove_file(root.join("backend.sock"))
         .unwrap_or_else(|error| panic!("backend cleanup: {error}"));

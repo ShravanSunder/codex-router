@@ -32,7 +32,6 @@ async fn board_control_roundtrip_preserves_root_thread_and_actor()
     let identity = ServiceIdentity::new(
         "00000000-0000-4000-8000-000000000001",
         "00000000-0000-4000-8000-000000000002",
-        &format!("sha256:{}", "a".repeat(64)),
     )
     .map_err(std::io::Error::other)?
     .with_board_store(store.clone());
@@ -241,7 +240,6 @@ async fn control_thread_list_pages_escape_heavy_holders_without_skips_or_repeats
     let identity = ServiceIdentity::new(
         "00000000-0000-4000-8000-000000000001",
         "00000000-0000-4000-8000-000000000002",
-        &format!("sha256:{}", "a".repeat(64)),
     )
     .map_err(std::io::Error::other)?
     .with_board_store(store.clone());
@@ -312,7 +310,6 @@ async fn malformed_board_requests_return_safe_specific_failures()
     let identity = ServiceIdentity::new(
         "00000000-0000-4000-8000-000000000001",
         "00000000-0000-4000-8000-000000000002",
-        &format!("sha256:{}", "a".repeat(64)),
     )
     .map_err(std::io::Error::other)?
     .with_board_store(store.clone());
@@ -436,7 +433,6 @@ async fn control_board_failures_pagination_and_inbox_use_the_public_path()
     let identity = ServiceIdentity::new(
         "00000000-0000-4000-8000-000000000001",
         "00000000-0000-4000-8000-000000000002",
-        &format!("sha256:{}", "a".repeat(64)),
     )
     .map_err(std::io::Error::other)?
     .with_board_store(store.clone());
@@ -746,7 +742,6 @@ async fn control_participant_operations_preserve_typed_state_and_authorization()
     let identity = ServiceIdentity::new(
         "00000000-0000-4000-8000-000000000001",
         "00000000-0000-4000-8000-000000000002",
-        &format!("sha256:{}", "a".repeat(64)),
     )
     .map_err(std::io::Error::other)?
     .with_board_store(store.clone());

@@ -1,5 +1,5 @@
 //! Reminder operations return durable wake identity, never an implied native submission receipt.
-use crate::{ClientError, ControlClient};
+use crate::{ClientError, CollaborationClient};
 use collaboration_protocol::{WakeFailure, WakeSendRequest, WakeShowRequest, WakeSnapshot};
 use serde::{Serialize, de::DeserializeOwned};
 #[derive(Debug, thiserror::Error)]
@@ -9,51 +9,51 @@ pub enum WakeClientError {
     #[error(transparent)]
     Connection(#[from] ClientError),
 }
-impl ControlClient {
+impl CollaborationClient {
     pub async fn send_wakeup(
-        &mut self,
+        &self,
         request: WakeSendRequest,
     ) -> Result<WakeSnapshot, WakeClientError> {
-        self.wakeup_call("wake/send", request).await
+        self.wakeup_call("wake_send", request).await
     }
     pub async fn read_wakeup(
-        &mut self,
+        &self,
         request: WakeShowRequest,
     ) -> Result<WakeSnapshot, WakeClientError> {
-        self.wakeup_call("wake/show", request).await
+        self.wakeup_call("wake_show", request).await
     }
     pub async fn pause_wakeup(
-        &mut self,
+        &self,
         request: collaboration_protocol::WakeMutationRequest,
     ) -> Result<collaboration_protocol::WakeMutationResult, WakeClientError> {
-        self.wakeup_call("wake/pause", request).await
+        self.wakeup_call("wake_pause", request).await
     }
     pub async fn resume_wakeup(
-        &mut self,
+        &self,
         request: collaboration_protocol::WakeMutationRequest,
     ) -> Result<collaboration_protocol::WakeMutationResult, WakeClientError> {
-        self.wakeup_call("wake/resume", request).await
+        self.wakeup_call("wake_resume", request).await
     }
     pub async fn cancel_wakeup(
-        &mut self,
+        &self,
         request: collaboration_protocol::WakeMutationRequest,
     ) -> Result<collaboration_protocol::WakeMutationResult, WakeClientError> {
-        self.wakeup_call("wake/cancel", request).await
+        self.wakeup_call("wake_cancel", request).await
     }
     pub async fn read_delivery(
-        &mut self,
+        &self,
         request: collaboration_protocol::DeliveryShowRequest,
     ) -> Result<collaboration_protocol::DeliveryInspection, WakeClientError> {
-        self.wakeup_call("delivery/show", request).await
+        self.wakeup_call("delivery_show", request).await
     }
     pub async fn list_wakeups(
-        &mut self,
+        &self,
         request: collaboration_protocol::AutomationPageRequest,
     ) -> Result<collaboration_protocol::AutomationPage<WakeSnapshot>, WakeClientError> {
-        self.wakeup_call("wake/list", request).await
+        self.wakeup_call("wake_list", request).await
     }
     async fn wakeup_call<TRequest: Serialize, TResponse: DeserializeOwned>(
-        &mut self,
+        &self,
         method: &str,
         request: TRequest,
     ) -> Result<TResponse, WakeClientError> {

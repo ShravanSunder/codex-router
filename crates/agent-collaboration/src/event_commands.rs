@@ -1,7 +1,7 @@
 //! Scoped Session event output; attachment is explicit and cancellation only closes observation.
 use clap::{Parser, Subcommand};
 use collaboration_client::protocol::{EndpointId, EndpointRef, SessionId, SessionRef};
-use collaboration_client::{BoundedObservationRequest, ControlClient, SessionObservation};
+use collaboration_client::{BoundedObservationRequest, CollaborationClient, SessionObservation};
 use serde_json::json;
 use std::{
     ffi::OsString,
@@ -163,7 +163,12 @@ async fn listen(
                 collaboration_client::ClientError::Protocol("invalid session"),
             )
         })?;
-        SessionObservation::attach_by_ids_with_context(directory, endpoint_id, session_id).await
+        SessionObservation::attach_by_ids_with_context(
+            &collaboration_client::CollaborationAccess::api(directory),
+            endpoint_id,
+            session_id,
+        )
+        .await
     }
     .await;
     let mut observation = match attached {
@@ -281,27 +286,30 @@ async fn observe(directory: &std::path::Path, input: ObserveInput) -> i32 {
             );
         }
     };
-    let control =
-        match ControlClient::connect(directory, "agent-collaboration", env!("CARGO_PKG_VERSION"))
-            .await
-        {
-            Ok(value) => value,
-            Err(error) => {
-                return crate::permission_diagnostic_reporting::report_permission_error(
-                    &error,
-                    crate::permission_diagnostic_reporting::PermissionDiagnosticRendering::Command,
+    let control = match CollaborationClient::connect(
+        directory,
+        "agent-collaboration",
+        env!("CARGO_PKG_VERSION"),
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(error) => {
+            return crate::permission_diagnostic_reporting::report_permission_error(
+                &error,
+                crate::permission_diagnostic_reporting::PermissionDiagnosticRendering::Command,
+                true,
+            )
+            .unwrap_or_else(|| {
+                crate::endpoint_commands::report_failure(
+                    "unavailable",
+                    "collaboration API discovery failed",
+                    3,
                     true,
                 )
-                .unwrap_or_else(|| {
-                    crate::endpoint_commands::report_failure(
-                        "unavailable",
-                        "Control discovery failed",
-                        3,
-                        true,
-                    )
-                });
-            }
-        };
+            });
+        }
+    };
     let target = SessionRef {
         endpoint: EndpointRef {
             service_id: control.identity().service_id.clone(),
@@ -311,8 +319,9 @@ async fn observe(directory: &std::path::Path, input: ObserveInput) -> i32 {
     };
     drop(control);
     let cancel = tokio_util::sync::CancellationToken::new();
+    let access = collaboration_client::CollaborationAccess::api(directory);
     let observation = SessionObservation::observe_bounded(
-        directory,
+        &access,
         BoundedObservationRequest {
             target,
             timeout_seconds: input.timeout_seconds,

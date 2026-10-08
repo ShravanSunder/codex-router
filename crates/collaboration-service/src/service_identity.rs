@@ -1,4 +1,4 @@
-//! Shared service identity and composed dependencies, separate from connection admission.
+//! The Router's identity and composed collaboration dependencies.
 use crate::EndpointDirectory;
 use collaboration_protocol::{EndpointAvailability, EndpointDescription, UuidIdentity};
 #[path = "subscription_delivery/mod.rs"]
@@ -16,7 +16,6 @@ pub struct ServiceIdentity {
     pub(crate) configuration_backend:
         Option<std::sync::Arc<dyn crate::AutomationConfigurationBackend>>,
     pub(crate) service_epoch: UuidIdentity,
-    pub(crate) schema_digest: collaboration_protocol::SchemaDigest,
     pub(crate) display_names: crate::SessionDisplayNameCache,
     pub(crate) directory: EndpointDirectory,
     pub(crate) wake_wait_permits: std::sync::Arc<tokio::sync::Semaphore>,
@@ -262,9 +261,7 @@ impl ServiceIdentity {
         self
     }
 
-    pub fn new(service_id: &str, service_epoch: &str, schema_digest: &str) -> Result<Self, String> {
-        let digest = collaboration_protocol::SchemaDigest::try_from(schema_digest.to_owned())
-            .map_err(str::to_owned)?;
+    pub fn new(service_id: &str, service_epoch: &str) -> Result<Self, String> {
         let service_id =
             UuidIdentity::try_from(service_id.to_owned()).map_err(|error| error.to_string())?;
         let machine_identity = crate::MachineIdentity::new(service_id.clone(), None)
@@ -276,7 +273,6 @@ impl ServiceIdentity {
             machine_identity,
             service_epoch: UuidIdentity::try_from(service_epoch.to_owned())
                 .map_err(|error| error.to_string())?,
-            schema_digest: digest,
             display_names: crate::SessionDisplayNameCache::default(),
             journal: None,
             native_backend: None,

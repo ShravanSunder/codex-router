@@ -15,7 +15,6 @@ async fn owned_listener_is_private_and_shutdown_removes_only_its_socket() {
     let identity = ServiceIdentity::new(
         "00000000-0000-4000-8000-000000000001",
         "00000000-0000-4000-8000-000000000002",
-        &format!("sha256:{}", "a".repeat(64)),
     )
     .unwrap_or_else(|e| panic!("identity: {e}"));
     let service = LocalControlService::bind(&socket, identity.clone())
@@ -66,7 +65,6 @@ async fn dropping_old_listener_preserves_replacement_at_same_path() {
     let identity = ServiceIdentity::new(
         "00000000-0000-4000-8000-000000000001",
         "00000000-0000-4000-8000-000000000002",
-        &format!("sha256:{}", "a".repeat(64)),
     )
     .unwrap_or_else(|error| panic!("identity: {error}"));
     let original = LocalControlService::bind(&socket, identity)

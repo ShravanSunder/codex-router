@@ -74,7 +74,7 @@ mod tests {
                 "schemaDigest":format!("sha256:{}",collaboration_protocol::ACP_SCHEMA_DIGEST)}]
         }))
         .unwrap_or_else(|error| panic!("fixture endpoint: {error}"));
-        let identity = ServiceIdentity::new(service_id, service_id, &digest)
+        let identity = ServiceIdentity::new(service_id, service_id)
             .and_then(|identity| identity.with_endpoints(vec![endpoint]))
             .unwrap_or_else(|error| panic!("fixture identity: {error}"));
         let listener = LocalControlService::bind(&root.join("control.sock"), identity)

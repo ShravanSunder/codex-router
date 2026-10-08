@@ -61,19 +61,6 @@ pub enum ProviderObservationEventTooLargeKind {
     EventTooLarge,
 }
 
-#[derive(JsonSchema, Clone, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct ProviderSessionListenRequest {
-    pub target: SessionRef,
-}
-
-#[derive(JsonSchema, Clone, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct ProviderSessionListenReady {
-    pub target: SessionRef,
-    pub generation: CodexGeneration,
-}
-
 #[cfg(test)]
 mod tests {
     use super::{BoundedObservationRequest, ProviderObservationEventTooLarge};

@@ -13,7 +13,7 @@ use collaboration_protocol::{
     LocalMutationEvidence, LocalMutationState, OperationId, SavedMessage, UuidIdentity,
     WaitUnavailable, WakeFailure, WakeFailureReason, WakeFailureStage, WakeMutationRequest,
     WakeMutationResult, WakeNextAction, WakeNotFound, WakeSendRequest, WakeShowRequest,
-    WakeSnapshot, WakeState, WakeSubscription, WakeWaitOutcome, WakeWaitRequest, WakeWaitResult,
+    WakeSnapshot, WakeState, WakeWaitOutcome, WakeWaitRequest, WakeWaitResult,
 };
 use serde_json::json;
 use std::{sync::Arc, time::Duration};
@@ -371,28 +371,6 @@ impl<'service> WakeOperations<'service> {
                 WakeFailureReason::InvalidRecord,
                 LocalMutationState::None,
             )
-        })
-    }
-
-    /// Starts a first-fire wait: a snapshot plus the cursor its later changes follow.
-    ///
-    /// Waits share the handle's wait permits; at capacity the wait is unavailable, never queued.
-    pub(crate) async fn wake_wait_start(
-        &self,
-        request: WakeShowRequest,
-    ) -> Result<(WakeSubscriptionState, WakeSubscription), WakeWaitFailure> {
-        let wakeup_id = request.wakeup_id.clone();
-        let (store, permit) = self.wait_admission(&wakeup_id)?;
-        crate::wakeup_subscription::start(
-            Arc::clone(store),
-            self.service_id.clone(),
-            request,
-            permit,
-        )
-        .await
-        .map_err(|error| match error {
-            StorageError::WakeNotFound => WakeWaitFailure::not_found(wakeup_id),
-            _ => WakeWaitFailure::unavailable(wakeup_id),
         })
     }
 

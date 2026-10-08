@@ -475,13 +475,9 @@ async fn known_rejected_provider_submission_after_retention_uses_fresh_id_and_ol
     }
 
     let service_id = String::from(old_push.target.endpoint.service_id.clone());
-    let identity = crate::ServiceIdentity::new(
-        &service_id,
-        &service_id,
-        &format!("sha256:{}", "a".repeat(64)),
-    )
-    .map_err(std::io::Error::other)?
-    .with_automation_store(Arc::clone(&store));
+    let identity = crate::ServiceIdentity::new(&service_id, &service_id)
+        .map_err(std::io::Error::other)?
+        .with_automation_store(Arc::clone(&store));
     let old_link = crate::push_record_resolver::link_for(&old_push, &identity);
     let old_link_result = crate::push_record_resolver::show(
         json!(1),

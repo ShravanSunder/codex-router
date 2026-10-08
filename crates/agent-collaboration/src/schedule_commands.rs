@@ -6,7 +6,7 @@ use collaboration_client::protocol::{
     ScheduleDefinition, ScheduleEffects, ScheduleEnableRequest, ScheduleShowRequest,
     ScheduleSnapshot, ScheduleUpdateRequest,
 };
-use collaboration_client::{ControlClient, ScheduleClientError};
+use collaboration_client::{CollaborationClient, ScheduleClientError};
 use serde_json::json;
 use std::{
     ffi::OsString,
@@ -54,7 +54,7 @@ enum ScheduleAction {
     Prepare(PreparationArguments),
     /// Save schedule configuration. An unprepared destination must be disabled.
     Create {
-        /// UTF-8 ScheduleDefinition JSON; '-' reads stdin. See the published Control schema.
+        /// UTF-8 ScheduleDefinition JSON; '-' reads stdin. See the schedule_create tool schema.
         #[arg(long)]
         definition_file: PathBuf,
         #[arg(long)]
@@ -186,7 +186,7 @@ pub fn run_schedule_command(arguments: Vec<OsString>) -> i32 {
     };
     let mut dispatched = false;
     let result: Result<ScheduleOutput, ScheduleClientError> = runtime.block_on(async {
-        let mut client = ControlClient::connect(
+        let client = CollaborationClient::connect(
             &directory,
             "agent-collaboration-schedule",
             env!("CARGO_PKG_VERSION"),
@@ -231,7 +231,6 @@ pub fn run_schedule_command(arguments: Vec<OsString>) -> i32 {
                 client.disable_schedule(request).await.map(snapshot_output)
             }
         };
-        let _ = client.close().await;
         result
     });
     if !dispatched
@@ -391,7 +390,7 @@ fn prepare(command: ScheduleAction) -> Result<PreparedSchedule, String> {
 }
 fn read_definition(path: PathBuf) -> Result<ScheduleDefinition, String> {
     let text = read_document(path, "definition")?;
-    serde_json::from_str(&text).map_err(|_|"Definition must be closed ScheduleDefinition JSON with instructionId, timing, enabled, destination, model, effort, and nullable executionTimeoutSeconds; inspect the Control schema.".into())
+    serde_json::from_str(&text).map_err(|_|"Definition must be closed ScheduleDefinition JSON with instructionId, timing, enabled, destination, model, effort, and nullable executionTimeoutSeconds; inspect the schedule_create tool schema.".into())
 }
 fn read_document(path: PathBuf, field: &str) -> Result<String, String> {
     let mut reader: Box<dyn Read> = if path.as_os_str() == "-" {
@@ -407,7 +406,7 @@ fn read_document(path: PathBuf, field: &str) -> Result<String, String> {
         .map_err(|_| format!("{field} must be readable UTF-8"))?;
     if text.len() > 1_048_576 {
         return Err(format!(
-            "{field} exceeds the 1048576-byte Control frame limit before envelope encoding"
+            "{field} exceeds the 1048576-byte message size limit before envelope encoding"
         ));
     }
     Ok(text)

@@ -21,15 +21,11 @@ async fn pending_journal_read_does_not_block_status_and_wakes_after_append() {
     let store = Arc::new(LifecycleStore::new(journal));
     let endpoint = json!({"serviceId":service,"endpointId":"codex-local"});
     let description=serde_json::from_value(json!({"endpoint":endpoint,"label":"Codex","availability":{"state":"unprobed"},"channels":[{"kind":"nativeCodex","transport":"unixWebSocket","path":"native.sock","schemaDigest":null,"generation":null}]})).unwrap_or_else(|e|panic!("description: {e}"));
-    let identity = ServiceIdentity::new(
-        service,
-        "00000000-0000-4000-8000-000000000002",
-        &format!("sha256:{}", "a".repeat(64)),
-    )
-    .unwrap_or_else(|e| panic!("identity: {e}"))
-    .with_endpoints(vec![description])
-    .unwrap_or_else(|e| panic!("endpoints: {e}"))
-    .with_journal(Arc::clone(&store));
+    let identity = ServiceIdentity::new(service, "00000000-0000-4000-8000-000000000002")
+        .unwrap_or_else(|e| panic!("identity: {e}"))
+        .with_endpoints(vec![description])
+        .unwrap_or_else(|e| panic!("endpoints: {e}"))
+        .with_journal(Arc::clone(&store));
     let (client, server) = tokio::net::UnixStream::pair().unwrap_or_else(|e| panic!("pair: {e}"));
     let task = tokio::spawn(serve_control_connection(server, identity.clone()));
     let (read, mut write) = client.into_split();

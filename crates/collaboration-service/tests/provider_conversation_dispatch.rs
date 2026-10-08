@@ -432,7 +432,7 @@ async fn initialized_fixture_with_endpoint(
         snapshot,
         wait_result,
     };
-    let identity = ServiceIdentity::new(SERVICE, EPOCH, &format!("sha256:{}", "a".repeat(64)))?
+    let identity = ServiceIdentity::new(SERVICE, EPOCH)?
         .with_provider_conversation_backend(Arc::new(backend.clone()));
     let identity = match endpoint_description {
         Some(description) => identity.with_endpoints(vec![description])?,
@@ -701,8 +701,8 @@ async fn unavailable_provider_conversation_names_endpoint_and_catalog_recovery()
         "availability":availability,
         "channels":[]
     }))?;
-    let identity = ServiceIdentity::new(SERVICE, EPOCH, &format!("sha256:{}", "a".repeat(64)))?
-        .with_endpoints(vec![endpoint_description])?;
+    let identity =
+        ServiceIdentity::new(SERVICE, EPOCH)?.with_endpoints(vec![endpoint_description])?;
     let (client, server) = tokio::net::UnixStream::pair()?;
     let serving = tokio::spawn(serve_control_connection(server, identity));
     let (read, mut write) = client.into_split();

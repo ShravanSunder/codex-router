@@ -82,7 +82,11 @@ enum NativeBridgeError {
 }
 
 async fn bridge(directory: PathBuf, endpoint: EndpointId) -> Result<(), NativeBridgeError> {
-    let connection = NativeTransportConnection::connect(&directory, endpoint).await?;
+    let connection = NativeTransportConnection::connect(
+        &collaboration_client::CollaborationAccess::api(&directory),
+        endpoint,
+    )
+    .await?;
     let socket = connection.stream;
     let (mut writer, mut reader) = socket.split();
     let input = async {

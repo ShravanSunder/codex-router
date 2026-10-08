@@ -12,14 +12,10 @@ async fn real_service_snapshot_folds_prior_publications_before_client_delivers_c
             "label":label,"availability":{"state":"unprobed"},"channels":[{"kind":"nativeCodex",
                 "transport":"unixWebSocket","path":"native.sock","schemaDigest":null,"generation":null}]})).unwrap()
     };
-    let identity = collaboration_service::ServiceIdentity::new(
-        service_id,
-        epoch,
-        &format!("sha256:{}", "a".repeat(64)),
-    )
-    .unwrap()
-    .with_endpoints(vec![endpoint_description("initial")])
-    .unwrap();
+    let identity = collaboration_service::ServiceIdentity::new(service_id, epoch)
+        .unwrap()
+        .with_endpoints(vec![endpoint_description("initial")])
+        .unwrap();
     let directory = identity.endpoint_directory();
     let (client, server) = tokio::net::UnixStream::pair().unwrap();
     let peer = tokio::spawn(collaboration_service::serve_control_connection(

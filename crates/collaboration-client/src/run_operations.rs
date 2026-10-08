@@ -1,5 +1,5 @@
-//! Inspect exact Runs and explicitly recover their summary work through the public Control client.
-use crate::{ClientError, ControlClient};
+//! Inspect exact Runs and explicitly recover their summary work through the collaboration API client.
+use crate::{ClientError, CollaborationClient};
 use collaboration_protocol::{RunFailure, RunRecoveryRequest, RunShowRequest, RunSnapshot};
 #[derive(Debug, thiserror::Error)]
 pub enum RunClientError {
@@ -8,27 +8,24 @@ pub enum RunClientError {
     #[error(transparent)]
     Connection(#[from] ClientError),
 }
-impl ControlClient {
-    pub async fn read_run(
-        &mut self,
-        request: RunShowRequest,
-    ) -> Result<RunSnapshot, RunClientError> {
-        self.run_call("run/show", request).await
+impl CollaborationClient {
+    pub async fn read_run(&self, request: RunShowRequest) -> Result<RunSnapshot, RunClientError> {
+        self.run_call("run_show", request).await
     }
     pub async fn retry_summary(
-        &mut self,
+        &self,
         request: RunRecoveryRequest,
     ) -> Result<RunSnapshot, RunClientError> {
-        self.run_call("run/summaryRetry", request).await
+        self.run_call("run_summary_retry", request).await
     }
     pub async fn skip_summary(
-        &mut self,
+        &self,
         request: RunRecoveryRequest,
     ) -> Result<RunSnapshot, RunClientError> {
-        self.run_call("run/summarySkip", request).await
+        self.run_call("run_summary_skip", request).await
     }
     async fn run_call<TRequest: serde::Serialize>(
-        &mut self,
+        &self,
         method: &str,
         request: TRequest,
     ) -> Result<RunSnapshot, RunClientError> {

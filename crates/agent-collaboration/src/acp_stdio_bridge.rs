@@ -48,7 +48,12 @@ pub fn run_acp_command(arguments: Vec<OsString>) -> i32 {
         }
     };
     let code = runtime.block_on(async {
-        let connection = match AcpTransportConnection::connect(&directory, endpoint).await {
+        let connection = match AcpTransportConnection::connect(
+            &collaboration_client::CollaborationAccess::api(&directory),
+            endpoint,
+        )
+        .await
+        {
             Ok(connection) => connection,
             Err(ClientError::UnsupportedCapability(_)) => {
                 eprintln!("ACP channel unsupported");

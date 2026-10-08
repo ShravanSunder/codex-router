@@ -136,20 +136,16 @@ async fn exercise_scheduled_run(
         gate,
         codex_home: root.clone(),
     };
-    let identity = ServiceIdentity::new(
-        service_id,
-        service_id,
-        &format!("sha256:{}", "a".repeat(64)),
-    )?
-    .with_endpoints(vec![description])?
-    .with_automation_store(store.clone())
-    .with_scheduled_run_execution(Arc::new(
-        collaboration_service::CodexAppServerScheduledRuns::new(
-            native_backend.clone(),
-            Arc::new(collaboration_service::UnmaterializedThreadHolder::new()),
-        ),
-    ))
-    .with_native_backend(native_backend)?;
+    let identity = ServiceIdentity::new(service_id, service_id)?
+        .with_endpoints(vec![description])?
+        .with_automation_store(store.clone())
+        .with_scheduled_run_execution(Arc::new(
+            collaboration_service::CodexAppServerScheduledRuns::new(
+                native_backend.clone(),
+                Arc::new(collaboration_service::UnmaterializedThreadHolder::new()),
+            ),
+        ))
+        .with_native_backend(native_backend)?;
     let shutdown = tokio_util::sync::CancellationToken::new();
     let schedule_worker = identity
         .schedule_timing_worker()

@@ -104,7 +104,6 @@ async fn codex_create_operation_is_inspectable_and_reconcilable_through_control(
     let identity = ServiceIdentity::new(
         &String::from(service_id),
         "019f0000-0000-7000-8000-000000000002",
-        &format!("sha256:{}", "a".repeat(64)),
     )?
     .with_provider_operation_store(Arc::clone(&store))
     .with_codex_conversation_recorder(Arc::clone(&recorder));

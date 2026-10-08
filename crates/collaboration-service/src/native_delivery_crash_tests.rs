@@ -513,14 +513,13 @@ fn identity(
         gate,
         codex_home: root.to_owned(),
     };
-    let identity =
-        crate::ServiceIdentity::new(SERVICE, epoch, &format!("sha256:{}", "a".repeat(64)))
-            .map_err(std::io::Error::other)?
-            .with_automation_store(store)
-            .with_endpoints(vec![description])
-            .map_err(std::io::Error::other)?
-            .with_native_backend(backend.clone())
-            .map_err(std::io::Error::other)?;
+    let identity = crate::ServiceIdentity::new(SERVICE, epoch)
+        .map_err(std::io::Error::other)?
+        .with_automation_store(store)
+        .with_endpoints(vec![description])
+        .map_err(std::io::Error::other)?
+        .with_native_backend(backend.clone())
+        .map_err(std::io::Error::other)?;
     let route: Arc<dyn SessionDeliveryRoute> = Arc::new(CodexAppServerDeliveryRoute::new(
         collaboration_protocol::UuidIdentity::try_from(SERVICE.to_owned())?,
         identity.endpoint_directory(),

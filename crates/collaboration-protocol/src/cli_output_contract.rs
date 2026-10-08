@@ -1,4 +1,4 @@
-//! CLI envelopes; operation payloads retain their Control/native/ACP contracts.
+//! CLI envelopes; operation payloads retain their API, native and ACP contracts.
 use crate::{
     AdapterOperationFailure, CodexGeneration, RouterAccess, SessionRef, SettingsObservation,
 };

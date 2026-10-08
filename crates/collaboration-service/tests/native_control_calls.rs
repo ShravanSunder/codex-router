@@ -121,7 +121,7 @@ async fn sdk_inspection_and_exact_interrupt_use_native_backend_with_generation_g
             .await
             .unwrap_or_else(|error| panic!("automation store: {error}")),
     ));
-    let identity = ServiceIdentity::new(service_id, epoch, &format!("sha256:{}", "a".repeat(64)))
+    let identity = ServiceIdentity::new(service_id, epoch)
         .unwrap_or_else(|error| panic!("identity: {error}"))
         .with_automation_store(Arc::clone(&automation_store))
         .with_endpoints(vec![description.clone()])
@@ -721,7 +721,7 @@ async fn inspect_control_response_preserves_native_fake_rejection_message() {
         endpoint: target.endpoint.clone(),
         gate,
     };
-    let identity = ServiceIdentity::new(service_id, epoch, &format!("sha256:{}", "a".repeat(64)))
+    let identity = ServiceIdentity::new(service_id, epoch)
         .unwrap_or_else(|error| panic!("identity: {error}"))
         .with_endpoints(vec![endpoint])
         .unwrap_or_else(|error| panic!("endpoints: {error}"))

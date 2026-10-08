@@ -1,5 +1,5 @@
 //! Public endpoint resolution immediately before native TUI launch.
-use crate::{ControlClient, NativeTransportError};
+use crate::{CollaborationClient, NativeTransportError};
 use collaboration_protocol::{ChannelDescription, EndpointAvailability};
 use std::{
     io,
@@ -11,7 +11,7 @@ pub fn resolve_public_native(directory: &Path) -> io::Result<PathBuf> {
         .enable_all()
         .build()?;
     runtime.block_on(async {
-        let mut client = ControlClient::connect(
+        let client = CollaborationClient::connect(
             directory,
             "agent-collaboration-launch",
             env!("CARGO_PKG_VERSION"),
@@ -68,10 +68,6 @@ pub fn resolve_public_native(directory: &Path) -> io::Result<PathBuf> {
                 "native selector escaped service directory",
             ));
         }
-        client
-            .close()
-            .await
-            .map_err(|_| io::Error::other("discovery connection close failed"))?;
         Ok(socket)
     })
 }

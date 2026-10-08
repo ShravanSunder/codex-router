@@ -62,7 +62,7 @@ async fn provider_pending_approval_uses_legacy_cli_shape_and_safe_decision() {
             .await
             .expect("automation store"),
     ));
-    let identity = collaboration_service::ServiceIdentity::new(service_id, epoch, &digest)
+    let identity = collaboration_service::ServiceIdentity::new(service_id, epoch)
         .expect("service identity")
         .with_automation_store(Arc::clone(&automation_store))
         .with_approval_broker(Arc::clone(&broker));
@@ -194,8 +194,8 @@ async fn approval_list_rejection_preserves_rejected_kind_and_exit_four() {
     let service_id = "00000000-0000-4000-8000-000000000001";
     let epoch = "00000000-0000-4000-8000-000000000002";
     let digest = format!("sha256:{}", "a".repeat(64));
-    let identity = collaboration_service::ServiceIdentity::new(service_id, epoch, &digest)
-        .expect("service identity");
+    let identity =
+        collaboration_service::ServiceIdentity::new(service_id, epoch).expect("service identity");
     let control =
         collaboration_service::LocalControlService::bind(&root.join("control.sock"), identity)
             .expect("control listener");

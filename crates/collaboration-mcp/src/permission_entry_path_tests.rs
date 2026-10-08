@@ -208,7 +208,7 @@ impl ApprovalFixture {
             delivery_tx,
         ));
         let digest = format!("sha256:{}", "a".repeat(64));
-        let identity = ServiceIdentity::new(SERVICE_ID, SERVICE_EPOCH, &digest)
+        let identity = ServiceIdentity::new(SERVICE_ID, SERVICE_EPOCH)
             .expect("service identity")
             .with_endpoints(vec![description])
             .expect("service endpoint")

@@ -543,16 +543,13 @@ mod provider_actor_tests {
             collaboration_service::MachineIdentity::new(service_id.clone(), Some("fixture-host"))
                 .expect("machine identity");
         let service_id_text = String::from(service_id.clone());
-        let broker_context = collaboration_service::ServiceIdentity::new(
-            &service_id_text,
-            &service_id_text,
-            &format!("sha256:{}", "a".repeat(64)),
-        )
-        .expect("service identity")
-        .with_machine_identity(machine_identity)
-        .expect("machine identity belongs to service")
-        .with_automation_store(push_store)
-        .with_approval_broker(Arc::clone(&broker));
+        let broker_context =
+            collaboration_service::ServiceIdentity::new(&service_id_text, &service_id_text)
+                .expect("service identity")
+                .with_machine_identity(machine_identity)
+                .expect("machine identity belongs to service")
+                .with_automation_store(push_store)
+                .with_approval_broker(Arc::clone(&broker));
         drop(broker_context);
         let notice_entered = Arc::new(tokio::sync::Notify::new());
         let notice_dropped = Arc::new(tokio::sync::Notify::new());

@@ -40,12 +40,7 @@ pub(crate) const TEST_PROTOCOL_VERSION: &str = "2025-11-25";
 
 /// A Router identity with no stores; tests add the stores their operations need.
 pub(crate) fn test_identity() -> ServiceIdentity {
-    ServiceIdentity::new(
-        TEST_SERVICE_ID,
-        TEST_SERVICE_EPOCH,
-        &format!("sha256:{}", "a".repeat(64)),
-    )
-    .expect("test service identity")
+    ServiceIdentity::new(TEST_SERVICE_ID, TEST_SERVICE_EPOCH).expect("test service identity")
 }
 
 /// The configuration a Host would hand every listener, over `application`.

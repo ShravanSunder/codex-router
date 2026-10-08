@@ -57,19 +57,15 @@ pub async fn exercise(proof: &mut ProofContext, portable: PortableRunProof) -> P
         }],
     };
     let gate = NativeGenerationGate::default();
-    let identity = ServiceIdentity::new(
-        &service_id,
-        &epoch,
-        &String::from(proof.client.identity().control_schema_digest.clone()),
-    )?
-    .with_endpoints(vec![description.clone()])?
-    .with_automation_store(Arc::clone(&store))
-    .with_native_backend(NativeControlBackend {
-        endpoint,
-        gate: gate.clone(),
-        codex_home: std::path::PathBuf::from(std::env::var_os("HOME").ok_or("HOME missing")?)
-            .join(".codex"),
-    })?;
+    let identity = ServiceIdentity::new(&service_id, &epoch)?
+        .with_endpoints(vec![description.clone()])?
+        .with_automation_store(Arc::clone(&store))
+        .with_native_backend(NativeControlBackend {
+            endpoint,
+            gate: gate.clone(),
+            codex_home: std::path::PathBuf::from(std::env::var_os("HOME").ok_or("HOME missing")?)
+                .join(".codex"),
+        })?;
     let mut connections = tokio::task::JoinSet::new();
     let mut client = connect_control(&identity, &mut connections).await?;
     let imported = client

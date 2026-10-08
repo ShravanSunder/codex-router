@@ -113,7 +113,7 @@ async fn connect(
         AutomationStore::open(&root.join("automation.sqlite")).await?,
     ));
     let identity =
-        crate::ServiceIdentity::new(SERVICE, epoch, &format!("sha256:{}", "a".repeat(64)))
+        crate::ServiceIdentity::new(SERVICE, epoch)
             .map_err(std::io::Error::other)?
             .with_automation_store(store);
     let (client, server) = tokio::net::UnixStream::pair()?;

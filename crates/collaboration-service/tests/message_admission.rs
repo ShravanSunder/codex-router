@@ -31,7 +31,7 @@ async fn message_to_missing_endpoint_reports_no_native_effects() {
             clock: Arc::new(SystemSubscriptionClock),
         });
     subscription_delivery.start().await.unwrap();
-    let identity = ServiceIdentity::new(id, id, &format!("sha256:{}", "a".repeat(64)))
+    let identity = ServiceIdentity::new(id, id)
         .unwrap()
         .with_automation_store(Arc::clone(&automation_store))
         .with_session_delivery(delivery)

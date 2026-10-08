@@ -173,7 +173,7 @@ mod tests {
         store: Arc<LifecycleStore>,
         epoch: &str,
     ) -> (ControlClient, tokio::task::JoinHandle<std::io::Result<()>>) {
-        let identity = ServiceIdentity::new(SERVICE, epoch, &format!("sha256:{}", "a".repeat(64))).unwrap()
+        let identity = ServiceIdentity::new(SERVICE, epoch).unwrap()
             .with_endpoints(vec![serde_json::from_value(json!({"endpoint":endpoint(),"label":"Fixture Codex",
                 "availability":{"state":"unprobed"},"channels":[{"kind":"nativeCodex","transport":"unixWebSocket",
                 "path":"native.sock","schemaDigest":null,"generation":null}]})).unwrap()]).unwrap()

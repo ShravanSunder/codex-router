@@ -18,7 +18,7 @@ async fn conversation_create_without_identity_or_from_reports_unavailable() {
             "schemaDigest":format!("sha256:{}", collaboration_client::protocol::ACP_SCHEMA_DIGEST)}]
     }))
     .expect("endpoint description");
-    let identity = collaboration_service::ServiceIdentity::new(service_id, epoch, &digest)
+    let identity = collaboration_service::ServiceIdentity::new(service_id, epoch)
         .expect("identity")
         .with_endpoints(vec![description])
         .expect("endpoint");
@@ -95,7 +95,7 @@ async fn conversation_create_from_supplies_created_by_without_env() {
             "schemaDigest":format!("sha256:{}", collaboration_client::protocol::ACP_SCHEMA_DIGEST)}]
     }))
     .expect("endpoint description");
-    let identity = collaboration_service::ServiceIdentity::new(service_id, epoch, &digest)
+    let identity = collaboration_service::ServiceIdentity::new(service_id, epoch)
         .expect("identity")
         .with_endpoints(vec![description])
         .expect("endpoint");

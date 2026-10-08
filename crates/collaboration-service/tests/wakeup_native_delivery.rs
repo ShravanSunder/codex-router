@@ -156,14 +156,10 @@ async fn exercise_delivery(
     if !recovered_delivery_ids.contains(&delivery_id) {
         return Err("restart did not expose the committed wake for dispatch".into());
     }
-    let identity = ServiceIdentity::new(
-        service_id,
-        service_id,
-        &format!("sha256:{}", "a".repeat(64)),
-    )?
-    .with_endpoints(vec![description])?
-    .with_automation_store(store.clone())
-    .with_native_backend(native_backend.clone())?;
+    let identity = ServiceIdentity::new(service_id, service_id)?
+        .with_endpoints(vec![description])?
+        .with_automation_store(store.clone())
+        .with_native_backend(native_backend.clone())?;
     let route: Arc<dyn SessionDeliveryRoute> = Arc::new(CodexAppServerDeliveryRoute::new(
         service_id.to_owned().try_into()?,
         identity.endpoint_directory(),

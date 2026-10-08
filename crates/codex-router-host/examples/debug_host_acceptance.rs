@@ -41,7 +41,7 @@ enum MessageProof {
 
 use codex_native_integration::{DebugCodexProfile, NativeProtocolConnection};
 use codex_router_host::ProcessGroupChild;
-use collaboration_client::ControlClient;
+use collaboration_client::CollaborationClient;
 use collaboration_protocol::{ChannelDescription, EndpointAvailability};
 use owned_thread_registry::OwnedThreadRegistry;
 use process_identity_guard::capture_production_identity;
@@ -223,8 +223,9 @@ async fn probe(
         if host.try_wait()?.is_some() {
             return Err("owned Host exited before readiness; inspect private diagnostics".into());
         }
-        if let Ok(mut client) =
-            ControlClient::connect(&directory, "debug_acceptance", env!("CARGO_PKG_VERSION")).await
+        if let Ok(client) =
+            CollaborationClient::connect(&directory, "debug_acceptance", env!("CARGO_PKG_VERSION"))
+                .await
             && let Ok(inventory) = client.list_endpoints().await
         {
             let candidate = inventory
@@ -377,8 +378,9 @@ async fn probe(
         );
     }
     if let MessageProof::Cli(executable) = messages {
-        let mut control =
-            ControlClient::connect(&directory, "cli-proof", env!("CARGO_PKG_VERSION")).await?;
+        let control =
+            CollaborationClient::connect(&directory, "cli-proof", env!("CARGO_PKG_VERSION"))
+                .await?;
         let inventory = control.list_endpoints().await?;
         let endpoint = inventory
             .endpoints
@@ -413,15 +415,15 @@ async fn probe(
         if reply.trim() != "DEBUG_CLI_REPLY_A" {
             return Err("CLI return reply mismatch".into());
         }
-        control.close().await?;
         println!(
             "{}",
             json!({"kind":"ownedCliExchangePassed","proof":"built CLI to public Control, two Luna turns, explicit CLI return; autonomous agent tool use not yet proven"})
         );
     }
     if let MessageProof::Agents(executable) = messages {
-        let mut control =
-            ControlClient::connect(&directory, "agent-proof", env!("CARGO_PKG_VERSION")).await?;
+        let control =
+            CollaborationClient::connect(&directory, "agent-proof", env!("CARGO_PKG_VERSION"))
+                .await?;
         let endpoint = control
             .list_endpoints()
             .await?
@@ -449,7 +451,6 @@ async fn probe(
         owned.require_owned(&second)?;
         let _receipt = owned.submit_text(&mut native, &first, &task).await?;
         agent_tool_proof::observe(&mut native, &mut peer, &first, &second).await?;
-        control.close().await?;
     }
     acp_client_proof::run_client_proof(
         &owned,

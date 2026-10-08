@@ -87,17 +87,13 @@ async fn stored_sessions_publish_absent_model_and_effort_as_null()
             "generation": null
         }]
     }))?;
-    let identity = ServiceIdentity::new(
-        SERVICE_ID,
-        "00000000-0000-4000-8000-000000000032",
-        &format!("sha256:{}", "a".repeat(64)),
-    )?
-    .with_endpoints(vec![description])?
-    .with_native_backend(NativeControlBackend {
-        endpoint: serde_json::from_value(endpoint.clone())?,
-        gate: NativeGenerationGate::default(),
-        codex_home: home,
-    })?;
+    let identity = ServiceIdentity::new(SERVICE_ID, "00000000-0000-4000-8000-000000000032")?
+        .with_endpoints(vec![description])?
+        .with_native_backend(NativeControlBackend {
+            endpoint: serde_json::from_value(endpoint.clone())?,
+            gate: NativeGenerationGate::default(),
+            codex_home: home,
+        })?;
     let request = json!({
         "jsonrpc":"2.0","id":"list","method":"codex/sessionList",
         "params":{"endpoint":endpoint,"view":"stored","scope":{"kind":"any"},"source":"all","pageSize":10}

@@ -2,7 +2,7 @@
 use crate::endpoint_commands::{report_failure, resolve_directory};
 use clap::{Parser, Subcommand};
 use collaboration_client::protocol::{EndpointId, EndpointRef};
-use collaboration_client::{ClientError, ControlClient};
+use collaboration_client::{ClientError, CollaborationClient};
 use std::{
     ffi::OsString,
     io::{self, Write},
@@ -77,9 +77,12 @@ pub fn run_address_command(arguments: Vec<OsString>) -> i32 {
         }
     };
     let result = runtime.block_on(async {
-        let mut client =
-            ControlClient::connect(&directory, "agent-collaboration", env!("CARGO_PKG_VERSION"))
-                .await?;
+        let client = CollaborationClient::connect(
+            &directory,
+            "agent-collaboration",
+            env!("CARGO_PKG_VERSION"),
+        )
+        .await?;
         let target = EndpointRef {
             service_id: client.identity().service_id.clone(),
             endpoint_id: endpoint,
@@ -87,7 +90,6 @@ pub fn run_address_command(arguments: Vec<OsString>) -> i32 {
         let snapshot = client
             .list_addresses(&target, page_size, cursor.as_deref())
             .await?;
-        client.close().await?;
         Ok::<_, ClientError>(snapshot)
     });
     match result {

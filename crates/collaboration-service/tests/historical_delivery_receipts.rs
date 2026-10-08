@@ -23,13 +23,9 @@ async fn retried_wake_retains_both_receipts_in_attempt_and_event_history()
     ));
     let store = Arc::new(tokio::sync::Mutex::new(AutomationStore::open(&path).await?));
     let service_id = "00000000-0000-4000-8000-000000000001";
-    let identity = ServiceIdentity::new(
-        service_id,
-        service_id,
-        &format!("sha256:{}", "a".repeat(64)),
-    )
-    .map_err(std::io::Error::other)?
-    .with_automation_store(Arc::clone(&store));
+    let identity = ServiceIdentity::new(service_id, service_id)
+        .map_err(std::io::Error::other)?
+        .with_automation_store(Arc::clone(&store));
     let (socket, server) = tokio::net::UnixStream::pair()?;
     let service = tokio::spawn(serve_control_connection(server, identity));
     let mut client = ControlClient::initialize(socket, "history-fixture", "1").await?;

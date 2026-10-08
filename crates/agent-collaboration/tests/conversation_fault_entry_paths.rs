@@ -132,7 +132,7 @@ async fn fork_response_loss_after_session_new_reports_unknown_without_replay() {
             "schemaDigest":format!("sha256:{}", collaboration_client::protocol::ACP_SCHEMA_DIGEST)}]
     }))
     .expect("endpoint description");
-    let identity = collaboration_service::ServiceIdentity::new(service_id, epoch, &digest)
+    let identity = collaboration_service::ServiceIdentity::new(service_id, epoch)
         .expect("identity")
         .with_endpoints(vec![description])
         .expect("endpoint");
@@ -274,7 +274,7 @@ async fn acp_initialize_response_loss_reports_no_effect_before_conversation_crea
         "availability":{"state":"available","observedAt":"2026-09-19T00:00:00Z"},
         "channels":[{"kind":"acp","transport":"unixJsonLines","path":"acp.sock","schemaDigest":format!("sha256:{}", collaboration_client::protocol::ACP_SCHEMA_DIGEST)}]
     })).expect("endpoint description");
-    let identity = collaboration_service::ServiceIdentity::new(service_id, epoch, &digest)
+    let identity = collaboration_service::ServiceIdentity::new(service_id, epoch)
         .expect("identity")
         .with_endpoints(vec![description])
         .expect("endpoint");
@@ -368,7 +368,7 @@ async fn compiled_cli_conversation_records_deserialize_for_success_errors_deadli
             "schemaDigest":format!("sha256:{}", collaboration_client::protocol::ACP_SCHEMA_DIGEST)}]
     }))
     .expect("endpoint description");
-    let identity = collaboration_service::ServiceIdentity::new(service_id, epoch, &digest)
+    let identity = collaboration_service::ServiceIdentity::new(service_id, epoch)
         .expect("identity")
         .with_endpoints(vec![description])
         .expect("endpoint");
@@ -738,7 +738,7 @@ async fn run_resumed_prompt_after_load(load_error: Option<Value>) -> std::proces
         "channels":[{"kind":"acp","transport":"unixJsonLines","path":"acp.sock","schemaDigest":format!("sha256:{}", collaboration_client::protocol::ACP_SCHEMA_DIGEST)}]
     }))
     .expect("endpoint description");
-    let identity = collaboration_service::ServiceIdentity::new(service_id, epoch, &digest)
+    let identity = collaboration_service::ServiceIdentity::new(service_id, epoch)
         .expect("identity")
         .with_endpoints(vec![description])
         .expect("endpoint");

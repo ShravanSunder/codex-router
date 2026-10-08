@@ -1,8 +1,8 @@
 //! The collaboration MCP server: one stateless handler per request over the typed application.
 //!
 //! Tools call `CollaborationApplication` in process. The conversation tools that open carrier
-//! sessions (create, load, prompt, cancel, create-and-prompt and bounded observation) still
-//! discover their carriers through the service directory until the clients cut over.
+//! sessions (create, load, prompt, cancel, create-and-prompt and bounded observation) run the
+//! carrier clients in the Host over the same application.
 use crate::collaboration_api_router::CollaborationApiConfig;
 use crate::native_schema_definitions::NativeSchemaDefinitions;
 use collaboration_client::{
@@ -39,7 +39,6 @@ use rmcp::{
 };
 use serde::Deserialize;
 use std::{
-    path::PathBuf,
     sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -120,7 +119,9 @@ impl ToolSurface {
 pub(crate) struct CollaborationMcpServer {
     surface: Arc<ToolSurface>,
     application: CollaborationApplication,
-    service_directory: PathBuf,
+    /// How the carrier tools reach the Router: in process, with carrier sockets in this
+    /// service directory.
+    carrier_access: collaboration_client::CollaborationAccess,
     router_executable_relation: tokio::sync::watch::Receiver<RouterExecutableRelation>,
     _active_call: ActiveCallGuard,
 }
@@ -156,7 +157,7 @@ impl CollaborationMcpServer {
         Self {
             surface,
             application: config.application.clone(),
-            service_directory: config.service_directory.clone(),
+            carrier_access: carrier_access(&config.application, &config.service_directory),
             router_executable_relation: config.router_executable_relation.clone(),
             _active_call: ActiveCallGuard::new(active_calls),
         }
@@ -165,13 +166,13 @@ impl CollaborationMcpServer {
     #[cfg(test)]
     pub(crate) fn for_application(
         application: CollaborationApplication,
-        service_directory: PathBuf,
+        service_directory: std::path::PathBuf,
     ) -> Self {
         let (_sender, relation) = tokio::sync::watch::channel(RouterExecutableRelation::Match);
         Self {
             surface: Arc::new(ToolSurface::new(None)),
+            carrier_access: carrier_access(&application, &service_directory),
             application,
-            service_directory,
             router_executable_relation: relation,
             _active_call: ActiveCallGuard::new(Arc::new(AtomicUsize::new(0))),
         }
@@ -199,6 +200,18 @@ impl CollaborationMcpServer {
         self.router_executable_relation = relation;
         self
     }
+}
+
+fn carrier_access(
+    application: &CollaborationApplication,
+    service_directory: &std::path::Path,
+) -> collaboration_client::CollaborationAccess {
+    collaboration_client::CollaborationAccess::local(
+        service_directory,
+        Arc::new(crate::local_collaboration::ApplicationCollaboration::new(
+            application.clone(),
+        )),
+    )
 }
 
 fn resolve_tool_schemas(

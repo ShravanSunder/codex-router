@@ -8,6 +8,10 @@ publish.workspace = true
 [lints]
 workspace = true
 
+[features]
+# The API served the way a Host serves it, for other crates' tests.
+test-support = []
+
 [dependencies]
 axum.workspace = true
 collaboration-client = { path = "../collaboration-client", version = "0.1.30" }
@@ -15,6 +19,7 @@ collaboration-protocol = { path = "../collaboration-protocol", version = "0.1.30
 collaboration-service = { path = "../collaboration-service", version = "0.1.30" }
 codex-native-integration.workspace = true
 futures-util.workspace = true
+http.workspace = true
 message-board = { path = "../message-board", version = "0.1.20" }
 rmcp.workspace = true
 schemars.workspace = true

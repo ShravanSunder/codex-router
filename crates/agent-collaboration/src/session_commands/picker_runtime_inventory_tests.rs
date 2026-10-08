@@ -363,7 +363,7 @@ async fn hosted_refresh_keeps_equal_provider_and_codex_ids_as_two_rows() {
         .map(|entry| serde_json::from_value(entry).expect("description"))
         .collect();
     let digest = format!("sha256:{}", "a".repeat(64));
-    let identity = ServiceIdentity::new(SERVICE, EPOCH, &digest)
+    let identity = ServiceIdentity::new(SERVICE, EPOCH)
         .expect("identity")
         .with_endpoints(descriptions)
         .expect("endpoints")

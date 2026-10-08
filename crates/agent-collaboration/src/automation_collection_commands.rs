@@ -4,7 +4,7 @@ use collaboration_client::protocol::{
     RunListRequest,
 };
 use collaboration_client::{
-    AutomationInspectionClientError, ClientError, ControlClient, WakeClientError,
+    AutomationInspectionClientError, ClientError, CollaborationClient, WakeClientError,
 };
 use serde_json::{Value, json};
 use std::{
@@ -176,7 +176,7 @@ pub(crate) fn run_collection_command(
         }
     };
     let result: Result<Value, ReadCommandError> = runtime.block_on(async {
-        let mut client = ControlClient::connect(
+        let client = CollaborationClient::connect(
             &directory,
             "agent-collaboration-inspection",
             env!("CARGO_PKG_VERSION"),
@@ -221,7 +221,6 @@ pub(crate) fn run_collection_command(
                 read_value(client.read_delivery(request)).await
             }
         };
-        let _ = client.close().await;
         result
     });
     if let Err(ReadCommandError::Client(error)) = &result

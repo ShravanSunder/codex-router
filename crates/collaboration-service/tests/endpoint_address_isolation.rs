@@ -42,7 +42,7 @@ mod tests {
             "change":{"kind":"threadArchived"}
         })).unwrap();
         store.append(&archived, 101).await.unwrap();
-        let identity = ServiceIdentity::new(SERVICE, EPOCH, &format!("sha256:{}", "a".repeat(64)))
+        let identity = ServiceIdentity::new(SERVICE, EPOCH)
             .unwrap()
             .with_endpoints(vec![
                 description(&first, "first.sock"),

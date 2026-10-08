@@ -2,6 +2,7 @@
 //! served on every listener the Host holds.
 
 mod collaboration_api_router;
+mod local_collaboration;
 mod loopback_bind_address;
 mod mcp_server;
 mod native_schema_definitions;
@@ -13,6 +14,8 @@ pub use collaboration_api_router::{
 };
 pub use loopback_bind_address::{LoopbackBindAddress, LoopbackBindAddressError};
 pub use native_schema_definitions::NativeSchemaDefinitions;
+#[cfg(feature = "test-support")]
+pub mod test_support;
 
 #[cfg(test)]
 mod api_test_harness;

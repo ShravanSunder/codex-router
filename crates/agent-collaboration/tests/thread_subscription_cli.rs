@@ -54,7 +54,7 @@ async fn subscribe_join_wait_and_cancel_use_real_control_and_sqlite_paths() -> T
             clock: Arc::new(SystemSubscriptionClock),
         });
     subscription_delivery.start().await?;
-    let identity = ServiceIdentity::new(SERVICE_ID, SERVICE_EPOCH, &digest)
+    let identity = ServiceIdentity::new(SERVICE_ID, SERVICE_EPOCH)
         .map_err(std::io::Error::other)?
         .with_board_store(Arc::clone(&store))
         .with_session_delivery(router)

@@ -131,7 +131,7 @@ async fn cli_summary_skip_preserves_worker_and_releases_schedule()
         .await?;
     let store = Arc::new(tokio::sync::Mutex::new(store));
     let digest = format!("sha256:{}", "a".repeat(64));
-    let identity = ServiceIdentity::new(service_id, service_id, &digest)
+    let identity = ServiceIdentity::new(service_id, service_id)
         .map_err(std::io::Error::other)?
         .with_automation_store(Arc::clone(&store));
     let listener = LocalControlService::bind(&root.join("control.sock"), identity)?;
