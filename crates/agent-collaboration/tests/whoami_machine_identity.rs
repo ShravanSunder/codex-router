@@ -1,12 +1,8 @@
-use collaboration_client::protocol::ServiceManifest;
-use collaboration_protocol::{
-    ControlSelector, ControlSocketPath, ControlTransport, MachineLabel, McpSelector, McpTransport,
-    SchemaDigest, UuidIdentity,
-};
-use collaboration_service::{LocalControlService, ManifestPublication, ServiceIdentity};
+use collaboration_mcp::test_support::ServedCollaborationApi;
+use collaboration_protocol::UuidIdentity;
+use collaboration_service::{CollaborationApplication, MachineIdentity, ServiceIdentity};
 use serde_json::Value;
 use std::os::unix::fs::PermissionsExt;
-use tokio_util::sync::CancellationToken;
 
 const SERVICE_ID: &str = "018f47d2-24d5-7a68-b9ec-6f759c39458f";
 const SERVICE_EPOCH: &str = "018f47d2-24d5-7a68-b9ec-6f759c39458f";
@@ -16,30 +12,20 @@ async fn whoami_displays_service_id_and_machine_label_in_text_and_json() {
     let root = tempfile::tempdir().expect("temporary service directory");
     std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700))
         .expect("private service directory");
-    let digest = format!("sha256:{}", "a".repeat(64));
-    let identity = ServiceIdentity::new(SERVICE_ID, SERVICE_EPOCH).expect("service identity");
-    let listener = LocalControlService::bind(&root.path().join("control.sock"), identity)
-        .expect("Control listener");
-    let manifest = ServiceManifest {
-        version: 2,
-        service_id: UuidIdentity::try_from(SERVICE_ID.to_owned()).expect("service id"),
-        machine_label: MachineLabel::try_from("Sunbook-Pro-M4".to_owned()).expect("machine label"),
-        service_epoch: UuidIdentity::try_from(SERVICE_EPOCH.to_owned()).expect("service epoch"),
-        control: ControlSelector {
-            transport: ControlTransport::UnixJsonLines,
-            path: ControlSocketPath::ControlSocket,
-        },
-        control_schema_digest: SchemaDigest::try_from(digest).expect("schema digest"),
-        mcp: McpSelector {
-            transport: McpTransport::StreamableHttp,
-            url: "http://127.0.0.1:8788/mcp".to_owned(),
-        },
-        router_proxy_endpoint: None,
-    };
-    let publication =
-        ManifestPublication::publish(root.path(), &manifest).expect("service manifest");
-    let stop = CancellationToken::new();
-    let server = tokio::spawn(listener.run(stop.clone()));
+    // The CLI reads the machine label from the version 3 manifest the API publishes.
+    let machine_identity = MachineIdentity::new(
+        UuidIdentity::try_from(SERVICE_ID.to_owned()).expect("service id"),
+        Some("Sunbook-Pro-M4"),
+    )
+    .expect("machine label");
+    let identity = ServiceIdentity::new(SERVICE_ID, SERVICE_EPOCH)
+        .expect("service identity")
+        .with_machine_identity(machine_identity)
+        .expect("machine identity");
+    let served =
+        ServedCollaborationApi::start(root.path(), CollaborationApplication::new(identity))
+            .await
+            .expect("served collaboration API");
 
     let text_output = run_whoami(root.path(), false)
         .await
@@ -56,9 +42,7 @@ async fn whoami_displays_service_id_and_machine_label_in_text_and_json() {
     assert_eq!(json["result"]["record"]["machineId"], SERVICE_ID);
     assert_eq!(json["result"]["record"]["machineLabel"], "Sunbook-Pro-M4");
 
-    stop.cancel();
-    server.await.expect("Control task").expect("Control server");
-    drop(publication);
+    served.stop().await.expect("collaboration API stops");
 }
 
 async fn run_whoami(

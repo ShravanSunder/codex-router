@@ -1,12 +1,19 @@
+//! Provider conversation tools over the stateless API: the composites run in the Host over the
+//! Router's own provider operations, here a scripted provider backend that records what it
+//! was asked.
 use crate::api_test_harness::{ServedApi, api_config, test_identity};
 use collaboration_service::CollaborationApplication;
 use reqwest::header::{ACCEPT, CONTENT_TYPE};
+use scripted_provider_backend::ScriptedProviderBackend;
 use serde_json::{Value, json};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use std::sync::Arc;
 
-pub(super) const SERVICE_ID: &str = "00000000-0000-4000-8000-000000000001";
+#[path = "provider_conversation_http_tests/scripted_provider_backend.rs"]
+mod scripted_provider_backend;
+
+const SERVICE_ID: &str = "00000000-0000-4000-8000-000000000001";
 const SERVICE_EPOCH: &str = "00000000-0000-4000-8000-000000000002";
-pub(super) const CREATE_OPERATION: &str = "019f0000-0000-7000-8000-000000000001";
+const CREATE_OPERATION: &str = "019f0000-0000-7000-8000-000000000001";
 const PROMPT_OPERATION: &str = "019f0000-0000-7000-8000-000000000002";
 const LOAD_OPERATION: &str = "019f0000-0000-7000-8000-000000000004";
 const PENDING_OPERATION: &str = "019f0000-0000-7000-8000-000000000005";
@@ -15,96 +22,51 @@ const CANCEL_OPERATION: &str = "019f0000-0000-7000-8000-000000000006";
 #[tokio::test]
 async fn stateless_http_exposes_one_conversation_surface_for_provider_operations() {
     let temporary = tempfile::tempdir().expect("temporary service directory");
-    let _publication = publish_manifest(temporary.path());
-    let control = tokio::net::UnixListener::bind(temporary.path().join("control.sock"))
-        .expect("Control listener");
-    let peer = tokio::spawn(async move {
-        for expected in [
-            "conversation/create",
-            "conversation/prompt",
-            "conversation/load",
-        ] {
-            let (stream, _) = control.accept().await.expect("Control accept");
-            let (reader, mut writer) = stream.into_split();
-            let mut lines = BufReader::new(reader).lines();
-            initialize_control(&mut lines, &mut writer).await;
-            let inventory = read_json_line(&mut lines).await;
-            assert_eq!(inventory["method"], "endpoint/list");
-            write_json_line(
-                &mut writer,
-                json!({"jsonrpc":"2.0","id":inventory["id"],"result":endpoint_inventory()}),
-            )
-            .await;
-            let request = read_json_line(&mut lines).await;
-            assert_eq!(request["method"], expected);
-            let operation_id = request["params"]["operationId"]
-                .as_str()
-                .expect("operation ID");
-            if expected == "conversation/load" {
-                write_json_line(
-                    &mut writer,
-                    json!({"jsonrpc":"2.0","id":request["id"],"error":{
-                        "code":-32050,
-                        "message":"provider binding is busy",
-                        "data":{
-                            "kind":"busy",
-                            "stage":"admission",
-                            "effect":"none",
-                            "message":"provider binding is busy",
-                            "operationId":operation_id,
-                            "target":null
-                        }
-                    }}),
-                )
-                .await;
-                continue;
-            }
-            let operation = match expected {
-                "conversation/create" => "conversationCreate",
-                "conversation/prompt" => "conversationPrompt",
-                _ => "conversationPrompt",
-            };
-            let snapshot = if expected == "conversation/create" {
-                terminal_snapshot(operation_id, operation)
-            } else {
-                operation_snapshot(operation_id, operation)
-            };
-            let result = json!({"admission":"admitted","operation":snapshot});
-            write_json_line(
-                &mut writer,
-                json!({"jsonrpc":"2.0","id":request["id"],"result":result}),
-            )
-            .await;
-            if expected == "conversation/create" {
-                let wait = read_json_line(&mut lines).await;
-                assert_eq!(wait["method"], "conversation/operationWait");
-                assert_eq!(wait["params"]["operationId"], CREATE_OPERATION);
-                write_json_line(&mut writer, json!({"jsonrpc":"2.0","id":wait["id"],"result":{
-                    "operation":terminal_snapshot(CREATE_OPERATION,"conversationCreate"),
-                    "output":{"kind":"available","settlement":{"kind":"created",
-                        "target":{"endpoint":{"serviceId":SERVICE_ID,"endpointId":"claude-code"},"sessionId":"provider-thread"},
-                        "effectiveSettings":{"requestedPolicy":{"access":"workspace-write"},"mappingStatus":"verified","authentication":"authenticated"}}}
-                }})).await;
-            } else if expected == "conversation/prompt" {
-                let wait = read_json_line(&mut lines).await;
-                assert_eq!(wait["method"], "conversation/operationWait");
-                assert_eq!(wait["params"]["operationId"], PROMPT_OPERATION);
-                write_json_line(
-                    &mut writer,
-                    json!({"jsonrpc":"2.0","id":wait["id"],"result":{
-                        "operation":terminal_snapshot(PROMPT_OPERATION,"conversationPrompt"),
-                        "output":{"kind":"available","settlement":{
-                            "kind":"promptCompleted",
-                            "target":{"endpoint":{"serviceId":SERVICE_ID,"endpointId":"claude-code"},"sessionId":"provider-thread"},
-                            "stopReason":"end_turn","response":"provider reply"
-                        }}
-                    }}),
-                )
-                .await;
-            }
-        }
-    });
-    let listener = start_listener(temporary.path()).await;
+    let created = json!({"kind":"available","settlement":{"kind":"created",
+        "target":{"endpoint":{"serviceId":SERVICE_ID,"endpointId":"claude-code"},"sessionId":"provider-thread"},
+        "effectiveSettings":{"requestedPolicy":{"access":"workspace-write"},"mappingStatus":"verified","authentication":"authenticated"}}});
+    let completed = json!({"kind":"available","settlement":{
+        "kind":"promptCompleted",
+        "target":{"endpoint":{"serviceId":SERVICE_ID,"endpointId":"claude-code"},"sessionId":"provider-thread"},
+        "stopReason":"end_turn","response":"provider reply"
+    }});
+    let backend = ScriptedProviderBackend::new()
+        .answer(
+            "create",
+            json!({"result":{"admission":"admitted",
+            "operation":terminal_snapshot(CREATE_OPERATION, "conversationCreate")}}),
+        )
+        .answer(
+            "wait",
+            json!({"result":{
+                "operation":terminal_snapshot(CREATE_OPERATION, "conversationCreate"),
+                "output":created
+            }}),
+        )
+        .answer(
+            "prompt",
+            json!({"result":{"admission":"admitted",
+            "operation":operation_snapshot(PROMPT_OPERATION, "conversationPrompt")}}),
+        )
+        .answer(
+            "wait",
+            json!({"result":{
+                "operation":terminal_snapshot(PROMPT_OPERATION, "conversationPrompt"),
+                "output":completed
+            }}),
+        )
+        .answer(
+            "load",
+            json!({"error":{
+                "kind":"busy",
+                "stage":"admission",
+                "effect":"none",
+                "message":"provider binding is busy",
+                "operationId":LOAD_OPERATION,
+                "target":null
+            }}),
+        );
+    let listener = start_listener(temporary.path(), &backend).await;
     let client = reqwest::Client::new();
 
     let tools = call_mcp(&client, &listener, 2, "tools/list", json!({})).await;
@@ -218,55 +180,41 @@ async fn stateless_http_exposes_one_conversation_surface_for_provider_operations
         load["result"]["structuredContent"]["operationId"],
         LOAD_OPERATION
     );
-    peer.await.expect("Control peer");
+    let calls = backend.calls();
+    assert_eq!(
+        calls
+            .iter()
+            .map(|(operation, _)| *operation)
+            .collect::<Vec<_>>(),
+        ["create", "wait", "prompt", "wait", "load"]
+    );
+    for ((_, request), operation_id) in calls.iter().zip([
+        CREATE_OPERATION,
+        CREATE_OPERATION,
+        PROMPT_OPERATION,
+        PROMPT_OPERATION,
+        LOAD_OPERATION,
+    ]) {
+        assert_eq!(request["operationId"], operation_id);
+    }
     listener.stop().await;
 }
 
 #[tokio::test]
 async fn mcp_provider_create_accepts_typed_human_creator_and_approver() {
     let temporary = tempfile::tempdir().expect("temporary service directory");
-    let _publication = publish_manifest(temporary.path());
-    let control = tokio::net::UnixListener::bind(temporary.path().join("control.sock"))
-        .expect("Control listener");
-    let peer = tokio::spawn(async move {
-        let (stream, _) = control.accept().await.expect("Control accept");
-        let (reader, mut writer) = stream.into_split();
-        let mut lines = BufReader::new(reader).lines();
-        initialize_control(&mut lines, &mut writer).await;
-        let inventory = read_json_line(&mut lines).await;
-        assert_eq!(inventory["method"], "endpoint/list");
-        write_json_line(
-            &mut writer,
-            json!({"jsonrpc":"2.0","id":inventory["id"],"result":endpoint_inventory()}),
-        )
-        .await;
-        let request = read_json_line(&mut lines).await;
-        assert_eq!(request["method"], "conversation/create");
-        let human_wire = json!({"humanId":"fixture-owner"});
-        assert_eq!(request["params"]["createdBy"], human_wire);
-        assert_eq!(request["params"]["approver"], human_wire);
-        write_json_line(
-            &mut writer,
-            json!({"jsonrpc":"2.0","id":request["id"],"result":{
-                "admission":"admitted",
-                "operation":operation_snapshot(CREATE_OPERATION,"conversationCreate")
-            }}),
-        )
-        .await;
-        let wait = read_json_line(&mut lines).await;
-        assert_eq!(wait["method"], "conversation/operationWait");
-        write_json_line(
-            &mut writer,
-            json!({"jsonrpc":"2.0","id":wait["id"],"result":{
-                "operation":terminal_snapshot(CREATE_OPERATION,"conversationCreate"),
-                "output":{"kind":"available","settlement":{"kind":"created",
-                    "target":{"endpoint":{"serviceId":SERVICE_ID,"endpointId":"claude-code"},"sessionId":"provider-thread"},
-                    "effectiveSettings":{"requestedPolicy":{"access":"workspace-write"},"mappingStatus":"verified","authentication":"authenticated"}}}
-            }}),
-        )
-        .await;
-    });
-    let listener = start_listener(temporary.path()).await;
+    let backend = ScriptedProviderBackend::new()
+        .answer("create", json!({"result":{
+            "admission":"admitted",
+            "operation":operation_snapshot(CREATE_OPERATION,"conversationCreate")
+        }}))
+        .answer("wait", json!({"result":{
+            "operation":terminal_snapshot(CREATE_OPERATION,"conversationCreate"),
+            "output":{"kind":"available","settlement":{"kind":"created",
+                "target":{"endpoint":{"serviceId":SERVICE_ID,"endpointId":"claude-code"},"sessionId":"provider-thread"},
+                "effectiveSettings":{"requestedPolicy":{"access":"workspace-write"},"mappingStatus":"verified","authentication":"authenticated"}}}
+        }}));
+    let listener = start_listener(temporary.path(), &backend).await;
     let client = reqwest::Client::new();
     let human = json!({"kind":"human","humanId":"fixture-owner"});
     let created = call_tool(
@@ -287,59 +235,34 @@ async fn mcp_provider_create_accepts_typed_human_creator_and_approver() {
     .await;
     assert_eq!(created["result"]["isError"], false, "{created}");
     assert_eq!(created["result"]["structuredContent"]["kind"], "created");
-    peer.await.expect("Control peer");
+    let calls = backend.calls();
+    assert_eq!(
+        calls
+            .iter()
+            .map(|(operation, _)| *operation)
+            .collect::<Vec<_>>(),
+        ["create", "wait"]
+    );
+    let human_wire = json!({"humanId":"fixture-owner"});
+    assert_eq!(calls[0].1["createdBy"], human_wire);
+    assert_eq!(calls[0].1["approver"], human_wire);
     listener.stop().await;
 }
 
 #[tokio::test]
 async fn provider_prompt_wait_timeout_returns_pending_exact_operation_and_target() {
     let temporary = tempfile::tempdir().expect("temporary service directory");
-    let _publication = publish_manifest(temporary.path());
-    let control = tokio::net::UnixListener::bind(temporary.path().join("control.sock"))
-        .expect("Control listener");
-    let peer = tokio::spawn(async move {
-        let (stream, _) = control.accept().await.expect("Control accept");
-        let (reader, mut writer) = stream.into_split();
-        let mut lines = BufReader::new(reader).lines();
-        initialize_control(&mut lines, &mut writer).await;
-        let inventory = read_json_line(&mut lines).await;
-        assert_eq!(inventory["method"], "endpoint/list");
-        write_json_line(
-            &mut writer,
-            json!({"jsonrpc":"2.0","id":inventory["id"],"result":endpoint_inventory()}),
+    let snapshot = operation_snapshot(PENDING_OPERATION, "conversationPrompt");
+    let backend = ScriptedProviderBackend::new()
+        .answer(
+            "prompt",
+            json!({"result":{"admission":"admitted","operation":snapshot.clone()}}),
         )
-        .await;
-        let prompt = read_json_line(&mut lines).await;
-        assert_eq!(prompt["method"], "conversation/prompt");
-        assert_eq!(prompt["params"]["operationId"], PENDING_OPERATION);
-        let snapshot = operation_snapshot(PENDING_OPERATION, "conversationPrompt");
-        write_json_line(
-            &mut writer,
-            json!({"jsonrpc":"2.0","id":prompt["id"],"result":{
-                "admission":"admitted","operation":snapshot.clone()
-            }}),
-        )
-        .await;
-        let wait = read_json_line(&mut lines).await;
-        assert_eq!(wait["method"], "conversation/operationWait");
-        assert_eq!(wait["params"]["operationId"], PENDING_OPERATION);
-        write_json_line(
-            &mut writer,
-            json!({"jsonrpc":"2.0","id":wait["id"],"result":{
-                "operation":snapshot,"output":{"kind":"pending"}
-            }}),
-        )
-        .await;
-        assert!(
-            lines
-                .next_line()
-                .await
-                .expect("call-local connection read")
-                .is_none(),
-            "a pending prompt must not send conversation/cancel or retry"
+        .answer(
+            "wait",
+            json!({"result":{"operation":snapshot,"output":{"kind":"pending"}}}),
         );
-    });
-    let listener = start_listener(temporary.path()).await;
+    let listener = start_listener(temporary.path(), &backend).await;
     let client = reqwest::Client::new();
     let endpoint = json!({"serviceId":SERVICE_ID,"endpointId":"claude-code"});
     let target = json!({"endpoint":endpoint,"sessionId":"provider-thread"});
@@ -364,40 +287,28 @@ async fn provider_prompt_wait_timeout_returns_pending_exact_operation_and_target
         PENDING_OPERATION
     );
     assert_eq!(response["result"]["structuredContent"]["target"], target);
-    peer.await.expect("Control peer");
+    let calls = backend.calls();
+    assert_eq!(
+        calls
+            .iter()
+            .map(|(operation, _)| *operation)
+            .collect::<Vec<_>>(),
+        ["prompt", "wait"],
+        "a pending prompt must not cancel or retry"
+    );
+    assert!(
+        calls
+            .iter()
+            .all(|(_, request)| request["operationId"] == PENDING_OPERATION)
+    );
     listener.stop().await;
 }
 
 #[tokio::test]
 async fn provider_prompt_without_operation_id_names_uuidv7_generator_before_mutation() {
     let temporary = tempfile::tempdir().expect("temporary service directory");
-    let _publication = publish_manifest(temporary.path());
-    let control = tokio::net::UnixListener::bind(temporary.path().join("control.sock"))
-        .expect("Control listener");
-    let peer = tokio::spawn(async move {
-        for operation in ["prompt", "load"] {
-            let (stream, _) = control.accept().await.expect("Control accept");
-            let (reader, mut writer) = stream.into_split();
-            let mut lines = BufReader::new(reader).lines();
-            initialize_control(&mut lines, &mut writer).await;
-            let inventory = read_json_line(&mut lines).await;
-            assert_eq!(inventory["method"], "endpoint/list");
-            write_json_line(
-                &mut writer,
-                json!({"jsonrpc":"2.0","id":inventory["id"],"result":endpoint_inventory()}),
-            )
-            .await;
-            assert!(
-                lines
-                    .next_line()
-                    .await
-                    .expect("call-local connection read")
-                    .is_none(),
-                "a provider {operation} without operationId must not mutate the provider"
-            );
-        }
-    });
-    let listener = start_listener(temporary.path()).await;
+    let backend = ScriptedProviderBackend::new();
+    let listener = start_listener(temporary.path(), &backend).await;
     let client = reqwest::Client::new();
     let endpoint = json!({"serviceId":SERVICE_ID,"endpointId":"claude-code"});
     let target = json!({"endpoint":endpoint,"sessionId":"provider-thread"});
@@ -461,51 +372,24 @@ async fn provider_prompt_without_operation_id_names_uuidv7_generator_before_muta
             .as_str()
             .is_some_and(|fix| fix.contains("python3 -c 'import uuid; print(uuid.uuid7())'"))
     );
-    peer.await.expect("Control peer");
+    assert!(
+        backend.calls().is_empty(),
+        "a provider prompt or load without operationId must not mutate the provider"
+    );
     listener.stop().await;
 }
 
 #[tokio::test]
 async fn provider_cancel_keeps_the_exact_target_operation_on_the_common_mcp_surface() {
     let temporary = tempfile::tempdir().expect("temporary service directory");
-    let _publication = publish_manifest(temporary.path());
-    let control = tokio::net::UnixListener::bind(temporary.path().join("control.sock"))
-        .expect("Control listener");
-    let peer = tokio::spawn(async move {
-        let (stream, _) = control.accept().await.expect("Control accept");
-        let (reader, mut writer) = stream.into_split();
-        let mut lines = BufReader::new(reader).lines();
-        initialize_control(&mut lines, &mut writer).await;
-        let inventory = read_json_line(&mut lines).await;
-        assert_eq!(inventory["method"], "endpoint/list");
-        write_json_line(
-            &mut writer,
-            json!({"jsonrpc":"2.0","id":inventory["id"],"result":endpoint_inventory()}),
-        )
-        .await;
-        let cancel = read_json_line(&mut lines).await;
-        assert_eq!(cancel["method"], "conversation/cancel");
-        assert_eq!(cancel["params"]["operationId"], CANCEL_OPERATION);
-        assert_eq!(cancel["params"]["targetOperationId"], PROMPT_OPERATION);
-        assert_eq!(cancel["params"]["target"]["sessionId"], "provider-thread");
-        write_json_line(
-            &mut writer,
-            json!({"jsonrpc":"2.0","id":cancel["id"],"result":{
-                "admission":"admitted",
-                "operation":operation_snapshot(CANCEL_OPERATION,"conversationCancel")
-            }}),
-        )
-        .await;
-        assert!(
-            lines
-                .next_line()
-                .await
-                .expect("call-local connection read")
-                .is_none(),
-            "cancel is one exact mutation, not a replay or wait"
-        );
-    });
-    let listener = start_listener(temporary.path()).await;
+    let backend = ScriptedProviderBackend::new().answer(
+        "cancel",
+        json!({"result":{
+            "admission":"admitted",
+            "operation":operation_snapshot(CANCEL_OPERATION,"conversationCancel")
+        }}),
+    );
+    let listener = start_listener(temporary.path(), &backend).await;
     let client = reqwest::Client::new();
     let endpoint = json!({"serviceId":SERVICE_ID,"endpointId":"claude-code"});
     let target = json!({"endpoint":endpoint,"sessionId":"provider-thread"});
@@ -530,67 +414,31 @@ async fn provider_cancel_keeps_the_exact_target_operation_on_the_common_mcp_surf
         response["result"]["structuredContent"]["operation"]["operation"],
         "conversationCancel"
     );
-    peer.await.expect("Control peer");
+    let calls = backend.calls();
+    assert_eq!(
+        calls
+            .iter()
+            .map(|(operation, _)| *operation)
+            .collect::<Vec<_>>(),
+        ["cancel"],
+        "cancel is one exact mutation, not a replay or wait"
+    );
+    let cancel = &calls[0].1;
+    assert_eq!(cancel["operationId"], CANCEL_OPERATION);
+    assert_eq!(cancel["targetOperationId"], PROMPT_OPERATION);
+    assert_eq!(cancel["target"]["sessionId"], "provider-thread");
     listener.stop().await;
 }
 
-pub(super) fn publish_manifest(
-    path: &std::path::Path,
-) -> collaboration_service::ManifestPublication {
-    collaboration_service::ManifestPublication::publish(
-        path,
-        &serde_json::from_value(json!({
-            "version":2,
-            "serviceId":SERVICE_ID,
-            "serviceEpoch":SERVICE_EPOCH,
-            "machineLabel":"fixture-host","control":{"transport":"unixJsonLines","path":"control.sock"},
-            "controlSchemaDigest":format!("sha256:{}", "a".repeat(64)),
-            "mcp":{"transport":"streamableHttp","url":"http://127.0.0.1:0/mcp"}
-        }))
-        .expect("service manifest"),
-    )
-    .expect("manifest publication")
-}
-
-pub(super) async fn start_listener(path: &std::path::Path) -> ServedApi {
-    ServedApi::tcp(&api_config(
-        CollaborationApplication::new(test_identity()),
-        path,
-    ))
-    .await
-}
-
-pub(super) async fn initialize_control(
-    lines: &mut tokio::io::Lines<BufReader<tokio::net::unix::OwnedReadHalf>>,
-    writer: &mut tokio::net::unix::OwnedWriteHalf,
-) {
-    let request = read_json_line(lines).await;
-    assert_eq!(request["method"], "control/initialize");
-    write_json_line(
-        writer,
-        json!({"jsonrpc":"2.0","id":request["id"],"result":{"version":{"major":1,"minor":0},"serviceId":SERVICE_ID,"serviceEpoch":SERVICE_EPOCH,"controlSchemaDigest":format!("sha256:{}", "a".repeat(64))}}),
-    )
-    .await;
-}
-
-pub(super) async fn read_json_line(
-    lines: &mut tokio::io::Lines<BufReader<tokio::net::unix::OwnedReadHalf>>,
-) -> Value {
-    serde_json::from_str(
-        &lines
-            .next_line()
-            .await
-            .expect("Control read")
-            .expect("Control frame"),
-    )
-    .expect("Control JSON")
-}
-
-async fn write_json_line(writer: &mut tokio::net::unix::OwnedWriteHalf, value: Value) {
-    writer
-        .write_all(format!("{value}\n").as_bytes())
-        .await
-        .expect("Control write");
+/// The API over a Router whose provider endpoint is served by `backend`.
+async fn start_listener(path: &std::path::Path, backend: &ScriptedProviderBackend) -> ServedApi {
+    let identity = test_identity()
+        .with_endpoints(vec![
+            serde_json::from_value(provider_endpoint()).expect("provider endpoint"),
+        ])
+        .expect("endpoint directory")
+        .with_provider_conversation_backend(Arc::new(backend.clone()));
+    ServedApi::tcp(&api_config(CollaborationApplication::new(identity), path)).await
 }
 
 fn operation_snapshot(operation_id: &str, operation: &str) -> Value {
@@ -623,24 +471,26 @@ fn terminal_snapshot(operation_id: &str, operation: &str) -> Value {
     snapshot
 }
 
-fn endpoint_inventory() -> Value {
+fn provider_endpoint() -> Value {
     json!({
-        "serviceEpoch":SERVICE_EPOCH,"sequence":1,
-        "endpoints":[{
-            "endpoint":{"serviceId":SERVICE_ID,"endpointId":"claude-code"},
-            "label":"Fixture provider",
-            "availability":{"state":"available","observedAt":"2026-09-20T12:00:00Z"},
-            "channels":[{
-                "kind":"externalProvider","transport":"stdioAcp",
-                "bindingId":"binding-1","bindingGeneration":3,
-                "runtime":{"provider":"claudeCode","runtimeName":"claude-agent-acp"},
-                "capabilities":[{"name":"create","status":"supported","evidence":"advertised"}]
-            }]
+        "endpoint":{"serviceId":SERVICE_ID,"endpointId":"claude-code"},
+        "label":"Fixture provider",
+        "availability":{"state":"available","observedAt":"2026-09-20T12:00:00Z"},
+        "channels":[{
+            "kind":"externalProvider","transport":"stdioAcp",
+            "bindingId":"binding-1","bindingGeneration":3,
+            "runtime":{"provider":"claudeCode","runtimeName":"claude-agent-acp"},
+            "capabilities":[{"name":"create","status":"supported","evidence":"advertised"}]
         }]
     })
 }
 
-pub(super) fn generation() -> Value {
+/// The binding the scripted backend serves the provider endpoint with.
+fn provider_binding() -> Value {
+    operation_snapshot(CREATE_OPERATION, "conversationCreate")["binding"]["binding"].clone()
+}
+
+fn generation() -> Value {
     json!({"serviceEpoch":SERVICE_EPOCH,"generation":3})
 }
 

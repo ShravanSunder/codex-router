@@ -1,12 +1,13 @@
 //! Real SDK/socket/SQLite package transfers work without a native backend.
-use collaboration_client::ControlClient;
 use collaboration_protocol::{
     InstructionCreateParams, InstructionText, OperationId, ScheduleCreateRequest,
     ScheduleImportRequest, ScheduleShowRequest,
 };
-use collaboration_service::{ServiceIdentity, serve_control_connection};
+use collaboration_service::ServiceIdentity;
 use serde_json::json;
 use std::sync::Arc;
+#[path = "support/served_api.rs"]
+mod served_api;
 
 #[tokio::test]
 async fn sdk_exports_and_imports_disabled_schedule_with_replay()
@@ -32,9 +33,8 @@ async fn exercise_package(fresh: bool) -> Result<(), Box<dyn std::error::Error>>
     )
     .map_err(std::io::Error::other)?
     .with_automation_store(store.clone());
-    let (socket, server) = tokio::net::UnixStream::pair()?;
-    let mut task = tokio::spawn(serve_control_connection(server, identity.clone()));
-    let mut client = ControlClient::initialize(socket, "package-test", "1").await?;
+    let served = served_api::ServedApi::start(identity).await?;
+    let client = served.client("package-test").await?;
     let instruction = client
         .create_instruction(InstructionCreateParams {
             operation_id: OperationId::generate(),
@@ -91,11 +91,6 @@ async fn exercise_package(fresh: bool) -> Result<(), Box<dyn std::error::Error>>
         {
             return Err("unprepared fresh schedule lacked actionable enable rejection".into());
         }
-        client.close().await?;
-        task.await??;
-        let (socket, server) = tokio::net::UnixStream::pair()?;
-        task = tokio::spawn(serve_control_connection(server, identity.clone()));
-        client = ControlClient::initialize(socket, "fresh-local-setup", "1").await?;
         let mut definition = imported.definition.clone();
         definition.destination = collaboration_protocol::ExecutionDestination::FreshEachRun {
             endpoint: serde_json::from_value(
@@ -153,12 +148,7 @@ async fn exercise_package(fresh: bool) -> Result<(), Box<dyn std::error::Error>>
             );
         }
     }
-    // Local preflight above preserves the connection; server errors follow the existing retirement contract.
-    client.close().await?;
-    task.await??;
-    let (socket, server) = tokio::net::UnixStream::pair()?;
-    let task = tokio::spawn(serve_control_connection(server, identity));
-    let mut client = ControlClient::initialize(socket, "package-reconnect", "1").await?;
+    // A rejection leaves the client usable: each call is its own request.
     let inspected = client
         .read_schedule(ScheduleShowRequest {
             schedule_id: first.schedule_id,
@@ -167,8 +157,7 @@ async fn exercise_package(fresh: bool) -> Result<(), Box<dyn std::error::Error>>
     if inspected.change_id != imported.change_id {
         return Err("package size rejection changed schedule state".into());
     }
-    client.close().await?;
-    task.await??;
+    served.stop().await?;
     drop(store);
     std::fs::remove_file(path)?;
     Ok(())

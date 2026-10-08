@@ -1,10 +1,11 @@
 use automation_storage::AutomationStore;
-use collaboration_client::ControlClient;
 use collaboration_protocol::{
     InstructionCreateParams, InstructionShowParams, InstructionText, OperationId,
 };
-use collaboration_service::{ServiceIdentity, serve_control_connection};
+use collaboration_service::ServiceIdentity;
 use std::sync::Arc;
+#[path = "support/served_api.rs"]
+mod served_api;
 
 #[tokio::test]
 async fn real_control_client_creates_and_reads_durable_instruction()
@@ -21,9 +22,8 @@ async fn real_control_client_creates_and_reads_durable_instruction()
     )
     .map_err(std::io::Error::other)?
     .with_automation_store(store.clone());
-    let (socket, server) = tokio::net::UnixStream::pair()?;
-    let task = tokio::spawn(serve_control_connection(server, identity));
-    let mut client = ControlClient::initialize(socket, "instruction-test", "1").await?;
+    let served = served_api::ServedApi::start(identity).await?;
+    let client = served.client("instruction-test").await?;
     let request = InstructionCreateParams {
         operation_id: OperationId::generate(),
         text: InstructionText::try_from("Check the workspace".to_owned())?,
@@ -66,8 +66,7 @@ async fn real_control_client_creates_and_reads_durable_instruction()
             "revision conflict omitted the revision observed by the rejecting transaction".into(),
         );
     }
-    client.close().await?;
-    task.await??;
+    served.stop().await?;
     drop(store);
     std::fs::remove_file(path)?;
     Ok(())

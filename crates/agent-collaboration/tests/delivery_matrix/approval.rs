@@ -32,7 +32,11 @@ pub(super) async fn deliver_approval_notice(
         .find(|entry| String::from(entry.endpoint.endpoint_id.clone()) == "cursor-local")
         .ok_or("Scripted Cursor ACP endpoint missing")?
         .endpoint;
-    let conversation = ConversationClient::connect(&proof.service_directory, &provider).await?;
+    let conversation = ConversationClient::connect(
+        &collaboration_client::CollaborationAccess::api(&proof.service_directory),
+        &provider,
+    )
+    .await?;
     let created = conversation
         .create(
             ConversationCreateInput {
@@ -69,7 +73,11 @@ pub(super) async fn deliver_approval_notice(
     let _cancel_prompt_on_drop = cancellation.clone().drop_guard();
     let prompt_cancellation = cancellation.clone();
     let mut prompt_task = tokio::spawn(async move {
-        let conversation = ConversationClient::connect(&service_directory, &provider).await?;
+        let conversation = ConversationClient::connect(
+            &collaboration_client::CollaborationAccess::api(&service_directory),
+            &provider,
+        )
+        .await?;
         conversation
             .prompt(
                 ConversationPromptInput {

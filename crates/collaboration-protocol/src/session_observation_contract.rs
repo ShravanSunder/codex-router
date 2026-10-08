@@ -46,7 +46,7 @@ pub struct BoundedObservationRequest {
     pub epoch: Option<u64>,
 }
 
-/// A retained event could not fit inside one Control frame after JSON encoding.
+/// A retained event could not fit inside one message after JSON encoding.
 #[derive(JsonSchema, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ProviderObservationEventTooLarge {

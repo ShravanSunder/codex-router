@@ -4,8 +4,8 @@
 fn message_features_do_not_import_client_routes() {
     let features = [
         (
-            "message/send",
-            include_str!("../src/session_message_dispatch.rs"),
+            "message send",
+            include_str!("../src/collaboration_application/message_operations.rs"),
         ),
         (
             "timed wake",
@@ -21,7 +21,7 @@ fn message_features_do_not_import_client_routes() {
         ),
         (
             "subscription admission",
-            include_str!("../src/thread_subscription_dispatch.rs"),
+            include_str!("../src/collaboration_application/board_operations.rs"),
         ),
         (
             "direct message push",

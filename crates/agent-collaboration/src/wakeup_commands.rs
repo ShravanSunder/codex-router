@@ -147,7 +147,7 @@ pub fn run_wakeup_command(arguments: Vec<OsString>) -> i32 {
         )
         .await?;
         dispatched = true;
-        let result = match invocation.request {
+        match invocation.request {
             PreparedWake::Send(request) => {
                 let request = *request;
                 let message = request
@@ -180,8 +180,7 @@ pub fn run_wakeup_command(arguments: Vec<OsString>) -> i32 {
                 LifecycleAction::Cancel => client.cancel_wakeup(request).await,
             }
             .and_then(encode_result),
-        };
-        result
+        }
     });
     if !dispatched
         && let Err(WakeClientError::Connection(error)) = &result

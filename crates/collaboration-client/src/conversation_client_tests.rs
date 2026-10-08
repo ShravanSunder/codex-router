@@ -239,21 +239,119 @@ fn conversation_transport_follows_advertised_channel() {
     assert!(advertised_conversation_transport(&native_only).is_err());
 }
 
+/// The Router's provider operations as scripted answers, counting what reached them.
+struct ScriptedProviderRouter {
+    admitted: Option<collaboration_protocol::ConversationOperationSnapshot>,
+    settled: Option<collaboration_protocol::ConversationOperationSnapshot>,
+    calls: std::sync::atomic::AtomicUsize,
+    create_calls: std::sync::atomic::AtomicUsize,
+    wait_calls: std::sync::atomic::AtomicUsize,
+    wait_delay: std::time::Duration,
+}
+
+impl ScriptedProviderRouter {
+    fn unreachable() -> Self {
+        Self {
+            admitted: None,
+            settled: None,
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            create_calls: std::sync::atomic::AtomicUsize::new(0),
+            wait_calls: std::sync::atomic::AtomicUsize::new(0),
+            wait_delay: std::time::Duration::ZERO,
+        }
+    }
+
+    fn admitted(
+        &self,
+    ) -> crate::LocalFuture<'_, collaboration_protocol::ConversationOperationSubmission> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let operation = self.admitted.clone();
+        Box::pin(async move {
+            Ok(collaboration_protocol::ConversationOperationSubmission {
+                admission: collaboration_protocol::ConversationAdmissionState::Admitted,
+                operation: operation.ok_or(crate::ClientError::Protocol("no provider I/O"))?,
+            })
+        })
+    }
+}
+
+impl crate::LocalCollaboration for ScriptedProviderRouter {
+    fn service_id(&self) -> collaboration_protocol::UuidIdentity {
+        "019f0000-0000-7000-8000-000000000001"
+            .to_owned()
+            .try_into()
+            .expect("service identity")
+    }
+    fn endpoints(&self) -> Result<collaboration_protocol::EndpointInventory, crate::ClientError> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Err(crate::ClientError::Protocol("unused endpoint inventory"))
+    }
+    fn create_provider_conversation(
+        &self,
+        _request: collaboration_protocol::ConversationCreateRequest,
+    ) -> crate::LocalFuture<'_, collaboration_protocol::ConversationOperationSubmission> {
+        self.create_calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.admitted()
+    }
+    fn load_provider_conversation(
+        &self,
+        _request: collaboration_protocol::ConversationLoadRequest,
+    ) -> crate::LocalFuture<'_, collaboration_protocol::ConversationOperationSubmission> {
+        self.admitted()
+    }
+    fn prompt_provider_conversation(
+        &self,
+        _request: collaboration_protocol::ConversationPromptRequest,
+    ) -> crate::LocalFuture<'_, collaboration_protocol::ConversationOperationSubmission> {
+        self.admitted()
+    }
+    fn cancel_provider_conversation_operation(
+        &self,
+        _request: collaboration_protocol::ConversationCancelRequest,
+    ) -> crate::LocalFuture<'_, collaboration_protocol::ConversationOperationSubmission> {
+        self.admitted()
+    }
+    fn wait_for_provider_conversation_operation(
+        &self,
+        _request: collaboration_protocol::ConversationOperationWaitRequest,
+    ) -> crate::LocalFuture<'_, collaboration_protocol::ConversationOperationWaitResult> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.wait_calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let operation = self.settled.clone();
+        let wait_delay = self.wait_delay;
+        Box::pin(async move {
+            tokio::time::sleep(wait_delay).await;
+            let operation = operation.ok_or(crate::ClientError::Protocol("no provider I/O"))?;
+            let target = operation.target.clone();
+            Ok(collaboration_protocol::ConversationOperationWaitResult {
+                operation,
+                output: collaboration_protocol::ConversationOperationWaitOutput::Available {
+                    settlement: serde_json::from_value(json!({
+                        "kind":"created","target":target,
+                        "effectiveSettings":{"requestedPolicy":{"access":"workspace-write"},
+                            "mappingStatus":"verified","authentication":"authenticated"}
+                    }))
+                    .expect("created settlement"),
+                },
+            })
+        })
+    }
+    fn observe_provider_session(
+        &self,
+        _request: collaboration_protocol::BoundedObservationRequest,
+    ) -> crate::LocalFuture<'_, collaboration_protocol::BoundedObservationResult> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Box::pin(async { Err(crate::ClientError::Protocol("unused observation")) })
+    }
+}
+
 #[tokio::test]
 async fn provider_create_rejects_codex_only_inputs_before_mutation() {
-    use collaboration_service::{ServiceIdentity, serve_control_connection};
+    use std::sync::Arc;
     for field in ["fork", "rootMessageId"] {
-        let (client, server) =
-            tokio::net::UnixStream::pair().unwrap_or_else(|error| panic!("socket pair: {error}"));
-        let identity = ServiceIdentity::new(
-            "019f0000-0000-7000-8000-000000000001",
-            "019f0000-0000-7000-8000-000000000002",
-        )
-        .unwrap_or_else(|error| panic!("service identity: {error}"));
-        let serving = tokio::spawn(serve_control_connection(server, identity));
-        let control = crate::ControlClient::initialize(client, "conversation-route-test", "1")
-            .await
-            .unwrap_or_else(|error| panic!("initialize: {error}"));
+        let router = Arc::new(ScriptedProviderRouter::unreachable());
         let mut input: ConversationCreateInput = serde_json::from_value(json!({
             "operationId":collaboration_protocol::OperationId::generate(),
             "endpoint":{"serviceId":"019f0000-0000-7000-8000-000000000001","endpointId":"claude-local"},
@@ -279,9 +377,11 @@ async fn provider_create_rejects_codex_only_inputs_before_mutation() {
             }
             _ => panic!("unexpected unsupported field fixture: {field}"),
         }
-        let result = ConversationClient::ExternalProvider(control)
-            .create(input, std::time::Duration::from_secs(1))
-            .await;
+        let result = ConversationClient::ExternalProvider(crate::ProviderConversations::Local(
+            Arc::clone(&router) as Arc<dyn crate::LocalCollaboration>,
+        ))
+        .create(input, std::time::Duration::from_secs(1))
+        .await;
         match result {
             Err(ConversationClientError::UnsupportedInput {
                 endpoint,
@@ -294,10 +394,14 @@ async fn provider_create_rejects_codex_only_inputs_before_mutation() {
             }
             _ => panic!("{field} was not rejected before provider I/O"),
         }
-        serving
-            .await
-            .unwrap_or_else(|error| panic!("service join: {error}"))
-            .unwrap_or_else(|error| panic!("service result: {error}"));
+        assert_eq!(
+            router.calls.load(std::sync::atomic::Ordering::SeqCst)
+                + router
+                    .create_calls
+                    .load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "{field} reached the Router"
+        );
     }
 }
 
@@ -305,147 +409,9 @@ async fn provider_create_rejects_codex_only_inputs_before_mutation() {
 async fn provider_create_wait_returns_the_target_from_exact_operation()
 -> Result<(), Box<dyn std::error::Error>> {
     use collaboration_protocol::{
-        ConversationAdmissionState, ConversationCancelRequest, ConversationCreateOutcome,
-        ConversationCreateRequest as ProviderCreateRequest, ConversationLoadRequest,
-        ConversationOperationReconcileRequest, ConversationOperationShowRequest,
-        ConversationOperationSnapshot, ConversationOperationSubmission,
-        ConversationOperationWaitOutput, ConversationOperationWaitRequest,
-        ConversationOperationWaitResult, ConversationPromptRequest, EndpointRef,
-        ProviderBindingIdentity,
+        ConversationCreateOutcome, ConversationOperationSnapshot, ProviderBindingIdentity,
     };
-    use collaboration_service::{
-        ProviderConversationBackend, ProviderConversationFuture, ServiceIdentity,
-        serve_control_connection,
-    };
-    use std::sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
-    };
-
-    #[derive(Clone)]
-    struct CreateBackend {
-        binding: ProviderBindingIdentity,
-        admitted: ConversationOperationSnapshot,
-        settled: ConversationOperationSnapshot,
-        create_calls: Arc<AtomicUsize>,
-        wait_calls: Arc<AtomicUsize>,
-        wait_delay: std::time::Duration,
-    }
-    impl ProviderConversationBackend for CreateBackend {
-        fn binding(&self, endpoint: &EndpointRef) -> Option<ProviderBindingIdentity> {
-            (&self.binding.endpoint == endpoint).then(|| self.binding.clone())
-        }
-        fn create(
-            &self,
-            _: ProviderCreateRequest,
-        ) -> ProviderConversationFuture<'_, ConversationOperationSubmission> {
-            self.create_calls.fetch_add(1, Ordering::SeqCst);
-            let operation = self.admitted.clone();
-            Box::pin(async move {
-                Ok(ConversationOperationSubmission {
-                    admission: ConversationAdmissionState::Admitted,
-                    operation,
-                })
-            })
-        }
-        fn load(
-            &self,
-            _: ConversationLoadRequest,
-        ) -> ProviderConversationFuture<'_, ConversationOperationSubmission> {
-            let operation = self.admitted.clone();
-            Box::pin(async move {
-                Ok(ConversationOperationSubmission {
-                    admission: ConversationAdmissionState::Admitted,
-                    operation,
-                })
-            })
-        }
-        fn resume(
-            &self,
-            _: collaboration_protocol::ConversationResumeRequest,
-        ) -> ProviderConversationFuture<'_, ConversationOperationSubmission> {
-            let operation = self.admitted.clone();
-            Box::pin(async move {
-                Ok(ConversationOperationSubmission {
-                    admission: ConversationAdmissionState::Admitted,
-                    operation,
-                })
-            })
-        }
-        fn close(
-            &self,
-            _: collaboration_protocol::ConversationCloseRequest,
-        ) -> ProviderConversationFuture<'_, ConversationOperationSubmission> {
-            let operation = self.admitted.clone();
-            Box::pin(async move {
-                Ok(ConversationOperationSubmission {
-                    admission: ConversationAdmissionState::Admitted,
-                    operation,
-                })
-            })
-        }
-        fn prompt(
-            &self,
-            _: ConversationPromptRequest,
-        ) -> ProviderConversationFuture<'_, ConversationOperationSubmission> {
-            let operation = self.admitted.clone();
-            Box::pin(async move {
-                Ok(ConversationOperationSubmission {
-                    admission: ConversationAdmissionState::Admitted,
-                    operation,
-                })
-            })
-        }
-        fn cancel(
-            &self,
-            _: ConversationCancelRequest,
-        ) -> ProviderConversationFuture<'_, ConversationOperationSubmission> {
-            let operation = self.admitted.clone();
-            Box::pin(async move {
-                Ok(ConversationOperationSubmission {
-                    admission: ConversationAdmissionState::Admitted,
-                    operation,
-                })
-            })
-        }
-        fn show(
-            &self,
-            _: ConversationOperationShowRequest,
-        ) -> ProviderConversationFuture<'_, ConversationOperationSnapshot> {
-            let operation = self.settled.clone();
-            Box::pin(async move { Ok(operation) })
-        }
-        fn wait(
-            &self,
-            _: ConversationOperationWaitRequest,
-        ) -> ProviderConversationFuture<'_, ConversationOperationWaitResult> {
-            self.wait_calls.fetch_add(1, Ordering::SeqCst);
-            let operation = self.settled.clone();
-            let wait_delay = self.wait_delay;
-            Box::pin(async move {
-                tokio::time::sleep(wait_delay).await;
-                let target = operation.target.clone();
-                Ok(ConversationOperationWaitResult {
-                    operation,
-                    output: ConversationOperationWaitOutput::Available {
-                        settlement: serde_json::from_value(json!({
-                            "kind":"created","target":target,
-                            "effectiveSettings":{"requestedPolicy":{"access":"workspace-write"},
-                                "mappingStatus":"verified","authentication":"authenticated"}
-                        }))
-                        .expect("created settlement"),
-                    },
-                })
-            })
-        }
-        fn reconcile(
-            &self,
-            _: ConversationOperationReconcileRequest,
-        ) -> ProviderConversationFuture<'_, ConversationOperationSnapshot> {
-            let operation = self.settled.clone();
-            Box::pin(async move { Ok(operation) })
-        }
-    }
+    use std::sync::{Arc, atomic::Ordering};
 
     let operation_id = collaboration_protocol::OperationId::generate();
     let binding: ProviderBindingIdentity = serde_json::from_value(json!({
@@ -468,32 +434,21 @@ async fn provider_create_wait_returns_the_target_from_exact_operation()
             "admittedAt":"2026-09-24T00:00:00Z","terminalAt":if stage == "terminal" {Some("2026-09-24T00:00:01Z")} else {None}
         }))
     };
-    let create_calls = Arc::new(AtomicUsize::new(0));
-    let wait_calls = Arc::new(AtomicUsize::new(0));
-    let backend = CreateBackend {
-        binding: binding.clone(),
-        admitted: snapshot("admitted", "none", None)?,
-        settled: snapshot("terminal", "applied", Some(target.clone()))?,
-        create_calls: Arc::clone(&create_calls),
-        wait_calls: Arc::clone(&wait_calls),
-        wait_delay: std::time::Duration::ZERO,
-    };
-    let identity = ServiceIdentity::new(
-        "019f0000-0000-7000-8000-000000000001",
-        "019f0000-0000-7000-8000-000000000002",
-    )?
-    .with_provider_conversation_backend(Arc::new(backend));
-    let (client, server) = tokio::net::UnixStream::pair()?;
-    let serving = tokio::spawn(serve_control_connection(server, identity));
-    let control = crate::ControlClient::initialize(client, "conversation-route-test", "1").await?;
+    let router = Arc::new(ScriptedProviderRouter {
+        admitted: Some(snapshot("admitted", "none", None)?),
+        settled: Some(snapshot("terminal", "applied", Some(target.clone()))?),
+        ..ScriptedProviderRouter::unreachable()
+    });
     let input: ConversationCreateInput = serde_json::from_value(json!({
         "operationId":operation_id,"endpoint":binding.endpoint,"workingDirectory":"/tmp/project",
         "access":"workspace-write",
         "createdBy":{"endpoint":{"serviceId":"019f0000-0000-7000-8000-000000000001","endpointId":"codex-local"},"sessionId":"caller"}
     }))?;
-    let outcome = ConversationClient::ExternalProvider(control)
-        .create(input, std::time::Duration::from_secs(1))
-        .await?;
+    let outcome = ConversationClient::ExternalProvider(crate::ProviderConversations::Local(
+        Arc::clone(&router) as Arc<dyn crate::LocalCollaboration>,
+    ))
+    .create(input, std::time::Duration::from_secs(1))
+    .await?;
     if outcome
         != (ConversationCreateOutcome::Created {
             operation_id: operation_id.clone(),
@@ -503,49 +458,38 @@ async fn provider_create_wait_returns_the_target_from_exact_operation()
                 "mappingStatus":"verified","authentication":"authenticated"
             }))?),
         })
-        || create_calls.load(Ordering::SeqCst) != 1
-        || wait_calls.load(Ordering::SeqCst) != 1
+        || router.create_calls.load(Ordering::SeqCst) != 1
+        || router.wait_calls.load(Ordering::SeqCst) != 1
     {
         return Err(format!(
             "provider create did not settle from its exact operation: {outcome:?}"
         )
         .into());
     }
-    serving.await??;
 
-    let delayed_backend = CreateBackend {
-        binding: binding.clone(),
-        admitted: snapshot("admitted", "none", None)?,
-        settled: snapshot("terminal", "applied", None)?,
-        create_calls: Arc::new(AtomicUsize::new(0)),
-        wait_calls: Arc::new(AtomicUsize::new(0)),
+    let delayed_router = Arc::new(ScriptedProviderRouter {
+        admitted: Some(snapshot("admitted", "none", None)?),
+        settled: Some(snapshot("terminal", "applied", None)?),
         wait_delay: std::time::Duration::from_secs(2),
-    };
-    let identity = ServiceIdentity::new(
-        "019f0000-0000-7000-8000-000000000001",
-        "019f0000-0000-7000-8000-000000000002",
-    )?
-    .with_provider_conversation_backend(Arc::new(delayed_backend.clone()));
-    let (client, server) = tokio::net::UnixStream::pair()?;
-    let serving = tokio::spawn(serve_control_connection(server, identity));
-    let control =
-        crate::ControlClient::initialize(client, "conversation-timeout-test", "1").await?;
+        ..ScriptedProviderRouter::unreachable()
+    });
     let input: ConversationCreateInput = serde_json::from_value(json!({
         "operationId":operation_id,"endpoint":binding.endpoint,"workingDirectory":"/tmp/project",
         "access":"workspace-write",
         "createdBy":{"endpoint":{"serviceId":"019f0000-0000-7000-8000-000000000001","endpointId":"codex-local"},"sessionId":"caller"}
     }))?;
-    let pending = ConversationClient::ExternalProvider(control)
-        .create(input, std::time::Duration::from_secs(1))
-        .await?;
+    let pending = ConversationClient::ExternalProvider(crate::ProviderConversations::Local(
+        Arc::clone(&delayed_router) as Arc<dyn crate::LocalCollaboration>,
+    ))
+    .create(input, std::time::Duration::from_secs(1))
+    .await?;
     if pending != (ConversationCreateOutcome::Pending { operation_id })
-        || delayed_backend.create_calls.load(Ordering::SeqCst) != 1
-        || delayed_backend.wait_calls.load(Ordering::SeqCst) != 1
+        || delayed_router.create_calls.load(Ordering::SeqCst) != 1
+        || delayed_router.wait_calls.load(Ordering::SeqCst) != 1
     {
         return Err(
             format!("timed-out create lost its admitted operation identity: {pending:?}").into(),
         );
     }
-    serving.await??;
     Ok(())
 }

@@ -286,7 +286,7 @@ async fn observe(directory: &std::path::Path, input: ObserveInput) -> i32 {
             );
         }
     };
-    let control = match CollaborationClient::connect(
+    let client = match CollaborationClient::connect(
         directory,
         "agent-collaboration",
         env!("CARGO_PKG_VERSION"),
@@ -312,12 +312,12 @@ async fn observe(directory: &std::path::Path, input: ObserveInput) -> i32 {
     };
     let target = SessionRef {
         endpoint: EndpointRef {
-            service_id: control.identity().service_id.clone(),
+            service_id: client.identity().service_id.clone(),
             endpoint_id,
         },
         session_id,
     };
-    drop(control);
+    drop(client);
     let cancel = tokio_util::sync::CancellationToken::new();
     let access = collaboration_client::CollaborationAccess::api(directory);
     let observation = SessionObservation::observe_bounded(

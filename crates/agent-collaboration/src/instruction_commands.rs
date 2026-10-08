@@ -155,12 +155,11 @@ pub fn run_instruction_command(arguments: Vec<OsString>) -> i32 {
         )
         .await?;
         dispatched = true;
-        let result = match prepared {
+        match prepared {
             PreparedInstruction::Create(p) => client.create_instruction(p).await,
             PreparedInstruction::Update(p) => client.update_instruction(p).await,
             PreparedInstruction::Show(p) => client.read_instruction(p).await,
-        };
-        result
+        }
     });
     if !dispatched
         && let Err(InstructionClientError::Connection(error)) = &result

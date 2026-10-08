@@ -4,8 +4,11 @@ use crate::{
     COLLABORATION_API_PATH, CollaborationApiConfig, CollaborationApiListener,
     DEFAULT_CONCURRENT_REQUESTS, collaboration_api_router, serve_collaboration_api,
 };
-use collaboration_protocol::RouterExecutableRelation;
-use collaboration_service::{CollaborationApplication, ServiceIdentity};
+use collaboration_protocol::{
+    ApiSelector, ApiSocketPath, ApiTransport, McpSelector, McpTransport, NonEmptyText,
+    RouterExecutableRelation, SERVICE_MANIFEST_VERSION, ServiceManifest,
+};
+use collaboration_service::{CollaborationApplication, ManifestPublication, ServiceIdentity};
 use reqwest::header::{ACCEPT, CONTENT_TYPE};
 use rmcp::{
     RoleClient, ServiceExt as _,
@@ -59,6 +62,33 @@ pub(crate) fn api_config(
     }
 }
 
+/// Publishes the version 3 manifest a Host writes for `application`, naming the API socket
+/// `control.sock` in `directory`.
+pub(crate) fn publish_manifest(
+    directory: &Path,
+    application: &CollaborationApplication,
+) -> ManifestPublication {
+    let manifest = ServiceManifest {
+        version: SERVICE_MANIFEST_VERSION,
+        service_id: application.service_id().clone(),
+        service_epoch: application.service_epoch().clone(),
+        machine_label: application.machine_label().clone(),
+        service_version: NonEmptyText::try_from(env!("CARGO_PKG_VERSION").to_owned())
+            .expect("service version"),
+        api: ApiSelector {
+            transport: ApiTransport::StreamableHttpUnix,
+            path: ApiSocketPath::ServiceSocket,
+        },
+        mcp: McpSelector {
+            transport: McpTransport::StreamableHttp,
+            url: "http://127.0.0.1:0/mcp".to_owned(),
+        },
+        native_schema_digest: None,
+        router_proxy_endpoint: None,
+    };
+    ManifestPublication::publish(directory, &manifest).expect("publish the version 3 manifest")
+}
+
 enum ServedEndpoint {
     LoopbackTcp(SocketAddr),
     UnixSocket(PathBuf),
@@ -70,6 +100,7 @@ pub(crate) struct ServedApi {
     shutdown: CancellationToken,
     active_calls: Arc<AtomicUsize>,
     task: JoinHandle<io::Result<()>>,
+    publication: Option<ManifestPublication>,
 }
 
 impl ServedApi {
@@ -92,6 +123,7 @@ impl ServedApi {
             shutdown: config.shutdown.clone(),
             active_calls,
             task,
+            publication: None,
         }
     }
 
@@ -109,7 +141,21 @@ impl ServedApi {
             shutdown: config.shutdown.clone(),
             active_calls,
             task,
+            publication: None,
         }
+    }
+
+    /// Serves the API on the service directory's `control.sock` and publishes the manifest
+    /// beside it, the way the CLIs find a Host.
+    pub(crate) async fn service_socket(config: &CollaborationApiConfig) -> Self {
+        let directory = &config.service_directory;
+        let mut served = Self::unix(
+            config,
+            &directory.join(ApiSocketPath::ServiceSocket.file_name()),
+        )
+        .await;
+        served.publication = Some(publish_manifest(directory, &config.application));
+        served
     }
 
     /// The URL a client names; a Unix-socket client names localhost.
@@ -234,6 +280,7 @@ impl ServedApi {
             .await
             .expect("API task join")
             .expect("API stops and its calls settle");
+        drop(self.publication);
     }
 }
 

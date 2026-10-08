@@ -378,10 +378,10 @@ async fn probe(
         );
     }
     if let MessageProof::Cli(executable) = messages {
-        let control =
+        let client =
             CollaborationClient::connect(&directory, "cli-proof", env!("CARGO_PKG_VERSION"))
                 .await?;
-        let inventory = control.list_endpoints().await?;
+        let inventory = client.list_endpoints().await?;
         let endpoint = inventory
             .endpoints
             .into_iter()
@@ -417,14 +417,14 @@ async fn probe(
         }
         println!(
             "{}",
-            json!({"kind":"ownedCliExchangePassed","proof":"built CLI to public Control, two Luna turns, explicit CLI return; autonomous agent tool use not yet proven"})
+            json!({"kind":"ownedCliExchangePassed","proof":"built CLI to the collaboration API, two Luna turns, explicit CLI return; autonomous agent tool use not yet proven"})
         );
     }
     if let MessageProof::Agents(executable) = messages {
-        let control =
+        let client =
             CollaborationClient::connect(&directory, "agent-proof", env!("CARGO_PKG_VERSION"))
                 .await?;
-        let endpoint = control
+        let endpoint = client
             .list_endpoints()
             .await?
             .endpoints

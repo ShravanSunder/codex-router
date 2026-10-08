@@ -35,7 +35,7 @@ impl ProviderPromptContentsRequest {
         })
     }
 
-    pub(super) fn from_control(
+    pub(super) fn from_prompt_request(
         request: ConversationPromptRequest,
     ) -> Result<Self, Box<ConversationOperationFailure>> {
         let prompt_text = match &request.prompt {
@@ -170,7 +170,7 @@ mod tests {
     use session_event_model::PromptContent;
 
     #[test]
-    fn control_prompt_forwards_exact_task_text_without_router_envelope() {
+    fn prompt_request_forwards_exact_task_text_without_router_envelope() {
         let target: SessionRef = serde_json::from_value(serde_json::json!({
             "endpoint":{"serviceId":"018f47d2-24d5-7a68-b9ec-6f759c39458f","endpointId":"codex-local"},
             "sessionId":"target-session"
@@ -195,8 +195,8 @@ mod tests {
             },
         };
 
-        let provider_request =
-            ProviderPromptContentsRequest::from_control(request).expect("provider prompt contents");
+        let provider_request = ProviderPromptContentsRequest::from_prompt_request(request)
+            .expect("provider prompt contents");
         let Some(PromptContent::Text { text }) = provider_request.contents.first() else {
             panic!("one text prompt should be generated");
         };

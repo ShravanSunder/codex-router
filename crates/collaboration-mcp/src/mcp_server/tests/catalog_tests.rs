@@ -37,7 +37,9 @@ fn catalog_has_complete_unique_tools_with_resolvable_schemas() {
 }
 
 #[test]
-fn typed_tool_names_cover_every_control_domain_operation() {
+fn catalog_exposes_one_conversation_surface_with_its_composite_tools() {
+    // The whole tool set is pinned by the success-schema snapshot; this pins the shape of the
+    // conversation surface within it.
     let server = CollaborationMcpServer::catalog_only();
     let actual = server
         .surface
@@ -46,29 +48,14 @@ fn typed_tool_names_cover_every_control_domain_operation() {
         .into_iter()
         .map(|tool| tool.name.into_owned())
         .collect::<BTreeSet<_>>();
-    let document =
-        collaboration_protocol::control_schema_document(None).expect("Control schema document");
-    let methods = document
-        .get("x-methods")
-        .and_then(Value::as_object)
-        .expect("Control method map");
-    let expected = methods
-        .keys()
-        .filter(|method| {
-            !matches!(
-                method.as_str(),
-                "control/initialize" | "provider/sessionObserve" | "provider/sessionListen"
-            )
-        })
-        .map(|method| expected_tool_name(method))
-        .chain([
-            "conversation_create".to_owned(),
-            "conversation_create_and_prompt".to_owned(),
-            "conversation_prompt".to_owned(),
-            "events_observe".to_owned(),
-        ])
-        .collect::<BTreeSet<_>>();
-    assert_eq!(actual, expected);
+    for composite in [
+        "conversation_create",
+        "conversation_create_and_prompt",
+        "conversation_prompt",
+        "events_observe",
+    ] {
+        assert!(actual.contains(composite), "missing {composite}");
+    }
     assert!(
         actual
             .iter()

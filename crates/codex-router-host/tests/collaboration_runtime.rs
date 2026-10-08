@@ -180,7 +180,12 @@ async fn host_composes_discovery_and_retires_only_owned_communication_sockets() 
     let control_schema_files = std::fs::read_dir(&root)
         .unwrap_or_else(|error| panic!("service directory: {error}"))
         .filter_map(Result::ok)
-        .filter(|entry| entry.file_name().to_string_lossy().starts_with("control-schema-"))
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("control-schema-")
+        })
         .count();
     assert_eq!(control_schema_files, 0, "no Control schema is published");
     let original_id = runtime.service_id().clone();

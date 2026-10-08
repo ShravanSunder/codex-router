@@ -4,32 +4,15 @@ use collaboration_protocol::{
 };
 use collaboration_service::{
     CodexConversationOperationRecorder, ConversationOperationRecorder, ProviderOperationStore,
-    ServiceIdentity, serve_control_connection,
+    ServiceIdentity,
 };
 use serde_json::{Value, json};
-use std::sync::{
-    Arc,
-    atomic::{AtomicUsize, Ordering},
-};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use std::sync::Arc;
+#[path = "support/served_api.rs"]
+mod served_api;
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
-static NEXT_REQUEST_ID: AtomicUsize = AtomicUsize::new(1);
 
-macro_rules! check {
-    ($condition:expr) => {
-        if !$condition {
-            return Err(format!("assertion failed: {}", stringify!($condition)).into());
-        }
-    };
-    ($condition:expr, $message:expr) => {
-        if !$condition {
-            return Err(
-                format!("assertion failed: {}: {}", stringify!($condition), $message).into(),
-            );
-        }
-    };
-}
 macro_rules! check_eq {
     ($left:expr, $right:expr) => {{
         let left = &$left;
@@ -58,32 +41,12 @@ macro_rules! check_eq {
     }};
 }
 
-async fn call(
-    reader: &mut BufReader<tokio::net::unix::OwnedReadHalf>,
-    writer: &mut tokio::net::unix::OwnedWriteHalf,
-    method: &str,
-    params: Value,
-) -> TestResult<Value> {
-    let request_id = format!(
-        "request-{}",
-        NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed)
-    );
-    writer
-        .write_all(
-            format!(
-                "{}\n",
-                json!({"jsonrpc":"2.0","id":request_id,"method":method,"params":params})
-            )
-            .as_bytes(),
-        )
-        .await?;
-    let mut line = String::new();
-    reader.read_line(&mut line).await?;
-    Ok(serde_json::from_str(&line)?)
+async fn call(served: &served_api::ServedApi, tool: &str, params: Value) -> TestResult<Value> {
+    Ok(served.call(tool, params).await?)
 }
 
 #[tokio::test]
-async fn codex_create_operation_is_inspectable_and_reconcilable_through_control() -> TestResult {
+async fn codex_create_operation_is_inspectable_and_reconcilable_through_the_api() -> TestResult {
     let path = std::env::temp_dir().join(format!(
         "codex-operation-inspection-{}.sqlite",
         OperationId::generate().as_str()
@@ -107,12 +70,7 @@ async fn codex_create_operation_is_inspectable_and_reconcilable_through_control(
     )?
     .with_provider_operation_store(Arc::clone(&store))
     .with_codex_conversation_recorder(Arc::clone(&recorder));
-    let (client, server) = tokio::net::UnixStream::pair()?;
-    let serving = tokio::spawn(serve_control_connection(server, identity));
-    let (read, mut write) = client.into_split();
-    let mut read = BufReader::new(read);
-    let initialized = call(&mut read, &mut write, "control/initialize", json!({"version":{"major":1,"minor":0},"client":{"name":"codex-operation-test","version":"1"}})).await?;
-    check!(initialized.get("result").is_some(), "{initialized}");
+    let served = served_api::ServedApi::start(identity).await?;
 
     let generation: CodexGeneration = serde_json::from_value(
         json!({"serviceEpoch":"019f0000-0000-7000-8000-000000000002","generation":1}),
@@ -121,18 +79,16 @@ async fn codex_create_operation_is_inspectable_and_reconcilable_through_control(
     recorder.admit_create(&operation_id, &generation).await?;
     recorder.before_native_dispatch(&operation_id).await?;
     let shown = call(
-        &mut read,
-        &mut write,
-        "conversation/operationShow",
+        &served,
+        "conversation_operation_show",
         json!({"operationId":operation_id}),
     )
     .await?;
     check_eq!(shown["result"]["stage"], "mayHaveDispatched");
     check_eq!(shown["result"]["binding"]["kind"], "codexAcp");
     let pending = call(
-        &mut read,
-        &mut write,
-        "conversation/operationWait",
+        &served,
+        "conversation_operation_wait",
         json!({"operationId":operation_id,"timeoutSeconds":1}),
     )
     .await?;
@@ -141,9 +97,8 @@ async fn codex_create_operation_is_inspectable_and_reconcilable_through_control(
     let session_id = SessionId::try_from("created-thread".to_owned())?;
     recorder.record_created(&operation_id, &session_id).await?;
     let settled = call(
-        &mut read,
-        &mut write,
-        "conversation/operationWait",
+        &served,
+        "conversation_operation_wait",
         json!({"operationId":operation_id,"timeoutSeconds":1}),
     )
     .await?;
@@ -157,9 +112,8 @@ async fn codex_create_operation_is_inspectable_and_reconcilable_through_control(
         "confirmed"
     );
     let reconciled = call(
-        &mut read,
-        &mut write,
-        "conversation/operationReconcile",
+        &served,
+        "conversation_operation_reconcile",
         json!({"operationId":operation_id}),
     )
     .await?;
@@ -182,9 +136,8 @@ async fn codex_create_operation_is_inspectable_and_reconcilable_through_control(
         .await?;
     recorder.record_failure(&recovered_id, false).await?;
     let recovered = call(
-        &mut read,
-        &mut write,
-        "conversation/operationReconcile",
+        &served,
+        "conversation_operation_reconcile",
         json!({"operationId":recovered_id}),
     )
     .await?;
@@ -200,17 +153,15 @@ async fn codex_create_operation_is_inspectable_and_reconcilable_through_control(
     recorder.before_native_dispatch(&unknown_id).await?;
     recorder.record_failure(&unknown_id, false).await?;
     let unknown = call(
-        &mut read,
-        &mut write,
-        "conversation/operationReconcile",
+        &served,
+        "conversation_operation_reconcile",
         json!({"operationId":unknown_id}),
     )
     .await?;
     check_eq!(unknown["result"]["effect"], "unknown");
     check_eq!(unknown["result"]["reconciliation"], "notReconcilable");
 
-    drop(write);
-    serving.await??;
+    served.stop().await?;
     for suffix in ["", "-wal", "-shm"] {
         let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
     }

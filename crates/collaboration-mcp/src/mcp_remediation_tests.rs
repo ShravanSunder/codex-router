@@ -5,7 +5,6 @@ use serde_json::{Value, json};
 use std::os::unix::fs::PermissionsExt;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio_tungstenite::tungstenite::Message;
-use tokio_util::sync::CancellationToken;
 
 const SERVICE_ID: &str = "00000000-0000-4000-8000-000000000001";
 const SERVICE_EPOCH: &str = "00000000-0000-4000-8000-000000000002";
@@ -125,9 +124,6 @@ async fn stateless_http_observation_distinguishes_malformed_frame_from_clean_eof
 struct ConversationFixture {
     root: tempfile::TempDir,
     listener: ServedApi,
-    stop: CancellationToken,
-    control_task: tokio::task::JoinHandle<std::io::Result<()>>,
-    publication: collaboration_service::ManifestPublication,
 }
 
 impl ConversationFixture {
@@ -135,54 +131,30 @@ impl ConversationFixture {
         let root = tempfile::tempdir().expect("temporary service directory");
         std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700))
             .expect("private directory");
-        let digest = format!("sha256:{}", "a".repeat(64));
         let endpoint = serde_json::from_value(json!({
             "endpoint":{"serviceId":SERVICE_ID,"endpointId":"codex-local"},"label":"remediation fixture",
             "availability":{"state":"available","observedAt":"2026-09-19T00:00:00Z"},
             "channels":[{"kind":"acp","transport":"unixJsonLines","path":channel_path,"schemaDigest":format!("sha256:{}", collaboration_protocol::ACP_SCHEMA_DIGEST)}]
         })).expect("endpoint");
-        Self::start_with_endpoint(root, digest, endpoint).await
+        Self::start_with_endpoint(root, endpoint).await
     }
 
     async fn start_with_endpoint(
         root: tempfile::TempDir,
-        digest: String,
         endpoint: collaboration_protocol::EndpointDescription,
     ) -> Self {
         let identity = collaboration_service::ServiceIdentity::new(SERVICE_ID, SERVICE_EPOCH)
             .expect("identity")
             .with_endpoints(vec![endpoint])
             .expect("endpoint directory");
-        let application = collaboration_service::CollaborationApplication::new(identity.clone());
-        let control = collaboration_service::LocalControlService::bind(
-            &root.path().join("control.sock"),
-            identity,
-        )
-        .expect("control");
-        let manifest = serde_json::from_value(json!({"version":2,"serviceId":SERVICE_ID,"serviceEpoch":SERVICE_EPOCH,"machineLabel":"fixture-host","control":{"transport":"unixJsonLines","path":"control.sock"},"controlSchemaDigest":digest,"mcp":{"transport":"streamableHttp","url":"http://127.0.0.1:0/mcp"}})).expect("manifest");
-        let publication =
-            collaboration_service::ManifestPublication::publish(root.path(), &manifest)
-                .expect("publication");
-        let stop = CancellationToken::new();
-        let control_task = tokio::spawn(control.run(stop.clone()));
+        // The carrier tools discover their sockets from the Router's own endpoint directory.
+        let application = collaboration_service::CollaborationApplication::new(identity);
         let listener = ServedApi::tcp(&api_config(application, root.path())).await;
-        Self {
-            root,
-            listener,
-            stop,
-            control_task,
-            publication,
-        }
+        Self { root, listener }
     }
 
     async fn shutdown(self) {
         self.listener.stop().await;
-        self.stop.cancel();
-        self.control_task
-            .await
-            .expect("control join")
-            .expect("control shutdown");
-        drop(self.publication);
     }
 }
 
@@ -236,9 +208,8 @@ impl NativeObservationFixture {
                 );
             }
         });
-        let digest = format!("sha256:{}", "a".repeat(64));
         let endpoint = serde_json::from_value(json!({"endpoint":{"serviceId":SERVICE_ID,"endpointId":"codex-local"},"label":"native remediation fixture","availability":{"state":"available","observedAt":"2026-09-19T00:00:00Z"},"channels":[{"kind":"nativeCodex","transport":"unixWebSocket","path":"native.sock","schemaDigest":null,"generation":{"serviceEpoch":SERVICE_EPOCH,"generation":1}}]})).expect("endpoint");
-        let fixture = ConversationFixture::start_with_endpoint(root, digest, endpoint).await;
+        let fixture = ConversationFixture::start_with_endpoint(root, endpoint).await;
         Self { fixture, peer }
     }
 }

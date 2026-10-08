@@ -108,7 +108,7 @@ fn run_push_record_query(
         let caller = harness_identity
             .session_ref(&client.identity().service_id)
             .map_err(|_| ClientError::InvalidRequest("invalid current session identity"))?;
-        let result = match query {
+        match query {
             PushRecordQuery::Show(reference) => client
                 .router_show(PushRecordShowParams { caller, reference })
                 .await
@@ -126,8 +126,7 @@ fn run_push_record_query(
                 })
                 .await
                 .map(PushRecordReadResult::List),
-        };
-        result
+        }
     });
     report_push_record_read(outcome, machine)
 }

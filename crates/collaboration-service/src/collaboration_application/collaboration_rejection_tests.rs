@@ -5,6 +5,7 @@ use super::automation_operations::{
     InstructionContext, InstructionFailureReason, instruction_failure, run_failure_context,
 };
 use super::schedule_operations::{ScheduleFailureContext, schedule_failure};
+use super::session_operations::INVALID_NATIVE_PARAMETERS;
 use super::wake_operations::{WakeFailureContext, wake_failure};
 use super::*;
 use CollaborationRejectionReason as Reason;

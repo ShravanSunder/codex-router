@@ -1,5 +1,8 @@
-use collaboration_client::{NativeTransportConnection, NativeTransportError, protocol::EndpointId};
-use collaboration_service::{LocalControlService, ManifestPublication, ServiceIdentity};
+use collaboration_client::{
+    CollaborationAccess, NativeTransportConnection, NativeTransportError, protocol::EndpointId,
+};
+use collaboration_mcp::test_support::ServedCollaborationApi;
+use collaboration_service::{CollaborationApplication, ServiceIdentity};
 use futures_util::{SinkExt, StreamExt};
 use std::os::unix::fs::DirBuilderExt;
 
@@ -10,7 +13,6 @@ async fn client_opens_advertised_native_websocket_without_protocol_initializatio
         .mode(0o700)
         .create(&root)
         .unwrap_or_else(|error| panic!("directory: {error}"));
-    let digest = format!("sha256:{}", "a".repeat(64));
     let identity = ServiceIdentity::new(
         "00000000-0000-4000-8000-000000000001",
         "00000000-0000-4000-8000-000000000002",
@@ -44,19 +46,16 @@ async fn client_opens_advertised_native_websocket_without_protocol_initializatio
     let identity = identity
         .with_endpoints(vec![endpoint])
         .unwrap_or_else(|error| panic!("register: {error}"));
-    let listener = LocalControlService::bind(&root.join("control.sock"), identity)
-        .unwrap_or_else(|error| panic!("bind: {error}"));
-    let manifest=serde_json::from_value(serde_json::json!({"version":2,"serviceId":"00000000-0000-4000-8000-000000000001","serviceEpoch":"00000000-0000-4000-8000-000000000002","machineLabel":"fixture-host","control":{"transport":"unixJsonLines","path":"control.sock"},"controlSchemaDigest":digest,"mcp":{"transport":"streamableHttp","url":"http://127.0.0.1:0/mcp"}})).unwrap_or_else(|error|panic!("manifest: {error}"));
-    let publication = ManifestPublication::publish(&root, &manifest)
-        .unwrap_or_else(|error| panic!("publish: {error}"));
-    let stop = tokio_util::sync::CancellationToken::new();
-    let service = tokio::spawn(listener.run(stop.clone()));
+    let served = ServedCollaborationApi::start(&root, CollaborationApplication::new(identity))
+        .await
+        .unwrap_or_else(|error| panic!("serve: {error}"));
 
     let endpoint_id = EndpointId::try_from("codex-local".to_owned())
         .unwrap_or_else(|error| panic!("endpoint ID: {error}"));
-    let mut connection = NativeTransportConnection::connect(&root, endpoint_id)
-        .await
-        .unwrap_or_else(|error| panic!("connect: {error}"));
+    let mut connection =
+        NativeTransportConnection::connect(&CollaborationAccess::api(&root), endpoint_id)
+            .await
+            .unwrap_or_else(|error| panic!("connect: {error}"));
     assert_eq!(
         String::from(connection.endpoint.endpoint_id.clone()),
         "codex-local"
@@ -76,12 +75,10 @@ async fn client_opens_advertised_native_websocket_without_protocol_initializatio
         .await
         .unwrap_or_else(|error| panic!("native peer: {error}"));
     drop(connection);
-    stop.cancel();
-    service
+    served
+        .stop()
         .await
-        .unwrap_or_else(|error| panic!("service join: {error}"))
         .unwrap_or_else(|error| panic!("service: {error}"));
-    drop(publication);
     std::fs::remove_file(native_path).unwrap_or_else(|error| panic!("native cleanup: {error}"));
     std::fs::remove_dir(root).unwrap_or_else(|error| panic!("directory cleanup: {error}"));
 }
@@ -97,7 +94,6 @@ async fn client_rejects_unavailable_and_escaped_native_endpoints_without_connect
             .create(directory)
             .unwrap_or_else(|error| panic!("directory: {error}"));
     }
-    let digest = format!("sha256:{}", "b".repeat(64));
     let identity = ServiceIdentity::new(
         "00000000-0000-4000-8000-000000000011",
         "00000000-0000-4000-8000-000000000012",
@@ -114,27 +110,16 @@ async fn client_rejects_unavailable_and_escaped_native_endpoints_without_connect
     let identity = identity
         .with_endpoints(vec![unavailable])
         .unwrap_or_else(|error| panic!("register: {error}"));
-    let listener = LocalControlService::bind(&root.join("control.sock"), identity)
-        .unwrap_or_else(|error| panic!("bind: {error}"));
-    let manifest = serde_json::from_value(serde_json::json!({
-        "version":2,
-        "serviceId":"00000000-0000-4000-8000-000000000011",
-        "serviceEpoch":"00000000-0000-4000-8000-000000000012",
-        "machineLabel":"fixture-host","control":{"transport":"unixJsonLines","path":"control.sock"},
-        "controlSchemaDigest":digest,
-        "mcp":{"transport":"streamableHttp","url":"http://127.0.0.1:0/mcp"}
-    }))
-    .unwrap_or_else(|error| panic!("manifest: {error}"));
-    let publication = ManifestPublication::publish(&root, &manifest)
-        .unwrap_or_else(|error| panic!("publish: {error}"));
-    let stop = tokio_util::sync::CancellationToken::new();
-    let service = tokio::spawn(listener.run(stop.clone()));
+    let served = ServedCollaborationApi::start(&root, CollaborationApplication::new(identity))
+        .await
+        .unwrap_or_else(|error| panic!("serve: {error}"));
+    let access = CollaborationAccess::api(&root);
     let endpoint_id = || {
         EndpointId::try_from("codex-local".to_owned())
             .unwrap_or_else(|error| panic!("endpoint ID: {error}"))
     };
 
-    let unavailable_error = NativeTransportConnection::connect(&root, endpoint_id())
+    let unavailable_error = NativeTransportConnection::connect(&access, endpoint_id())
         .await
         .err()
         .unwrap_or_else(|| panic!("unavailable endpoint unexpectedly connected"));
@@ -159,7 +144,7 @@ async fn client_rejects_unavailable_and_escaped_native_endpoints_without_connect
             .unwrap_or_else(|error| panic!("endpoint: {error}")),
         )
         .unwrap_or_else(|error| panic!("publish: {error}"));
-    let escaped_error = NativeTransportConnection::connect(&root, endpoint_id())
+    let escaped_error = NativeTransportConnection::connect(&access, endpoint_id())
         .await
         .err()
         .unwrap_or_else(|| panic!("escaped endpoint unexpectedly connected"));
@@ -177,12 +162,10 @@ async fn client_rejects_unavailable_and_escaped_native_endpoints_without_connect
         "escaped native listener accepted a connection"
     );
 
-    stop.cancel();
-    service
+    served
+        .stop()
         .await
-        .unwrap_or_else(|error| panic!("service join: {error}"))
         .unwrap_or_else(|error| panic!("service: {error}"));
-    drop(publication);
     std::fs::remove_file(root.join("native.sock"))
         .unwrap_or_else(|error| panic!("symlink cleanup: {error}"));
     std::fs::remove_file(outside_socket).unwrap_or_else(|error| panic!("native cleanup: {error}"));

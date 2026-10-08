@@ -1,12 +1,12 @@
 #![allow(clippy::expect_used, clippy::indexing_slicing, clippy::panic)]
-//! The Host's real router selects provider and peer clients through Control.
+//! The Host's real router selects provider and peer clients through the collaboration API.
 #[path = "support/session_message_route_fixture.rs"]
 mod route_fixture;
 use codex_router_host::{
     CollaborationRuntime, CollaborationRuntimeInputs, ExternalProviderLaunchBinding,
     ExternalProviderStartup,
 };
-use collaboration_client::ControlClient;
+use collaboration_client::CollaborationClient;
 use collaboration_protocol::{
     DeliveryOutcome, DeliveryRejectionReason, EndpointId, EndpointRef, ProviderRequestedPolicy,
     ProviderWorkingDirectory, RouterAccess, SessionId, SessionRef,
@@ -72,9 +72,9 @@ async fn host_router_selects_peer_and_provider_without_cross_loading() {
     )
     .await
     .expect("Host startup");
-    let mut client = ControlClient::connect(root.path(), "route-composition", "1")
+    let client = CollaborationClient::connect(root.path(), "route-composition", "1")
         .await
-        .expect("Control connection");
+        .expect("collaboration API client");
     let claude_endpoint = EndpointRef {
         service_id: runtime.service_id().clone(),
         endpoint_id: EndpointId::try_from("claude-local".to_owned()).expect("Claude endpoint"),
@@ -165,7 +165,7 @@ async fn host_router_selects_peer_and_provider_without_cross_loading() {
         .expect("remove peer registry record");
     // DM sends use LoadedOnly; loading is an explicit conversation operation.
     load_provider_target(
-        &mut client,
+        &client,
         SessionRef {
             endpoint: claude_endpoint.clone(),
             session_id: SessionId::try_from("recorded-unloaded".to_owned()).expect("session"),
@@ -192,9 +192,8 @@ async fn host_router_selects_peer_and_provider_without_cross_loading() {
     );
 
     let held_claude =
-        create_provider_target(&mut client, claude_endpoint, actor.clone(), root.path()).await;
-    let held_cursor =
-        create_provider_target(&mut client, cursor_endpoint, actor, root.path()).await;
+        create_provider_target(&client, claude_endpoint, actor.clone(), root.path()).await;
+    let held_cursor = create_provider_target(&client, cursor_endpoint, actor, root.path()).await;
     publish_peer(
         &registry,
         &held_claude.session_id,
@@ -226,17 +225,17 @@ async fn host_router_selects_peer_and_provider_without_cross_loading() {
     );
     assert!(!cursor_loads.exists(), "held Cursor was loaded again");
 
-    send_and_wait_wake(&mut client, held_claude.clone()).await;
-    send_and_wait_wake(&mut client, held_cursor.clone()).await;
+    send_and_wait_wake(&client, held_claude.clone()).await;
+    send_and_wait_wake(&client, held_cursor.clone()).await;
     prompt_and_approve_from_peer_provider(
-        &mut client,
+        &client,
         held_claude.clone(),
         held_cursor.clone(),
         &cursor_prompts,
     )
     .await;
     prompt_and_approve_from_peer_provider(
-        &mut client,
+        &client,
         held_cursor.clone(),
         held_claude.clone(),
         &claude_prompts,
@@ -244,7 +243,7 @@ async fn host_router_selects_peer_and_provider_without_cross_loading() {
     .await;
     std::fs::write(&claude_prompts, "").expect("clear Claude prompt log before subscription proof");
     std::fs::write(&cursor_prompts, "").expect("clear Cursor prompt log before subscription proof");
-    post_thread_activity_for_sessions(&mut client, [held_claude, held_cursor]).await;
+    post_thread_activity_for_sessions(&client, [held_claude, held_cursor]).await;
     wait_for_prompt_text(&claude_prompts, "🧵 Router: new thread activity").await;
     wait_for_prompt_text(&cursor_prompts, "🧵 Router: new thread activity").await;
     wait_for_completed_provider_prompts(&claude_prompts, 1).await;
@@ -303,9 +302,9 @@ async fn host_composed_permission_push_preserves_selected_option_through_provide
     )
     .await
     .expect("real Host startup");
-    let mut client = ControlClient::connect(root.path(), "host-permission-proof", "1")
+    let client = CollaborationClient::connect(root.path(), "host-permission-proof", "1")
         .await
-        .expect("Control connection");
+        .expect("collaboration API client");
     let actor = SessionRef {
         endpoint: EndpointRef {
             service_id: runtime.service_id().clone(),
@@ -314,7 +313,7 @@ async fn host_composed_permission_push_preserves_selected_option_through_provide
         session_id: SessionId::try_from("permission-proof-actor".to_owned()).expect("actor"),
     };
     let requester = create_provider_target(
-        &mut client,
+        &client,
         EndpointRef {
             service_id: runtime.service_id().clone(),
             endpoint_id: EndpointId::try_from("claude-local".to_owned())
@@ -325,7 +324,7 @@ async fn host_composed_permission_push_preserves_selected_option_through_provide
     )
     .await;
     let approver = create_provider_target(
-        &mut client,
+        &client,
         EndpointRef {
             service_id: runtime.service_id().clone(),
             endpoint_id: EndpointId::try_from("cursor-local".to_owned())
@@ -337,7 +336,7 @@ async fn host_composed_permission_push_preserves_selected_option_through_provide
     .await;
 
     let stored_notice = prompt_and_approve_from_peer_provider(
-        &mut client,
+        &client,
         requester,
         approver.clone(),
         &approver_prompts,

@@ -1,11 +1,15 @@
-//! Control publishes every listed Codex session with all of its fields; a stored session with no
-//! recorded model or reasoning effort carries both as `null`, as the catalog always wrote them.
+//! The API publishes every listed Codex session with all of its fields; a stored session with no
+//! recorded model or reasoning effort publishes neither, and never invents one. (Control alone
+//! filled the absent two with `null`; the typed result omits them.)
 use collaboration_service::{NativeControlBackend, NativeGenerationGate, ServiceIdentity};
 use serde_json::{Value, json};
 use std::os::unix::fs::PermissionsExt;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+#[path = "support/served_api.rs"]
+mod served_api;
 
 const SERVICE_ID: &str = "00000000-0000-4000-8000-000000000031";
+/// Published only when the catalog recorded them.
+const OPTIONAL_SESSION_FIELDS: [&str; 2] = ["model", "reasoningEffort"];
 const SESSION_FIELDS: [&str; 10] = [
     "target",
     "name",
@@ -39,30 +43,13 @@ async fn stored_catalog(home: &std::path::Path) -> Result<(), Box<dyn std::error
 
 async fn send_raw(
     identity: ServiceIdentity,
-    request: Value,
+    tool: &str,
+    params: Value,
 ) -> Result<Value, Box<dyn std::error::Error>> {
-    let (client, server) = tokio::net::UnixStream::pair()?;
-    let task = tokio::spawn(collaboration_service::serve_control_connection(
-        server, identity,
-    ));
-    let (reader, mut writer) = client.into_split();
-    let mut lines = BufReader::new(reader).lines();
-    let initialize = json!({
-        "jsonrpc":"2.0","id":"initialize","method":"control/initialize",
-        "params":{"version":{"major":1,"minor":0},"client":{"name":"session-shape","version":"1"}}
-    });
-    writer
-        .write_all(format!("{initialize}\n").as_bytes())
-        .await?;
-    lines
-        .next_line()
-        .await?
-        .ok_or("initialization response missing")?;
-    writer.write_all(format!("{request}\n").as_bytes()).await?;
-    let response = lines.next_line().await?.ok_or("list response missing")?;
-    writer.shutdown().await?;
-    task.await??;
-    Ok(serde_json::from_str(&response)?)
+    let served = served_api::ServedApi::start(identity).await?;
+    let response = served.call(tool, params).await?;
+    served.stop().await?;
+    Ok(response)
 }
 
 #[tokio::test]
@@ -94,13 +81,12 @@ async fn stored_sessions_publish_absent_model_and_effort_as_null()
             gate: NativeGenerationGate::default(),
             codex_home: home,
         })?;
-    let request = json!({
-        "jsonrpc":"2.0","id":"list","method":"codex/sessionList",
-        "params":{"endpoint":endpoint,"view":"stored","scope":{"kind":"any"},"source":"all","pageSize":10}
+    let params = json!({
+        "endpoint":endpoint,"view":"stored","scope":{"kind":"any"},"source":"all","pageSize":10
     });
 
     // Act.
-    let response = send_raw(identity, request).await?;
+    let response = send_raw(identity, "sessions_list", params).await?;
 
     // Assert.
     let sessions = response
@@ -115,7 +101,13 @@ async fn stored_sessions_publish_absent_model_and_effort_as_null()
             .as_object()
             .ok_or_else(|| format!("session is not an object: {session}"))?;
         let mut names: Vec<&str> = fields.keys().map(String::as_str).collect();
-        let mut expected = SESSION_FIELDS.to_vec();
+        let mut expected: Vec<&str> = SESSION_FIELDS
+            .into_iter()
+            .filter(|field| {
+                !OPTIONAL_SESSION_FIELDS.contains(field)
+                    || fields.get(*field).is_some_and(|value| !value.is_null())
+            })
+            .collect();
         names.sort_unstable();
         expected.sort_unstable();
         if names != expected {
@@ -132,8 +124,10 @@ async fn stored_sessions_publish_absent_model_and_effort_as_null()
     };
     let without = by_id("without-model")?;
     let with = by_id("with-model")?;
-    if without.get("model") != Some(&Value::Null)
-        || without.get("reasoningEffort") != Some(&Value::Null)
+    if without.get("model").is_some_and(|model| !model.is_null())
+        || without
+            .get("reasoningEffort")
+            .is_some_and(|effort| !effort.is_null())
         || with.get("model") != Some(&json!("gpt-5.6-sol"))
         || with.get("reasoningEffort") != Some(&json!("high"))
     {

@@ -362,13 +362,17 @@ async fn show_record(
         .await
         .unwrap()
         .unwrap();
-    crate::push_record_resolver::show(
-        json!("show-held-push"),
-        json!({
-            "caller": target_session(&fixture.reader).unwrap(),
-            "reference": crate::push_record_resolver::link_for(&record, identity),
+    let shown = crate::CollaborationApplication::new(identity.clone())
+        .messages()
+        .push_show(collaboration_protocol::PushRecordShowParams {
+            caller: target_session(&fixture.reader).unwrap(),
+            reference: crate::push_record_resolver::link_for(&record, identity),
+        })
+        .await;
+    match shown {
+        Ok(result) => json!({ "result": result }),
+        Err(failure) => json!({
+            "error": crate::collaboration_application::CollaborationRejection::published_rejection(&failure)
         }),
-        identity,
-    )
-    .await
+    }
 }

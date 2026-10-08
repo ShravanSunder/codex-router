@@ -4,7 +4,6 @@ use reqwest::header::{ACCEPT, CONTENT_TYPE};
 use serde_json::{Value, json};
 use std::os::unix::fs::PermissionsExt;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio_util::sync::CancellationToken;
 
 #[tokio::test]
 async fn codex_conversation_cancel_names_turn_interrupt_without_sending_acp_cancel() {
@@ -13,7 +12,6 @@ async fn codex_conversation_cancel_names_turn_interrupt_without_sending_acp_canc
         .expect("private service directory");
     let service_id = "00000000-0000-4000-8000-000000000001";
     let epoch = "00000000-0000-4000-8000-000000000002";
-    let digest = format!("sha256:{}", "a".repeat(64));
     let endpoint = json!({"serviceId":service_id,"endpointId":"codex-local"});
     let description = serde_json::from_value(json!({
         "endpoint":endpoint,"label":"Fixture Codex",
@@ -26,23 +24,8 @@ async fn codex_conversation_cancel_names_turn_interrupt_without_sending_acp_canc
         .expect("service identity")
         .with_endpoints(vec![description])
         .expect("endpoint directory");
-    let application = collaboration_service::CollaborationApplication::new(identity.clone());
-    let control = collaboration_service::LocalControlService::bind(
-        &root.path().join("control.sock"),
-        identity,
-    )
-    .expect("Control listener");
-    let manifest = serde_json::from_value(json!({
-        "version":2,"serviceId":service_id,"serviceEpoch":epoch,
-        "machineLabel":"fixture-host","control":{"transport":"unixJsonLines","path":"control.sock"},
-        "controlSchemaDigest":digest,
-        "mcp":{"transport":"streamableHttp","url":"http://127.0.0.1:0/mcp"}
-    }))
-    .expect("manifest");
-    let _publication = collaboration_service::ManifestPublication::publish(root.path(), &manifest)
-        .expect("manifest publication");
-    let stop = CancellationToken::new();
-    let control_task = tokio::spawn(control.run(stop.clone()));
+    // The carrier tools discover the ACP socket from the Router's own endpoint directory.
+    let application = collaboration_service::CollaborationApplication::new(identity);
     let acp =
         tokio::net::UnixListener::bind(root.path().join("codex-acp.sock")).expect("ACP listener");
     let acp_peer = tokio::spawn(async move {
@@ -193,9 +176,4 @@ async fn codex_conversation_cancel_names_turn_interrupt_without_sending_acp_canc
     );
     acp_peer.await.expect("ACP peer");
     listener.stop().await;
-    stop.cancel();
-    control_task
-        .await
-        .expect("Control join")
-        .expect("Control shutdown");
 }

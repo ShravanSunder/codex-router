@@ -1,12 +1,13 @@
 //! Bounded SDK discovery through actual service sockets and SQLite, with no native backend.
-use collaboration_client::ControlClient;
 use collaboration_protocol::{
     AutomationPageRequest, DeliveryListRequest, InstructionCreateParams, InstructionText,
     OperationId, RevisionListRequest, RunListRequest, ScheduleCreateRequest,
 };
-use collaboration_service::{ServiceIdentity, serve_control_connection};
+use collaboration_service::ServiceIdentity;
 use serde_json::json;
 use std::sync::Arc;
+#[path = "support/served_api.rs"]
+mod served_api;
 
 #[tokio::test]
 async fn sdk_lists_local_collections_and_rejects_cross_collection_cursor()
@@ -24,9 +25,8 @@ async fn sdk_lists_local_collections_and_rejects_cross_collection_cursor()
     )
     .map_err(std::io::Error::other)?
     .with_automation_store(store.clone());
-    let (socket, server) = tokio::net::UnixStream::pair()?;
-    let task = tokio::spawn(serve_control_connection(server, identity));
-    let mut client = ControlClient::initialize(socket, "collection-test", "1").await?;
+    let served = served_api::ServedApi::start(identity).await?;
+    let client = served.client("collection-test").await?;
     let first_operation_id = OperationId::generate();
     let first = client
         .create_instruction(InstructionCreateParams {
@@ -142,8 +142,7 @@ async fn sdk_lists_local_collections_and_rejects_cross_collection_cursor()
     {
         return Err("cross-collection cursor lacked typed rejection".into());
     }
-    client.close().await?;
-    task.await??;
+    served.stop().await?;
     drop(store);
     std::fs::remove_file(path)?;
     Ok(())

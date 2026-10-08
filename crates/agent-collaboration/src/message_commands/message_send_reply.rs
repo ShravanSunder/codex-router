@@ -56,8 +56,7 @@ pub(super) fn run_message_send(args: MessageSendArguments) -> i32 {
             delivery: saved.delivery,
             generation_guard: saved.generation_guard,
         };
-        let result = client.send_message(request).await;
-        result
+        client.send_message(request).await
     });
     report(outcome, machine)
 }
@@ -115,14 +114,13 @@ pub(super) fn run_message_reply(args: ReplyArguments) -> i32 {
                     "invalid caller session identity",
                 )))
             })?;
-        let result = client
+        client
             .reply_to_push(MessageReplyRequest {
                 caller,
                 reference,
                 text: reply_text,
             })
-            .await;
-        result
+            .await
     });
     report_reply(outcome, machine)
 }

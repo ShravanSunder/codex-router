@@ -7,17 +7,17 @@ use collaboration_protocol::{
     ProviderBindingIdentity, ProviderSessionInspectRequest, ProviderSessionInspectResult,
     ProviderSettingsAcceptRequest, ProviderSettingsResult, ProviderSettingsSetRequest,
 };
+use collaboration_service::collaboration_application::CollaborationRejection;
 use collaboration_service::{
-    ProviderConversationBackend, ProviderSessionInspectFuture, ProviderSettingsFuture,
-    ServiceIdentity, serve_control_connection,
+    CollaborationApplication, ProviderConversationBackend, ProviderSessionInspectFuture,
+    ProviderSettingsFuture, ServiceIdentity,
 };
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::{future::Future, pin::Pin, sync::Arc};
-use tokio::{
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
-    sync::Mutex,
-};
+use tokio::sync::Mutex;
+#[path = "support/served_api.rs"]
+mod served_api;
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 type BackendFuture<'a, T> =
@@ -167,39 +167,25 @@ fn settings_result(target: collaboration_protocol::SessionRef) -> ProviderSettin
 
 #[tokio::test]
 async fn settings_methods_forward_typed_actor_without_operation_id() -> TestResult {
-    let (mut writer, mut reader, backend) = initialized_fixture().await?;
+    let (fixture, backend) = initialized_fixture().await?;
     let set = json!({"target":session("provider-conversation"),"actor":actor("creator"),"setting":"mode","value":"ask"});
-    let set_response = call(
-        &mut writer,
-        &mut reader,
-        "set",
-        "conversation/settingsSet",
-        set.clone(),
-    )
-    .await?;
+    let set_response = call(&fixture, "conversation/settingsSet", set.clone()).await?;
     ensure(
         set_response["result"]["effectiveSettings"]["mode"] == "ask",
         format!("set: {set_response}"),
     )?;
     let accept = json!({"target":session("provider-conversation"),"actor":actor("approver")});
-    let accept_response = call(
-        &mut writer,
-        &mut reader,
-        "accept",
-        "conversation/settingsAccept",
-        accept.clone(),
-    )
-    .await?;
+    let accept_response = call(&fixture, "conversation/settingsAccept", accept.clone()).await?;
     ensure(
         accept_response["result"]["target"] == session("provider-conversation"),
         format!("accept: {accept_response}"),
     )?;
-    let invalid = call(&mut writer, &mut reader, "invalid", "conversation/settingsSet", json!({
+    let invalid = call(&fixture, "conversation/settingsSet", json!({
         "target":session("provider-conversation"),"actor":actor("creator"),"setting":"mode","value":"ask",
         "operationId":operation_id()
     })).await?;
     ensure(
-        invalid["error"]["code"] == -32602,
+        arguments_refused(&invalid),
         format!("operation ID admitted: {invalid}"),
     )?;
     ensure(
@@ -207,9 +193,7 @@ async fn settings_methods_forward_typed_actor_without_operation_id() -> TestResu
         "settings calls changed".into(),
     )?;
     let inspected = call(
-        &mut writer,
-        &mut reader,
-        "inspect",
+        &fixture,
         "provider/sessionInspect",
         json!({"target":session("provider-conversation")}),
     )
@@ -223,7 +207,7 @@ async fn settings_methods_forward_typed_actor_without_operation_id() -> TestResu
 
 #[tokio::test]
 async fn resume_and_close_dispatch_as_inspectable_provider_operations() -> TestResult {
-    let (mut writer, mut reader, backend) = initialized_fixture().await?;
+    let (fixture, backend) = initialized_fixture().await?;
     let resume = json!({
         "operationId":operation_id(),
         "target":session("provider-conversation"),
@@ -233,14 +217,7 @@ async fn resume_and_close_dispatch_as_inspectable_provider_operations() -> TestR
         "approver":actor("creator"),
         "requestedPolicy":{"access":"workspace-write"}
     });
-    let response = call(
-        &mut writer,
-        &mut reader,
-        "resume",
-        "conversation/resume",
-        resume.clone(),
-    )
-    .await?;
+    let response = call(&fixture, "conversation/resume", resume.clone()).await?;
     ensure(
         response["result"]["admission"] == "admitted",
         format!("resume: {response}"),
@@ -252,14 +229,7 @@ async fn resume_and_close_dispatch_as_inspectable_provider_operations() -> TestR
         "requestedBy":actor("creator"),
         "approver":actor("creator")
     });
-    let response = call(
-        &mut writer,
-        &mut reader,
-        "close",
-        "conversation/close",
-        close.clone(),
-    )
-    .await?;
+    let response = call(&fixture, "conversation/close", close.clone()).await?;
     ensure(
         response["result"]["admission"] == "admitted",
         format!("close: {response}"),
@@ -273,7 +243,7 @@ async fn resume_and_close_dispatch_as_inspectable_provider_operations() -> TestR
 
 #[tokio::test]
 async fn human_creator_and_approver_survive_create_and_load_control_dispatch() -> TestResult {
-    let (mut writer, mut reader, backend) = initialized_fixture().await?;
+    let (fixture, backend) = initialized_fixture().await?;
     let human = json!({"humanId":"owner"});
     let create = json!({
         "operationId":operation_id(),
@@ -284,14 +254,7 @@ async fn human_creator_and_approver_survive_create_and_load_control_dispatch() -
         "approver":human,
         "requestedPolicy":{"access":"workspace-write"}
     });
-    let created = call(
-        &mut writer,
-        &mut reader,
-        "create-human",
-        "conversation/create",
-        create.clone(),
-    )
-    .await?;
+    let created = call(&fixture, "conversation/create", create.clone()).await?;
     ensure(
         created["result"]["admission"] == "admitted",
         format!("create: {created}"),
@@ -305,14 +268,7 @@ async fn human_creator_and_approver_survive_create_and_load_control_dispatch() -
         "approver":human,
         "requestedPolicy":{"access":"workspace-write"}
     });
-    let loaded = call(
-        &mut writer,
-        &mut reader,
-        "load-human",
-        "conversation/load",
-        load.clone(),
-    )
-    .await?;
+    let loaded = call(&fixture, "conversation/load", load.clone()).await?;
     ensure(
         loaded["result"]["admission"] == "admitted",
         format!("load: {loaded}"),
@@ -380,42 +336,58 @@ fn snapshot(binding: ProviderBindingIdentity) -> TestResult<ConversationOperatio
     }))?)
 }
 
-async fn call(
-    writer: &mut tokio::net::unix::OwnedWriteHalf,
-    reader: &mut BufReader<tokio::net::unix::OwnedReadHalf>,
-    id: &str,
-    method: &str,
-    params: Value,
-) -> TestResult<Value> {
-    writer
-        .write_all(
-            format!(
-                "{}\n",
-                json!({"jsonrpc":"2.0","id":id,"method":method,"params":params})
-            )
-            .as_bytes(),
-        )
-        .await?;
-    let mut line = String::new();
-    reader.read_line(&mut line).await?;
-    Ok(serde_json::from_str(&line)?)
+/// The served API and the application it serves. Provider create, load, prompt and cancel
+/// submissions have no tool of their own (the API runs them as composite tools that also wait),
+/// so the submission itself is called on the application the tools run on; every other method
+/// is one tool call.
+struct Fixture {
+    served: served_api::ServedApi,
+    application: CollaborationApplication,
 }
 
-async fn initialized_fixture() -> TestResult<(
-    tokio::net::unix::OwnedWriteHalf,
-    BufReader<tokio::net::unix::OwnedReadHalf>,
-    RecordingBackend,
-)> {
+/// Answers `{"result": ..}` or `{"error": {"code", "message", "data"}}` as the API publishes it.
+async fn call(fixture: &Fixture, method: &str, params: Value) -> TestResult<Value> {
+    let conversations = fixture.application.conversations();
+    macro_rules! submitted {
+        ($operation:ident) => {
+            match serde_json::from_value(params) {
+                Ok(request) => published(conversations.$operation(request).await),
+                Err(error) => json!({"error":{"code":-32602,"message":error.to_string()}}),
+            }
+        };
+    }
+    let tool = match method {
+        "conversation/create" => return Ok(submitted!(conversation_create)),
+        "conversation/load" => return Ok(submitted!(conversation_load)),
+        "conversation/prompt" => return Ok(submitted!(conversation_prompt)),
+        "conversation/cancel" => return Ok(submitted!(conversation_cancel)),
+        "conversation/settingsSet" => "conversation_settings_set",
+        "conversation/settingsAccept" => "conversation_settings_accept",
+        "conversation/resume" => "conversation_resume",
+        "conversation/close" => "conversation_close",
+        "conversation/operationShow" => "conversation_operation_show",
+        "conversation/operationWait" => "conversation_operation_wait",
+        "conversation/operationReconcile" => "conversation_operation_reconcile",
+        "provider/sessionInspect" => "provider_session_inspect",
+        other => return Err(format!("no tool for {other}").into()),
+    };
+    Ok(fixture.served.call(tool, params).await?)
+}
+
+fn published<TResult: Serialize>(result: Result<TResult, impl CollaborationRejection>) -> Value {
+    match result {
+        Ok(result) => json!({ "result": result }),
+        Err(failure) => json!({ "error": failure.published_rejection() }),
+    }
+}
+
+async fn initialized_fixture() -> TestResult<(Fixture, RecordingBackend)> {
     initialized_fixture_with_endpoint(None).await
 }
 
 async fn initialized_fixture_with_endpoint(
     endpoint_description: Option<EndpointDescription>,
-) -> TestResult<(
-    tokio::net::unix::OwnedWriteHalf,
-    BufReader<tokio::net::unix::OwnedReadHalf>,
-    RecordingBackend,
-)> {
+) -> TestResult<(Fixture, RecordingBackend)> {
     let claude_binding = binding(endpoint(), "claudeCode", "claude-agent-acp")?;
     let cursor_binding = binding(cursor_endpoint(), "cursor", "cursor-agent-acp")?;
     let snapshot = snapshot(claude_binding.clone())?;
@@ -438,21 +410,19 @@ async fn initialized_fixture_with_endpoint(
         Some(description) => identity.with_endpoints(vec![description])?,
         None => identity,
     };
-    let (client, server) = tokio::net::UnixStream::pair()?;
-    tokio::spawn(serve_control_connection(server, identity));
-    let (read, mut write) = client.into_split();
-    let mut reader = BufReader::new(read);
-    let response = call(&mut write, &mut reader, "init", "control/initialize", json!({"version":{"major":1,"minor":0},"client":{"name":"provider-dispatch-test","version":"1"}})).await?;
-    ensure(
-        response.get("result").is_some(),
-        format!("initialize: {response}"),
-    )?;
-    Ok((write, reader, backend))
+    Ok((fixture(identity).await?, backend))
+}
+
+async fn fixture(identity: ServiceIdentity) -> TestResult<Fixture> {
+    Ok(Fixture {
+        application: CollaborationApplication::new(identity.clone()),
+        served: served_api::ServedApi::start(identity).await?,
+    })
 }
 
 #[tokio::test]
 async fn initialized_control_forwards_all_provider_conversation_methods() -> TestResult {
-    let (mut writer, mut reader, backend) = initialized_fixture().await?;
+    let (fixture, backend) = initialized_fixture().await?;
     let mutation = json!({"operationId":operation_id(),"generation":generation(),"requestedBy":actor("caller"),"approver":actor("approver")});
     let requests = [
         (
@@ -488,15 +458,8 @@ async fn initialized_control_forwards_all_provider_conversation_methods() -> Tes
             json!({"operationId":operation_id()}),
         ),
     ];
-    for (index, (method, params)) in requests.into_iter().enumerate() {
-        let response = call(
-            &mut writer,
-            &mut reader,
-            &format!("call-{index}"),
-            method,
-            params,
-        )
-        .await?;
+    for (method, params) in requests {
+        let response = call(&fixture, method, params).await?;
         ensure(
             response.get("result").is_some(),
             format!("{method}: {response}"),
@@ -527,7 +490,7 @@ async fn initialized_control_forwards_all_provider_conversation_methods() -> Tes
 
 #[tokio::test]
 async fn omitted_generation_uses_current_binding_for_each_mutation() -> TestResult {
-    let (mut writer, mut reader, backend) = initialized_fixture().await?;
+    let (fixture, backend) = initialized_fixture().await?;
     for (method, params) in [
         (
             "conversation/create",
@@ -546,7 +509,7 @@ async fn omitted_generation_uses_current_binding_for_each_mutation() -> TestResu
             json!({"operationId":operation_id(),"targetOperationId":operation_id(),"target":session("provider-conversation"),"requestedBy":actor("caller"),"approver":actor("approver")}),
         ),
     ] {
-        let response = call(&mut writer, &mut reader, method, method, params).await?;
+        let response = call(&fixture, method, params).await?;
         ensure(
             response.get("result").is_some(),
             format!("{method}: {response}"),
@@ -568,8 +531,8 @@ async fn omitted_generation_uses_current_binding_for_each_mutation() -> TestResu
 
 #[tokio::test]
 async fn dispatch_resolves_the_requested_dynamic_provider_binding() -> TestResult {
-    let (mut writer, mut reader, backend) = initialized_fixture().await?;
-    let response = call(&mut writer, &mut reader, "cursor-create", "conversation/create", json!({
+    let (fixture, backend) = initialized_fixture().await?;
+    let response = call(&fixture, "conversation/create", json!({
         "operationId":operation_id(),"endpoint":cursor_endpoint(),"generation":generation(),
         "workingDirectory":"/tmp/provider-work","createdBy":actor("caller"),"approver":actor("approver"),
         "requestedPolicy":{"access":"workspace-write"}
@@ -588,12 +551,10 @@ async fn dispatch_resolves_the_requested_dynamic_provider_binding() -> TestResul
 
 #[tokio::test]
 async fn existing_operation_id_returns_existing_before_stale_generation_validation() -> TestResult {
-    let (mut writer, mut reader, backend) = initialized_fixture().await?;
+    let (fixture, backend) = initialized_fixture().await?;
     *backend.existing_lookup.lock().await = true;
     let response = call(
-        &mut writer,
-        &mut reader,
-        "stale-duplicate",
+        &fixture,
         "conversation/prompt",
         json!({
             "operationId":operation_id(),"target":session("provider-conversation"),
@@ -616,13 +577,13 @@ async fn existing_operation_id_returns_existing_before_stale_generation_validati
 
 #[tokio::test]
 async fn backend_failure_is_returned_as_the_structured_control_error() -> TestResult {
-    let (mut writer, mut reader, backend) = initialized_fixture().await?;
+    let (fixture, backend) = initialized_fixture().await?;
     let failure: ConversationOperationFailure = serde_json::from_value(json!({
         "kind":"outcomeUnknown","stage":"settlement","effect":"unknown",
         "message":"provider response was lost","operationId":operation_id(),"target":session("provider-conversation")
     }))?;
     *backend.failure.lock().await = Some(failure.clone());
-    let response = call(&mut writer, &mut reader, "failure", "conversation/prompt", json!({
+    let response = call(&fixture, "conversation/prompt", json!({
         "operationId":operation_id(),"target":session("provider-conversation"),"generation":generation(),
         "requestedBy":actor("caller"),"approver":actor("approver"),"prompt":{"kind":"humanUser","text":"hello"}
     })).await?;
@@ -639,23 +600,18 @@ async fn backend_failure_is_returned_as_the_structured_control_error() -> TestRe
 
 #[tokio::test]
 async fn malformed_and_foreign_identity_requests_never_reach_backend() -> TestResult {
-    let (mut writer, mut reader, backend) = initialized_fixture().await?;
-    let malformed = call(
-        &mut writer,
-        &mut reader,
-        "bad",
-        "conversation/create",
-        json!({}),
-    )
-    .await?;
+    let (fixture, backend) = initialized_fixture().await?;
+    // Malformed input is refused by the API's own decoder before any operation runs.
+    let malformed = fixture
+        .served
+        .call("conversation_create", json!({}))
+        .await?;
     ensure(
-        malformed["error"]["code"] == -32602,
+        arguments_refused(&malformed),
         format!("malformed request: {malformed}"),
     )?;
     let stale = call(
-        &mut writer,
-        &mut reader,
-        "stale",
+        &fixture,
         "conversation/prompt",
         json!({
             "operationId":operation_id(),"target":session("provider-conversation"),
@@ -668,7 +624,7 @@ async fn malformed_and_foreign_identity_requests_never_reach_backend() -> TestRe
         stale["error"]["data"]["kind"] == "staleGeneration",
         format!("stale generation: {stale}"),
     )?;
-    let foreign = call(&mut writer, &mut reader, "foreign", "conversation/prompt", json!({
+    let foreign = call(&fixture, "conversation/prompt", json!({
         "operationId":operation_id(),"target":{"endpoint":{"serviceId":"019f0000-0000-7000-8000-000000000099","endpointId":"cursor"},"sessionId":"provider-conversation"},
         "generation":generation(),"requestedBy":actor("caller"),"approver":actor("approver"),"prompt":{"kind":"humanUser","text":"hello"}
     })).await?;
@@ -703,17 +659,7 @@ async fn unavailable_provider_conversation_names_endpoint_and_catalog_recovery()
     }))?;
     let identity =
         ServiceIdentity::new(SERVICE, EPOCH)?.with_endpoints(vec![endpoint_description])?;
-    let (client, server) = tokio::net::UnixStream::pair()?;
-    let serving = tokio::spawn(serve_control_connection(server, identity));
-    let (read, mut write) = client.into_split();
-    let mut read = BufReader::new(read);
-    let initialized = call(&mut write, &mut read, "init", "control/initialize", json!({
-        "version":{"major":1,"minor":0},"client":{"name":"unavailable-provider-test","version":"1"}
-    })).await?;
-    ensure(
-        initialized.get("result").is_some(),
-        format!("initialize: {initialized}"),
-    )?;
+    let fixture = fixture(identity).await?;
     for (method, params) in [
         (
             "conversation/create",
@@ -748,7 +694,7 @@ async fn unavailable_provider_conversation_names_endpoint_and_catalog_recovery()
             }),
         ),
     ] {
-        let response = call(&mut write, &mut read, method, method, params).await?;
+        let response = call(&fixture, method, params).await?;
         let data = &response["error"]["data"];
         ensure(
             data["kind"] == "unavailable",
@@ -769,9 +715,7 @@ async fn unavailable_provider_conversation_names_endpoint_and_catalog_recovery()
             format!("{method}: {response}"),
         )?;
     }
-    drop(write);
-    drop(read);
-    serving.await??;
+    fixture.served.stop().await?;
     Ok(())
 }
 
@@ -784,12 +728,9 @@ async fn unavailable_catalog_vetoes_a_still_present_provider_binding() -> TestRe
     let description: EndpointDescription = serde_json::from_value(json!({
         "endpoint":endpoint(),"label":"Fixture Claude","availability":availability,"channels":[]
     }))?;
-    let (mut writer, mut reader, backend) =
-        initialized_fixture_with_endpoint(Some(description)).await?;
+    let (fixture, backend) = initialized_fixture_with_endpoint(Some(description)).await?;
     let response = call(
-        &mut writer,
-        &mut reader,
-        "unavailable",
+        &fixture,
         "conversation/prompt",
         json!({
             "operationId":operation_id(),"target":session("provider-conversation"),
@@ -815,6 +756,14 @@ async fn unavailable_catalog_vetoes_a_still_present_provider_binding() -> TestRe
         "unavailable binding reached provider I/O".to_owned(),
     )?;
     Ok(())
+}
+
+/// The API refused the call's arguments before any operation ran. The Control decoder answered
+/// `-32602`; the API reports arguments that do not decode as a tool error with no typed payload,
+/// where every operation failure carries one.
+fn arguments_refused(response: &Value) -> bool {
+    response.get("error").is_some_and(Value::is_object)
+        && response.pointer("/error/data").is_none_or(Value::is_null)
 }
 
 fn ensure(condition: bool, message: String) -> TestResult {

@@ -54,7 +54,7 @@ pub(crate) async fn store_first_and_deliver(
 
 #[cfg(test)]
 mod tests {
-    use super::dispatch_message;
+    use crate::collaboration_application::CollaborationRejection;
     use crate::{
         BoardAvailability, MachineIdentity, ServiceIdentity, SessionDeliveryRouter,
         SessionMessageDelivery, SubscriptionDeliveryService, SubscriptionDeliveryServiceProps,
@@ -121,9 +121,9 @@ mod tests {
             .with_automation_store(Arc::clone(&automation))
             .with_subscription_delivery_service(subscription_service, presence);
         let target = session(&identity.service_id);
-        let response = dispatch_message(
-            json!("client-1"),
-            SessionMessageSendParams {
+        let sent = crate::CollaborationApplication::new(identity.clone())
+            .messages()
+            .message_send(SessionMessageSendParams {
                 target: target.clone(),
                 message: MessageContent::HumanUser {
                     text: "stored before delivery"
@@ -133,10 +133,12 @@ mod tests {
                 },
                 mode: MessageDelivery::Auto,
                 generation_guard: None,
-            },
-            &identity,
-        )
-        .await;
+            })
+            .await;
+        let response = match sent {
+            Ok(result) => json!({ "result": result }),
+            Err(failure) => json!({ "error": failure.published_rejection() }),
+        };
 
         let response_message = response
             .pointer("/error/data/message")
@@ -179,9 +181,5 @@ mod tests {
                 "Push was stored; delivery outcome is unknown. Inspect {expected_link} before retrying."
             )))
         );
-        assert!(collaboration_protocol::control_error_is_valid(
-            "message/send",
-            &response
-        ));
     }
 }

@@ -130,11 +130,10 @@ pub fn run_automation_command(arguments: Vec<OsString>) -> i32 {
         )
         .await?;
         dispatched = true;
-        let result = match request {
+        match request {
             Some(request) => client.configure_automation(request).await.and_then(encode),
             None => client.automation_status().await.and_then(encode),
-        };
-        result
+        }
     });
     if !dispatched
         && let Err(ConfigurationClientError::Connection(error)) = &result

@@ -238,7 +238,6 @@ async fn exercise_push_delivery_matrix(
     )?;
     peer.shutdown().await?;
     config_guard.verify()?;
-    proof.client.close().await?;
     Ok(())
 }
 
@@ -295,7 +294,6 @@ async fn exercise_scripted_acp_target(
         json!({"pushId":show.record.push_id,"target":target,"firstLine":observed}),
     )?;
     config_guard.verify()?;
-    proof.client.close().await?;
     Ok(())
 }
 
@@ -436,7 +434,6 @@ async fn push_delivery_matrix_holds_codex_recipients() -> ProofResult<()> {
     }
     .await;
     config_guard.verify()?;
-    proof.client.close().await?;
     result
 }
 

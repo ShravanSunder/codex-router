@@ -16,51 +16,6 @@ fn fixture_session(endpoint_id: &str, session_id: &str) -> Value {
     })
 }
 
-fn expected_tool_name(method: &str) -> String {
-    if let Some(provider_method) = method.strip_prefix("conversation/") {
-        return format!(
-            "conversation_{}",
-            provider_method
-                .chars()
-                .flat_map(|character| {
-                    if character.is_ascii_uppercase() {
-                        vec!['_', character.to_ascii_lowercase()]
-                    } else {
-                        vec![character]
-                    }
-                })
-                .collect::<String>()
-        );
-    }
-    match method {
-        "endpoint/list" => return "endpoints_list".to_owned(),
-        "codex/sessionList" => return "sessions_list".to_owned(),
-        "provider/sessionList" => return "provider_sessions_list".to_owned(),
-        "provider/sessionInspect" => return "provider_session_inspect".to_owned(),
-        "codex/sessionInspect" => return "session_inspect".to_owned(),
-        "codex/sessionRename" => return "session_rename".to_owned(),
-        "message/send" => return "message_send".to_owned(),
-        "codex/turnInterrupt" => return "turn_interrupt".to_owned(),
-        "lifecycleJournal/status" => return "journal_status".to_owned(),
-        "lifecycleJournal/read" => return "journal_read".to_owned(),
-        "addressBook/list" => return "addresses_list".to_owned(),
-        "wake/subscribe" => return "wake_wait_until_first_fire".to_owned(),
-        _ => {}
-    }
-    let mut output = String::new();
-    for character in method.chars() {
-        if character == '/' {
-            output.push('_');
-        } else if character.is_ascii_uppercase() {
-            output.push('_');
-            output.push(character.to_ascii_lowercase());
-        } else {
-            output.push(character);
-        }
-    }
-    output
-}
-
 #[path = "tests/route_tests.rs"]
 mod route_tests;
 

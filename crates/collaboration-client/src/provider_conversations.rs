@@ -21,7 +21,7 @@ const COMPOSITE_CALL_ALLOWANCE: Duration = Duration::from_secs(30);
 
 pub enum ProviderConversations {
     /// The collaboration API: one composite tool call per operation.
-    Api(CollaborationClient),
+    Api(Box<CollaborationClient>),
     /// The Router's own operations, for callers inside the Host.
     Local(Arc<dyn LocalCollaboration>),
 }

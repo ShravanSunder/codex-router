@@ -207,7 +207,7 @@ pub fn run_session_inventory_command(arguments: Vec<OsString>) -> i32 {
                 code: -32050,
                 data: Some(json!({"kind":"endpointNotFound","stage":"discovery","message":"Endpoint not found"})),
             })?;
-        let result = match endpoint_kind {
+        match endpoint_kind {
             InventoryEndpointKind::Codex => {
                 let source = source.ok_or(ClientError::InvalidRequest("--source is required for Codex sessions"))?;
                 serde_json::to_value(client.list_sessions(NativeSessionListParams {
@@ -222,8 +222,7 @@ pub fn run_session_inventory_command(arguments: Vec<OsString>) -> i32 {
                 code: -32050,
                 data: Some(json!({"kind":"unsupportedCapability","stage":"discovery","message":"Session inventory unsupported on this endpoint"})),
             }),
-        };
-        result
+        }
     });
     match result {
         Ok(result) => {

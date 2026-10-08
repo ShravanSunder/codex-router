@@ -1,7 +1,6 @@
-use collaboration_client::ControlClient;
-use collaboration_service::{LocalControlService, ServiceIdentity};
+use collaboration_mcp::test_support::ServedCollaborationApi;
+use collaboration_service::{CollaborationApplication, OwnerOnlySocket, ServiceIdentity};
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
-use tokio_util::sync::CancellationToken;
 
 #[tokio::test]
 async fn owned_listener_is_private_and_shutdown_removes_only_its_socket() {
@@ -17,8 +16,9 @@ async fn owned_listener_is_private_and_shutdown_removes_only_its_socket() {
         "00000000-0000-4000-8000-000000000002",
     )
     .unwrap_or_else(|e| panic!("identity: {e}"));
-    let service = LocalControlService::bind(&socket, identity.clone())
-        .unwrap_or_else(|e| panic!("bind: {e}"));
+    let served = ServedCollaborationApi::start(&directory, CollaborationApplication::new(identity))
+        .await
+        .unwrap_or_else(|e| panic!("serve: {e}"));
     assert_eq!(
         std::fs::metadata(&socket)
             .unwrap_or_else(|e| panic!("metadata: {e}"))
@@ -27,15 +27,11 @@ async fn owned_listener_is_private_and_shutdown_removes_only_its_socket() {
             & 0o777,
         0o600
     );
-    assert!(LocalControlService::bind(&socket, identity).is_err());
-    let stop = CancellationToken::new();
-    let task = tokio::spawn(service.run(stop.clone()));
-    let stream = tokio::net::UnixStream::connect(&socket)
+    assert!(OwnerOnlySocket::bind(&socket).is_err());
+    let client = served
+        .client("listener-proof")
         .await
         .unwrap_or_else(|e| panic!("connect: {e}"));
-    let mut client = ControlClient::initialize(stream, "listener-proof", "1")
-        .await
-        .unwrap_or_else(|e| panic!("initialize: {e}"));
     assert!(
         client
             .list_endpoints()
@@ -44,9 +40,9 @@ async fn owned_listener_is_private_and_shutdown_removes_only_its_socket() {
             .endpoints
             .is_empty()
     );
-    stop.cancel();
-    task.await
-        .unwrap_or_else(|e| panic!("join: {e}"))
+    served
+        .stop()
+        .await
         .unwrap_or_else(|e| panic!("service: {e}"));
     assert!(!socket.exists());
     std::fs::remove_dir(directory).unwrap_or_else(|e| panic!("cleanup: {e}"));
@@ -62,13 +58,7 @@ async fn dropping_old_listener_preserves_replacement_at_same_path() {
         .create(&directory)
         .unwrap_or_else(|error| panic!("directory: {error}"));
     let socket = directory.join("control.sock");
-    let identity = ServiceIdentity::new(
-        "00000000-0000-4000-8000-000000000001",
-        "00000000-0000-4000-8000-000000000002",
-    )
-    .unwrap_or_else(|error| panic!("identity: {error}"));
-    let original = LocalControlService::bind(&socket, identity)
-        .unwrap_or_else(|error| panic!("bind: {error}"));
+    let original = OwnerOnlySocket::bind(&socket).unwrap_or_else(|error| panic!("bind: {error}"));
     // Act: replace only this test-owned socket path while the original handle remains alive.
     std::fs::remove_file(&socket).unwrap_or_else(|error| panic!("unlink fixture: {error}"));
     let replacement = tokio::net::UnixListener::bind(&socket)

@@ -1,12 +1,14 @@
 //! Public SDK readers consume actual native reconciliation and persisted SQLite state.
+#[path = "support/served_api.rs"]
+mod served_api;
 #[cfg(test)]
 mod tests {
     use codex_native_integration::{
         NativePayloadSchemas, NativeProtocolConnection, NativeSchemaBundle,
     };
-    use collaboration_client::ControlClient;
+    use collaboration_client::CollaborationClient;
     use collaboration_protocol::{CoverageState, LifecycleChange, ObservationScope};
-    use collaboration_service::{ServiceIdentity, serve_control_connection};
+    use collaboration_service::ServiceIdentity;
     use futures_util::{SinkExt, StreamExt};
     use lifecycle_observation::{
         LifecycleStore, NativeObservationInputs, NativeObservationStream, ObservationJournal,
@@ -78,7 +80,7 @@ mod tests {
         })
         .unwrap_or_else(|error| panic!("observer: {error}"));
         let observer = tokio::spawn(observer.run(tokio_util::sync::CancellationToken::new()));
-        let (mut client, server_task) = connect_public_reader(&scope, Arc::clone(&store)).await;
+        let (client, served) = connect_public_reader(&scope, Arc::clone(&store)).await;
 
         // Act: wait through the public journal, capture page one, then change native state.
         let ready_position = tokio::time::timeout(Duration::from_secs(3), async {
@@ -174,13 +176,10 @@ mod tests {
         fixture
             .await
             .unwrap_or_else(|error| panic!("fixture: {error}"));
-        client
-            .close()
+        drop(client);
+        served
+            .stop()
             .await
-            .unwrap_or_else(|error| panic!("close: {error}"));
-        server_task
-            .await
-            .unwrap_or_else(|error| panic!("server task: {error}"))
             .unwrap_or_else(|error| panic!("server: {error}"));
         Arc::try_unwrap(store)
             .unwrap_or_else(|_| panic!("store shared"))
@@ -190,7 +189,7 @@ mod tests {
             .await
             .unwrap_or_else(|error| panic!("reopen: {error}"));
         let store = Arc::new(LifecycleStore::new(journal));
-        let (mut client, server_task) = connect_public_reader(&scope, Arc::clone(&store)).await;
+        let (client, served) = connect_public_reader(&scope, Arc::clone(&store)).await;
         let restored = client
             .list_addresses(&scope.endpoint, 100, None)
             .await
@@ -215,13 +214,10 @@ mod tests {
                 .iter()
                 .any(|record| matches!(record.observation.change, LifecycleChange::CoverageLost))
         );
-        client
-            .close()
+        drop(client);
+        served
+            .stop()
             .await
-            .unwrap_or_else(|error| panic!("close: {error}"));
-        server_task
-            .await
-            .unwrap_or_else(|error| panic!("server task: {error}"))
             .unwrap_or_else(|error| panic!("server: {error}"));
         Arc::try_unwrap(store)
             .unwrap_or_else(|_| panic!("store shared"))
@@ -233,7 +229,7 @@ mod tests {
     async fn connect_public_reader(
         scope: &ObservationScope,
         store: Arc<LifecycleStore>,
-    ) -> (ControlClient, tokio::task::JoinHandle<std::io::Result<()>>) {
+    ) -> (CollaborationClient, crate::served_api::ServedApi) {
         let identity = ServiceIdentity::new(
         "00000000-0000-4000-8000-000000000001", "00000000-0000-4000-8000-000000000002",
     ).unwrap_or_else(|error| panic!("identity: {error}"))
@@ -242,13 +238,14 @@ mod tests {
         .unwrap_or_else(|error| panic!("endpoint: {error}"))])
     .unwrap_or_else(|error| panic!("endpoints: {error}"))
     .with_journal(store);
-        let (client, server) =
-            tokio::net::UnixStream::pair().unwrap_or_else(|error| panic!("Control pair: {error}"));
-        let task = tokio::spawn(serve_control_connection(server, identity));
-        let client = ControlClient::initialize(client, "public-observation-test", "1")
+        let served = crate::served_api::ServedApi::start(identity)
             .await
-            .unwrap_or_else(|error| panic!("initialize: {error}"));
-        (client, task)
+            .unwrap_or_else(|error| panic!("serve: {error}"));
+        let client = served
+            .client("public-observation-test")
+            .await
+            .unwrap_or_else(|error| panic!("connect: {error}"));
+        (client, served)
     }
 
     async fn read_request(wire: &mut WebSocketStream<tokio::net::UnixStream>) -> Value {

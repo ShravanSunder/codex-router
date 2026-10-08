@@ -85,6 +85,11 @@ fn router_version_warning(
         })
 }
 
+/// The scripted API the integration tests also use, for this crate's unit tests.
+#[cfg(test)]
+#[path = "../tests/support/scripted_api.rs"]
+mod scripted_api;
+
 #[cfg(test)]
 mod router_version_warning_tests {
     use super::router_version_warning;

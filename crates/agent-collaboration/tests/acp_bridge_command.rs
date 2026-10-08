@@ -1,7 +1,8 @@
 //! Raw ACP stdio bridge preserves caller-owned negotiation and callback identifiers.
 #[cfg(test)]
 mod tests {
-    use collaboration_service::{LocalControlService, ManifestPublication, ServiceIdentity};
+    use collaboration_mcp::test_support::ServedCollaborationApi;
+    use collaboration_service::{CollaborationApplication, ServiceIdentity};
     use serde_json::json;
     use std::{
         cell::Cell,
@@ -15,7 +16,6 @@ mod tests {
         time::Duration,
     };
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-    use tokio_util::sync::CancellationToken;
 
     const INITIALIZE: &str = "{\"jsonrpc\":\"2.0\",\"id\":9007199254740993,\"method\":\"initialize\",\"params\":{\"protocolVersion\":1,\"clientCapabilities\":{}}}\n";
     const CALLBACK: &str = "{\"jsonrpc\":\"2.0\",\"id\":9007199254740995,\"method\":\"session/request_permission\",\"params\":{\"sessionId\":\"fixture\",\"options\":[]}}\n";
@@ -31,17 +31,20 @@ mod tests {
             .create(&root)
             .unwrap();
         let id = "00000000-0000-4000-8000-000000000001";
-        let digest = format!("sha256:{}", "a".repeat(64));
         let endpoint = serde_json::from_value(json!({"endpoint":{"serviceId":id,"endpointId":"codex-local"},"label":"ACP bridge fixture","availability":{"state":"available","observedAt":"2026-09-06T00:00:00Z"},"channels":[{"kind":"acp","transport":"unixJsonLines","path":"acp.sock","schemaDigest":format!("sha256:{}",collaboration_client::protocol::ACP_SCHEMA_DIGEST)}]})).unwrap();
         let identity = ServiceIdentity::new(id, id)
             .unwrap()
             .with_endpoints(vec![endpoint])
             .unwrap();
-        let listener = LocalControlService::bind(&root.join("control.sock"), identity).unwrap();
-        let manifest = serde_json::from_value(json!({"version":2,"serviceId":id,"serviceEpoch":id,"machineLabel":"fixture-host","control":{"transport":"unixJsonLines","path":"control.sock"},"controlSchemaDigest":digest,"mcp":{"transport":"streamableHttp","url":"http://127.0.0.1:0/mcp"}})).unwrap();
-        let publication = ManifestPublication::publish(&root, &manifest).unwrap();
-        let stop = CancellationToken::new();
-        let service = tokio::spawn(listener.run(stop.clone()));
+        // The bridge discovers the carrier socket through endpoints_list on the served API.
+        let served = ServedCollaborationApi::start(&root, CollaborationApplication::new(identity))
+            .await
+            .unwrap();
+        let listed = served.call("endpoints_list", json!({})).await.unwrap();
+        assert_eq!(
+            listed.pointer("/result/endpoints/0/channels/0/path"),
+            Some(&json!("acp.sock"))
+        );
         let acp = tokio::net::UnixListener::bind(root.join("acp.sock")).unwrap();
         let provider_connected = Arc::new(AtomicBool::new(false));
         let peer_connected = Arc::clone(&provider_connected);
@@ -79,7 +82,9 @@ mod tests {
             .spawn()
             .unwrap();
         let wait_phase = Cell::new("writing initialize");
-        let flow = tokio::time::timeout(Duration::from_secs(5), async {
+        // Generous enough for the first launch of a freshly built executable under a full
+        // parallel test run; the exchange itself takes milliseconds.
+        let flow = tokio::time::timeout(Duration::from_secs(20), async {
             let mut input = child.stdin.take().ok_or("stdin missing")?;
             let mut output = BufReader::new(child.stdout.take().ok_or("stdout missing")?);
             input.write_all(INITIALIZE.as_bytes()).await?;
@@ -118,14 +123,12 @@ mod tests {
             child.kill().await.unwrap();
         }
         let _status = child.wait().await;
-        stop.cancel();
-        service.await.unwrap().unwrap();
+        served.stop().await.unwrap();
         let peer_passed = peer.is_finished();
         if !peer_passed {
             peer.abort();
         }
         let peer_result = peer.await;
-        drop(publication);
         std::fs::remove_file(root.join("acp.sock")).unwrap();
         std::fs::remove_dir(root).unwrap();
         // Assert: whole executable carrier exchange completed and the peer's exact checks passed.

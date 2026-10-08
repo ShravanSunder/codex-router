@@ -1,7 +1,6 @@
 use claude_code_peer_messaging::ClaudeCodeSessionRegistry;
 use std::sync::Arc;
 
-use collaboration_client::ControlClient;
 use collaboration_protocol::{
     EndpointDescription, NativeSessionScope, NativeSessionSource, NativeSessionView,
     ProviderRequestedPolicy, ProviderSessionListParams, ProviderSessionState,
@@ -9,10 +8,11 @@ use collaboration_protocol::{
 };
 use collaboration_service::{
     ProviderOperationStore, ProviderSessionEventHub, ProviderSessionRecord, ServiceIdentity,
-    serve_control_connection,
 };
 use serde_json::json;
 use tokio::sync::Mutex;
+#[path = "support/served_api.rs"]
+mod served_api;
 
 #[tokio::test]
 async fn provider_inventory_control_reads_durable_rows_with_hub_state() {
@@ -148,9 +148,11 @@ async fn provider_inventory_control_reads_durable_rows_with_hub_state() {
         .with_provider_session_hub(hub.clone())
         .with_claude_code_sessions(Arc::new(ClaudeCodeSessionRegistry::new(registry_directory)));
     let second_identity = identity.clone();
-    let (client_stream, server_stream) = tokio::net::UnixStream::pair().expect("socket");
-    let server = tokio::spawn(serve_control_connection(server_stream, identity));
-    let mut client = ControlClient::initialize(client_stream, "provider-list-test", "1")
+    let served = served_api::ServedApi::start(identity)
+        .await
+        .expect("socket");
+    let client = served
+        .client("provider-list-test")
         .await
         .expect("initialize");
     let params = ProviderSessionListParams {
@@ -312,12 +314,13 @@ async fn provider_inventory_control_reads_durable_rows_with_hub_state() {
         invalid_source,
         collaboration_client::ClientError::Rejected { code: -32050, .. }
     ));
-    client.close().await.expect("close");
-    server.await.expect("server task").expect("serve");
+    served.stop().await.expect("close");
 
-    let (client_stream, server_stream) = tokio::net::UnixStream::pair().expect("second socket");
-    let server = tokio::spawn(serve_control_connection(server_stream, second_identity));
-    let mut client = ControlClient::initialize(client_stream, "provider-list-test", "1")
+    let served = served_api::ServedApi::start(second_identity)
+        .await
+        .expect("second socket");
+    let client = served
+        .client("provider-list-test")
         .await
         .expect("second initialize");
     let wrong_channel = client
@@ -345,11 +348,8 @@ async fn provider_inventory_control_reads_durable_rows_with_hub_state() {
         ),
         "{wrong_channel:?}"
     );
-    client.close().await.expect("second close");
-    server
-        .await
-        .expect("second server task")
-        .expect("second serve");
+    drop(client);
+    served.stop().await.expect("second serve");
 
     let unavailable_claude: EndpointDescription = serde_json::from_value(json!({
         "endpoint":target.endpoint,"label":"Claude unavailable fixture",
@@ -363,9 +363,11 @@ async fn provider_inventory_control_reads_durable_rows_with_hub_state() {
         .with_claude_code_sessions(Arc::new(ClaudeCodeSessionRegistry::new(
             root.path().join("claude-fixture-registry"),
         )));
-    let (client_stream, server_stream) = tokio::net::UnixStream::pair().expect("third socket");
-    let server = tokio::spawn(serve_control_connection(server_stream, identity));
-    let mut client = ControlClient::initialize(client_stream, "terminal-only-list-test", "1")
+    let served = served_api::ServedApi::start(identity)
+        .await
+        .expect("third socket");
+    let client = served
+        .client("terminal-only-list-test")
         .await
         .expect("third initialize");
     let terminal_only = client
@@ -385,9 +387,6 @@ async fn provider_inventory_control_reads_durable_rows_with_hub_state() {
         &terminal_only.sessions[0],
         collaboration_protocol::ProviderSessionSummary::ClaudeCodeInteractive { .. }
     ));
-    client.close().await.expect("third close");
-    server
-        .await
-        .expect("third server task")
-        .expect("third serve");
+    drop(client);
+    served.stop().await.expect("third serve");
 }

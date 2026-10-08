@@ -32,7 +32,10 @@ fn runtime_picker_preserves_native_subagent_classification() {
 }
 use serde_json::{Value, json};
 use std::os::unix::fs::PermissionsExt;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+#[path = "../../tests/fake_api_support/mod.rs"]
+mod fake_api_support;
+use fake_api_support::{FakeCollaborationApi, FakeReply};
 const SERVICE: &str = "00000000-0000-4000-8000-000000000001";
 const EPOCH: &str = "00000000-0000-4000-8000-000000000002";
 
@@ -78,87 +81,63 @@ fn inspected(id: &str) -> Value {
     "thread":{"id":id,"name":format!("Live {id}"),"cwd":"/repo","modelProvider":"debug-provider","createdAt":100,"updatedAt":200,
     "gitInfo":{"branch":"feature/live","originUrl":"https://example.invalid/repo.git"}}})
 }
+/// A stand-in API answering `steps` in order, each `(tool, result)`. The handle yields the
+/// calls as `{"tool", "arguments"}` once every step was answered and no further call came.
 async fn connect_fixture(
     steps: Vec<(&'static str, Value)>,
-) -> (ControlClient, tokio::task::JoinHandle<Vec<Value>>) {
-    let (client, server) = tokio::net::UnixStream::pair().unwrap();
+) -> (CollaborationClient, tokio::task::JoinHandle<Vec<Value>>) {
+    let mut api = FakeCollaborationApi::new(SERVICE, EPOCH).unwrap();
+    let (tools, replies): (Vec<&'static str>, Vec<FakeReply>) = steps
+        .into_iter()
+        .map(|(tool, result)| (tool, FakeReply::Result(result)))
+        .unzip();
+    let served = api.serve_then_watch(replies, std::time::Duration::from_millis(200));
+    let client = CollaborationClient::connect(api.directory(), "picker-proof", "1")
+        .await
+        .unwrap();
     let task = tokio::spawn(async move {
-        let (read, mut write) = server.into_split();
-        let mut lines = BufReader::new(read).lines();
-        let request: Value =
-            serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
-        assert_eq!(request["method"], "control/initialize");
-        let result = json!({"version":{"major":1,"minor":0},"serviceId":SERVICE,"serviceEpoch":EPOCH,"controlSchemaDigest":format!("sha256:{}","a".repeat(64))});
-        write
-            .write_all(
-                format!(
-                    "{}\n",
-                    json!({"jsonrpc":"2.0","id":request["id"],"result":result})
-                )
-                .as_bytes(),
-            )
+        let watched = tokio::time::timeout(std::time::Duration::from_secs(10), served)
             .await
+            .expect("expected read operation")
+            .unwrap()
             .unwrap();
-        let mut observed = Vec::new();
-        for (method, result) in steps {
-            let line = lines
-                .next_line()
-                .await
-                .unwrap()
-                .expect("expected read operation");
-            let request: Value = serde_json::from_str(&line).unwrap();
-            assert_eq!(request["method"], method);
-            write
-                .write_all(
-                    format!(
-                        "{}\n",
-                        json!({"jsonrpc":"2.0","id":request["id"],"result":result})
-                    )
-                    .as_bytes(),
-                )
-                .await
-                .unwrap();
-            observed.push(request);
+        drop(api);
+        for (call, tool) in watched.calls.iter().zip(&tools) {
+            assert_eq!(call["tool"], *tool);
         }
         assert!(
-            lines.next_line().await.unwrap().is_none(),
+            watched.further_call.is_none(),
             "no mutation or retry allowed"
         );
-        observed
+        watched.calls
     });
-    (
-        ControlClient::initialize(client, "picker-proof", "1")
-            .await
-            .unwrap(),
-        task,
-    )
+    (client, task)
 }
 
 #[tokio::test]
 async fn paged_runtime_only_threads_include_metadata_and_blocked_status_without_mutations() {
     // Arrange: neither live thread exists in the stored catalog.
     let steps = vec![
-        ("endpoint/list", inventory()),
+        ("endpoints_list", inventory()),
         (
-            "codex/sessionList",
+            "sessions_list",
             page("first", json!({"type":"idle"}), json!("next-page")),
         ),
-        ("codex/sessionInspect", inspected("first")),
+        ("session_inspect", inspected("first")),
         (
-            "codex/sessionList",
+            "sessions_list",
             page(
                 "second",
                 json!({"type":"active","activeFlags":["waitingOnApproval"]}),
                 Value::Null,
             ),
         ),
-        ("codex/sessionInspect", inspected("second")),
-        ("endpoint/list", inventory()),
+        ("session_inspect", inspected("second")),
+        ("endpoints_list", inventory()),
     ];
     let (mut client, peer) = connect_fixture(steps).await;
     // Act
     let (_, rows) = load_runtime_records(&mut client, &[], false).await.unwrap();
-    client.close().await.unwrap();
     let requests = peer.await.unwrap();
     // Assert
     assert_eq!(rows.len(), 2);
@@ -172,33 +151,32 @@ async fn paged_runtime_only_threads_include_metadata_and_blocked_status_without_
         rows[1].runtime_status,
         crate::picker_runtime_status::PickerRuntimeStatus::Blocked
     );
-    assert_eq!(requests[1]["params"]["view"], "loaded");
-    assert_eq!(requests[1]["params"]["includeEmptySessions"], false);
-    assert_eq!(requests[3]["params"]["cursor"], "next-page");
+    assert_eq!(requests[1]["arguments"]["view"], "loaded");
+    assert_eq!(requests[1]["arguments"]["includeEmptySessions"], false);
+    assert_eq!(requests[3]["arguments"]["cursor"], "next-page");
 }
 
 #[tokio::test]
 async fn runtime_picker_passes_the_empty_session_opt_in_to_inventory() {
     let (mut client, peer) = connect_fixture(vec![
-        ("endpoint/list", inventory()),
+        ("endpoints_list", inventory()),
         (
-            "codex/sessionList",
+            "sessions_list",
             page("empty-thread", json!({"type":"idle"}), Value::Null),
         ),
-        ("codex/sessionInspect", inspected("empty-thread")),
-        ("endpoint/list", inventory()),
+        ("session_inspect", inspected("empty-thread")),
+        ("endpoints_list", inventory()),
     ])
     .await;
 
     let (_, records) = load_runtime_records(&mut client, &[], true)
         .await
         .expect("explicitly opted-in inventory");
-    client.close().await.unwrap();
     let requests = peer.await.unwrap();
 
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].session_id, "empty-thread");
-    assert_eq!(requests[1]["params"]["includeEmptySessions"], true);
+    assert_eq!(requests[1]["arguments"]["includeEmptySessions"], true);
 }
 
 #[tokio::test]
@@ -207,18 +185,17 @@ async fn replacement_during_refresh_discards_the_entire_runtime_result() {
     let mut replacement = inventory();
     replacement["endpoints"][0]["channels"][0]["generation"]["generation"] = json!(2);
     let (mut client, peer) = connect_fixture(vec![
-        ("endpoint/list", inventory()),
+        ("endpoints_list", inventory()),
         (
-            "codex/sessionList",
+            "sessions_list",
             page("first", json!({"type":"idle"}), Value::Null),
         ),
-        ("codex/sessionInspect", inspected("first")),
-        ("endpoint/list", replacement),
+        ("session_inspect", inspected("first")),
+        ("endpoints_list", replacement),
     ])
     .await;
     // Act / Assert: no mixture of generations may become live picker state.
     assert!(load_runtime_records(&mut client, &[], false).await.is_err());
-    client.close().await.unwrap();
     peer.await.unwrap();
 }
 
@@ -227,10 +204,9 @@ async fn unavailable_endpoint_does_not_attempt_to_load_or_inspect_threads() {
     // Arrange: a reachable service whose backend is unavailable.
     let mut unavailable = inventory();
     unavailable["endpoints"][0]["availability"] = json!({"state":"unprobed"});
-    let (mut client, peer) = connect_fixture(vec![("endpoint/list", unavailable)]).await;
+    let (mut client, peer) = connect_fixture(vec![("endpoints_list", unavailable)]).await;
     // Act / Assert
     assert!(load_runtime_records(&mut client, &[], false).await.is_err());
-    client.close().await.unwrap();
     assert_eq!(peer.await.unwrap().len(), 1);
 }
 
@@ -245,23 +221,22 @@ async fn stored_metadata_is_preserved_while_runtime_status_is_refreshed() {
     );
     stored.conversation.snippets = vec!["Retained preview".into()];
     let (mut client, peer) = connect_fixture(vec![
-        ("endpoint/list", inventory()),
+        ("endpoints_list", inventory()),
         (
-            "codex/sessionList",
+            "sessions_list",
             page(
                 "first",
                 json!({"type":"active","activeFlags":[]}),
                 Value::Null,
             ),
         ),
-        ("endpoint/list", inventory()),
+        ("endpoints_list", inventory()),
     ])
     .await;
     // Act
     let (_, rows) = load_runtime_records(&mut client, &[stored], false)
         .await
         .unwrap();
-    client.close().await.unwrap();
     peer.await.unwrap();
     // Assert
     assert_eq!(rows[0].title, "Stored title");
@@ -283,14 +258,13 @@ async fn provider_inventory_reaches_picker_as_a_qualified_read_only_row() {
         }],"nextCursor":null
     });
     let (mut client, peer) = connect_fixture(vec![
-        ("endpoint/list", inventory_with_provider()),
-        ("provider/sessionList", provider_page),
+        ("endpoints_list", inventory_with_provider()),
+        ("provider_sessions_list", provider_page),
     ])
     .await;
     let (native_endpoint, rows) = load_provider_records(&mut client)
         .await
         .expect("provider rows");
-    client.close().await.expect("close");
     let requests = peer.await.expect("peer");
     assert_eq!(
         native_endpoint.expect("native endpoint"),
@@ -303,7 +277,7 @@ async fn provider_inventory_reaches_picker_as_a_qualified_read_only_row() {
     ));
     assert!(rows[0].title.contains("Claude fixture"));
     assert_eq!(rows[0].runtime_status, PickerRuntimeStatus::Blocked);
-    assert_eq!(requests[1]["params"]["source"], "all");
+    assert_eq!(requests[1]["arguments"]["source"], "all");
 }
 
 #[tokio::test]
@@ -312,13 +286,9 @@ async fn hosted_refresh_keeps_equal_provider_and_codex_ids_as_two_rows() {
         EndpointDescription, ProviderRequestedPolicy, ProviderWorkingDirectory, RouterAccess,
         SessionRef,
     };
-    use collaboration_service::{
-        LocalControlService, ManifestPublication, ProviderOperationStore, ProviderSessionRecord,
-        ServiceIdentity,
-    };
+    use collaboration_service::{ProviderOperationStore, ProviderSessionRecord, ServiceIdentity};
     use std::sync::Arc;
     use tokio::sync::Mutex;
-    use tokio_util::sync::CancellationToken;
 
     let root = tempfile::Builder::new()
         .prefix("provider-picker-")
@@ -362,24 +332,17 @@ async fn hosted_refresh_keeps_equal_provider_and_codex_ids_as_two_rows() {
         .cloned()
         .map(|entry| serde_json::from_value(entry).expect("description"))
         .collect();
-    let digest = format!("sha256:{}", "a".repeat(64));
     let identity = ServiceIdentity::new(SERVICE, EPOCH)
         .expect("identity")
         .with_endpoints(descriptions)
         .expect("endpoints")
         .with_provider_operation_store(store);
-    let control =
-        LocalControlService::bind(&root.path().join("control.sock"), identity).expect("listener");
-    let manifest = serde_json::from_value(json!({
-        "version":2,"serviceId":SERVICE,"serviceEpoch":EPOCH,
-        "machineLabel":"fixture-host","control":{"transport":"unixJsonLines","path":"control.sock"},
-        "controlSchemaDigest":digest,
-        "mcp":{"transport":"streamableHttp","url":"http://127.0.0.1:0/mcp"}
-    }))
-    .expect("manifest");
-    let _publication = ManifestPublication::publish(root.path(), &manifest).expect("publication");
-    let stop = CancellationToken::new();
-    let server = tokio::spawn(control.run(stop.clone()));
+    let served = collaboration_mcp::test_support::ServedCollaborationApi::start(
+        root.path(),
+        collaboration_service::CollaborationApplication::new(identity),
+    )
+    .await
+    .expect("serve collaboration API");
     let codex = runtime_record(
         "shared-id",
         "Codex row",
@@ -399,8 +362,7 @@ async fn hosted_refresh_keeps_equal_provider_and_codex_ids_as_two_rows() {
         rows.iter()
             .any(|row| matches!(row.identity, SessionPickerIdentity::HostedProvider(_)))
     );
-    stop.cancel();
-    server.await.expect("server task").expect("server");
+    served.stop().await.expect("collaboration API stops");
 }
 
 #[tokio::test]

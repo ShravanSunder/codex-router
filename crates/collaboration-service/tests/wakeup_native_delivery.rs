@@ -14,6 +14,8 @@ use serde_json::{Value, json};
 use sqlx::Connection;
 use std::{collections::BTreeMap, os::unix::fs::DirBuilderExt, sync::Arc, time::Duration};
 use tokio_tungstenite::tungstenite::Message;
+#[path = "support/served_api.rs"]
+mod served_api;
 #[path = "support/wake_push_draft.rs"]
 mod wake_push_test_support;
 
@@ -413,13 +415,8 @@ async fn exercise_delivery(
             | NativeOutcome::ReconcileAbsent
             | NativeOutcome::ReconcileWrongPushId
     ) {
-        let (socket, server) = tokio::net::UnixStream::pair()?;
-        let service = tokio::spawn(collaboration_service::serve_control_connection(
-            server, identity,
-        ));
-        let mut client =
-            collaboration_client::ControlClient::initialize(socket, "reconcile-fixture", "1")
-                .await?;
+        let served = served_api::ServedApi::start(identity).await?;
+        let client = served.client("reconcile-fixture").await?;
         let result = client
             .reconcile_delivery(collaboration_protocol::DeliveryShowRequest {
                 delivery_id: delivery_id.clone(),
@@ -450,8 +447,7 @@ async fn exercise_delivery(
         ) {
             return Err("absence or content mismatch was treated as a definite outcome".into());
         }
-        client.close().await?;
-        service.await??;
+        served.stop().await?;
     }
     tokio::time::timeout(Duration::from_secs(2), backend).await???;
     shutdown.cancel();

@@ -4,7 +4,6 @@ use crate::{
     CodexAppServerDeliveryRoute, NativeControlBackend, SessionDeliveryRoute, SessionDeliveryRouter,
     SessionMessageDelivery,
 };
-use collaboration_client::ControlClient;
 use collaboration_protocol::{
     DeliveryDisposition, DeliveryEvidence, DeliveryShowRequest, OperationId, PushId,
     RouterOriginRef, SavedMessage,
@@ -113,20 +112,20 @@ async fn native_delivery_process_loss_preserves_uncertainty_without_resend() -> 
                 .ok_or("wake worker missing")?
                 .run(stop.clone()),
         );
-        let (socket, peer) = tokio::net::UnixStream::pair()?;
-        let service = tokio::spawn(crate::serve_control_connection(peer, identity));
-        let mut client = ControlClient::initialize(socket, "delivery-recovery", "1").await?;
+        let application = crate::CollaborationApplication::new(identity);
         let observed = tokio::time::timeout(Duration::from_secs(3), async {
             let mut interval = tokio::time::interval(Duration::from_millis(10));
             loop {
                 interval.tick().await;
-                let current = client
-                    .read_delivery(DeliveryShowRequest {
+                let current = application
+                    .wakes()
+                    .delivery_show(DeliveryShowRequest {
                         delivery_id: delivery.clone(),
                     })
-                    .await?;
+                    .await
+                    .map_err(|failure| format!("delivery show failed: {failure:?}"))?;
                 if matches!(current.disposition, DeliveryDisposition::Uncertain) {
-                    return Ok::<_, collaboration_client::WakeClientError>(current);
+                    return Ok::<_, String>(current);
                 }
             }
         })
@@ -139,8 +138,7 @@ async fn native_delivery_process_loss_preserves_uncertainty_without_resend() -> 
             .await?;
         stop.cancel();
         worker.await?;
-        client.close().await?;
-        service.await??;
+        drop(application);
         if observed.delivery_id != delivery || !same_attempt || !eligible.is_empty() {
             return Err(
                 "recovery changed attempt identity or made uncertain delivery retryable".into(),

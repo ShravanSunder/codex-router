@@ -111,7 +111,11 @@ pub(super) async fn exercise_acp_target_matrix(config_guard: &ConfigHashGuard) -
     let cancellation = CancellationToken::new();
     let _cancel_on_drop = cancellation.clone().drop_guard();
     let mut held_prompt = tokio::spawn(async move {
-        let conversation = ConversationClient::connect(&service_directory, &endpoint).await?;
+        let conversation = ConversationClient::connect(
+            &collaboration_client::CollaborationAccess::api(&service_directory),
+            &endpoint,
+        )
+        .await?;
         conversation
             .prompt(
                 ConversationPromptInput {
@@ -179,7 +183,6 @@ pub(super) async fn exercise_acp_target_matrix(config_guard: &ConfigHashGuard) -
         "providerAcpDeliveryMatrix",
         json!({"cells":cells,"target":target}),
     )?;
-    proof.client.close().await?;
     Ok(())
 }
 
@@ -198,7 +201,11 @@ async fn create_provider_session(
         .find(|entry| String::from(entry.endpoint.endpoint_id.clone()) == endpoint_id)
         .ok_or("Scripted ACP endpoint missing")?
         .endpoint;
-    let conversation = ConversationClient::connect(&proof.service_directory, &endpoint).await?;
+    let conversation = ConversationClient::connect(
+        &collaboration_client::CollaborationAccess::api(&proof.service_directory),
+        &endpoint,
+    )
+    .await?;
     match conversation
         .create(
             ConversationCreateInput {
@@ -245,7 +252,11 @@ async fn deliver_pending_approval(
     let cancellation = CancellationToken::new();
     let _cancel_on_drop = cancellation.clone().drop_guard();
     let prompt_task = tokio::spawn(async move {
-        let conversation = ConversationClient::connect(&service_directory, &endpoint).await?;
+        let conversation = ConversationClient::connect(
+            &collaboration_client::CollaborationAccess::api(&service_directory),
+            &endpoint,
+        )
+        .await?;
         conversation
             .prompt(
                 ConversationPromptInput {

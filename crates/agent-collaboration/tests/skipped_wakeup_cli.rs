@@ -1,14 +1,13 @@
 //! Replaying creation must observe the current skipped wake through the CLI wait path.
 use automation_storage::{AutomationStore, WakeAction, WakeCreate, WakeMutation};
 use collaboration_client::protocol::{OperationId, SavedMessage};
-use collaboration_service::{LocalControlService, ManifestPublication, ServiceIdentity};
+use collaboration_service::ServiceIdentity;
 use serde_json::{Value, json};
 use std::{os::unix::fs::DirBuilderExt, sync::Arc, time::Duration};
-use tokio_util::sync::CancellationToken;
 
 #[tokio::test]
 async fn skipped_one_shot_cli_wait_reports_no_firing() -> Result<(), Box<dyn std::error::Error>> {
-    // Arrange: real SQLite and Control transport, controlled clock, no native backend.
+    // Arrange: real SQLite and collaboration API, controlled clock, no native backend.
     let root = std::path::PathBuf::from(format!(
         "/tmp/skipped-cli-{}",
         OperationId::generate().as_str()
@@ -43,20 +42,14 @@ async fn skipped_one_shot_cli_wait_reports_no_firing() -> Result<(), Box<dyn std
             .await?;
     }
     let store = Arc::new(tokio::sync::Mutex::new(store));
-    let digest = format!("sha256:{}", "a".repeat(64));
     let identity = ServiceIdentity::new(service_id, epoch)
         .map_err(std::io::Error::other)?
         .with_automation_store(Arc::clone(&store));
-    let listener = LocalControlService::bind(&root.join("control.sock"), identity)?;
-    let manifest = serde_json::from_value(json!({
-        "version":2,"serviceId":service_id,"serviceEpoch":epoch,
-        "machineLabel":"fixture-host","control":{"transport":"unixJsonLines","path":"control.sock"},
-        "controlSchemaDigest":digest,
-        "mcp":{"transport":"streamableHttp","url":"http://127.0.0.1:0/mcp"}
-    }))?;
-    let publication = ManifestPublication::publish(&root, &manifest)?;
-    let stop = CancellationToken::new();
-    let server = tokio::spawn(listener.run(stop.clone()));
+    let served = collaboration_mcp::test_support::ServedCollaborationApi::start(
+        &root,
+        collaboration_service::CollaborationApplication::new(identity),
+    )
+    .await?;
 
     // Act: recover the existing creation receipt, then wait on the current wake.
     let output = tokio::time::timeout(
@@ -83,9 +76,7 @@ async fn skipped_one_shot_cli_wait_reports_no_firing() -> Result<(), Box<dyn std
             .output(),
     )
     .await;
-    stop.cancel();
-    server.await??;
-    drop(publication);
+    served.stop().await?;
     let output = output??;
 
     // Assert: durable creation succeeded, but no firing or delivery was invented.

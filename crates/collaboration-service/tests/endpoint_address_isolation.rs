@@ -1,11 +1,12 @@
 //! Public address readers preserve endpoint identity when backend-local IDs collide.
+#[path = "support/served_api.rs"]
+mod served_api;
 #[cfg(test)]
 mod tests {
-    use collaboration_client::ControlClient;
     use collaboration_protocol::{
         ArchiveState, EndpointDescription, EndpointRef, LifecycleObservation,
     };
-    use collaboration_service::{ServiceIdentity, serve_control_connection};
+    use collaboration_service::ServiceIdentity;
     use lifecycle_observation::{LifecycleStore, ObservationJournal};
     use serde_json::json;
     use std::sync::Arc;
@@ -50,11 +51,8 @@ mod tests {
             ])
             .unwrap()
             .with_journal(Arc::clone(&store));
-        let (client, server) = tokio::net::UnixStream::pair().unwrap();
-        let service = tokio::spawn(serve_control_connection(server, identity));
-        let mut client = ControlClient::initialize(client, "address-isolation", "1")
-            .await
-            .unwrap();
+        let served = crate::served_api::ServedApi::start(identity).await.unwrap();
+        let client = served.client("address-isolation").await.unwrap();
 
         // Act: resolve each explicit endpoint through the actual public Rust client.
         let inventory = client.list_endpoints().await.unwrap();
@@ -85,8 +83,7 @@ mod tests {
             second_page.entries[0].disposition.archive,
             ArchiveState::Archived
         ));
-        client.close().await.unwrap();
-        service.await.unwrap().unwrap();
+        served.stop().await.unwrap();
         Arc::try_unwrap(store)
             .unwrap_or_else(|_| panic!("store retained"))
             .close()

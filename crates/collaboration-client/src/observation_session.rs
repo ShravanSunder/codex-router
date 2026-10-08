@@ -438,7 +438,7 @@ mod bounded_observation_tests {
         let cancel = CancellationToken::new();
         cancel.cancel();
         let error = NativeObservation::observe_bounded(
-            std::path::Path::new("/path-that-must-not-be-read"),
+            &crate::CollaborationAccess::api(std::path::Path::new("/path-that-must-not-be-read")),
             request(1, 1, 1),
             cancel,
         )
@@ -460,7 +460,7 @@ mod bounded_observation_tests {
         paged.after_sequence = Some(2);
         paged.epoch = Some(1);
         let error = NativeObservation::observe_bounded(
-            std::path::Path::new("/path-that-must-not-be-read"),
+            &crate::CollaborationAccess::api(std::path::Path::new("/path-that-must-not-be-read")),
             paged,
             CancellationToken::new(),
         )

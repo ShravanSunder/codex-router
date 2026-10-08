@@ -390,13 +390,15 @@ async fn streamable_http_question_form_reaches_the_waiting_agent() {
 }
 
 #[tokio::test]
-async fn stateless_http_create_reports_manifest_preflight_without_creation_uncertainty() {
-    // The listener is real, but its service directory deliberately has no manifest. This reaches the MCP adapter's actual create entry point
-    // while proving that discovery failure occurred before ACP setup/dispatch.
+async fn stateless_http_create_reports_discovery_failure_without_creation_uncertainty() {
+    // The listener is real, but its Router publishes no endpoints and its service directory
+    // has no manifest. The create tool discovers carriers from the Router's own endpoint
+    // directory, never the manifest, so the failure is that discovery, before ACP setup or
+    // dispatch.
     let directory = tempfile::tempdir_in("/tmp").expect("private service directory");
     let listener = ServedApi::tcp(&api_config(
         collaboration_service::CollaborationApplication::new(
-            crate::api_test_harness::test_identity(),
+            ServiceIdentity::new(SERVICE_ID, SERVICE_EPOCH).expect("service identity"),
         ),
         directory.path(),
     ))
@@ -459,8 +461,14 @@ async fn stateless_http_create_reports_manifest_preflight_without_creation_uncer
     )
     .await;
     let failure = &response["result"]["structuredContent"];
-    assert_eq!(failure["effect"], "none");
-    assert_eq!(failure["stage"], "manifest-read");
+    assert_eq!(failure["effect"], "none", "{response}");
+    assert_eq!(failure["kind"], "protocolViolation", "{response}");
+    assert!(
+        failure["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("conversation endpoint not found")),
+        "{response}"
+    );
 
     let wake_response = mcp_call(
         &client,

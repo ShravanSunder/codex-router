@@ -4,10 +4,10 @@ pub fn automation_proof_startup_arguments(
     run_directory: &Path,
 ) -> Result<Vec<OsString>, Box<dyn std::error::Error>> {
     let canonical_run_directory = run_directory.canonicalize()?;
-    let control_socket = canonical_run_directory.join("agent-communication/control.sock");
-    let control_socket = control_socket
+    let service_socket = canonical_run_directory.join("agent-communication/control.sock");
+    let service_socket = service_socket
         .to_str()
-        .ok_or("acceptance Control socket path is not UTF-8")?;
+        .ok_or("acceptance service socket path is not UTF-8")?;
 
     let reservation = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
     let proxy_port = reservation.local_addr()?.port();
@@ -23,7 +23,7 @@ pub fn automation_proof_startup_arguments(
 
     let mut unix_sockets = toml::Table::new();
     unix_sockets.insert(
-        control_socket.to_owned(),
+        service_socket.to_owned(),
         toml::Value::String("allow".to_owned()),
     );
     let mut network_proxy = toml::Table::new();

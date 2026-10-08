@@ -479,12 +479,19 @@ async fn known_rejected_provider_submission_after_retention_uses_fresh_id_and_ol
         .map_err(std::io::Error::other)?
         .with_automation_store(Arc::clone(&store));
     let old_link = crate::push_record_resolver::link_for(&old_push, &identity);
-    let old_link_result = crate::push_record_resolver::show(
-        json!(1),
-        json!({"caller":old_push.target,"reference":old_link}),
-        &identity,
-    )
-    .await;
+    let old_link_result = match crate::CollaborationApplication::new(identity.clone())
+        .messages()
+        .push_show(collaboration_protocol::PushRecordShowParams {
+            caller: old_push.target.clone(),
+            reference: old_link.clone(),
+        })
+        .await
+    {
+        Ok(result) => json!({ "result": result }),
+        Err(failure) => json!({
+            "error": crate::collaboration_application::CollaborationRejection::published_rejection(&failure)
+        }),
+    };
     if old_link_result
         .pointer("/error/data/kind")
         .and_then(serde_json::Value::as_str)

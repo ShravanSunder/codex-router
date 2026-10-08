@@ -1,5 +1,5 @@
 use codex_router_host::{CollaborationRuntime, CollaborationRuntimeInputs};
-use collaboration_client::ControlClient;
+use collaboration_client::CollaborationClient;
 use collaboration_protocol::{InstructionCreateParams, InstructionText, OperationId};
 use std::os::unix::fs::DirBuilderExt;
 
@@ -23,7 +23,7 @@ async fn host_supplies_automation_storage_without_native_backend()
         owner_human_id: None,
     })
     .await?;
-    let mut client = ControlClient::connect(&root, "automation-composition", "1").await?;
+    let client = CollaborationClient::connect(&root, "automation-composition", "1").await?;
     // Act: Host-created service handles a real SDK request with no native endpoint.
     let document = client
         .create_instruction(InstructionCreateParams {
@@ -38,7 +38,6 @@ async fn host_supplies_automation_storage_without_native_backend()
     {
         return Err("Host did not compose separate automation persistence".into());
     }
-    client.close().await?;
     runtime.shutdown().await?;
     for entry in std::fs::read_dir(&root)? {
         let entry = entry?;

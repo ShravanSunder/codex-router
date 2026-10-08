@@ -1,4 +1,4 @@
-use crate::api_test_harness::{ServedApi, api_config};
+use crate::api_test_harness::{ServedApi, api_config, publish_manifest};
 use codex_acp_adapter::{
     AcpSchemaCatalog, ApprovalBroker, ApprovalRoute, BrokeredApprovalOutcome,
     BrokeredApprovalRequest, PendingPermission,
@@ -8,8 +8,8 @@ use collaboration_protocol::{
     RouterAccess, RouterLink, RouterOriginRef, SessionRef, render_push_line,
 };
 use collaboration_service::{
-    EndpointDirectory, LocalControlService, MachineIdentity, ManifestPublication,
-    NativeControlBackend, NativeGenerationGate, ServiceIdentity, ServiceInteractionBroker,
+    EndpointDirectory, MachineIdentity, ManifestPublication, NativeControlBackend,
+    NativeGenerationGate, ServiceIdentity, ServiceInteractionBroker,
 };
 use futures_util::{SinkExt, StreamExt};
 use reqwest::header::{ACCEPT, CONTENT_TYPE};
@@ -24,7 +24,7 @@ use std::{
     },
     time::Duration,
 };
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_tungstenite::tungstenite::Message;
 use tokio_util::sync::CancellationToken;
 
@@ -39,8 +39,7 @@ struct ApprovalFixture {
     generation: CodexGeneration,
     requester: SessionRef,
     approver: SessionRef,
-    control_stop: CancellationToken,
-    control_task: tokio::task::JoinHandle<std::io::Result<()>>,
+    service_api: ServedApi,
     fault_task: Option<tokio::task::JoinHandle<()>>,
     forwarded_decisions: Option<Arc<AtomicUsize>>,
     backend_task: tokio::task::JoinHandle<()>,
@@ -207,7 +206,6 @@ impl ApprovalFixture {
             },
             delivery_tx,
         ));
-        let digest = format!("sha256:{}", "a".repeat(64));
         let identity = ServiceIdentity::new(SERVICE_ID, SERVICE_EPOCH)
             .expect("service identity")
             .with_endpoints(vec![description])
@@ -218,34 +216,31 @@ impl ApprovalFixture {
             .expect("native backend")
             .with_automation_store(Arc::clone(&automation_store))
             .with_approval_broker(Arc::clone(&broker));
-        let control_path = directory.path().join(if drop_decision_reply {
+        // The CLI reaches the API on the service socket the manifest names; the response-loss
+        // case puts a proxy there that forwards to the real socket and drops the decision's
+        // answer after the Router has applied it.
+        let api_socket = directory.path().join(if drop_decision_reply {
             "broker-control.sock"
         } else {
             "control.sock"
         });
-        let application = collaboration_service::CollaborationApplication::new(identity.clone());
-        let control = LocalControlService::bind(&control_path, identity).expect("control bind");
+        let application = collaboration_service::CollaborationApplication::new(identity);
+        let service_api = ServedApi::unix(
+            &api_config(application.clone(), directory.path()),
+            &api_socket,
+        )
+        .await;
         let forwarded_decisions = drop_decision_reply.then(|| Arc::new(AtomicUsize::new(0)));
         let fault_task = forwarded_decisions.as_ref().map(|forwarded_decisions| {
             let listener = tokio::net::UnixListener::bind(directory.path().join("control.sock"))
                 .expect("fault proxy bind");
-            let target = control_path.clone();
+            let target = api_socket.clone();
             let forwarded_decisions = Arc::clone(forwarded_decisions);
             tokio::spawn(async move {
                 drop_approval_decision_reply(listener, target, forwarded_decisions).await;
             })
         });
-        let manifest = serde_json::from_value(json!({
-            "version":2, "serviceId":SERVICE_ID, "serviceEpoch":SERVICE_EPOCH,
-            "machineLabel":"fixture-host","control":{"transport":"unixJsonLines","path":"control.sock"},
-            "controlSchemaDigest":digest,
-            "mcp":{"transport":"streamableHttp","url":"http://127.0.0.1:0/mcp"}
-        }))
-        .expect("manifest");
-        let publication = ManifestPublication::publish(directory.path(), &manifest)
-            .expect("manifest publication");
-        let control_stop = CancellationToken::new();
-        let control_task = tokio::spawn(control.run(control_stop.clone()));
+        let publication = publish_manifest(directory.path(), &application);
         Self {
             directory,
             application,
@@ -254,8 +249,7 @@ impl ApprovalFixture {
             generation,
             requester,
             approver,
-            control_stop,
-            control_task,
+            service_api,
             fault_task,
             forwarded_decisions,
             backend_task,
@@ -352,11 +346,7 @@ impl ApprovalFixture {
     }
 
     async fn shutdown(self) {
-        self.control_stop.cancel();
-        self.control_task
-            .await
-            .expect("control join")
-            .expect("control shutdown");
+        self.service_api.stop().await;
         if let Some(fault_task) = self.fault_task {
             fault_task.await.expect("fault proxy join");
         }
@@ -553,46 +543,62 @@ async fn serve_approval_deliveries(
     }
 }
 
+/// Forwards each HTTP request on the service socket to the real API socket, one connection
+/// per request as the CLI's client makes them, and drops the `approval_decide` answer after
+/// the Router has written it.
 async fn drop_approval_decision_reply(
     listener: tokio::net::UnixListener,
     target: PathBuf,
     forwarded_decisions: Arc<AtomicUsize>,
 ) {
-    let (client, _) = listener.accept().await.expect("fault proxy accept");
-    let broker = tokio::net::UnixStream::connect(target)
-        .await
-        .expect("fault proxy broker connect");
-    let (client_read, mut client_write) = client.into_split();
-    let (broker_read, mut broker_write) = broker.into_split();
-    let mut client_lines = BufReader::new(client_read).lines();
-    let mut broker_lines = BufReader::new(broker_read).lines();
-
-    while let Some(request) = client_lines
-        .next_line()
-        .await
-        .expect("fault proxy client frame")
-    {
-        let method =
-            serde_json::from_str::<Value>(&request).expect("fault proxy client JSON")["method"]
-                .as_str()
-                .map(str::to_owned);
-        broker_write
-            .write_all(format!("{request}\n").as_bytes())
+    loop {
+        let (mut client, _) = listener.accept().await.expect("fault proxy accept");
+        let Some(request) = read_http_request(&mut client).await else {
+            continue;
+        };
+        let mut api = tokio::net::UnixStream::connect(&target)
+            .await
+            .expect("fault proxy API connect");
+        api.write_all(&request)
             .await
             .expect("fault proxy forward request");
-        let response = broker_lines
-            .next_line()
-            .await
-            .expect("fault proxy broker frame")
-            .expect("fault proxy broker response");
-        if method.as_deref() == Some("approval/decide") {
+        if String::from_utf8_lossy(&request).contains("\"approval_decide\"") {
+            let mut first = [0_u8; 1];
+            let answered = api.read(&mut first).await.expect("fault proxy API answer");
+            assert_eq!(answered, 1, "the Router answered the decision");
             forwarded_decisions.fetch_add(1, Ordering::SeqCst);
             return;
         }
-        client_write
-            .write_all(format!("{response}\n").as_bytes())
-            .await
-            .expect("fault proxy forward response");
+        tokio::spawn(async move {
+            let _ = tokio::io::copy_bidirectional(&mut client, &mut api).await;
+        });
+    }
+}
+
+/// One whole HTTP/1.1 request with a `Content-Length` body, or `None` when the client closed
+/// before sending one (a reachability probe).
+async fn read_http_request(stream: &mut tokio::net::UnixStream) -> Option<Vec<u8>> {
+    let mut request = Vec::new();
+    let mut chunk = [0_u8; 8192];
+    loop {
+        let read = stream.read(&mut chunk).await.expect("fault proxy read");
+        if read == 0 {
+            return None;
+        }
+        request.extend_from_slice(&chunk[..read]);
+        let Some(head_end) = request.windows(4).position(|window| window == b"\r\n\r\n") else {
+            continue;
+        };
+        let head = String::from_utf8_lossy(&request[..head_end]).to_ascii_lowercase();
+        let body_length = head
+            .lines()
+            .find_map(|line| line.strip_prefix("content-length:"))
+            .map_or(0, |length| {
+                length.trim().parse::<usize>().expect("content length")
+            });
+        if request.len() >= head_end + 4 + body_length {
+            return Some(request);
+        }
     }
 }
 

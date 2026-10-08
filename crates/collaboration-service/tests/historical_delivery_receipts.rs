@@ -2,15 +2,16 @@ use agent_automation::{ExpiryRule, TimingRule};
 use automation_storage::{
     AutomationStore, DeliveryCompletion, DeliveryResult, WakeCreate, WakeEvaluation,
 };
-use collaboration_client::ControlClient;
 use collaboration_protocol::{
     AutomationEventDetails, AutomationEventsRequest, DeliveryAttemptsRequest, DeliveryEvidence,
     DeliveryReceipt, OperationId, SavedMessage, SessionRef,
 };
-use collaboration_service::{ServiceIdentity, serve_control_connection};
+use collaboration_service::ServiceIdentity;
 use serde_json::json;
 use sqlx::Connection;
 use std::sync::Arc;
+#[path = "support/served_api.rs"]
+mod served_api;
 #[path = "support/wake_push_draft.rs"]
 mod wake_push_test_support;
 
@@ -26,9 +27,8 @@ async fn retried_wake_retains_both_receipts_in_attempt_and_event_history()
     let identity = ServiceIdentity::new(service_id, service_id)
         .map_err(std::io::Error::other)?
         .with_automation_store(Arc::clone(&store));
-    let (socket, server) = tokio::net::UnixStream::pair()?;
-    let service = tokio::spawn(serve_control_connection(server, identity));
-    let mut client = ControlClient::initialize(socket, "history-fixture", "1").await?;
+    let served = served_api::ServedApi::start(identity).await?;
+    let client = served.client("history-fixture").await?;
     let target = json!({"endpoint":{"serviceId":service_id,"endpointId":"codex-local"},"sessionId":"fixture-thread"});
     let message: SavedMessage = serde_json::from_value(json!({
         "target":target,"content":{"kind":"agent","sender":target,"text":"Check status"},
@@ -201,8 +201,7 @@ async fn retried_wake_retains_both_receipts_in_attempt_and_event_history()
     ) {
         return Err("legacy event invented a receipt".into());
     }
-    client.close().await?;
-    service.await??;
+    served.stop().await?;
     drop(store);
     std::fs::remove_file(path)?;
     Ok(())

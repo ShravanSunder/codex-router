@@ -230,8 +230,11 @@ async fn load_codex_target(
     requested_by: &SessionRef,
     target: &SessionRef,
 ) -> ProofResult<()> {
-    let conversation =
-        ConversationClient::connect(&proof.service_directory, &target.endpoint).await?;
+    let conversation = ConversationClient::connect(
+        &collaboration_client::CollaborationAccess::api(&proof.service_directory),
+        &target.endpoint,
+    )
+    .await?;
     let result = conversation
         .load(
             ConversationLoadInput {

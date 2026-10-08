@@ -195,7 +195,7 @@ pub fn run_schedule_command(arguments: Vec<OsString>) -> i32 {
         dispatched = true;
         let snapshot_output =
             |snapshot: ScheduleSnapshot| ScheduleOutput::Snapshot(Box::new(snapshot));
-        let result = match prepared {
+        match prepared {
             PreparedSchedule::Import(request) => {
                 client.import_schedule(request).await.map(snapshot_output)
             }
@@ -230,8 +230,7 @@ pub fn run_schedule_command(arguments: Vec<OsString>) -> i32 {
             PreparedSchedule::Disable(request) => {
                 client.disable_schedule(request).await.map(snapshot_output)
             }
-        };
-        result
+        }
     });
     if !dispatched
         && let Err(ScheduleClientError::Connection(error)) = &result

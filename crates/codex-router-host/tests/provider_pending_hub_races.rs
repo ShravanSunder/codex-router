@@ -4,20 +4,27 @@ use codex_router_host::{
     CollaborationRuntime, CollaborationRuntimeInputs, ExternalProviderLaunchBinding,
     ExternalProviderStartup,
 };
-use collaboration_client::ControlClient;
+use collaboration_client::CollaborationClient;
 use collaboration_protocol::{
-    ChannelDescription, CodexGeneration, ConversationCancelRequest, ConversationCreateRequest,
-    ConversationOperationSettlement, ConversationOperationWaitOutput,
+    BoundedObservationRequest, ChannelDescription, CodexGeneration, ConversationCancelRequest,
+    ConversationCreateRequest, ConversationOperationSettlement, ConversationOperationWaitOutput,
     ConversationOperationWaitRequest, ConversationPromptRequest, EndpointId, EndpointRef,
     MessageContent, MessageText, NativeSessionScope, NativeSessionSource, NativeSessionView,
     OperationId, PositiveSeconds, ProviderIdentity, ProviderRequestedPolicy,
-    ProviderSessionListParams, ProviderSessionListenRequest, ProviderSessionState,
-    ProviderWorkingDirectory, RouterAccess, SessionId, SessionRef,
+    ProviderSessionListParams, ProviderSessionState, ProviderWorkingDirectory, RouterAccess,
+    SessionId, SessionRef,
 };
 use serde_json::{Value, json};
-use std::{os::unix::fs::PermissionsExt as _, path::Path, time::Duration};
+use std::{collections::VecDeque, os::unix::fs::PermissionsExt as _, path::Path, time::Duration};
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
+
+#[path = "support/provider_conversation_submission.rs"]
+#[allow(dead_code)]
+mod provider_conversation_submission;
+use provider_conversation_submission::{
+    spawn_provider_prompt, submit_provider_cancel, submit_provider_create,
+};
 
 const PROVIDER: &str = r#"#!/usr/bin/python3
 import json,os,socket,sys,threading
@@ -96,7 +103,7 @@ async fn start_host(root: &Path) -> TestResult<CollaborationRuntime> {
 }
 
 async fn create_session(
-    client: &mut ControlClient,
+    client: &CollaborationClient,
     root: &Path,
 ) -> TestResult<(SessionRef, SessionRef, ProviderIdentity, CodexGeneration)> {
     let inventory = client.list_endpoints().await?;
@@ -127,8 +134,9 @@ async fn create_session(
     };
     let approver: ProviderIdentity = serde_json::from_value(json!({"humanId":"race-human"}))?;
     let operation_id = OperationId::generate();
-    client
-        .create_provider_conversation(ConversationCreateRequest {
+    submit_provider_create(
+        client,
+        ConversationCreateRequest {
             settings: None,
             operation_id: operation_id.clone(),
             endpoint: provider.endpoint.clone(),
@@ -139,8 +147,9 @@ async fn create_session(
             requested_policy: ProviderRequestedPolicy {
                 access: RouterAccess::WriteRestricted,
             },
-        })
-        .await?;
+        },
+    )
+    .await?;
     let result = client
         .wait_for_provider_conversation_operation(ConversationOperationWaitRequest {
             operation_id,
@@ -156,16 +165,25 @@ async fn create_session(
     Ok((target, actor, approver, generation))
 }
 
-async fn prompt(
-    client: &mut ControlClient,
+type PromptTask = tokio::task::JoinHandle<
+    Result<
+        collaboration_client::ConversationOperationResult,
+        collaboration_client::ConversationClientError,
+    >,
+>;
+
+/// Prompts in the background: the prompt stays pending on its approval while the test acts.
+fn prompt(
+    client: &CollaborationClient,
     target: &SessionRef,
     actor: &SessionRef,
     approver: &ProviderIdentity,
     generation: &CodexGeneration,
-) -> TestResult<OperationId> {
+) -> TestResult<(OperationId, PromptTask)> {
     let operation_id = OperationId::generate();
-    client
-        .prompt_provider_conversation(ConversationPromptRequest {
+    let task = spawn_provider_prompt(
+        client,
+        ConversationPromptRequest {
             input_id: None,
             operation_id: operation_id.clone(),
             target: target.clone(),
@@ -175,22 +193,72 @@ async fn prompt(
             prompt: MessageContent::HumanUser {
                 text: MessageText::try_from("request permission".to_owned())?,
             },
-        })
-        .await?;
-    Ok(operation_id)
+        },
+    );
+    Ok((operation_id, task))
+}
+
+/// Follows one provider Session's hub events through short bounded `events_observe` calls,
+/// each resuming after the last event within the hub's epoch.
+struct HubEventFollow {
+    client: CollaborationClient,
+    target: SessionRef,
+    epoch: Option<u64>,
+    after_sequence: Option<u64>,
+    pending: VecDeque<Value>,
+}
+
+impl HubEventFollow {
+    fn new(client: &CollaborationClient, target: &SessionRef) -> Self {
+        Self {
+            client: client.clone(),
+            target: target.clone(),
+            epoch: None,
+            after_sequence: None,
+            pending: VecDeque::new(),
+        }
+    }
+
+    async fn next_message(&mut self) -> TestResult<Value> {
+        loop {
+            if let Some(event) = self.pending.pop_front() {
+                return Ok(event);
+            }
+            let observed = self
+                .client
+                .observe_provider_session(BoundedObservationRequest {
+                    target: self.target.clone(),
+                    timeout_seconds: 1,
+                    max_events: 64,
+                    max_bytes: 1_048_576,
+                    after_sequence: self.after_sequence,
+                    epoch: self.epoch,
+                })
+                .await?;
+            self.epoch = observed.epoch;
+            for event in &observed.events {
+                if let Some(sequence) = event.get("sequence").and_then(Value::as_u64) {
+                    self.after_sequence = Some(
+                        self.after_sequence
+                            .map_or(sequence, |after| after.max(sequence)),
+                    );
+                }
+            }
+            self.pending.extend(observed.events);
+        }
+    }
 }
 
 async fn wait_for_pending(
-    client: &mut ControlClient,
-    observer: &mut ControlClient,
+    client: &CollaborationClient,
+    observer: &mut HubEventFollow,
 ) -> TestResult<(String, Vec<Value>)> {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     let mut events = Vec::new();
     loop {
-        let notification =
-            tokio::time::timeout_at(deadline, observer.next_provider_session_notification())
-                .await
-                .map_err(|_| format!("no pending approval event; observed: {events:?}"))??;
+        let notification = tokio::time::timeout_at(deadline, observer.next_message())
+            .await
+            .map_err(|_| format!("no pending approval event; observed: {events:?}"))??;
         let event = notification
             .get("event")
             .cloned()
@@ -210,16 +278,15 @@ async fn wait_for_pending(
 }
 
 async fn watch_turn(
-    observer: &mut ControlClient,
+    observer: &mut HubEventFollow,
     terminal: &'static str,
     mut events: Vec<Value>,
 ) -> TestResult<Vec<Value>> {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     loop {
-        let notification =
-            tokio::time::timeout_at(deadline, observer.next_provider_session_notification())
-                .await
-                .map_err(|_| format!("hub did not publish {terminal}; observed: {events:?}"))??;
+        let notification = tokio::time::timeout_at(deadline, observer.next_message())
+            .await
+            .map_err(|_| format!("hub did not publish {terminal}; observed: {events:?}"))??;
         let event = notification
             .get("event")
             .cloned()
@@ -258,7 +325,7 @@ fn assert_interaction_settles_before_turn_end(events: &[Value]) -> TestResult {
 }
 
 async fn listed_state(
-    client: &mut ControlClient,
+    client: &CollaborationClient,
     target: &SessionRef,
 ) -> TestResult<ProviderSessionState> {
     let listing = client
@@ -289,16 +356,16 @@ async fn listed_state(
 async fn provider_exit_resolves_pending_approval_before_lost_turn() -> TestResult {
     let root = tempfile::tempdir()?;
     let runtime = start_host(root.path()).await?;
-    let mut client = ControlClient::connect(root.path(), "exit-control", "1").await?;
-    let (target, actor, approver, generation) = create_session(&mut client, root.path()).await?;
-    let mut observer = ControlClient::connect(root.path(), "exit-observer", "1").await?;
-    observer
-        .listen_provider_session(ProviderSessionListenRequest {
-            target: target.clone(),
-        })
-        .await?;
-    let _prompt = prompt(&mut client, &target, &actor, &approver, &generation).await?;
-    let (request_id, initial_events) = wait_for_pending(&mut client, &mut observer).await?;
+    let client = CollaborationClient::connect(root.path(), "exit-control", "1").await?;
+    let (target, actor, _, generation) = create_session(&client, root.path()).await?;
+    // The approver is another provider Session: the API's prompt names Session approvers,
+    // and this one's approval notice waits behind the blocked prompt, so the approval stays
+    // pending.
+    let (approver_session, _, _, _) = create_session(&client, root.path()).await?;
+    let approver = ProviderIdentity::from(approver_session);
+    let mut observer = HubEventFollow::new(&client, &target);
+    let _prompt = prompt(&client, &target, &actor, &approver, &generation)?;
+    let (request_id, initial_events) = wait_for_pending(&client, &mut observer).await?;
     let mut exit = tokio::net::UnixStream::connect(root.path().join("exit.sock")).await?;
     use tokio::io::AsyncWriteExt as _;
     exit.write_all(b"x").await?;
@@ -314,7 +381,7 @@ async fn provider_exit_resolves_pending_approval_before_lost_turn() -> TestResul
         )
         .into());
     }
-    let state = listed_state(&mut client, &target).await?;
+    let state = listed_state(&client, &target).await?;
     if state != ProviderSessionState::Unloaded {
         return Err(format!("retired Session remained in {state:?}").into());
     }
@@ -326,28 +393,28 @@ async fn provider_exit_resolves_pending_approval_before_lost_turn() -> TestResul
 async fn explicit_cancel_settles_approval_and_keeps_peer_session_usable() -> TestResult {
     let root = tempfile::tempdir()?;
     let runtime = start_host(root.path()).await?;
-    let mut client = ControlClient::connect(root.path(), "cancel-control", "1").await?;
-    let (target, actor, approver, generation) = create_session(&mut client, root.path()).await?;
-    let (peer, _, _, _) = create_session(&mut client, root.path()).await?;
-    let mut observer = ControlClient::connect(root.path(), "cancel-observer", "1").await?;
-    observer
-        .listen_provider_session(ProviderSessionListenRequest {
-            target: target.clone(),
-        })
-        .await?;
-    let prompt_id = prompt(&mut client, &target, &actor, &approver, &generation).await?;
-    let (request_id, initial_events) = wait_for_pending(&mut client, &mut observer).await?;
+    let client = CollaborationClient::connect(root.path(), "cancel-control", "1").await?;
+    let (target, actor, _, generation) = create_session(&client, root.path()).await?;
+    let (peer, _, _, _) = create_session(&client, root.path()).await?;
+    // The peer provider Session approves: the API's prompt names Session approvers, and its
+    // approval notice waits behind the blocked prompt, so the approval stays pending.
+    let approver = ProviderIdentity::from(peer.clone());
+    let mut observer = HubEventFollow::new(&client, &target);
+    let (prompt_id, _prompt) = prompt(&client, &target, &actor, &approver, &generation)?;
+    let (request_id, initial_events) = wait_for_pending(&client, &mut observer).await?;
     let cancel_id = OperationId::generate();
-    client
-        .cancel_provider_conversation_operation(ConversationCancelRequest {
+    submit_provider_cancel(
+        &client,
+        ConversationCancelRequest {
             operation_id: cancel_id.clone(),
             target_operation_id: prompt_id,
             target: target.clone(),
             generation: Some(generation.clone()),
             requested_by: actor.clone().into(),
             approver: approver.clone(),
-        })
-        .await?;
+        },
+    )
+    .await?;
     let mut release = tokio::net::UnixStream::connect(root.path().join("exit.sock")).await?;
     use tokio::io::AsyncWriteExt as _;
     release.write_all(b"c").await?;
@@ -363,11 +430,12 @@ async fn explicit_cancel_settles_approval_and_keeps_peer_session_usable() -> Tes
         )
         .into());
     }
-    let state = listed_state(&mut client, &target).await?;
+    let state = listed_state(&client, &target).await?;
     if state != ProviderSessionState::Idle {
         return Err(format!("cancelled Session remained in {state:?}").into());
     }
-    let peer_prompt = prompt(&mut client, &peer, &actor, &approver, &generation).await?;
+    let (peer_prompt, peer_task) = prompt(&client, &peer, &actor, &approver, &generation)?;
+    peer_task.await??;
     let peer_result = client
         .wait_for_provider_conversation_operation(ConversationOperationWaitRequest {
             operation_id: peer_prompt,

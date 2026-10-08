@@ -745,6 +745,6 @@ fn native_control_errors_keep_service_detail_and_only_uncertain_effects_are_unkn
     assert_eq!(lost_after_send["effect"], "unknown");
     assert_eq!(
         lost_after_send["message"],
-        "Control protocol violation: connection closed after dispatch"
+        "collaboration API protocol violation: connection closed after dispatch"
     );
 }

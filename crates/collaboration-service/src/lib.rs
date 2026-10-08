@@ -73,6 +73,8 @@ mod scheduled_run_contract;
 mod scheduled_run_evidence_sink;
 mod scheduled_run_router;
 mod session_command_port;
+#[cfg(test)]
+mod wake_creation_crash_tests;
 pub use app_server_model_catalog::{
     InvalidProviderModelEntry, ProviderModelEntry, render_model_list,
 };

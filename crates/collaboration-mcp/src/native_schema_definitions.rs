@@ -4,7 +4,7 @@ use serde_json::{Map, Value};
 use std::sync::Arc;
 
 /// The Codex app-server protocol's v2 schema definitions from one native bundle, named by the
-/// bundle's digest (the control schema's `nativeSchemaDigest`).
+/// bundle's digest (the service manifest's `nativeSchemaDigest`).
 #[derive(Clone, Debug)]
 pub struct NativeSchemaDefinitions {
     digest: NativeSchemaDigest,

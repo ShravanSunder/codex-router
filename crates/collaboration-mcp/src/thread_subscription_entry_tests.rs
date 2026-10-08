@@ -1,10 +1,11 @@
+use crate::api_test_harness::{ServedApi, api_config};
 use crate::mcp_server::CollaborationMcpServer;
-use collaboration_client::ControlClient;
-use collaboration_protocol::{ServiceManifest, UuidIdentity};
+use collaboration_client::CollaborationClient;
+use collaboration_protocol::UuidIdentity;
 use collaboration_service::{
-    BoardAvailability, LocalControlService, MachineIdentity, ManifestPublication, ServiceIdentity,
-    SessionDeliveryRouter, SessionMessageDelivery, SubscriptionDeliveryService,
-    SubscriptionDeliveryServiceProps, SystemSubscriptionClock, TargetPresenceProbe,
+    BoardAvailability, MachineIdentity, ServiceIdentity, SessionDeliveryRouter,
+    SessionMessageDelivery, SubscriptionDeliveryService, SubscriptionDeliveryServiceProps,
+    SystemSubscriptionClock, TargetPresenceProbe,
 };
 use message_board::{
     BoardCreateRequest, BoardId, Description, Identity, MessageId, MessageText,
@@ -16,12 +17,9 @@ use rmcp::{ServerHandler as _, ServiceExt as _, handler::client::ClientHandler};
 use serde_json::{Value, json};
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use tokio_util::sync::CancellationToken;
 
 const SERVICE_ID: &str = "00000000-0000-4000-8000-000000000011";
 const SERVICE_EPOCH: &str = "00000000-0000-4000-8000-000000000012";
-const CONTROL_DIGEST: &str =
-    "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
 #[derive(Clone)]
 struct TestMcpClient;
@@ -52,7 +50,7 @@ async fn call_registered_tool(
 }
 
 #[tokio::test]
-async fn subscription_tools_roundtrip_through_mcp_control_and_sqlite() {
+async fn subscription_tools_roundtrip_through_mcp_api_and_sqlite() {
     use std::os::unix::fs::PermissionsExt;
 
     let temporary = tempfile::tempdir_in("/tmp").expect("private service directory");
@@ -88,28 +86,14 @@ async fn subscription_tools_roundtrip_through_mcp_control_and_sqlite() {
         .expect("subscription service start");
 
     let service_identity = ServiceIdentity::new(SERVICE_ID, SERVICE_EPOCH)
-        .expect("Control service identity")
+        .expect("service identity")
         .with_board_store(Arc::clone(&board_store))
         .with_subscription_delivery_service(subscription_service.clone(), presence);
     let application =
         collaboration_service::CollaborationApplication::new(service_identity.clone());
-    let control =
-        LocalControlService::bind(&temporary.path().join("control.sock"), service_identity)
-            .expect("Control listener");
-    let manifest: ServiceManifest = serde_json::from_value(json!({
-        "version":2,
-        "serviceId":SERVICE_ID,
-        "serviceEpoch":SERVICE_EPOCH,
-        "machineLabel":"mcp-subscription-test",
-        "control":{"transport":"unixJsonLines","path":"control.sock"},
-        "controlSchemaDigest":CONTROL_DIGEST,
-        "mcp":{"transport":"streamableHttp","url":"http://127.0.0.1:0/mcp"}
-    }))
-    .expect("service manifest");
-    let _publication = ManifestPublication::publish(temporary.path(), &manifest)
-        .expect("publish real Control manifest");
-    let control_shutdown = CancellationToken::new();
-    let control_task = tokio::spawn(control.run(control_shutdown.clone()));
+    // Setup goes through the CLIs' client on the service socket, as an operator would.
+    let setup_api =
+        ServedApi::service_socket(&api_config(application.clone(), temporary.path())).await;
 
     let actor: Identity = serde_json::from_value(json!({
         "kind":"session",
@@ -124,9 +108,9 @@ async fn subscription_tools_roundtrip_through_mcp_control_and_sqlite() {
         "humanId":"mcp-subscription-owner"
     }))
     .expect("human setup actor");
-    let mut setup_client = ControlClient::connect(temporary.path(), "subscription-test", "1")
+    let setup_client = CollaborationClient::connect(temporary.path(), "subscription-test", "1")
         .await
-        .expect("setup Control client");
+        .expect("setup collaboration client");
     let project_id = ProjectId::generate();
     setup_client
         .board_project_create(ProjectCreateRequest {
@@ -179,10 +163,7 @@ async fn subscription_tools_roundtrip_through_mcp_control_and_sqlite() {
         .await
         .expect("create thread in SQLite");
     let root_message_id = thread.message.message_id;
-    setup_client
-        .close()
-        .await
-        .expect("close setup Control client");
+    setup_api.stop().await;
 
     let mcp_server =
         CollaborationMcpServer::for_application(application, temporary.path().to_owned());
@@ -477,9 +458,4 @@ async fn subscription_tools_roundtrip_through_mcp_control_and_sqlite() {
     running_client.cancel().await.expect("stop MCP test client");
     running_server.cancel().await.expect("stop MCP test server");
     subscription_service.shutdown().await;
-    control_shutdown.cancel();
-    control_task
-        .await
-        .expect("Control service task")
-        .expect("Control service shutdown");
 }

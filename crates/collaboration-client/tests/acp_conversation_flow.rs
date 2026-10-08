@@ -1,9 +1,11 @@
+use collaboration_client::CollaborationAccess;
 use collaboration_client::{
     AcpConversation, ConversationCreatePromptRequest, ConversationCreateRequest, ConversationEnd,
     ConversationEvent, ConversationPromptRequest, PublicPromptContent,
 };
+use collaboration_mcp::test_support::ServedCollaborationApi;
 use collaboration_protocol::{MessageText, SessionId};
-use collaboration_service::{LocalControlService, ManifestPublication, ServiceIdentity};
+use collaboration_service::{CollaborationApplication, ServiceIdentity};
 use serde_json::{Value, json};
 use std::{os::unix::fs::DirBuilderExt, time::Duration};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -20,14 +22,11 @@ async fn create_and_first_prompt_share_one_connection_and_return_correlated_sett
         .create(&root)
         .unwrap();
     let service_id = "00000000-0000-4000-8000-000000000001";
-    let digest = format!("sha256:{}", "a".repeat(64));
     let endpoint = json!({"serviceId":service_id,"endpointId":"codex-local"});
     let identity=ServiceIdentity::new(service_id,service_id).unwrap().with_endpoints(vec![serde_json::from_value(json!({"endpoint":endpoint,"label":"ACP fixture","availability":{"state":"available","observedAt":"2026-09-06T00:00:00Z"},"channels":[{"kind":"acp","transport":"unixJsonLines","path":"acp.sock","schemaDigest":format!("sha256:{}",collaboration_protocol::ACP_SCHEMA_DIGEST)}]})).unwrap()]).unwrap();
-    let listener = LocalControlService::bind(&root.join("control.sock"), identity).unwrap();
-    let manifest:collaboration_protocol::ServiceManifest=serde_json::from_value(json!({"version":2,"serviceId":service_id,"serviceEpoch":service_id,"machineLabel":"fixture-host","control":{"transport":"unixJsonLines","path":"control.sock"},"controlSchemaDigest":digest,"mcp":{"transport":"streamableHttp","url":"http://127.0.0.1:0/mcp"}})).unwrap();
-    let manifest = ManifestPublication::publish(&root, &manifest).unwrap();
-    let stop = CancellationToken::new();
-    let service = tokio::spawn(listener.run(stop.clone()));
+    let served = ServedCollaborationApi::start(&root, CollaborationApplication::new(identity))
+        .await
+        .unwrap_or_else(|error| panic!("serve: {error}"));
     let acp = tokio::net::UnixListener::bind(root.join("acp.sock")).unwrap();
     let peer = tokio::spawn(async move {
         let (stream, _) = acp.accept().await.unwrap();
@@ -83,7 +82,7 @@ async fn create_and_first_prompt_share_one_connection_and_return_correlated_sett
     }))
     .unwrap();
     let result = AcpConversation::create_and_prompt(
-        &root,
+        &CollaborationAccess::api(&root),
         ConversationCreatePromptRequest {
             create: ConversationCreateRequest {
                 operation_id: collaboration_protocol::OperationId::generate(),
@@ -127,9 +126,10 @@ async fn create_and_first_prompt_share_one_connection_and_return_correlated_sett
         "the ACP result remains part of the settlement"
     );
     peer.await.unwrap();
-    stop.cancel();
-    service.await.unwrap().unwrap();
-    drop(manifest);
+    served
+        .stop()
+        .await
+        .unwrap_or_else(|error| panic!("service: {error}"));
     std::fs::remove_file(root.join("acp.sock")).unwrap();
     std::fs::remove_dir(root).unwrap();
 }
@@ -145,14 +145,11 @@ async fn create_and_first_prompt_backend_rejection_retains_created_target() {
         .create(&root)
         .unwrap();
     let service_id = "00000000-0000-4000-8000-000000000003";
-    let digest = format!("sha256:{}", "b".repeat(64));
     let endpoint = json!({"serviceId":service_id,"endpointId":"codex-local"});
     let identity=ServiceIdentity::new(service_id,service_id).unwrap().with_endpoints(vec![serde_json::from_value(json!({"endpoint":endpoint,"label":"ACP rejection fixture","availability":{"state":"available","observedAt":"2026-09-06T00:00:00Z"},"channels":[{"kind":"acp","transport":"unixJsonLines","path":"acp.sock","schemaDigest":format!("sha256:{}",collaboration_protocol::ACP_SCHEMA_DIGEST)}]})).unwrap()]).unwrap();
-    let listener = LocalControlService::bind(&root.join("control.sock"), identity).unwrap();
-    let manifest:collaboration_protocol::ServiceManifest=serde_json::from_value(json!({"version":2,"serviceId":service_id,"serviceEpoch":service_id,"machineLabel":"fixture-host","control":{"transport":"unixJsonLines","path":"control.sock"},"controlSchemaDigest":digest,"mcp":{"transport":"streamableHttp","url":"http://127.0.0.1:0/mcp"}})).unwrap();
-    let publication = ManifestPublication::publish(&root, &manifest).unwrap();
-    let stop = CancellationToken::new();
-    let service = tokio::spawn(listener.run(stop.clone()));
+    let served = ServedCollaborationApi::start(&root, CollaborationApplication::new(identity))
+        .await
+        .unwrap_or_else(|error| panic!("serve: {error}"));
     let acp = tokio::net::UnixListener::bind(root.join("acp.sock")).unwrap();
     let peer = tokio::spawn(async move {
         let (stream, _) = acp.accept().await.unwrap();
@@ -185,7 +182,7 @@ async fn create_and_first_prompt_backend_rejection_retains_created_target() {
     let sender: collaboration_protocol::SessionRef =
         serde_json::from_value(json!({"endpoint":endpoint_ref,"sessionId":"sender"})).unwrap();
     let error = AcpConversation::create_and_prompt(
-        &root,
+        &CollaborationAccess::api(&root),
         ConversationCreatePromptRequest {
             create: ConversationCreateRequest {
                 operation_id: collaboration_protocol::OperationId::generate(),
@@ -226,9 +223,10 @@ async fn create_and_first_prompt_backend_rejection_retains_created_target() {
     );
     assert!(turn_id.is_none());
     peer.await.unwrap();
-    stop.cancel();
-    service.await.unwrap().unwrap();
-    drop(publication);
+    served
+        .stop()
+        .await
+        .unwrap_or_else(|error| panic!("service: {error}"));
     std::fs::remove_file(root.join("acp.sock")).unwrap();
     std::fs::remove_dir(root).unwrap();
 }
@@ -245,14 +243,11 @@ async fn reusable_acp_client_orders_load_updates_and_detaches_on_caller_cancel()
         .create(&root)
         .unwrap();
     let id = "00000000-0000-4000-8000-000000000001";
-    let digest = format!("sha256:{}", "a".repeat(64));
     let endpoint = json!({"serviceId":id,"endpointId":"codex-local"});
     let identity=ServiceIdentity::new(id,id).unwrap().with_endpoints(vec![serde_json::from_value(json!({"endpoint":endpoint,"label":"ACP fixture","availability":{"state":"available","observedAt":"2026-09-06T00:00:00Z"},"channels":[{"kind":"acp","transport":"unixJsonLines","path":"acp.sock","schemaDigest":format!("sha256:{}",collaboration_protocol::ACP_SCHEMA_DIGEST)}]})).unwrap()]).unwrap();
-    let listener = LocalControlService::bind(&root.join("control.sock"), identity).unwrap();
-    let manifest:collaboration_protocol::ServiceManifest=serde_json::from_value(json!({"version":2,"serviceId":id,"serviceEpoch":id,"machineLabel":"fixture-host","control":{"transport":"unixJsonLines","path":"control.sock"},"controlSchemaDigest":digest,"mcp":{"transport":"streamableHttp","url":"http://127.0.0.1:0/mcp"}})).unwrap();
-    let manifest = ManifestPublication::publish(&root, &manifest).unwrap();
-    let stop = CancellationToken::new();
-    let service = tokio::spawn(listener.run(stop.clone()));
+    let served = ServedCollaborationApi::start(&root, CollaborationApplication::new(identity))
+        .await
+        .unwrap_or_else(|error| panic!("serve: {error}"));
     let acp = tokio::net::UnixListener::bind(root.join("acp.sock")).unwrap();
     let (prompt_started, receive_started) = tokio::sync::oneshot::channel();
     let peer = tokio::spawn(async move {
@@ -326,9 +321,12 @@ async fn reusable_acp_client_orders_load_updates_and_detaches_on_caller_cancel()
         );
     });
     // Act: client initialization, load buffering, permission denial, same-connection cancellation.
-    let mut client = AcpConversation::connect(&root, "codex-local".to_owned().try_into().unwrap())
-        .await
-        .unwrap();
+    let mut client = AcpConversation::connect(
+        &CollaborationAccess::api(&root),
+        "codex-local".to_owned().try_into().unwrap(),
+    )
+    .await
+    .unwrap();
     let mut events = Vec::new();
     let mut emit = |event| {
         events.push(event);
@@ -411,9 +409,10 @@ async fn reusable_acp_client_orders_load_updates_and_detaches_on_caller_cancel()
     );
     drop(client);
     peer.await.unwrap();
-    stop.cancel();
-    service.await.unwrap().unwrap();
-    drop(manifest);
+    served
+        .stop()
+        .await
+        .unwrap_or_else(|error| panic!("service: {error}"));
     // Assert: setup updates appear only after ready; callback and terminals are explicit.
     assert!(matches!(
         events.first(),

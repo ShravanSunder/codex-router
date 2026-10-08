@@ -1,10 +1,11 @@
-//! Established Control transport with a controlled admission gate and a real debug Codex backend.
+//! The served collaboration API with a controlled admission gate and a real debug Codex backend.
 //! Host discovery and native relay publication have separate live acceptance coverage.
 use super::{
     proof_context::{ProofContext, ProofResult},
     summary_failure_recovery::PortableRunProof,
 };
 use automation_storage::AutomationStore;
+use collaboration_client::WakeWaitError;
 use collaboration_client::protocol::{
     ChannelDescription, CodexGeneration, DeliveryEvidence, DeliveryListRequest,
     DeliveryShowRequest, EndpointAvailability, EndpointDescription, EndpointRef,
@@ -12,8 +13,10 @@ use collaboration_client::protocol::{
     NativeCarrier, OperationId, RunListRequest, SavedMessage, ScheduleImportRequest, SessionRef,
     TimingRequest, WakeMutationRequest, WakeSendRequest, WakeShowRequest,
 };
-use collaboration_client::{ControlClient, WakeWaitError};
-use collaboration_service::{NativeControlBackend, NativeGenerationGate, ServiceIdentity};
+use collaboration_mcp::test_support::ServedCollaborationApi;
+use collaboration_service::{
+    CollaborationApplication, NativeControlBackend, NativeGenerationGate, ServiceIdentity,
+};
 use serde_json::{Value, json};
 use std::{os::unix::fs::DirBuilderExt, sync::Arc, time::Duration};
 use tokio::sync::Mutex;
@@ -66,8 +69,10 @@ pub async fn exercise(proof: &mut ProofContext, portable: PortableRunProof) -> P
             codex_home: std::path::PathBuf::from(std::env::var_os("HOME").ok_or("HOME missing")?)
                 .join(".codex"),
         })?;
-    let mut connections = tokio::task::JoinSet::new();
-    let mut client = connect_control(&identity, &mut connections).await?;
+    let served =
+        ServedCollaborationApi::start(&directory, CollaborationApplication::new(identity.clone()))
+            .await?;
+    let client = served.client("durable-recovery-proof").await?;
     let imported = client
         .import_schedule(ScheduleImportRequest {
             operation_id: OperationId::generate(),
@@ -124,7 +129,8 @@ pub async fn exercise(proof: &mut ProofContext, portable: PortableRunProof) -> P
         expiry: ExpiryRequest::None,
     };
     let wake = client.send_wakeup(request.clone()).await?;
-    let waiter = connect_control(&identity, &mut connections)
+    let waiter = served
+        .client("durable-recovery-waiter")
         .await?
         .subscribe_wakeup(WakeShowRequest {
             wakeup_id: wake.definition.wakeup_id.clone(),
@@ -237,7 +243,8 @@ pub async fn exercise(proof: &mut ProofContext, portable: PortableRunProof) -> P
         seconds: 60.try_into()?,
     };
     let paused = client.send_wakeup(paused_request).await?;
-    let waiter = connect_control(&identity, &mut connections)
+    let waiter = served
+        .client("durable-recovery-waiter")
         .await?
         .subscribe_wakeup(WakeShowRequest {
             wakeup_id: paused.definition.wakeup_id.clone(),
@@ -264,27 +271,10 @@ pub async fn exercise(proof: &mut ProofContext, portable: PortableRunProof) -> P
         "pausedFirstFireWaitRejected",
         json!({"wakeupId":paused.definition.wakeup_id}),
     )?;
-    client.close().await?;
     shutdown.cancel();
     worker.await?;
-    while let Some(connection) = connections.join_next().await {
-        connection??;
-    }
+    served.stop().await?;
     Ok(())
-}
-
-async fn connect_control(
-    identity: &ServiceIdentity,
-    tasks: &mut tokio::task::JoinSet<Result<(), String>>,
-) -> ProofResult<ControlClient> {
-    let (client, server) = tokio::net::UnixStream::pair()?;
-    let identity = identity.clone();
-    tasks.spawn(async move {
-        collaboration_service::serve_control_connection(server, identity)
-            .await
-            .map_err(|error| error.to_string())
-    });
-    Ok(ControlClient::initialize(client, "durable-recovery-proof", "1").await?)
 }
 
 fn timestamp() -> ProofResult<collaboration_client::protocol::ObservationTimestamp> {

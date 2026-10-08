@@ -40,14 +40,13 @@ fn missing_service_is_a_machine_readable_unavailable_result() {
 
 #[tokio::test]
 async fn executable_discovers_an_isolated_published_service() {
-    use collaboration_service::{LocalControlService, ManifestPublication, ServiceIdentity};
+    use collaboration_service::ServiceIdentity;
     use std::os::unix::fs::DirBuilderExt;
     let root = std::path::PathBuf::from(format!("/tmp/endpoint-cli-{}", std::process::id()));
     std::fs::DirBuilder::new()
         .mode(0o700)
         .create(&root)
         .unwrap_or_else(|e| panic!("directory: {e}"));
-    let digest = format!("sha256:{}", "a".repeat(64));
     let journal_id = "00000000-0000-4000-8000-000000000003"
         .to_owned()
         .try_into()
@@ -66,13 +65,12 @@ async fn executable_discovers_an_isolated_published_service() {
     .unwrap_or_else(|e| panic!("identity: {e}"))
     .with_journal(std::sync::Arc::clone(&store));
     let endpoints = identity.endpoint_directory();
-    let listener = LocalControlService::bind(&root.join("control.sock"), identity)
-        .unwrap_or_else(|e| panic!("bind: {e}"));
-    let manifest=serde_json::from_value(serde_json::json!({"version":2,"serviceId":"00000000-0000-4000-8000-000000000001","serviceEpoch":"00000000-0000-4000-8000-000000000002","machineLabel":"fixture-host","control":{"transport":"unixJsonLines","path":"control.sock"},"controlSchemaDigest":digest,"mcp":{"transport":"streamableHttp","url":"http://127.0.0.1:0/mcp"}})).unwrap_or_else(|e|panic!("manifest: {e}"));
-    let publication =
-        ManifestPublication::publish(&root, &manifest).unwrap_or_else(|e| panic!("publish: {e}"));
-    let stop = tokio_util::sync::CancellationToken::new();
-    let task = tokio::spawn(listener.run(stop.clone()));
+    let served = collaboration_mcp::test_support::ServedCollaborationApi::start(
+        &root,
+        collaboration_service::CollaborationApplication::new(identity),
+    )
+    .await
+    .unwrap_or_else(|e| panic!("serve: {e}"));
     let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_agent-collaboration"))
         .args(["endpoints", "list", "--json", "--service-directory"])
         .arg(&root)
@@ -195,11 +193,10 @@ async fn executable_discovers_an_isolated_published_service() {
         .unwrap_or_else(|error| panic!("error JSON: {error}"));
     assert_eq!(changed["error"]["data"]["kind"], "journalChanged");
     assert_eq!(changed["error"]["data"]["current"]["journalId"], journal_id);
-    stop.cancel();
-    task.await
-        .unwrap_or_else(|e| panic!("join: {e}"))
+    served
+        .stop()
+        .await
         .unwrap_or_else(|e| panic!("listener: {e}"));
-    drop(publication);
     std::sync::Arc::try_unwrap(store)
         .unwrap_or_else(|_| panic!("store retained"))
         .close()

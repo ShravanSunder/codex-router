@@ -1,16 +1,16 @@
 //! An aged durable wake can fire again after its previous push is physically pruned.
 use super::{WakeDeliverySender, build_wake_push_draft};
+use crate::collaboration_application::{CollaborationApplication, CollaborationRejection};
 use crate::{
     AttemptEvidenceSink, AttemptReconciliation, AttemptReconciliationContext,
     DeliveryContractError, DeliveryFuture, MachineIdentity, ServiceIdentity,
-    SessionMessageDelivery, serve_control_connection,
+    SessionMessageDelivery,
 };
 use agent_automation::{
     CessationEvidence, ExpiryRule, NativeEffectEvidence, PreparationEffect, RouteEffectEvidence,
     SubmissionEffect, TimingRule, WakeState,
 };
 use automation_storage::{AutomationStore, WakeCreate, WakeEvaluation};
-use collaboration_client::{ClientError, ControlClient};
 use collaboration_protocol::{
     CodexGeneration, DeliveryOutcome, DeliveryReceipt, MachineId, OperationId, PushDeliveryState,
     PushHeaderFacts, PushKind, PushLineInput, PushOrigin, PushRecord, PushRecordShowParams,
@@ -18,7 +18,7 @@ use collaboration_protocol::{
     render_push_line,
 };
 use serde_json::json;
-use std::{error::Error, sync::Arc, time::Duration};
+use std::{error::Error, sync::Arc};
 use tokio::sync::Mutex;
 
 type TestResult<TValue = ()> = Result<TValue, Box<dyn Error + Send + Sync>>;
@@ -96,29 +96,23 @@ impl SessionMessageDelivery for StoredWakeRoute {
 }
 
 async fn require_expired_link(
-    identity: &ServiceIdentity,
+    application: &CollaborationApplication,
     target: &SessionRef,
     link: &str,
 ) -> TestResult {
-    // A rejected Control call retires its client connection. Each old-link
-    // lookup therefore uses a separate real connection from the fresh lookup.
-    let (socket, server) = tokio::net::UnixStream::pair()?;
-    let control_task = tokio::spawn(serve_control_connection(server, identity.clone()));
-    let mut client = ControlClient::initialize(socket, "expired-wake-link-proof", "1").await?;
-    let result = client
-        .router_show(PushRecordShowParams {
+    let result = application
+        .messages()
+        .push_show(PushRecordShowParams {
             caller: target.clone(),
             reference: link.to_owned(),
         })
         .await;
-    let valid_rejection = ensure(
-        matches!(result, Err(ClientError::Rejected { code: -32050, data: Some(data) })
-        if data.get("kind").and_then(serde_json::Value::as_str) == Some("notFound")),
-        "pruned wake push link must be notFound through real Control",
-    );
-    client.close().await?;
-    tokio::time::timeout(Duration::from_secs(5), control_task).await???;
-    valid_rejection
+    ensure(
+        matches!(result.map_err(|failure| failure.published_rejection()), Err(rejection)
+        if rejection.code == -32050
+            && rejection.data.as_ref().and_then(|data| data.get("kind")).and_then(serde_json::Value::as_str) == Some("notFound")),
+        "pruned wake push link must be notFound through the application",
+    )
 }
 
 async fn evaluate_and_dispatch(
@@ -203,9 +197,7 @@ async fn aged_wake_definition_fires_fresh_push_after_old_link_is_pruned() -> Tes
         configuration: crate::AutomationConfigurationHandle::default(),
         machine_identity: machine.clone(),
     };
-    let (socket, server) = tokio::net::UnixStream::pair()?;
-    let control_task = tokio::spawn(serve_control_connection(server, identity.clone()));
-    let mut client = ControlClient::initialize(socket, "aged-wake-retention-proof", "1").await?;
+    let application = CollaborationApplication::new(identity.clone());
 
     let (old_push, old_occurrence) =
         evaluate_and_dispatch(&store, &sender, &wakeup_id, anchor_ms + interval_ms).await?;
@@ -233,7 +225,7 @@ async fn aged_wake_definition_fires_fresh_push_after_old_link_is_pruned() -> Tes
             .is_none(),
         "aged push must be physically absent",
     )?;
-    require_expired_link(&identity, &target, &old_link).await?;
+    require_expired_link(&application, &target, &old_link).await?;
     let retained = store
         .lock()
         .await
@@ -258,8 +250,9 @@ async fn aged_wake_definition_fires_fresh_push_after_old_link_is_pruned() -> Tes
         "same aged wake must fire a fresh current push and occurrence",
     )?;
     let fresh_link = RouterLink::new(MachineId::from(service_id), fresh_push.push_id.clone());
-    let shown = client
-        .router_show(PushRecordShowParams {
+    let shown = application
+        .messages()
+        .push_show(PushRecordShowParams {
             caller: target.clone(),
             reference: fresh_link.to_string(),
         })
@@ -267,9 +260,9 @@ async fn aged_wake_definition_fires_fresh_push_after_old_link_is_pruned() -> Tes
     ensure(
         shown.record.push_id == fresh_push.push_id
             && shown.record.body.as_deref() == Some(WAKE_BODY),
-        "fresh firing must be readable with its full body through Control",
+        "fresh firing must be readable with its full body through the application",
     )?;
-    require_expired_link(&identity, &target, &old_link).await?;
+    require_expired_link(&application, &target, &old_link).await?;
     let observed = route.observed.lock().await;
     let [old_request, fresh_request] = observed.as_slice() else {
         return Err("both actual firings must cross the service route exactly once".into());
@@ -302,8 +295,7 @@ async fn aged_wake_definition_fires_fresh_push_after_old_link_is_pruned() -> Tes
         "both firings must settle the same unchanged definition",
     )?;
 
-    client.close().await?;
-    tokio::time::timeout(Duration::from_secs(5), control_task).await???;
+    drop(application);
     drop(sender);
     drop(route);
     drop(identity);

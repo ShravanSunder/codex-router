@@ -1,15 +1,14 @@
-use collaboration_client::ControlClient;
 use collaboration_protocol::{
     SubscriptionWaitBatch, ThreadSubscribeRequest, ThreadSubscriptionPresence,
     ThreadSubscriptionState, ThreadSubscriptionWaitFilter, ThreadSubscriptionWaitRequest,
     ThreadSubscriptionsRequest, ThreadUnsubscribeRequest,
 };
+use collaboration_service::ServiceIdentity;
 use collaboration_service::{
     BoardAvailability, MachineIdentity, SessionDeliveryRouter, SessionMessageDelivery,
     SubscriptionDeliveryService, SubscriptionDeliveryServiceProps, SystemSubscriptionClock,
     TargetPresenceProbe,
 };
-use collaboration_service::{ServiceIdentity, serve_control_connection};
 use message_board::{
     BoardCreateRequest, BoardId, Description, EndpointId, Identity, MessageId, MessagePostRequest,
     MessageReferences, MessageText, ParticipantRole, Placement, ProjectCreateRequest, ProjectId,
@@ -20,6 +19,8 @@ use message_board::{
 use message_board_storage::BoardStore;
 use std::{sync::Arc, time::Duration};
 use tokio::sync::Mutex;
+#[path = "support/served_api.rs"]
+mod served_api;
 
 fn ensure_subscription_condition(
     condition: bool,
@@ -33,7 +34,7 @@ fn ensure_subscription_condition(
 }
 
 #[tokio::test]
-async fn subscription_control_methods_roundtrip_through_control_and_sqlite()
+async fn subscription_methods_roundtrip_through_the_api_and_sqlite()
 -> Result<(), Box<dyn std::error::Error>> {
     const SERVICE_ID: &str = "00000000-0000-4000-8000-000000000001";
     let directory = tempfile::tempdir()?;
@@ -66,10 +67,8 @@ async fn subscription_control_methods_roundtrip_through_control_and_sqlite()
         .map_err(std::io::Error::other)?
         .with_board_store(Arc::clone(&store))
         .with_subscription_delivery_service(subscription_delivery.clone(), presence);
-    let (socket, server) = tokio::net::UnixStream::pair()?;
-    let rejection_identity = identity.clone();
-    let server_task = tokio::spawn(serve_control_connection(server, identity));
-    let mut client = ControlClient::initialize(socket, "subscription-control-test", "1").await?;
+    let served = served_api::ServedApi::start(identity).await?;
+    let client = served.client("subscription-control-test").await?;
 
     let reader = Identity::Human {
         human_id: "human-reader".to_owned().try_into()?,
@@ -148,14 +147,8 @@ async fn subscription_control_methods_roundtrip_through_control_and_sqlite()
         "list did not return the persisted subscription view",
     )?;
 
-    let (rejection_socket, rejection_server) = tokio::net::UnixStream::pair()?;
-    let rejection_server_task = tokio::spawn(serve_control_connection(
-        rejection_server,
-        rejection_identity,
-    ));
-    let mut rejection_client =
-        ControlClient::initialize(rejection_socket, "subscription-rejection-test", "1").await?;
-    let non_poll_wait = rejection_client
+    // A rejection leaves the client usable: each call is its own request.
+    let non_poll_wait = client
         .board_thread_wait(
             ThreadSubscriptionWaitRequest {
                 actor: reader.clone(),
@@ -172,10 +165,8 @@ async fn subscription_control_methods_roundtrip_through_control_and_sqlite()
             non_poll_wait,
             Err(collaboration_client::BoardClientError::Rejected(_))
         ),
-        "Control wait did not refuse a subscription whose mode is off",
+        "API wait did not refuse a subscription whose mode is off",
     )?;
-    drop(rejection_client);
-    rejection_server_task.await??;
 
     client
         .board_thread_subscribe(ThreadSubscribeRequest {
@@ -449,11 +440,11 @@ async fn subscription_control_methods_roundtrip_through_control_and_sqlite()
     )?;
 
     drop(client);
-    server_task.await??;
+    served.stop().await?;
     subscription_delivery.shutdown().await;
     drop(subscription_delivery);
     let store = Arc::try_unwrap(store)
-        .map_err(|_| "Control service retained the board store after connection shutdown")?;
+        .map_err(|_| "API service retained the board store after shutdown")?;
     store.into_inner().close().await?;
     let push_store = Arc::try_unwrap(push_store)
         .map_err(|_| "Subscription service retained automation storage after shutdown")?;

@@ -1,12 +1,13 @@
 //! Real local SDK/socket/storage path; no native runtime or model.
-use collaboration_client::ControlClient;
 use collaboration_protocol::{
     InstructionCreateParams, InstructionText, OperationId, ScheduleCreateRequest,
     ScheduleShowRequest,
 };
-use collaboration_service::{ServiceIdentity, serve_control_connection};
+use collaboration_service::ServiceIdentity;
 use serde_json::json;
 use std::sync::Arc;
+#[path = "support/served_api.rs"]
+mod served_api;
 #[tokio::test]
 async fn sdk_creates_disabled_schedule_without_native_backend()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -23,9 +24,8 @@ async fn sdk_creates_disabled_schedule_without_native_backend()
     )
     .map_err(std::io::Error::other)?
     .with_automation_store(store.clone());
-    let (socket, server) = tokio::net::UnixStream::pair()?;
-    let task = tokio::spawn(serve_control_connection(server, identity));
-    let mut client = ControlClient::initialize(socket, "schedule-test", "1").await?;
+    let served = served_api::ServedApi::start(identity).await?;
+    let client = served.client("schedule-test").await?;
     let instruction = client
         .create_instruction(InstructionCreateParams {
             operation_id: OperationId::generate(),
@@ -60,8 +60,7 @@ async fn sdk_creates_disabled_schedule_without_native_backend()
     ) {
         return Err("unprepared schedule enabled or failed without typed feedback".into());
     }
-    client.close().await?;
-    task.await??;
+    served.stop().await?;
     drop(store);
     std::fs::remove_file(path)?;
     Ok(())
@@ -83,9 +82,8 @@ async fn sdk_rejects_mode_change_and_thread_preparation_with_actionable_feedback
     )
     .map_err(std::io::Error::other)?
     .with_automation_store(store.clone());
-    let (socket, server) = tokio::net::UnixStream::pair()?;
-    let service = tokio::spawn(serve_control_connection(server, identity.clone()));
-    let mut client = ControlClient::initialize(socket, "mode-fixture", "1").await?;
+    let served = served_api::ServedApi::start(identity.clone()).await?;
+    let client = served.client("mode-fixture").await?;
     let instruction = client
         .create_instruction(InstructionCreateParams {
             operation_id: OperationId::generate(),
@@ -99,12 +97,10 @@ async fn sdk_rejects_mode_change_and_thread_preparation_with_actionable_feedback
         "timing":{"kind":"interval","seconds":60},"enabled":false,
         "destination":{"kind":"freshEachRun","endpoint":endpoint,"cwd":"/isolated-test"},"executionTimeoutSeconds":null,"model":"gpt-5.6-sol","effort":"medium"}
     }))?).await?;
-    client.close().await?;
-    service.await??;
+    served.stop().await?;
     for prepare in [false, true] {
-        let (socket, server) = tokio::net::UnixStream::pair()?;
-        let service = tokio::spawn(serve_control_connection(server, identity.clone()));
-        let mut client = ControlClient::initialize(socket, "mode-rejection", "1").await?;
+        let served = served_api::ServedApi::start(identity.clone()).await?;
+        let client = served.client("mode-rejection").await?;
         let result = if prepare {
             client
                 .prepare_schedule(serde_json::from_value(json!({
@@ -139,8 +135,7 @@ async fn sdk_rejects_mode_change_and_thread_preparation_with_actionable_feedback
         {
             return Err("mode rejection omitted field, reason or recovery action".into());
         }
-        client.close().await?;
-        service.await??;
+        served.stop().await?;
     }
     let current = store.lock().await.inspect_schedule::<collaboration_protocol::SessionRef, collaboration_protocol::EndpointRef>(&created.schedule_id).await?;
     if current.record.change_id != created.change_id

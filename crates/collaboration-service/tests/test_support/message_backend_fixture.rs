@@ -1,6 +1,6 @@
-//! Real socket fixture with scripted native responses; never a live model backend.
+//! Real API fixture with scripted native responses; never a live model backend.
 use automation_storage::AutomationStore;
-use collaboration_client::{ClientError, ControlClient};
+use collaboration_client::ClientError;
 use collaboration_protocol::{
     CodexGeneration, DeliveryReceipt, EndpointDescription, MessageContent, MessageDelivery,
     SessionMessageSendParams, SessionRef,
@@ -8,13 +8,14 @@ use collaboration_protocol::{
 use collaboration_service::{
     CodexAppServerDeliveryRoute, NativeControlBackend, NativeGenerationGate, ServiceIdentity,
     SessionDeliveryRoute, SessionDeliveryRouter, SessionMessageDelivery, new_service_uuid,
-    serve_control_connection,
 };
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, os::unix::fs::DirBuilderExt, sync::Arc, time::Duration};
 use tokio::sync::Mutex;
 use tokio_tungstenite::tungstenite::Message;
+#[path = "../support/served_api.rs"]
+mod served_api;
 
 pub enum NativeReply {
     Result(Value),
@@ -115,8 +116,7 @@ pub async fn exercise(
     let identity = identity
         .with_session_delivery(delivery)
         .with_subscription_delivery_service(owner.clone(), presence);
-    let (client, server) = tokio::net::UnixStream::pair()?;
-    let service = tokio::spawn(serve_control_connection(server, identity));
+    let served = served_api::ServedApi::start(identity).await?;
     let backend = tokio::spawn(async move {
         let (stream, _) = listener.accept().await?;
         let mut socket = tokio_tungstenite::accept_async(stream).await?;
@@ -195,7 +195,7 @@ pub async fn exercise(
         }
         Ok::<_, FixtureError>(requests)
     });
-    let mut client = ControlClient::initialize(client, "message-proof", "1").await?;
+    let client = served.client("message-proof").await?;
     let result = tokio::time::timeout(
         Duration::from_secs(3),
         client.send_agent_message(SessionMessageSendParams {
@@ -209,8 +209,8 @@ pub async fn exercise(
         }),
     )
     .await?;
-    client.close().await?;
-    service.await??;
+    drop(client);
+    served.stop().await?;
     owner.shutdown().await;
     drop(owner);
     let requests = backend.await??;

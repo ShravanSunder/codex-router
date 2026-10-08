@@ -20,7 +20,11 @@ use crate::{
 
 /// How long one provider observation call waits for new events while following.
 const FOLLOW_CALL_SECONDS: u64 = 30;
-const FOLLOW_MAX_EVENTS: usize = 4096;
+/// The first call collects the retained snapshot in one batch.
+const SNAPSHOT_MAX_EVENTS: usize = 4096;
+/// A bounded observation returns at its deadline unless it fills, so each following call
+/// asks for one event: it returns as soon as the next event exists, retained or live.
+const FOLLOW_EVENTS_PER_CALL: usize = 1;
 const FOLLOW_MAX_BYTES: usize = 1_048_576;
 
 pub enum SessionObservation {
@@ -79,7 +83,7 @@ impl SessionObservation {
                 .observe(BoundedObservationRequest {
                     target: target.clone(),
                     timeout_seconds: 1,
-                    max_events: FOLLOW_MAX_EVENTS,
+                    max_events: SNAPSHOT_MAX_EVENTS,
                     max_bytes: FOLLOW_MAX_BYTES,
                     after_sequence: None,
                     epoch: None,
@@ -205,7 +209,7 @@ impl ProviderSessionFollow {
                 .observe(BoundedObservationRequest {
                     target: self.target.clone(),
                     timeout_seconds: FOLLOW_CALL_SECONDS,
-                    max_events: FOLLOW_MAX_EVENTS,
+                    max_events: FOLLOW_EVENTS_PER_CALL,
                     max_bytes: FOLLOW_MAX_BYTES,
                     after_sequence: self.after_sequence,
                     epoch: self.epoch,

@@ -1,12 +1,11 @@
 //! Carrier response loss through the stateless collaboration API: a lost or refused carrier
 //! answer keeps the known target and effect, and nothing is replayed.
-use crate::api_test_harness::{ServedApi, api_config, test_identity};
+use crate::api_test_harness::{ServedApi, api_config};
 use collaboration_service::CollaborationApplication;
 use futures_util::StreamExt;
 use reqwest::header::{ACCEPT, CONTENT_TYPE};
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio_util::sync::CancellationToken;
 
 #[tokio::test]
 async fn stateless_http_resumed_prompt_load_response_loss_retains_target_without_replay() {
@@ -76,7 +75,6 @@ async fn run_stateless_mcp_resumed_prompt_after_load(load_error: Option<Value>) 
     }
     let service_id = "00000000-0000-4000-8000-000000000001";
     let epoch = "00000000-0000-4000-8000-000000000002";
-    let digest = format!("sha256:{}", "a".repeat(64));
     let description = serde_json::from_value(json!({
         "endpoint":{"serviceId":service_id,"endpointId":"codex-local"}, "label":"MCP resumed load fixture",
         "availability":{"state":"available","observedAt":"2026-09-19T00:00:00Z"},
@@ -87,22 +85,6 @@ async fn run_stateless_mcp_resumed_prompt_after_load(load_error: Option<Value>) 
         .expect("service identity")
         .with_endpoints(vec![description])
         .expect("endpoint directory");
-    let control = collaboration_service::LocalControlService::bind(
-        &temporary.path().join("control.sock"),
-        identity,
-    )
-    .expect("control listener");
-    let manifest = serde_json::from_value(json!({
-        "version":2,"serviceId":service_id,"serviceEpoch":epoch,
-        "machineLabel":"fixture-host","control":{"transport":"unixJsonLines","path":"control.sock"},
-        "controlSchemaDigest":digest,"mcp":{"transport":"streamableHttp","url":"http://127.0.0.1:0/mcp"}
-    }))
-    .expect("service manifest");
-    let publication =
-        collaboration_service::ManifestPublication::publish(temporary.path(), &manifest)
-            .expect("manifest publication");
-    let control_stop = CancellationToken::new();
-    let control_task = tokio::spawn(control.run(control_stop.clone()));
     let acp =
         tokio::net::UnixListener::bind(temporary.path().join("acp.sock")).expect("ACP listener");
     let peer = tokio::spawn(async move {
@@ -163,7 +145,7 @@ async fn run_stateless_mcp_resumed_prompt_after_load(load_error: Option<Value>) 
         }
     });
     let listener = ServedApi::tcp(&api_config(
-        CollaborationApplication::new(test_identity()),
+        CollaborationApplication::new(identity),
         temporary.path(),
     ))
     .await;
@@ -185,12 +167,6 @@ async fn run_stateless_mcp_resumed_prompt_after_load(load_error: Option<Value>) 
     let body = protocol_response_json(response).await;
     listener.stop().await;
     peer.await.expect("ACP peer join");
-    control_stop.cancel();
-    control_task
-        .await
-        .expect("control join")
-        .expect("control shutdown");
-    drop(publication);
     body
 }
 
@@ -263,7 +239,6 @@ async fn stateless_http_observation_attach_failure_retains_target_and_pre_dispat
     }
     let service_id = "00000000-0000-4000-8000-000000000001";
     let epoch = "00000000-0000-4000-8000-000000000002";
-    let digest = format!("sha256:{}", "a".repeat(64));
     let target = json!({"endpoint":{"serviceId":service_id,"endpointId":"codex-local"},"sessionId":"observe-thread"});
     let identity = collaboration_service::ServiceIdentity::new(service_id, epoch)
         .expect("service identity")
@@ -273,24 +248,8 @@ async fn stateless_http_observation_attach_failure_retains_target_and_pre_dispat
             "channels":[{"kind":"nativeCodex","transport":"unixWebSocket","path":"missing-native.sock","schemaDigest":null,"generation":{"serviceEpoch":epoch,"generation":1}}]
         })).expect("endpoint description")])
         .expect("endpoint directory");
-    let control = collaboration_service::LocalControlService::bind(
-        &temporary.path().join("control.sock"),
-        identity,
-    )
-    .expect("control listener");
-    let manifest = serde_json::from_value(json!({
-        "version":2,"serviceId":service_id,"serviceEpoch":epoch,
-        "machineLabel":"fixture-host","control":{"transport":"unixJsonLines","path":"control.sock"},"controlSchemaDigest":digest,
-        "mcp":{"transport":"streamableHttp","url":"http://127.0.0.1:0/mcp"}
-    }))
-    .expect("service manifest");
-    let publication =
-        collaboration_service::ManifestPublication::publish(temporary.path(), &manifest)
-            .expect("manifest publication");
-    let stop = CancellationToken::new();
-    let control_task = tokio::spawn(control.run(stop.clone()));
     let listener = ServedApi::tcp(&api_config(
-        CollaborationApplication::new(test_identity()),
+        CollaborationApplication::new(identity),
         temporary.path(),
     ))
     .await;
@@ -313,12 +272,6 @@ async fn stateless_http_observation_attach_failure_retains_target_and_pre_dispat
         Some(&json!("none"))
     );
     listener.stop().await;
-    stop.cancel();
-    control_task
-        .await
-        .expect("control join")
-        .expect("control shutdown");
-    drop(publication);
 }
 
 #[tokio::test]
@@ -332,24 +285,12 @@ async fn stateless_http_observation_resume_response_loss_retains_target_and_unkn
     }
     let service_id = "00000000-0000-4000-8000-000000000001";
     let epoch = "00000000-0000-4000-8000-000000000002";
-    let digest = format!("sha256:{}", "a".repeat(64));
     let target = json!({"endpoint":{"serviceId":service_id,"endpointId":"codex-local"},"sessionId":"observe-thread"});
     let identity = collaboration_service::ServiceIdentity::new(service_id, epoch).expect("service identity").with_endpoints(vec![serde_json::from_value(json!({
         "endpoint":{"serviceId":service_id,"endpointId":"codex-local"}, "label":"MCP observation resume fixture",
         "availability":{"state":"available","observedAt":"2026-09-19T00:00:00Z"},
         "channels":[{"kind":"nativeCodex","transport":"unixWebSocket","path":"native.sock","schemaDigest":null,"generation":{"serviceEpoch":epoch,"generation":1}}]
     })).expect("endpoint description")]).expect("endpoint directory");
-    let control = collaboration_service::LocalControlService::bind(
-        &temporary.path().join("control.sock"),
-        identity,
-    )
-    .expect("control listener");
-    let manifest = serde_json::from_value(json!({"version":2,"serviceId":service_id,"serviceEpoch":epoch,"machineLabel":"fixture-host","control":{"transport":"unixJsonLines","path":"control.sock"},"controlSchemaDigest":digest,"mcp":{"transport":"streamableHttp","url":"http://127.0.0.1:0/mcp"}})).expect("service manifest");
-    let publication =
-        collaboration_service::ManifestPublication::publish(temporary.path(), &manifest)
-            .expect("manifest publication");
-    let stop = CancellationToken::new();
-    let control_task = tokio::spawn(control.run(stop.clone()));
     let native = tokio::net::UnixListener::bind(temporary.path().join("native.sock"))
         .expect("native listener");
     let native_peer = tokio::spawn(async move {
@@ -396,7 +337,7 @@ async fn stateless_http_observation_resume_response_loss_retains_target_and_unkn
         assert_eq!(resume["params"]["threadId"], "observe-thread");
     });
     let listener = ServedApi::tcp(&api_config(
-        CollaborationApplication::new(test_identity()),
+        CollaborationApplication::new(identity),
         temporary.path(),
     ))
     .await;
@@ -418,12 +359,6 @@ async fn stateless_http_observation_resume_response_loss_retains_target_and_unkn
     );
     listener.stop().await;
     native_peer.await.expect("native peer join");
-    stop.cancel();
-    control_task
-        .await
-        .expect("control join")
-        .expect("control shutdown");
-    drop(publication);
 }
 
 #[derive(Clone, Copy)]
@@ -446,7 +381,6 @@ async fn run_stateless_mcp_create_response_loss(
     }
     let service_id = "00000000-0000-4000-8000-000000000001";
     let epoch = "00000000-0000-4000-8000-000000000002";
-    let digest = format!("sha256:{}", "a".repeat(64));
     let endpoint = json!({"serviceId":service_id,"endpointId":"codex-local"});
     let description = serde_json::from_value(json!({
         "endpoint":endpoint, "label":"MCP create-loss fixture",
@@ -458,22 +392,6 @@ async fn run_stateless_mcp_create_response_loss(
         .expect("service identity")
         .with_endpoints(vec![description])
         .expect("endpoint directory");
-    let control = collaboration_service::LocalControlService::bind(
-        &temporary.path().join("control.sock"),
-        identity,
-    )
-    .expect("control listener");
-    let manifest = serde_json::from_value(json!({
-        "version":2,"serviceId":service_id,"serviceEpoch":epoch,
-        "machineLabel":"fixture-host","control":{"transport":"unixJsonLines","path":"control.sock"},
-        "controlSchemaDigest":digest,"mcp":{"transport":"streamableHttp","url":"http://127.0.0.1:0/mcp"}
-    }))
-    .expect("service manifest");
-    let publication =
-        collaboration_service::ManifestPublication::publish(temporary.path(), &manifest)
-            .expect("manifest publication");
-    let control_stop = CancellationToken::new();
-    let control_task = tokio::spawn(control.run(control_stop.clone()));
     let acp =
         tokio::net::UnixListener::bind(temporary.path().join("acp.sock")).expect("ACP listener");
     let peer = tokio::spawn(async move {
@@ -534,7 +452,7 @@ async fn run_stateless_mcp_create_response_loss(
         );
     });
     let listener = ServedApi::tcp(&api_config(
-        CollaborationApplication::new(test_identity()),
+        CollaborationApplication::new(identity),
         temporary.path(),
     ))
     .await;
@@ -551,12 +469,6 @@ async fn run_stateless_mcp_create_response_loss(
     let body = protocol_response_json(response).await;
     listener.stop().await;
     peer.await.expect("ACP peer join");
-    control_stop.cancel();
-    control_task
-        .await
-        .expect("control join")
-        .expect("control shutdown");
-    drop(publication);
     body
 }
 

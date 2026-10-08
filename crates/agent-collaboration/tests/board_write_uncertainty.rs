@@ -1,7 +1,8 @@
-//! A lost Control response after transmission preserves inspect-before-retry evidence.
+//! A lost API response after transmission preserves inspect-before-retry evidence.
 use serde_json::{Value, json};
-use std::os::unix::fs::DirBuilderExt;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+mod fake_api_support;
+use fake_api_support::{FakeCollaborationApi, FakeReply};
 
 const SERVICE_ID: &str = "00000000-0000-4000-8000-000000000001";
 const SERVICE_EPOCH: &str = "00000000-0000-4000-8000-000000000002";
@@ -89,81 +90,13 @@ async fn run_lost_project_create(
     project_id: Option<&str>,
     machine_output: bool,
 ) -> TestResult<LostWriteProof> {
-    let root = std::path::PathBuf::from("/tmp").join(format!(
-        "board-write-uncertainty-{}",
-        collaboration_client::board::ProjectId::generate().as_str()
-    ));
-    std::fs::DirBuilder::new().mode(0o700).create(&root)?;
-    let listener = tokio::net::UnixListener::bind(root.join("control.sock"))?;
-    let digest = format!("sha256:{}", "a".repeat(64));
-    let manifest = serde_json::from_value(json!({
-        "version":2,
-        "serviceId":SERVICE_ID,
-        "serviceEpoch":SERVICE_EPOCH,
-        "machineLabel":"fixture-host","control":{"transport":"unixJsonLines","path":"control.sock"},
-        "controlSchemaDigest":digest,
-        "mcp":{"transport":"streamableHttp","url":"http://127.0.0.1:0/mcp"},
-    }))?;
-    let publication = collaboration_service::ManifestPublication::publish(&root, &manifest)?;
-    let fixture_digest = digest.clone();
-    let fixture = tokio::spawn(async move {
-        let (stream, _) = listener.accept().await?;
-        let mut stream = BufReader::new(stream);
-        let initialize = read_request(&mut stream).await?;
-        assert_eq!(
-            initialize.get("method").and_then(Value::as_str),
-            Some("control/initialize")
-        );
-        let request_id = initialize
-            .get("id")
-            .cloned()
-            .ok_or("initialize ID missing")?;
-        let response = json!({
-            "jsonrpc":"2.0",
-            "id":request_id,
-            "result":{
-                "version":{"major":1,"minor":0},
-                "serviceId":SERVICE_ID,
-                "serviceEpoch":SERVICE_EPOCH,
-                "controlSchemaDigest":fixture_digest,
-            }
-        });
-        stream
-            .get_mut()
-            .write_all(format!("{response}\n").as_bytes())
-            .await?;
-
-        let write = read_request(&mut stream).await?;
-        assert_eq!(
-            write.get("method").and_then(Value::as_str),
-            Some("board/projectCreate")
-        );
-        assert_eq!(
-            write.pointer("/params/name").and_then(Value::as_str),
-            Some("Uncertain write proof")
-        );
-        assert_eq!(
-            write.pointer("/params/actor/kind").and_then(Value::as_str),
-            Some("human")
-        );
-        let transmitted_project_id = write
-            .pointer("/params/projectId")
-            .and_then(Value::as_str)
-            .ok_or("write omitted projectId")?
-            .to_owned();
-
-        // The peer has consumed the complete write frame. Closing now makes only the response
-        // uncertain. Keep listening briefly to prove the CLI does not reconnect and replay it.
-        drop(stream);
-        let second_connection_accepted = matches!(
-            tokio::time::timeout(std::time::Duration::from_millis(500), listener.accept(),).await,
-            Ok(Ok(_))
-        );
-        Ok::<_, Box<dyn std::error::Error + Send + Sync>>((
-            transmitted_project_id,
-            second_connection_accepted,
-        ))
-    });
+    let mut fixture = FakeCollaborationApi::new(SERVICE_ID, SERVICE_EPOCH)?;
+    // The stand-in reads the complete write, then closes without answering: only the
+    // response is uncertain. It keeps listening briefly to prove the CLI does not replay it.
+    let served = fixture.serve_then_watch(
+        vec![FakeReply::Disconnect],
+        std::time::Duration::from_millis(500),
+    );
 
     let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_agent-collaboration"));
     command.args([
@@ -176,7 +109,7 @@ async fn run_lost_project_create(
         HUMAN_ACTOR,
         "--service-directory",
     ]);
-    command.arg(&root);
+    command.arg(fixture.directory());
     if machine_output {
         command.arg("--json");
     }
@@ -185,67 +118,42 @@ async fn run_lost_project_create(
     }
     let output =
         tokio::time::timeout(std::time::Duration::from_secs(3), command.output()).await??;
-    let (transmitted_project_id, second_connection_accepted) = fixture.await??;
-
-    drop(publication);
-    std::fs::remove_file(root.join("control.sock"))?;
-    std::fs::remove_dir(root)?;
+    let watched = served.await??;
+    let write = watched.calls.first().ok_or("the CLI made no write")?;
+    assert_eq!(
+        write.get("tool").and_then(Value::as_str),
+        Some("board_project_create")
+    );
+    assert_eq!(
+        write.pointer("/arguments/name").and_then(Value::as_str),
+        Some("Uncertain write proof")
+    );
+    assert_eq!(
+        write
+            .pointer("/arguments/actor/kind")
+            .and_then(Value::as_str),
+        Some("human")
+    );
+    let transmitted_project_id = write
+        .pointer("/arguments/projectId")
+        .and_then(Value::as_str)
+        .ok_or("write omitted projectId")?
+        .to_owned();
     Ok(LostWriteProof {
         output,
         transmitted_project_id,
-        second_connection_accepted,
+        second_connection_accepted: watched.further_call.is_some(),
     })
 }
 
-async fn read_request(stream: &mut BufReader<tokio::net::UnixStream>) -> TestResult<Value> {
-    let mut line = String::new();
-    stream.read_line(&mut line).await?;
-    Ok(serde_json::from_str(&line)?)
-}
-
 async fn run_known_project_rejection() -> TestResult<std::process::Output> {
-    let root = std::path::PathBuf::from("/tmp").join(format!(
-        "board-known-rejection-{}",
-        collaboration_client::board::ProjectId::generate().as_str()
-    ));
-    std::fs::DirBuilder::new().mode(0o700).create(&root)?;
-    let listener = tokio::net::UnixListener::bind(root.join("control.sock"))?;
-    let digest = format!("sha256:{}", "b".repeat(64));
-    let manifest = serde_json::from_value(json!({
-        "version":2,"serviceId":SERVICE_ID,"serviceEpoch":SERVICE_EPOCH,
-        "machineLabel":"fixture-host","control":{"transport":"unixJsonLines","path":"control.sock"},
-        "controlSchemaDigest":digest,
-        "mcp":{"transport":"streamableHttp","url":"http://127.0.0.1:0/mcp"},
-    }))?;
-    let publication = collaboration_service::ManifestPublication::publish(&root, &manifest)?;
-    let fixture = tokio::spawn(async move {
-        let (stream, _) = listener.accept().await?;
-        let mut stream = BufReader::new(stream);
-        let initialize = read_request(&mut stream).await?;
-        let initialize_id = initialize
-            .get("id")
-            .cloned()
-            .ok_or("initialize ID missing")?;
-        let initialized = json!({"jsonrpc":"2.0","id":initialize_id,"result":{
-            "version":{"major":1,"minor":0},"serviceId":SERVICE_ID,
-            "serviceEpoch":SERVICE_EPOCH,"controlSchemaDigest":digest}});
-        stream
-            .get_mut()
-            .write_all(format!("{initialized}\n").as_bytes())
-            .await?;
-        let write = read_request(&mut stream).await?;
-        let write_id = write.get("id").cloned().ok_or("write ID missing")?;
-        let rejected = json!({"jsonrpc":"2.0","id":write_id,"error":{
-            "code":-32050,"message":"Board operation rejected","data":{
-                "kind":"nameConflict","stage":"admission",
-                "message":"Choose another project name.","nextAction":"selectDifferentName",
-                "details":{"kind":"none"}}}});
-        stream
-            .get_mut()
-            .write_all(format!("{rejected}\n").as_bytes())
-            .await?;
-        Ok::<_, Box<dyn std::error::Error + Send + Sync>>(())
-    });
+    let mut fixture = FakeCollaborationApi::new(SERVICE_ID, SERVICE_EPOCH)?;
+    let served = fixture.serve(vec![FakeReply::Error(json!({
+        "code":-32050,"message":"Board operation rejected","data":{
+            "kind":"nameConflict","stage":"admission",
+            "message":"Choose another project name.","nextAction":"selectDifferentName",
+            "details":{"kind":"none"}}
+    }))]);
     let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_agent-collaboration"))
         .args([
             "board",
@@ -257,13 +165,10 @@ async fn run_known_project_rejection() -> TestResult<std::process::Output> {
             HUMAN_ACTOR,
             "--service-directory",
         ])
-        .arg(&root)
+        .arg(fixture.directory())
         .output()
         .await?;
-    fixture.await??;
-    drop(publication);
-    std::fs::remove_file(root.join("control.sock"))?;
-    std::fs::remove_dir(root)?;
+    served.await??;
     Ok(output)
 }
 

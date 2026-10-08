@@ -1,12 +1,12 @@
-use collaboration_client::ControlClient;
-use collaboration_service::{ServiceIdentity, serve_control_connection};
+use collaboration_service::ServiceIdentity;
 use message_board::*;
 use message_board_storage::BoardStore;
 use std::sync::Arc;
 mod board_control_support;
+use board_control_support::served_api;
 
 #[tokio::test]
-async fn oversized_repository_locators_return_field_and_numeric_bound()
+async fn oversized_repository_locators_name_field_and_numeric_bound()
 -> Result<(), Box<dyn std::error::Error>> {
     let path = std::env::temp_dir().join(format!(
         "repository-control-{}.sqlite",
@@ -25,22 +25,23 @@ async fn oversized_repository_locators_return_field_and_numeric_bound()
         serde_json::json!({"jsonrpc":"2.0","id":"origin","method":"board/repositoryAttach","params":{"projectId":project_id,"repository":{"kind":"origin","normalizedOrigin":format!("github.com/{}", "x".repeat(455_000))},"actor":actor}}),
         serde_json::json!({"jsonrpc":"2.0","id":"directory","method":"board/repositoryAttach","params":{"projectId":project_id,"repository":{"kind":"local","serviceId":"00000000-0000-4000-8000-000000000001","commonDirectory":format!("/{}", "x".repeat(500_000))},"actor":actor}}),
     ]).await?;
+    // Tool arguments that fail to decode are refused at validation with the decoder's
+    // message, which names the field and its bound; the oversized value is not echoed.
     for (response, field) in responses
         .iter()
-        .zip(["repository.normalizedOrigin", "repository.commonDirectory"])
+        .zip(["normalizedOrigin", "commonDirectory"])
     {
-        let valid = response
-            .pointer("/error/data/kind")
-            .and_then(serde_json::Value::as_str)
-            == Some("invalidField")
-            && response
-                .pointer("/error/data/details/field")
+        let failure = response.pointer("/error/data");
+        let text = |name: &str| {
+            failure
+                .and_then(|failure| failure.get(name))
                 .and_then(serde_json::Value::as_str)
-                == Some(field)
-            && response
-                .pointer("/error/data/details/requirement")
-                .and_then(serde_json::Value::as_str)
-                .is_some_and(|value| value.contains("4096"))
+        };
+        let valid = text("kind") == Some("protocolViolation")
+            && text("stage") == Some("validation")
+            && text("effect") == Some("none")
+            && text("message").is_some_and(|message| message.contains(field))
+            && text("message").is_some_and(|message| message.contains("4096"))
             && response.to_string().len() < 1_048_576;
         if !valid {
             return Err(
@@ -54,9 +55,8 @@ async fn oversized_repository_locators_return_field_and_numeric_bound()
     )
     .map_err(std::io::Error::other)?
     .with_board_store(store.clone());
-    let (socket, server) = tokio::net::UnixStream::pair()?;
-    let task = tokio::spawn(serve_control_connection(server, identity));
-    let mut client = ControlClient::initialize(socket, "repository-boundary-test", "1").await?;
+    let served = served_api::ServedApi::start(identity).await?;
+    let client = served.client("repository-boundary-test").await?;
     let actor = Identity::Human {
         human_id: HumanId::try_from("owner".to_owned())?,
     };
@@ -112,8 +112,7 @@ async fn oversized_repository_locators_return_field_and_numeric_bound()
     {
         return Err("second max-bound repository page exceeded the frame or did not finish".into());
     }
-    drop(client);
-    task.await??;
+    served.stop().await?;
     drop(store);
     std::fs::remove_file(path)?;
     Ok(())

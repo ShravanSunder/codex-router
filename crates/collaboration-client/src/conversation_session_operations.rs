@@ -123,10 +123,10 @@ impl ConversationClient {
                     }
                     ProviderConversations::Local(router) => router,
                 };
-                let control = LocalProviderOperations(router.as_ref());
+                let operations = LocalProviderOperations(router.as_ref());
                 let submitted = tokio::time::timeout(timeout, async {
-                    control.load_provider_conversation(request).await?;
-                    let waited = control
+                    operations.load_provider_conversation(request).await?;
+                    let waited = operations
                         .wait_for_provider_conversation_operation(
                             ConversationOperationWaitRequest {
                                 operation_id: operation_id.clone(),
@@ -274,10 +274,10 @@ impl ConversationClient {
                     }
                     ProviderConversations::Local(router) => router,
                 };
-                let control = LocalProviderOperations(router.as_ref());
+                let operations = LocalProviderOperations(router.as_ref());
                 let submitted = tokio::time::timeout(timeout, async {
-                    control.prompt_provider_conversation(request).await?;
-                    let waited = control
+                    operations.prompt_provider_conversation(request).await?;
+                    let waited = operations
                         .wait_for_provider_conversation_operation(
                             ConversationOperationWaitRequest {
                                 operation_id: operation_id.clone(),

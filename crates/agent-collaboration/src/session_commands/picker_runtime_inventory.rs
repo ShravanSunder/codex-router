@@ -286,8 +286,7 @@ impl PickerRuntimeInventory {
                     env!("CARGO_PKG_VERSION"),
                 )
                 .await?;
-                let result = load_provider_records(&mut client).await;
-                result
+                load_provider_records(&mut client).await
             };
             let native = async {
                 let mut client = CollaborationClient::connect(
@@ -296,9 +295,8 @@ impl PickerRuntimeInventory {
                     env!("CARGO_PKG_VERSION"),
                 )
                 .await?;
-                let result =
-                    load_runtime_records(&mut client, &metadata, include_empty_sessions).await;
-                result
+
+                load_runtime_records(&mut client, &metadata, include_empty_sessions).await
             };
             let deadline = std::time::Duration::from_secs(5);
             let (providers, native) = tokio::join!(

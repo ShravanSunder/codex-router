@@ -1,10 +1,10 @@
-use collaboration_client::{ClientError, ControlClient, MessageSendRequest, PublicMessageContent};
+use collaboration_client::{ClientError, MessageSendRequest, PublicMessageContent};
 use collaboration_protocol::{CodexGeneration, EndpointDescription, SessionRef};
 use collaboration_service::{
     BoardAvailability, CodexAppServerDeliveryRoute, MachineIdentity, NativeControlBackend,
     NativeGenerationGate, ServiceIdentity, SessionDeliveryRoute, SessionDeliveryRouter,
     SessionMessageDelivery, SubscriptionDeliveryService, SubscriptionDeliveryServiceProps,
-    SystemSubscriptionClock, TargetPresenceProbe, serve_control_connection,
+    SystemSubscriptionClock, TargetPresenceProbe,
 };
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
@@ -14,13 +14,15 @@ use std::{
     sync::{Arc, Mutex},
 };
 use tokio_tungstenite::tungstenite::Message;
+#[path = "support/served_api.rs"]
+mod served_api;
 
 /// A fixed instant well in the past, so a computed idle time can only be positive.
 const BUSY_THREAD_UPDATED_AT_SECONDS: i64 = 1_700_000_000;
 
 #[tokio::test]
 async fn sdk_inspection_and_exact_interrupt_use_native_backend_with_generation_guards() {
-    // Arrange: isolated Control and backend sockets plus explicitly fixture-only schemas.
+    // Arrange: an isolated API and backend socket plus explicitly fixture-only schemas.
     let root = std::env::temp_dir().join(format!("native-control-{}", std::process::id()));
     std::fs::DirBuilder::new()
         .mode(0o700)
@@ -168,9 +170,9 @@ async fn sdk_inspection_and_exact_interrupt_use_native_backend_with_generation_g
         .with_session_delivery(delivery)
         .with_subscription_delivery_service(subscription_delivery.clone(), presence)
         .with_approval_broker(broker);
-    let (client, server) =
-        tokio::net::UnixStream::pair().unwrap_or_else(|error| panic!("pair: {error}"));
-    let service = tokio::spawn(serve_control_connection(server, identity.clone()));
+    let served = served_api::ServedApi::start(identity.clone())
+        .await
+        .unwrap_or_else(|error| panic!("serve: {error}"));
     // The native Thread schema requires both timestamps as unix seconds.
     let thread_updated_at = chrono::Utc::now().timestamp() - 45;
     let thread_created_at = thread_updated_at - 600;
@@ -407,9 +409,10 @@ async fn sdk_inspection_and_exact_interrupt_use_native_backend_with_generation_g
         }
     });
     // Act: no request is sent for the empty sentinel; native inspection, message submission, queueing and interruption follow.
-    let mut client = ControlClient::initialize(client, "proof", "1")
+    let client = served
+        .client("proof")
         .await
-        .unwrap_or_else(|error| panic!("initialize: {error}"));
+        .unwrap_or_else(|error| panic!("connect: {error}"));
     assert!(
         client
             .interrupt_turn(&target, &generation, "")
@@ -550,34 +553,18 @@ async fn sdk_inspection_and_exact_interrupt_use_native_backend_with_generation_g
         .try_into()
         .unwrap_or_else(|error| panic!("generation: {error}"));
     let rejected = client.interrupt_turn(&target, &stale, "proof-turn").await;
-    client
-        .close()
-        .await
-        .unwrap_or_else(|error| panic!("close: {error}"));
-    service
-        .await
-        .unwrap_or_else(|error| panic!("service: {error}"))
-        .unwrap_or_else(|error| panic!("serve: {error}"));
-    let (client, server) =
-        tokio::net::UnixStream::pair().unwrap_or_else(|error| panic!("lost rename pair: {error}"));
-    let service = tokio::spawn(serve_control_connection(server, identity.clone()));
-    let mut client = ControlClient::initialize(client, "lost-rename-proof", "1")
-        .await
-        .unwrap_or_else(|error| panic!("lost rename initialization: {error}"));
+    // A rejection leaves the client usable: each call is its own request.
     let lost_rename = client
         .rename_session(collaboration_protocol::NativeRenameParams {
             target: target.clone(),
             name: "After send".into(),
         })
         .await;
-    client
-        .close()
+    drop(client);
+    served
+        .stop()
         .await
-        .unwrap_or_else(|error| panic!("lost rename close: {error}"));
-    service
-        .await
-        .unwrap_or_else(|error| panic!("lost rename service join: {error}"))
-        .unwrap_or_else(|error| panic!("lost rename service: {error}"));
+        .unwrap_or_else(|error| panic!("serve: {error}"));
     backend
         .await
         .unwrap_or_else(|error| panic!("backend: {error}"));
@@ -592,20 +579,18 @@ async fn sdk_inspection_and_exact_interrupt_use_native_backend_with_generation_g
         .endpoint_directory()
         .publish(description)
         .unwrap_or_else(|error| panic!("schema withdrawal: {error}"));
-    let (client, server) =
-        tokio::net::UnixStream::pair().unwrap_or_else(|error| panic!("second pair: {error}"));
-    let service = tokio::spawn(serve_control_connection(server, identity));
-    let mut client = ControlClient::initialize(client, "withdrawn-schema-proof", "1")
+    let served = served_api::ServedApi::start(identity)
         .await
-        .unwrap_or_else(|error| panic!("second initialization: {error}"));
+        .unwrap_or_else(|error| panic!("second serve: {error}"));
+    let client = served
+        .client("withdrawn-schema-proof")
+        .await
+        .unwrap_or_else(|error| panic!("second connect: {error}"));
     let unsupported = client.inspect_session(&target).await;
-    client
-        .close()
+    drop(client);
+    served
+        .stop()
         .await
-        .unwrap_or_else(|error| panic!("second close: {error}"));
-    service
-        .await
-        .unwrap_or_else(|error| panic!("second service: {error}"))
         .unwrap_or_else(|error| panic!("second serve: {error}"));
     Arc::try_unwrap(automation_store)
         .unwrap_or_else(|_| panic!("service retained automation store"))
@@ -727,9 +712,9 @@ async fn inspect_control_response_preserves_native_fake_rejection_message() {
         .unwrap_or_else(|error| panic!("endpoints: {error}"))
         .with_native_backend(native_backend)
         .unwrap_or_else(|error| panic!("native backend: {error}"));
-    let (client_stream, service_stream) =
-        tokio::net::UnixStream::pair().unwrap_or_else(|error| panic!("Control pair: {error}"));
-    let service_task = tokio::spawn(serve_control_connection(service_stream, identity));
+    let served = served_api::ServedApi::start(identity)
+        .await
+        .unwrap_or_else(|error| panic!("serve: {error}"));
     let native_task = tokio::spawn(async move {
         let (stream, _) = backend_listener.accept().await.expect("native accept");
         let mut socket = tokio_tungstenite::accept_async(stream)
@@ -771,9 +756,10 @@ async fn inspect_control_response_preserves_native_fake_rejection_message() {
         }
     });
 
-    let mut client = ControlClient::initialize(client_stream, "inspect-test", "0.1.37")
+    let client = served
+        .client("inspect-test")
         .await
-        .unwrap_or_else(|error| panic!("Control initialize: {error}"));
+        .unwrap_or_else(|error| panic!("connect: {error}"));
     let result = client.inspect_session(&target).await;
 
     assert!(
@@ -784,8 +770,11 @@ async fn inspect_control_response_preserves_native_fake_rejection_message() {
     native_task
         .await
         .unwrap_or_else(|error| panic!("native fake: {error}"));
-    service_task.abort();
-    let _ = service_task.await;
+    drop(client);
+    served
+        .stop()
+        .await
+        .unwrap_or_else(|error| panic!("serve: {error}"));
     std::fs::remove_file(backend_path).unwrap_or_else(|error| panic!("socket cleanup: {error}"));
     std::fs::remove_dir(root).unwrap_or_else(|error| panic!("directory cleanup: {error}"));
 }

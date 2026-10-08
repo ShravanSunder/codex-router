@@ -55,14 +55,13 @@ pub(super) fn execute(command: PreparedBoardCommand, context: CommandContext) ->
             PreparedBoardCommand::MessagePost(pending) => pending.text_file.clone(),
             _ => None,
         };
-        let result = dispatch(&mut client, command)
+        dispatch(&mut client, command)
             .await
             .map(CommandExecutionResult::Value)
             .map_err(|error| CommandExecutionError::Request {
                 error,
                 thread_create_text_file,
-            });
-        result
+            })
     });
     report(result, context.json)
 }

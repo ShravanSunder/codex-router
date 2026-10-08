@@ -154,12 +154,11 @@ pub fn run_workflow_command(arguments: Vec<OsString>) -> i32 {
         )
         .await?;
         dispatched = true;
-        let result = match prepared {
+        match prepared {
             PreparedRun::Show(request) => client.read_run(request).await,
             PreparedRun::Retry(request) => client.retry_summary(request).await,
             PreparedRun::Skip(request) => client.skip_summary(request).await,
-        };
-        result
+        }
     });
     if !dispatched
         && let Err(RunClientError::Connection(error)) = &result

@@ -1,4 +1,4 @@
-//! Opt-in OS sandbox proof with a real Control socket; no app-server or model is launched.
+//! Opt-in OS sandbox proof with a real collaboration API socket; no app-server or model is launched.
 use codex_router_host::{CollaborationRuntime, CollaborationRuntimeInputs};
 use collaboration_client::protocol::OperationId;
 use std::{
@@ -48,7 +48,7 @@ async fn codex_sandbox_requires_exact_control_socket_permission() -> ProofResult
     let denied = sandbox.run(SocketGrant::None, &command).await?;
     if denied.status.success() {
         return Err(
-            "Default network-disabled workspace unexpectedly admitted Control socket access".into(),
+            "Default network-disabled workspace unexpectedly admitted API socket access".into(),
         );
     }
     let denied_response: serde_json::Value = serde_json::from_slice(&denied.stdout)?;
@@ -71,7 +71,7 @@ async fn codex_sandbox_requires_exact_control_socket_permission() -> ProofResult
         )
         .into());
     }
-    println!("Denied Control CLI receipt: {denied_response}");
+    println!("Denied API CLI receipt: {denied_response}");
     let allowed = sandbox
         .run(
             SocketGrant::CommandFlag(&root.join("control.sock")),
@@ -139,9 +139,9 @@ async fn codex_sandbox_requires_exact_control_socket_permission() -> ProofResult
     {
         return Err("Native configuration widened access to another listening socket".into());
     }
-    println!("Native managed-network configuration also permits only the selected Control socket.");
+    println!("Native managed-network configuration also permits only the selected API socket.");
     println!(
-        "Default workspace socket denied; exact Control socket grant passed; other listening socket remained denied."
+        "Default workspace socket denied; exact API socket grant passed; other listening socket remained denied."
     );
     drop(listener);
     runtime.shutdown().await?;

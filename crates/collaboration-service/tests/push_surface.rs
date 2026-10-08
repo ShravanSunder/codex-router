@@ -10,27 +10,21 @@ use collaboration_protocol::{
 use collaboration_service::{
     AttemptEvidenceSink, AttemptReconciliation, AttemptReconciliationContext,
     DeliveryContractError, DeliveryFuture, DeliveryPrecondition, ServiceIdentity,
-    SessionMessageDelivery, serve_control_connection,
+    SessionMessageDelivery,
 };
 use serde_json::{Value, json};
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicBool, Ordering},
 };
-use tokio::{
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines},
-    net::{
-        UnixStream,
-        unix::{OwnedReadHalf, OwnedWriteHalf},
-    },
-    sync::Mutex as TokioMutex,
-    task::JoinHandle,
-};
+use tokio::sync::Mutex as TokioMutex;
 
 const SERVICE_ID: &str = "00000000-0000-4000-8000-000000000001";
 
 #[path = "push_surface/board_and_history_proofs.rs"]
 mod board_and_history_proofs;
+#[path = "support/served_api.rs"]
+mod served_api;
 #[path = "push_surface/subscription_expansion_proofs.rs"]
 mod subscription_expansion_proofs;
 
@@ -98,84 +92,70 @@ impl SessionMessageDelivery for RecordingDelivery {
     }
 }
 
+/// The served API, called one tool per former Control method, answering the same
+/// `{"result"}` / `{"error"}` envelope.
 struct ControlHarness {
-    writer: OwnedWriteHalf,
-    responses: Lines<BufReader<OwnedReadHalf>>,
-    service: JoinHandle<Result<(), String>>,
-    next_id: u64,
+    served: served_api::ServedApi,
     owner: Option<collaboration_service::SubscriptionDeliveryService>,
 }
 
 impl ControlHarness {
     async fn start(identity: ServiceIdentity) -> Self {
-        let (client, server) = UnixStream::pair().expect("control stream pair");
-        let service = tokio::spawn(async move {
-            serve_control_connection(server, identity)
+        Self {
+            served: served_api::ServedApi::start(identity)
                 .await
-                .map_err(|error| error.to_string())
-        });
-        let (reader, writer) = client.into_split();
-        let mut harness = Self {
-            writer,
-            responses: BufReader::new(reader).lines(),
-            service,
-            next_id: 1,
+                .expect("serve the API"),
             owner: None,
-        };
-        let initialized = harness
-            .call(
-                "control/initialize",
-                json!({
-                    "version":{"major":1,"minor":0},
-                    "client":{"name":"push-surface-test","version":"1"}
-                }),
-            )
-            .await;
-        assert!(initialized.get("result").is_some(), "{initialized}");
-        harness
+        }
     }
 
     async fn call(&mut self, method: &str, params: Value) -> Value {
-        let id = self.next_id.to_string();
-        self.next_id += 1;
-        let request = json!({
-            "jsonrpc":"2.0",
-            "id":id,
-            "method":method,
-            "params":params
-        });
-        self.writer
-            .write_all(format!("{request}\n").as_bytes())
-            .await
-            .expect("write control request");
-        loop {
-            let line = self
-                .responses
-                .next_line()
-                .await
-                .expect("read control response")
-                .expect("control response line");
-            let response: Value = serde_json::from_str(&line).expect("control response JSON");
-            if response.get("id") == Some(&json!(id)) {
-                return response;
-            }
-        }
+        let (tool, params) = match method {
+            "message/send" => ("message_send", message_send_arguments(params)),
+            "message/reply" => ("message_reply", params),
+            "message/inbox" => ("message_inbox", params),
+            "message/history" => ("message_history", params),
+            "router/show" => ("router_show", params),
+            other => return json!({"error": {"message": format!("no tool for {other}")}}),
+        };
+        let response = self.served.call(tool, params).await.expect("API call");
+        stored_receipt(response)
     }
 
     async fn close(self) {
-        let Self {
-            mut writer,
-            responses: _,
-            service,
-            next_id: _,
-            owner,
-        } = self;
-        writer.shutdown().await.expect("close control client");
-        service.await.expect("service task").expect("service exit");
-        if let Some(owner) = owner {
+        self.served.stop().await.expect("service exit");
+        if let Some(owner) = self.owner {
             owner.shutdown().await;
         }
     }
+}
+
+/// The `message_send` tool takes the delivery mode as `delivery`.
+fn message_send_arguments(mut params: Value) -> Value {
+    if let Some(fields) = params.as_object_mut()
+        && let Some(mode) = fields.remove("mode")
+    {
+        fields.insert("delivery".to_owned(), mode);
+    }
+    params
+}
+
+/// A stored push whose delivery was not accepted is published as a tool error carrying the
+/// push and its receipt; callers read it as that receipt, as the API client does.
+fn stored_receipt(response: Value) -> Value {
+    let Some(data) = response.pointer("/error/data") else {
+        return response;
+    };
+    if data.get("pushId").is_none() || data.get("receipt").is_none() {
+        return response;
+    }
+    let mut receipt = data.clone();
+    if let Some(fields) = receipt.as_object_mut() {
+        for envelope_field in ["kind", "message", "effect"] {
+            fields.remove(envelope_field);
+        }
+    }
+    json!({ "result": receipt })
 }
 
 fn session(endpoint_id: &str, session_id: &str) -> SessionRef {
@@ -658,7 +638,16 @@ async fn reply_rejects_missing_reference_and_non_dm_records() {
     let missing_reference = control
         .call("message/reply", json!({"caller":target,"text":"answer"}))
         .await;
-    assert_eq!(missing_reference["error"]["data"]["kind"], "invalidField");
+    // The API refuses arguments that do not decode before any operation runs, as a tool error
+    // with no typed payload (Control's decoder answered a typed `invalidField`).
+    assert!(
+        missing_reference["error"].is_object(),
+        "{missing_reference}"
+    );
+    assert!(
+        missing_reference["error"]["data"].is_null(),
+        "{missing_reference}"
+    );
 
     let range = PushActivityRange {
         root_message_id: message_board::MessageId::generate(),

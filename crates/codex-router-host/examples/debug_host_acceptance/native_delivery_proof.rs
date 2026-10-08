@@ -18,13 +18,13 @@ pub async fn run_delivery_proof(
     owned: &mut OwnedThreadRegistry,
     request: DeliveryProofRequest<'_>,
 ) -> Result<(), Box<dyn Error>> {
-    let control = CollaborationClient::connect(
+    let client = CollaborationClient::connect(
         request.directory,
         "native-delivery-proof",
         env!("CARGO_PKG_VERSION"),
     )
     .await?;
-    let service = control.identity().service_id.clone();
+    let service = client.identity().service_id.clone();
     let first = owned.create(native, request.cwd).await?;
     let second = owned.create(native, request.cwd).await?;
     // Materialize before the public listener explicitly attaches by native resume.

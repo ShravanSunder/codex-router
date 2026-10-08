@@ -3,12 +3,14 @@ use codex_acp_adapter::{
     UnmaterializedBindingStore, serve_acp_connection,
 };
 use codex_native_integration::{NativePayloadSchemas, NativeSchemaBundle};
+use collaboration_client::CollaborationAccess;
 use collaboration_client::{
     AcpConversation, ConversationPromptRequest, ExistingConversationPromptRequest,
     PublicPromptContent,
 };
+use collaboration_mcp::test_support::ServedCollaborationApi;
 use collaboration_protocol::{EndpointId, MessageText, SessionRef};
-use collaboration_service::{LocalControlService, ManifestPublication, ServiceIdentity};
+use collaboration_service::{CollaborationApplication, ServiceIdentity};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use std::{
@@ -167,7 +169,6 @@ async fn aggregate_long_turn_settles_through_real_adapter_after_many_native_upda
         .create(&root)
         .unwrap();
     let service_id = "00000000-0000-4000-8000-000000000021";
-    let digest = format!("sha256:{}", "e".repeat(64));
     let endpoint = json!({"serviceId":service_id,"endpointId":"codex-local"});
     let identity = ServiceIdentity::new(service_id, service_id)
         .unwrap()
@@ -178,20 +179,9 @@ async fn aggregate_long_turn_settles_through_real_adapter_after_many_native_upda
             "channels":[{"kind":"acp","transport":"unixJsonLines","path":"acp.sock","schemaDigest":format!("sha256:{}", collaboration_protocol::ACP_SCHEMA_DIGEST)}]
         })).unwrap()])
         .unwrap();
-    let control = LocalControlService::bind(&root.join("control.sock"), identity).unwrap();
-    let manifest: collaboration_protocol::ServiceManifest = serde_json::from_value(json!({
-        "version":2,
-        "serviceId":service_id,
-        "serviceEpoch":service_id,
-        "machineLabel":"adapter-fixture",
-        "control":{"transport":"unixJsonLines","path":"control.sock"},
-        "controlSchemaDigest":digest,
-        "mcp":{"transport":"streamableHttp","url":"http://127.0.0.1:0/mcp"}
-    }))
-    .unwrap();
-    let publication = ManifestPublication::publish(&root, &manifest).unwrap();
-    let stop = CancellationToken::new();
-    let control_task = tokio::spawn(control.run(stop.clone()));
+    let served = ServedCollaborationApi::start(&root, CollaborationApplication::new(identity))
+        .await
+        .unwrap_or_else(|error| panic!("serve: {error}"));
 
     let native_cwd = "/work".to_owned();
     let native_listener = tokio::net::UnixListener::bind(root.join("native.sock")).unwrap();
@@ -353,7 +343,9 @@ async fn aggregate_long_turn_settles_through_real_adapter_after_many_native_upda
             .unwrap()
     );
     let endpoint_id = EndpointId::try_from("codex-local".to_owned()).unwrap();
-    let mut conversation = AcpConversation::connect(&root, endpoint_id).await.unwrap();
+    let mut conversation = AcpConversation::connect(&CollaborationAccess::api(&root), endpoint_id)
+        .await
+        .unwrap();
     let prompt_request = |target: SessionRef, text: &str| ExistingConversationPromptRequest {
         target,
         cwd: std::path::PathBuf::from("/work"),
@@ -406,9 +398,10 @@ async fn aggregate_long_turn_settles_through_real_adapter_after_many_native_upda
         .await
         .expect("adapter shutdown")
         .unwrap();
-    stop.cancel();
-    control_task.await.unwrap().unwrap();
-    drop(publication);
+    served
+        .stop()
+        .await
+        .unwrap_or_else(|error| panic!("service: {error}"));
     std::fs::remove_file(root.join("acp.sock")).unwrap();
     std::fs::remove_file(root.join("native.sock")).unwrap();
     std::fs::remove_dir(root).unwrap();

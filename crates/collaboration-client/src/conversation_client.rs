@@ -155,7 +155,7 @@ impl From<crate::OperationError> for ConversationClientError {
 }
 
 pub enum ConversationClient {
-    CodexAcp(AcpConversation),
+    CodexAcp(Box<AcpConversation>),
     ExternalProvider(ProviderConversations),
 }
 
@@ -367,7 +367,7 @@ impl ConversationClient {
                     )
                     .into());
                 }
-                Ok(Self::CodexAcp(acp))
+                Ok(Self::CodexAcp(Box::new(acp)))
             }
             ConversationTransport::ExternalProvider => Ok(Self::ExternalProvider(match access {
                 CollaborationAccess::Local { router, .. } => {
@@ -375,7 +375,7 @@ impl ConversationClient {
                 }
                 CollaborationAccess::Api { .. } => match endpoints {
                     crate::collaboration_access::EndpointDirectoryReader::Api(client) => {
-                        ProviderConversations::Api(client)
+                        ProviderConversations::Api(Box::new(client))
                     }
                     crate::collaboration_access::EndpointDirectoryReader::Local(router) => {
                         ProviderConversations::Local(router)
@@ -527,10 +527,10 @@ impl ConversationClient {
                     }
                     ProviderConversations::Local(router) => router,
                 };
-                let control = LocalProviderOperations(router.as_ref());
+                let operations = LocalProviderOperations(router.as_ref());
                 let submitted = tokio::time::timeout(timeout, async {
-                    control.create_provider_conversation(request).await?;
-                    let settled = control
+                    operations.create_provider_conversation(request).await?;
+                    let settled = operations
                         .wait_for_provider_conversation_operation(
                             ConversationOperationWaitRequest {
                                 operation_id: operation_id.clone(),

@@ -1,18 +1,17 @@
 //! Complete scheduled worker protocol path with real SQLite and scripted native sockets.
 use automation_storage::AutomationStore;
-use collaboration_client::ControlClient;
 use collaboration_protocol::{
     CodexGeneration, EndpointDescription, InstructionCreateParams, InstructionText, OperationId,
     ScheduleCreateRequest, SessionRef,
 };
-use collaboration_service::{
-    NativeControlBackend, NativeGenerationGate, ServiceIdentity, serve_control_connection,
-};
+use collaboration_service::{NativeControlBackend, NativeGenerationGate, ServiceIdentity};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use sqlx::Connection;
 use std::{collections::BTreeMap, os::unix::fs::DirBuilderExt, sync::Arc, time::Duration};
 use tokio_tungstenite::tungstenite::Message;
+#[path = "support/served_api.rs"]
+mod served_api;
 
 const FRESH_SCHEDULE_TASK_TEXT: &str = "Inspect the task completely and preserve every detail. This deliberately long instruction must arrive intact rather than as a shortened push preview. Final verification marker: FRESH_SCHEDULE_TASK_TEXT_FULLY_DELIVERED_7D2A9B";
 
@@ -150,9 +149,8 @@ async fn exercise_scheduled_run(
     let schedule_worker = identity
         .schedule_timing_worker()
         .ok_or("scheduler missing")?;
-    let (socket, server) = tokio::net::UnixStream::pair()?;
-    let service = tokio::spawn(serve_control_connection(server, identity));
-    let mut client = ControlClient::initialize(socket, "scheduled-run-fixture", "1").await?;
+    let served = served_api::ServedApi::start(identity).await?;
+    let client = served.client("scheduled-run-fixture").await?;
     let instruction = client
         .create_instruction(InstructionCreateParams {
             operation_id: OperationId::generate(),
@@ -500,8 +498,7 @@ async fn exercise_scheduled_run(
         }
         shutdown.cancel();
         worker.await?;
-        client.close().await?;
-        service.await??;
+        served.stop().await?;
         backend.await??;
         drop(store);
         for entry in std::fs::read_dir(&root)? {
@@ -625,8 +622,7 @@ async fn exercise_scheduled_run(
     }
     shutdown.cancel();
     worker.await?;
-    client.close().await?;
-    service.await??;
+    served.stop().await?;
     backend.await??;
     let mut push_connection = sqlx::SqliteConnection::connect_with(
         &sqlx::sqlite::SqliteConnectOptions::new().filename(&database),

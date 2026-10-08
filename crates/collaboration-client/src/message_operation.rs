@@ -248,48 +248,43 @@ fn is_reply_pre_dispatch_rejection(error: &ClientError) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{MessageSendError, MessageSendRequest, PublicMessageContent};
+    use crate::scripted_api::{ScriptedApi, ScriptedCalls};
     use crate::{ClientError, CollaborationClient};
     use collaboration_protocol::{
         CodexGeneration, EndpointId, EndpointRef, MessageDelivery, MessageText, SessionId,
         SessionRef, UuidIdentity,
     };
     use serde_json::{Value, json};
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use std::time::Duration;
     use tokio::task::JoinHandle;
 
     const SERVICE_ID: &str = "00000000-0000-4000-8000-000000000001";
     const PUSH_ID: &str = "019f0000-0000-7000-8000-000000000101";
     const OTHER_PUSH_ID: &str = "019f0000-0000-7000-8000-000000000102";
 
+    async fn connected_client() -> (ScriptedApi, CollaborationClient, ScriptedCalls) {
+        let (api, calls) = ScriptedApi::start().await.expect("scripted API");
+        let client = CollaborationClient::connect(api.directory(), "message-test", "1")
+            .await
+            .expect("connect");
+        (api, client, calls)
+    }
+
+    /// A refused, unsent or unknown delivery as the API publishes it: a tool error carrying the
+    /// stored push and its receipt.
+    fn published_delivery_failure(mut receipt: Value, kind: &str, effect: &str) -> Value {
+        if let Some(fields) = receipt.as_object_mut() {
+            fields.insert("mcpResult".to_owned(), json!("error"));
+            fields.insert("kind".to_owned(), json!(kind));
+            fields.insert("message".to_owned(), json!("fixture delivery failure"));
+            fields.insert("effect".to_owned(), json!(effect));
+        }
+        receipt
+    }
+
     #[tokio::test]
     async fn wrong_service_is_rejected_before_endpoint_discovery_or_submission() {
-        let (client_stream, server_stream) = tokio::net::UnixStream::pair().expect("stream pair");
-        let peer = tokio::spawn(async move {
-            let (read, mut write) = server_stream.into_split();
-            let mut lines = BufReader::new(read).lines();
-            let initialize: Value = serde_json::from_str(
-                &lines
-                    .next_line()
-                    .await
-                    .expect("read init")
-                    .expect("init frame"),
-            )
-            .expect("init JSON");
-            let response = json!({"jsonrpc":"2.0","id":initialize["id"],"result":{
-                "version":{"major":1,"minor":0},
-                "serviceId":"00000000-0000-4000-8000-000000000001",
-                "serviceEpoch":"00000000-0000-4000-8000-000000000002",
-                "controlSchemaDigest":format!("sha256:{}", "a".repeat(64))
-            }});
-            write
-                .write_all(format!("{response}\n").as_bytes())
-                .await
-                .expect("write init");
-            assert!(lines.next_line().await.expect("read close").is_none());
-        });
-        let mut client = CollaborationClient::initialize(client_stream, "message-test", "1")
-            .await
-            .expect("initialize");
+        let (_api, client, mut calls) = connected_client().await;
         let request = MessageSendRequest {
             target: SessionRef {
                 endpoint: EndpointRef {
@@ -319,62 +314,32 @@ mod tests {
                     "message target belongs to another service"
                 ))
         ));
-        client.close().await.expect("close client");
-        peer.await.expect("join peer");
+        assert!(calls.none_within(Duration::from_millis(50)).await);
     }
 
     #[tokio::test]
     async fn strict_generation_guard_reaches_the_service_and_reports_known_none() {
-        let (client_stream, server_stream) = tokio::net::UnixStream::pair().expect("stream pair");
+        let (_api, client, mut calls) = connected_client().await;
         let peer = tokio::spawn(async move {
-            let (read, mut write) = server_stream.into_split();
-            let mut lines = BufReader::new(read).lines();
-            let initialize: Value = serde_json::from_str(
-                &lines
-                    .next_line()
-                    .await
-                    .expect("read init")
-                    .expect("init frame"),
-            )
-            .expect("init JSON");
-            let response = json!({"jsonrpc":"2.0","id":initialize["id"],"result":{
-                "version":{"major":1,"minor":0},"serviceId":"00000000-0000-4000-8000-000000000001",
-                "serviceEpoch":"00000000-0000-4000-8000-000000000002","controlSchemaDigest":format!("sha256:{}", "a".repeat(64))
-            }});
-            write
-                .write_all(format!("{response}\n").as_bytes())
-                .await
-                .expect("write init");
-            let sent: Value = serde_json::from_str(
-                &lines
-                    .next_line()
-                    .await
-                    .expect("read message")
-                    .expect("message frame"),
-            )
-            .expect("message JSON");
-            assert_eq!(sent["method"], "message_send");
-            assert_eq!(sent["params"]["generationGuard"]["generation"], 1);
-            let response = json!({"jsonrpc":"2.0","id":sent["id"],"result":{
-                "pushId":PUSH_ID,
-                "link":format!("router://{SERVICE_ID}/push/{PUSH_ID}"),
-                "target":{"endpoint":{"serviceId":SERVICE_ID,"endpointId":"codex-local"},"sessionId":"target"},
-                "targetIdentity":"✳️ Codex target",
-                "deliveryState":"rejected",
-                "receipt":{
-                    "outcome":{"kind":"notSubmitted","retryable":false,"reason":"staleGeneration"},
-                    "reachability":"codexAppServer","client":null
-                }
-            }});
-            write
-                .write_all(format!("{response}\n").as_bytes())
-                .await
-                .expect("write receipt");
-            assert!(lines.next_line().await.expect("read close").is_none());
+            let sent = calls.next().await.expect("message call");
+            assert_eq!(sent.tool, "message_send");
+            assert_eq!(sent.arguments["generationGuard"]["generation"], 1);
+            sent.fail(published_delivery_failure(
+                json!({
+                    "pushId":PUSH_ID,
+                    "link":format!("router://{SERVICE_ID}/push/{PUSH_ID}"),
+                    "target":{"endpoint":{"serviceId":SERVICE_ID,"endpointId":"codex-local"},"sessionId":"target"},
+                    "targetIdentity":"✳️ Codex target",
+                    "deliveryState":"rejected",
+                    "receipt":{
+                        "outcome":{"kind":"notSubmitted","retryable":false,"reason":"staleGeneration"},
+                        "reachability":"codexAppServer","client":null
+                    }
+                }),
+                "notSubmitted",
+                "none",
+            ));
         });
-        let mut client = CollaborationClient::initialize(client_stream, "message-test", "1")
-            .await
-            .expect("initialize");
         let request: MessageSendRequest = serde_json::from_value(json!({
             "target":{"endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"codex-local"},"sessionId":"target"},
             "message":{"kind":"humanUser","text":"hello"},"delivery":"auto",
@@ -390,43 +355,17 @@ mod tests {
             collaboration_protocol::DeliveryOutcome::NotSubmitted { retryable: false, reason }
                 if reason == "staleGeneration"
         ));
-        client.close().await.expect("close client");
         peer.await.expect("join peer");
     }
 
     #[tokio::test]
     async fn unpinned_send_uses_service_route_without_native_catalog_precheck() {
-        let (client_stream, server_stream) = tokio::net::UnixStream::pair().expect("stream pair");
+        let (_api, client, mut calls) = connected_client().await;
         let peer = tokio::spawn(async move {
-            let (read, mut write) = server_stream.into_split();
-            let mut lines = BufReader::new(read).lines();
-            let initialize: Value = serde_json::from_str(
-                &lines
-                    .next_line()
-                    .await
-                    .expect("read init")
-                    .expect("init frame"),
-            )
-            .expect("init JSON");
-            let response = json!({"jsonrpc":"2.0","id":initialize["id"],"result":{
-                "version":{"major":1,"minor":0},"serviceId":"00000000-0000-4000-8000-000000000001",
-                "serviceEpoch":"00000000-0000-4000-8000-000000000002","controlSchemaDigest":format!("sha256:{}", "a".repeat(64))
-            }});
-            write
-                .write_all(format!("{response}\n").as_bytes())
-                .await
-                .expect("write init");
-            let sent: Value = serde_json::from_str(
-                &lines
-                    .next_line()
-                    .await
-                    .expect("read message")
-                    .expect("message frame"),
-            )
-            .expect("message JSON");
-            assert_eq!(sent["method"], "message_send");
-            assert!(sent["params"]["generationGuard"].is_null());
-            let response = json!({"jsonrpc":"2.0","id":sent["id"],"result":{
+            let sent = calls.next().await.expect("message call");
+            assert_eq!(sent.tool, "message_send");
+            assert!(sent.arguments["generationGuard"].is_null());
+            sent.succeed(json!({
                 "pushId":PUSH_ID,
                 "link":format!("router://{SERVICE_ID}/push/{PUSH_ID}"),
                 "target":{"endpoint":{"serviceId":SERVICE_ID,"endpointId":"codex-local"},"sessionId":"target"},
@@ -436,15 +375,10 @@ mod tests {
                     "outcome":{"kind":"notSubmitted","retryable":true,"reason":"provider starting"},
                     "reachability":null,"client":null
                 }
-            }});
-            write
-                .write_all(format!("{response}\n").as_bytes())
-                .await
-                .expect("write receipt");
+            }));
+            // Only the message call reaches the API: no native catalog precheck.
+            assert!(calls.none_within(Duration::from_millis(50)).await);
         });
-        let mut client = CollaborationClient::initialize(client_stream, "message-test", "1")
-            .await
-            .expect("initialize");
         let request = fixture_request(None);
         assert!(matches!(
             client.send_message(request).await,
@@ -465,48 +399,23 @@ mod tests {
 
     #[tokio::test]
     async fn unavailable_after_message_submission_keeps_outcome_unknown() {
-        let (client_stream, server_stream) = tokio::net::UnixStream::pair().expect("stream pair");
+        let (_api, client, mut calls) = connected_client().await;
         let peer = tokio::spawn(async move {
-            let (read, mut write) = server_stream.into_split();
-            let mut lines = BufReader::new(read).lines();
-            let initialize: Value = serde_json::from_str(
-                &lines
-                    .next_line()
-                    .await
-                    .expect("read init")
-                    .expect("init frame"),
-            )
-            .expect("init JSON");
-            let response = json!({"jsonrpc":"2.0","id":initialize["id"],"result":{
-                "version":{"major":1,"minor":0},"serviceId":"00000000-0000-4000-8000-000000000001",
-                "serviceEpoch":"00000000-0000-4000-8000-000000000002","controlSchemaDigest":format!("sha256:{}", "a".repeat(64))
-            }});
-            write
-                .write_all(format!("{response}\n").as_bytes())
-                .await
-                .expect("write init");
-            let sent: Value = serde_json::from_str(
-                &lines
-                    .next_line()
-                    .await
-                    .expect("read message")
-                    .expect("message frame"),
-            )
-            .expect("message JSON");
-            assert_eq!(sent["method"], "message_send");
-            let response = json!({"jsonrpc":"2.0","id":sent["id"],"error":{
-                "code":-32050,"message":"Native backend unavailable",
-                "data":{"kind":"unavailable","stage":"start","message":"Native backend unavailable"}
-            }});
-            write
-                .write_all(format!("{response}\n").as_bytes())
-                .await
-                .expect("write unavailable response");
-            assert!(lines.next_line().await.expect("read close").is_none());
+            let sent = calls.next().await.expect("message call");
+            assert_eq!(sent.tool, "message_send");
+            let failure = crate::operation_failure_from_client_error(
+                ClientError::Rejected {
+                    code: -32050,
+                    data: Some(
+                        json!({"kind":"unavailable","stage":"start","message":"Native backend unavailable"}),
+                    ),
+                },
+                crate::OperationEffect::Unknown,
+            );
+            let mut failure = serde_json::to_value(failure).expect("published failure");
+            failure["mcpResult"] = json!("error");
+            sent.fail(failure);
         });
-        let mut client = CollaborationClient::initialize(client_stream, "message-test", "1")
-            .await
-            .expect("initialize");
         let request = fixture_request(None);
         let expected_target = request.target.clone();
         let error = client
@@ -520,45 +429,17 @@ mod tests {
                     && matches!(source.as_ref(), ClientError::Rejected { data: Some(data), .. }
                         if data["kind"] == "unavailable")
         ));
-        client.close().await.expect("close client");
         peer.await.expect("join peer");
     }
 
     #[tokio::test]
     async fn response_loss_after_message_dispatch_is_submission_failure() {
-        let (client_stream, server_stream) = tokio::net::UnixStream::pair().expect("stream pair");
+        let (_api, client, mut calls) = connected_client().await;
         let peer = tokio::spawn(async move {
-            let (read, mut write) = server_stream.into_split();
-            let mut lines = BufReader::new(read).lines();
-            let initialize: Value = serde_json::from_str(
-                &lines
-                    .next_line()
-                    .await
-                    .expect("read init")
-                    .expect("init frame"),
-            )
-            .expect("init JSON");
-            let response = json!({"jsonrpc":"2.0","id":initialize["id"],"result":{
-                "version":{"major":1,"minor":0},"serviceId":"00000000-0000-4000-8000-000000000001",
-                "serviceEpoch":"00000000-0000-4000-8000-000000000002","controlSchemaDigest":format!("sha256:{}", "a".repeat(64))
-            }});
-            write
-                .write_all(format!("{response}\n").as_bytes())
-                .await
-                .expect("write init");
-            let send: Value = serde_json::from_str(
-                &lines
-                    .next_line()
-                    .await
-                    .expect("read send")
-                    .expect("send frame"),
-            )
-            .expect("send JSON");
-            assert_eq!(send["method"], "message_send");
+            let send = calls.next().await.expect("message call");
+            assert_eq!(send.tool, "message_send");
+            send.lose_response();
         });
-        let mut client = CollaborationClient::initialize(client_stream, "message-test", "1")
-            .await
-            .expect("initialize");
         let error = client
             .send_message(fixture_request(None))
             .await
@@ -574,7 +455,7 @@ mod tests {
         let request = fixture_request(None);
         let mut response = push_result(&request.target, PUSH_ID, PUSH_ID);
         response["target"]["sessionId"] = json!("different-target");
-        let (mut client, peer) = control_client_with_send_result(response).await;
+        let (_api, client, peer) = client_with_send_result(response).await;
 
         let error = client
             .send_message(request)
@@ -582,7 +463,6 @@ mod tests {
             .expect_err("a successful receipt for another target is inconsistent");
         assert_protocol_inconsistency(error);
 
-        client.close().await.expect("close client");
         peer.await.expect("join peer");
     }
 
@@ -590,7 +470,7 @@ mod tests {
     async fn successful_push_response_link_must_match_its_push_id() {
         let request = fixture_request(None);
         let response = push_result(&request.target, PUSH_ID, OTHER_PUSH_ID);
-        let (mut client, peer) = control_client_with_send_result(response).await;
+        let (_api, client, peer) = client_with_send_result(response).await;
 
         let error = client
             .send_message(request)
@@ -598,7 +478,6 @@ mod tests {
             .expect_err("a link to another push is inconsistent");
         assert_protocol_inconsistency(error);
 
-        client.close().await.expect("close client");
         peer.await.expect("join peer");
     }
 
@@ -614,14 +493,13 @@ mod tests {
             PUSH_ID,
             "started",
         );
-        let (mut client, peer) = control_client_with_send_result(response).await;
+        let (_api, client, peer) = client_with_send_result(response).await;
 
         let result = client
             .send_message(request)
             .await
             .expect("matching native delivery receipt");
         assert_eq!(result.push_id.as_str(), PUSH_ID);
-        client.close().await.expect("close client");
         peer.await.expect("join peer");
 
         let request = fixture_request(Some(expected_generation.clone()));
@@ -682,56 +560,16 @@ mod tests {
         .expect("message request")
     }
 
-    async fn control_client_with_send_result(
+    async fn client_with_send_result(
         result: Value,
-    ) -> (CollaborationClient, JoinHandle<()>) {
-        let (client_stream, server_stream) = tokio::net::UnixStream::pair().expect("stream pair");
+    ) -> (ScriptedApi, CollaborationClient, JoinHandle<()>) {
+        let (api, client, mut calls) = connected_client().await;
         let peer = tokio::spawn(async move {
-            let (read, mut write) = server_stream.into_split();
-            let mut lines = BufReader::new(read).lines();
-            let initialize: Value = serde_json::from_str(
-                &lines
-                    .next_line()
-                    .await
-                    .expect("read init")
-                    .expect("init frame"),
-            )
-            .expect("init JSON");
-            let initialize_result = json!({
-                "jsonrpc":"2.0",
-                "id":initialize["id"],
-                "result":{
-                    "version":{"major":1,"minor":0},
-                    "serviceId":SERVICE_ID,
-                    "serviceEpoch":"00000000-0000-4000-8000-000000000002",
-                    "controlSchemaDigest":format!("sha256:{}", "a".repeat(64))
-                }
-            });
-            write
-                .write_all(format!("{initialize_result}\n").as_bytes())
-                .await
-                .expect("write initialization result");
-
-            let send: Value = serde_json::from_str(
-                &lines
-                    .next_line()
-                    .await
-                    .expect("read message send")
-                    .expect("message send frame"),
-            )
-            .expect("message send JSON");
-            assert_eq!(send["method"], "message_send");
-            let response = json!({"jsonrpc":"2.0","id":send["id"],"result":result});
-            write
-                .write_all(format!("{response}\n").as_bytes())
-                .await
-                .expect("write push result");
-            assert!(lines.next_line().await.expect("read close").is_none());
+            let send = calls.next().await.expect("message send call");
+            assert_eq!(send.tool, "message_send");
+            send.succeed(result);
         });
-        let client = CollaborationClient::initialize(client_stream, "message-test", "1")
-            .await
-            .expect("initialize");
-        (client, peer)
+        (api, client, peer)
     }
 
     fn push_result(target: &SessionRef, push_id: &str, link_push_id: &str) -> Value {
@@ -812,13 +650,12 @@ mod tests {
     }
 
     async fn assert_inconsistent_response(request: MessageSendRequest, response: Value) {
-        let (mut client, peer) = control_client_with_send_result(response).await;
+        let (_api, client, peer) = client_with_send_result(response).await;
         let error = client
             .send_message(request)
             .await
             .expect_err("inconsistent delivery data must fail closed");
         assert_protocol_inconsistency(error);
-        client.close().await.expect("close client");
         peer.await.expect("join peer");
     }
 }

@@ -141,6 +141,5 @@ pub async fn exercise() -> ProofResult<()> {
         "nativeForkContinuationVerified",
         json!({"source":source,"fork":target,"run":run}),
     )?;
-    proof.client.close().await?;
     Ok(())
 }

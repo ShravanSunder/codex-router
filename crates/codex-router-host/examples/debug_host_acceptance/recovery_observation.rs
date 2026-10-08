@@ -35,7 +35,7 @@ pub async fn hold(directory: &Path, socket: &Path, thread: &str) -> Result<(), B
                 sequence=current.sequence;
                 let event=json!({"sequence":current.sequence,"endpoints":current.endpoints});
                 println!("{}",json!({"kind":"recoveryTimelineEvent","elapsedMs":started.elapsed().as_millis(),"event":event}));
-                let available=event["endpoints"].as_array().is_some_and(|endpoints| endpoints.iter().any(|endpoint| {
+                let available=event.get("endpoints").and_then(Value::as_array).is_some_and(|endpoints| endpoints.iter().any(|endpoint| {
                     endpoint.pointer("/endpoint/endpointId").and_then(Value::as_str)==Some("codex-local")
                         && endpoint.pointer("/availability/state").and_then(Value::as_str)==Some("available")
                 }));

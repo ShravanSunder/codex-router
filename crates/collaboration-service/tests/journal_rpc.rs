@@ -1,8 +1,9 @@
-use collaboration_service::{ServiceIdentity, serve_control_connection};
+use collaboration_service::ServiceIdentity;
 use lifecycle_observation::{LifecycleStore, ObservationJournal};
-use serde_json::{Value, json};
+use serde_json::json;
 use std::{sync::Arc, time::Duration};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+#[path = "support/served_api.rs"]
+mod served_api;
 
 #[tokio::test]
 async fn pending_journal_read_does_not_block_status_and_wakes_after_append() {
@@ -26,76 +27,45 @@ async fn pending_journal_read_does_not_block_status_and_wakes_after_append() {
         .with_endpoints(vec![description])
         .unwrap_or_else(|e| panic!("endpoints: {e}"))
         .with_journal(Arc::clone(&store));
-    let (client, server) = tokio::net::UnixStream::pair().unwrap_or_else(|e| panic!("pair: {e}"));
-    let task = tokio::spawn(serve_control_connection(server, identity.clone()));
-    let (read, mut write) = client.into_split();
-    let mut lines = BufReader::new(read).lines();
-    let init = json!({"jsonrpc":"2.0","id":"init","method":"control/initialize","params":{"version":{"major":1,"minor":0},"client":{"name":"test","version":"1"}}});
-    write
-        .write_all(format!("{init}\n").as_bytes())
+    let served = served_api::ServedApi::start(identity)
         .await
-        .unwrap_or_else(|e| panic!("write: {e}"));
-    assert!(
-        lines
-            .next_line()
-            .await
-            .unwrap_or_else(|e| panic!("read: {e}"))
-            .is_some()
-    );
-    let waiting = json!({"jsonrpc":"2.0","id":"waiting","method":"lifecycleJournal/read","params":{"endpoint":endpoint,"after":{"journalId":journal_id,"sequence":0},"pageSize":100,"waitMilliseconds":30000}});
-    let status =
-        json!({"jsonrpc":"2.0","id":"status","method":"lifecycleJournal/status","params":{}});
-    write
-        .write_all(format!("{waiting}\n{status}\n").as_bytes())
-        .await
-        .unwrap_or_else(|e| panic!("write: {e}"));
-    let line = tokio::time::timeout(Duration::from_secs(2), lines.next_line())
-        .await
-        .unwrap_or_else(|e| panic!("status blocked: {e}"))
-        .unwrap_or_else(|e| panic!("read: {e}"))
-        .unwrap_or_else(|| panic!("response"));
-    let response: Value = serde_json::from_str(&line).unwrap_or_else(|e| panic!("JSON: {e}"));
-    assert_eq!(response["id"], "status");
+        .unwrap_or_else(|e| panic!("serve: {e}"));
+    let mut waiting = Box::pin(served.call(
+        "journal_read",
+        json!({"endpoint":endpoint,"after":{"journalId":journal_id,"sequence":0},"pageSize":100,"waitMilliseconds":30000}),
+    ));
+    // The status call answers while the read is still waiting.
+    let response = tokio::select! {
+        early = &mut waiting => panic!("journal read returned before any append: {early:?}"),
+        status = tokio::time::timeout(Duration::from_secs(2), served.call("journal_status", json!({}))) => status
+            .unwrap_or_else(|e| panic!("status blocked: {e}"))
+            .unwrap_or_else(|e| panic!("status: {e}")),
+    };
+    assert!(response.get("result").is_some(), "{response}");
     let observation=serde_json::from_value(json!({"observedAt":"2026-09-05T12:00:00Z","source":"observerLifecycle","scope":{"endpoint":endpoint,"generation":null,"observerId":"00000000-0000-4000-8000-000000000002"},"subject":{"kind":"backend"},"change":{"kind":"coverageLost"}})).unwrap_or_else(|e|panic!("observation: {e}"));
     store
         .append(&observation, 100)
         .await
         .unwrap_or_else(|e| panic!("append: {e}"));
-    let line = tokio::time::timeout(Duration::from_secs(2), lines.next_line())
+    let response = tokio::time::timeout(Duration::from_secs(2), waiting)
         .await
         .unwrap_or_else(|e| panic!("wake timeout: {e}"))
-        .unwrap_or_else(|e| panic!("read: {e}"))
-        .unwrap_or_else(|| panic!("response"));
-    let response: Value = serde_json::from_str(&line).unwrap_or_else(|e| panic!("JSON: {e}"));
-    assert_eq!(response["id"], "waiting");
+        .unwrap_or_else(|e| panic!("read: {e}"));
     assert_eq!(response["result"]["next"]["sequence"], 1);
-    let address_request = json!({"jsonrpc":"2.0","id":"addresses","method":"addressBook/list","params":{"endpoint":endpoint,"pageSize":100}});
-    write
-        .write_all(format!("{address_request}\n").as_bytes())
+    let addresses = served
+        .call(
+            "addresses_list",
+            json!({"endpoint":endpoint,"pageSize":100}),
+        )
         .await
-        .unwrap_or_else(|e| panic!("write: {e}"));
-    let line = lines
-        .next_line()
-        .await
-        .unwrap_or_else(|e| panic!("read: {e}"))
-        .unwrap_or_else(|| panic!("response"));
-    let addresses: Value = serde_json::from_str(&line).unwrap_or_else(|e| panic!("JSON: {e}"));
-    assert_eq!(addresses["id"], "addresses");
+        .unwrap_or_else(|e| panic!("addresses: {e}"));
     assert_eq!(addresses["result"]["watermark"]["sequence"], 1);
     assert_eq!(addresses["result"]["coverage"]["state"], "disconnected");
     assert_eq!(addresses["result"]["entries"], json!([]));
-    write
-        .shutdown()
+    let client = served
+        .client("typed-journal")
         .await
-        .unwrap_or_else(|e| panic!("close: {e}"));
-    task.await
-        .unwrap_or_else(|e| panic!("join: {e}"))
-        .unwrap_or_else(|e| panic!("serve: {e}"));
-    let (client, server) = tokio::net::UnixStream::pair().unwrap_or_else(|e| panic!("pair: {e}"));
-    let task = tokio::spawn(serve_control_connection(server, identity));
-    let mut client = collaboration_client::ControlClient::initialize(client, "typed-journal", "1")
-        .await
-        .unwrap_or_else(|e| panic!("initialize: {e}"));
+        .unwrap_or_else(|e| panic!("connect: {e}"));
     assert!(matches!(
         client
             .journal_status()
@@ -125,13 +95,8 @@ async fn pending_journal_read_does_not_block_status_and_wakes_after_append() {
         }) => assert_eq!(data["kind"], "historyExpired"),
         other => panic!("expected expired history, got {other:?}"),
     }
-    client
-        .close()
-        .await
-        .unwrap_or_else(|e| panic!("close: {e}"));
-    task.await
-        .unwrap_or_else(|e| panic!("join: {e}"))
-        .unwrap_or_else(|e| panic!("serve: {e}"));
+    drop(client);
+    served.stop().await.unwrap_or_else(|e| panic!("serve: {e}"));
     Arc::try_unwrap(store)
         .unwrap_or_else(|_| panic!("store shared"))
         .close()

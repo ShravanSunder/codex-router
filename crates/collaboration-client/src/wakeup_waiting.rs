@@ -1,10 +1,10 @@
 //! First-fire waiting: bounded waits chained by their resume cursor; ordinary calls keep their
 //! 30-second deadline.
 use crate::api_connection::ToolAnswer;
-use crate::{ClientError, CollaborationClient};
+use crate::{ClientError, CollaborationClient, WakeClientError};
 use collaboration_protocol::{
-    FireReceipt, UuidIdentity, WakeShowRequest, WakeWaitOutcome, WakeWaitRequest, WakeWaitResult,
-    WakeupId,
+    FireReceipt, UuidIdentity, WakeFailure, WakeFailureReason, WakeShowRequest, WakeSnapshot,
+    WakeState, WakeWaitOutcome, WakeWaitRequest, WakeWaitResult, WakeupId,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -164,19 +164,47 @@ impl WakeWaitError {
 pub struct WakeWaitConnection {
     client: CollaborationClient,
     wakeup_id: WakeupId,
+    start: WakeWaitStart,
+}
+
+/// The wake-up's state when the wait subscribed.
+enum WakeWaitStart {
+    /// It had already fired, or a change had already ruled a first fire out.
+    Settled(WakeWaitOutcome),
+    /// Changes after this cursor belong to the wait, including any before it starts.
+    After(String),
 }
 
 /// The longest one bounded wait lasts before it returns its cursor.
 const WAKE_WAIT_CALL_SECONDS: u32 = 1500;
 
 impl CollaborationClient {
+    /// Subscribes a first-fire wait at the wake-up's current state, so a pause, cancellation
+    /// or fire between subscribing and waiting is still observed.
     pub async fn subscribe_wakeup(
         self,
         request: WakeShowRequest,
     ) -> Result<WakeWaitConnection, WakeWaitError> {
+        let wakeup_id = request.wakeup_id.clone();
+        let snapshot = match self.read_wakeup(request).await {
+            Ok(snapshot) => snapshot,
+            Err(WakeClientError::Rejected(failure)) => {
+                return Err(subscribe_failure(&wakeup_id, *failure));
+            }
+            Err(WakeClientError::Connection(error)) => return Err(error.into()),
+        };
+        if snapshot.definition.wakeup_id != wakeup_id {
+            return Err(ClientError::Protocol("wake subscription identity mismatch").into());
+        }
+        cursor_sequence(&snapshot.latest_event_cursor, &self.identity().service_id)?;
+        let start = match settled_outcome(&snapshot) {
+            Some(outcome) => WakeWaitStart::Settled(outcome),
+            None => WakeWaitStart::After(snapshot.latest_event_cursor),
+        };
         Ok(WakeWaitConnection {
             client: self,
-            wakeup_id: request.wakeup_id,
+            wakeup_id,
+            start,
         })
     }
 }
@@ -192,11 +220,17 @@ impl WakeWaitConnection {
         cancellation: CancellationToken,
     ) -> Result<FireReceipt, WakeWaitError> {
         let id = self.wakeup_id.clone();
-        let mut after = None;
+        let mut after = match self.start {
+            WakeWaitStart::Settled(outcome) => {
+                return finished_wait(&id, outcome)
+                    .unwrap_or_else(|| Err(ClientError::Protocol("unsettled wake").into()));
+            }
+            WakeWaitStart::After(cursor) => cursor,
+        };
         loop {
             let request = WakeWaitRequest {
                 wakeup_id: id.clone(),
-                after: after.clone(),
+                after: Some(after.clone()),
                 timeout_seconds: Some(WAKE_WAIT_CALL_SECONDS),
             };
             let arguments = serde_json::to_value(&request)
@@ -219,25 +253,70 @@ impl WakeWaitConnection {
             if waited.wakeup_id != id {
                 return Err(ClientError::Protocol("wake wait identity mismatch").into());
             }
-            cursor_sequence(&waited.cursor, &self.client.identity().service_id)?;
-            match waited.outcome {
-                WakeWaitOutcome::Fired { fire } => {
-                    if fire.wakeup_id != id {
-                        return Err(ClientError::Protocol("firing identity mismatch").into());
-                    }
-                    return Ok(fire);
-                }
-                WakeWaitOutcome::Paused => return Err(WakeWaitError::Paused { wakeup_id: id }),
-                WakeWaitOutcome::Cancelled => {
-                    return Err(WakeWaitError::Cancelled { wakeup_id: id });
-                }
-                WakeWaitOutcome::Expired => return Err(WakeWaitError::Expired { wakeup_id: id }),
-                WakeWaitOutcome::FinishedWithoutFiring => {
-                    return Err(WakeWaitError::FinishedWithoutFiring { wakeup_id: id });
-                }
-                WakeWaitOutcome::TimedOut => after = Some(waited.cursor),
+            let previous = cursor_sequence(&after, &self.client.identity().service_id)?;
+            let sequence = cursor_sequence(&waited.cursor, &self.client.identity().service_id)?;
+            if sequence < previous {
+                return Err(ClientError::Protocol("wake wait cursor moved backwards").into());
+            }
+            match finished_wait(&id, waited.outcome) {
+                Some(finished) => return finished,
+                None => after = waited.cursor,
             }
         }
+    }
+}
+
+/// What a wait outcome means for the caller, or `None` when it only timed out.
+fn finished_wait(
+    id: &WakeupId,
+    outcome: WakeWaitOutcome,
+) -> Option<Result<FireReceipt, WakeWaitError>> {
+    let wakeup_id = id.clone();
+    Some(match outcome {
+        WakeWaitOutcome::Fired { fire } => {
+            if &fire.wakeup_id == id {
+                Ok(fire)
+            } else {
+                Err(ClientError::Protocol("firing identity mismatch").into())
+            }
+        }
+        WakeWaitOutcome::Paused => Err(WakeWaitError::Paused { wakeup_id }),
+        WakeWaitOutcome::Cancelled => Err(WakeWaitError::Cancelled { wakeup_id }),
+        WakeWaitOutcome::Expired => Err(WakeWaitError::Expired { wakeup_id }),
+        WakeWaitOutcome::FinishedWithoutFiring => {
+            Err(WakeWaitError::FinishedWithoutFiring { wakeup_id })
+        }
+        WakeWaitOutcome::TimedOut => return None,
+    })
+}
+
+/// The outcome a wake-up's current state already settles, if any.
+fn settled_outcome(snapshot: &WakeSnapshot) -> Option<WakeWaitOutcome> {
+    if let Some(fire) = snapshot.first_fire.clone() {
+        return Some(WakeWaitOutcome::Fired { fire });
+    }
+    match snapshot.state {
+        WakeState::Active => None,
+        WakeState::Paused => Some(WakeWaitOutcome::Paused),
+        WakeState::Cancelled => Some(WakeWaitOutcome::Cancelled),
+        WakeState::Expired => Some(WakeWaitOutcome::Expired),
+        WakeState::Finished => Some(WakeWaitOutcome::FinishedWithoutFiring),
+    }
+}
+
+/// The wait error a refused subscription reports.
+fn subscribe_failure(id: &WakeupId, failure: WakeFailure) -> WakeWaitError {
+    let wakeup_id = id.clone();
+    match failure.reason {
+        WakeFailureReason::ResourceNotFound => WakeWaitError::NotFound { wakeup_id },
+        WakeFailureReason::AutomationUnavailable | WakeFailureReason::Overloaded => {
+            WakeWaitError::Unavailable { wakeup_id }
+        }
+        _ => ClientError::Rejected {
+            code: crate::api_connection::OPERATION_FAILED,
+            data: serde_json::to_value(&failure).ok(),
+        }
+        .into(),
     }
 }
 
