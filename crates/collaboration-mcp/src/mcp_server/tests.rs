@@ -25,5 +25,8 @@ mod catalog_tests;
 #[path = "tests/schema_tests.rs"]
 mod schema_tests;
 
+#[path = "tests/emitted_result_schema_tests.rs"]
+mod emitted_result_schema_tests;
+
 #[path = "tests/inspect_snapshot_tests.rs"]
 mod inspect_snapshot_tests;

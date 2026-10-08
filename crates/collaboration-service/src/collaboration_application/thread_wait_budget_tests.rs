@@ -81,15 +81,29 @@ fn thread_wait_root_notice_limit_fits_one_maximal_root_but_not_two() {
 
 #[test]
 fn the_api_bound_admits_every_notice_whose_roots_stay_within_it() {
-    // Arrange: as many maximal roots as the API bound allows.
+    // Arrange: as many maximal roots as the API bound allows. Every maximal root encodes to
+    // the same length, so `count` roots encode to `count * (root + comma) + 1` bytes (two
+    // brackets, one comma fewer than roots) and the largest count is computed, not searched.
     let limit = thread_wait_root_notice_limit(API_RESULT_BUDGET).expect("API budget has room");
-    let mut roots = Vec::new();
-    while serde_json::to_vec(&roots).expect("roots encode").len() <= limit {
-        roots.push(root());
-    }
+    let root_bytes = serde_json::to_vec(&root()).expect("root encodes").len();
+    let largest_count = (limit - 1) / (root_bytes + 1);
+    let mut roots: Vec<_> = (0..=largest_count).map(|_| root()).collect();
+    let one_too_many_bytes = serde_json::to_vec(&roots).expect("roots encode").len();
     roots.pop();
+    let largest_bytes = serde_json::to_vec(&roots).expect("roots encode").len();
 
-    // Act & assert
-    assert!(!roots.is_empty());
-    assert!(API_RESULT_BUDGET.admits(&notice(roots)));
+    // Act
+    let admitted = API_RESULT_BUDGET.admits(&notice(roots));
+
+    // Assert
+    assert!(largest_count > 0, "the API bound holds at least one root");
+    assert!(
+        largest_bytes <= limit,
+        "{largest_count} roots take {largest_bytes} bytes, over the {limit}-byte bound"
+    );
+    assert!(
+        one_too_many_bytes > limit,
+        "one more root still fits, so the count is not the largest"
+    );
+    assert!(admitted, "the largest notice within the bound must fit");
 }
