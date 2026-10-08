@@ -24,6 +24,8 @@ mod floor_switch_supervisor_tests;
 mod floor_switch_terminal_tests;
 #[path = "forwarding_tests/floor-switch-tests.rs"]
 mod floor_switch_tests;
+#[path = "forwarding_tests/floor-switch-write-readiness-tests.rs"]
+mod floor_switch_write_readiness_tests;
 #[path = "forwarding_tests/handshake-cancellation-tests.rs"]
 mod handshake_cancellation_tests;
 #[path = "forwarding_tests/handshake_outcome_tests.rs"]
@@ -40,6 +42,8 @@ mod provider_observer_fixtures;
 mod quota_frame_tests;
 #[path = "forwarding_tests/quota_persistence_tests.rs"]
 mod quota_persistence_tests;
+#[path = "forwarding_tests/shutdown-admission-readiness-tests.rs"]
+mod shutdown_admission_readiness_tests;
 #[path = "forwarding_tests/shutdown_floor_tests.rs"]
 mod shutdown_floor_tests;
 #[path = "forwarding_tests/turn_reservation_tests.rs"]
