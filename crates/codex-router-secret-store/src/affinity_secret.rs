@@ -11,6 +11,9 @@ use crate::backend::SecretStore;
 use crate::model::SecretKey;
 use crate::model::SecretStoreError;
 
+mod existing;
+pub use existing::load_existing_router_affinity_hash_secret;
+
 /// Stable secret-store key for the router affinity HMAC secret.
 pub const ROUTER_AFFINITY_HASH_SECRET_KEY: &str = "router_affinity_hash_secret.v1";
 

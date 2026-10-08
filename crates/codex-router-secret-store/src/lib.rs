@@ -23,6 +23,12 @@ mod encrypted_credential_store_tests;
 #[cfg(test)]
 mod credential_migration_tests;
 
+#[cfg(test)]
+mod existing_proxy_secrets_test_support;
+
+#[cfg(test)]
+mod existing_proxy_secrets_tests;
+
 pub use backend::SecretStore;
 
 /// Returns this crate's package name.
