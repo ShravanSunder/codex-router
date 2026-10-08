@@ -136,10 +136,17 @@ pub(super) async fn quota_status_report(
             )
         })
         .collect::<HashMap<_, _>>();
-    let refresh_statuses = quota_history_state
+    let openai_refresh_statuses = quota_history_state
         .quota_refresh_statuses_for_route_band(USER_QUOTA_ROUTE_BAND)
         .await?;
-    let refresh_statuses = refresh_statuses
+    let openai_refresh_statuses = openai_refresh_statuses
+        .into_iter()
+        .map(|status| (status.account_id().clone(), status))
+        .collect::<HashMap<_, _>>();
+    let claude_refresh_statuses = quota_history_state
+        .quota_refresh_statuses_for_route_band(RouteBand::ClaudeMessages.as_str())
+        .await?;
+    let claude_refresh_statuses = claude_refresh_statuses
         .into_iter()
         .map(|status| (status.account_id().clone(), status))
         .collect::<HashMap<_, _>>();
@@ -185,6 +192,10 @@ pub(super) async fn quota_status_report(
     let mut status_inputs = Vec::new();
     let mut assessment_inputs = Vec::new();
     for account in accounts {
+        let refresh_status = match account.provider() {
+            Provider::Openai => openai_refresh_statuses.get(account.account_id()),
+            Provider::Claude => claude_refresh_statuses.get(account.account_id()),
+        };
         let selector_input = selector_inputs
             .iter()
             .find(|input| input.account_id() == account.account_id());
@@ -263,15 +274,12 @@ pub(super) async fn quota_status_report(
             account_id: account.account_id().clone(),
             active_credential_generation: account.active_credential_generation(),
             reset_credits_available,
-            updated: format_refresh_status(
-                refresh_statuses.get(account.account_id()),
-                now_unix_seconds,
-            ),
+            updated: format_refresh_status(refresh_status, now_unix_seconds),
             active_clients,
             windows: display_windows,
             credit_usage: credit_usage_status(
                 selector_input,
-                refresh_statuses.get(account.account_id()),
+                refresh_status,
                 account.active_credential_generation(),
                 now_unix_seconds,
             ),
