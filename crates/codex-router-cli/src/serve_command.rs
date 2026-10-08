@@ -1,6 +1,7 @@
 //! Serve command runtime composition and worker lifetime ownership.
 
 use super::*;
+use codex_router_auth::resolver::CredentialRefreshTaskSupervisor;
 
 pub(crate) async fn run_serve_command_with_upkeep_start<UpkeepStart, UpkeepFuture>(
     stdout: &mut impl Write,
@@ -9,7 +10,8 @@ pub(crate) async fn run_serve_command_with_upkeep_start<UpkeepStart, UpkeepFutur
     upkeep_start: UpkeepStart,
 ) -> Result<(), CliError>
 where
-    UpkeepStart: FnOnce(PathBuf, EncryptedCredentialStore) -> UpkeepFuture,
+    UpkeepStart:
+        FnOnce(PathBuf, EncryptedCredentialStore, CredentialRefreshTaskSupervisor) -> UpkeepFuture,
     UpkeepFuture: Future<
         Output = Result<
             credential_upkeep_worker::CredentialUpkeepWorker,
@@ -38,7 +40,8 @@ pub(crate) async fn run_serve_command_with_upkeep_start_and_token_reload_observe
     token_reload_observer: impl Fn(codex_router_core::ids::TokenGeneration) + Send + 'static,
 ) -> Result<(), CliError>
 where
-    UpkeepStart: FnOnce(PathBuf, EncryptedCredentialStore) -> UpkeepFuture,
+    UpkeepStart:
+        FnOnce(PathBuf, EncryptedCredentialStore, CredentialRefreshTaskSupervisor) -> UpkeepFuture,
     UpkeepFuture: Future<
         Output = Result<
             credential_upkeep_worker::CredentialUpkeepWorker,
@@ -71,7 +74,8 @@ pub(crate) async fn run_serve_command_with_worker_starts_and_token_reload_observ
     token_reload_observer: impl Fn(codex_router_core::ids::TokenGeneration) + Send + 'static,
 ) -> Result<(), CliError>
 where
-    UpkeepStart: FnOnce(PathBuf, EncryptedCredentialStore) -> UpkeepFuture,
+    UpkeepStart:
+        FnOnce(PathBuf, EncryptedCredentialStore, CredentialRefreshTaskSupervisor) -> UpkeepFuture,
     UpkeepFuture: Future<
         Output = Result<
             credential_upkeep_worker::CredentialUpkeepWorker,
@@ -85,6 +89,7 @@ where
         String,
         Duration,
         codex_router_proxy::websocket::WebSocketQuotaFloorNotifier,
+        CredentialRefreshTaskSupervisor,
     ) -> QuotaFuture,
     QuotaFuture: Future<Output = Result<quota::BackgroundQuotaRefreshWorker, QuotaCommandError>>,
 {
@@ -113,6 +118,7 @@ where
             runtime_config.with_quota_clock(now_unix_seconds, command.max_snapshot_age_seconds);
     }
     let runtime = LoopbackRouterRuntime::start(runtime_config, credential_store.clone()).await?;
+    let refresh_tasks = runtime.credential_refresh_task_supervisor();
     let local_auth_reloader = runtime.local_auth_reloader();
     let mut token_reload_watcher =
         LocalTokenReloadWatcher::start(local_token_store, initial_token_generation, move |auth| {
@@ -135,7 +141,13 @@ where
         runtime.shutdown().await;
         return Err(CliError::Stdout(error));
     }
-    let mut upkeep_worker = match upkeep_start(state_db.clone(), credential_store.clone()).await {
+    let mut upkeep_worker = match upkeep_start(
+        state_db.clone(),
+        credential_store.clone(),
+        refresh_tasks.clone(),
+    )
+    .await
+    {
         Ok(worker) => worker,
         Err(error) => {
             token_reload_watcher.shutdown().await;
@@ -152,6 +164,7 @@ where
             DEFAULT_CHATGPT_BACKEND_BASE_URL.to_owned(),
             quota_refresh_interval,
             quota_floor_notifier,
+            refresh_tasks.clone(),
         )
         .await
         {

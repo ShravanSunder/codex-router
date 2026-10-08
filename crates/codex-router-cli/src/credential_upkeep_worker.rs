@@ -8,6 +8,7 @@ use std::time::Instant;
 
 use codex_router_auth::resolver::AsyncRouterCredentialResolver;
 use codex_router_auth::resolver::CredentialRefreshClient;
+use codex_router_auth::resolver::CredentialRefreshTaskSupervisor;
 #[cfg(test)]
 use codex_router_auth::resolver::NoopCredentialRefreshClient;
 #[cfg(not(test))]
@@ -108,11 +109,13 @@ pub enum CredentialUpkeepStartError {
 pub(crate) async fn start_background_credential_upkeep_worker(
     state_db_path: PathBuf,
     secret_store: EncryptedCredentialStore,
+    refresh_tasks: CredentialRefreshTaskSupervisor,
 ) -> Result<CredentialUpkeepWorker, CredentialUpkeepStartError> {
     #[cfg(test)]
     return start_background_credential_upkeep_worker_with_client_and_clock(
         state_db_path,
         secret_store,
+        refresh_tasks,
         NoopCredentialRefreshClient,
         || current_unix_seconds().unwrap_or(0),
     )
@@ -121,6 +124,7 @@ pub(crate) async fn start_background_credential_upkeep_worker(
     start_background_credential_upkeep_worker_with_client_and_clock(
         state_db_path,
         secret_store,
+        refresh_tasks,
         ProviderCredentialRefreshClients::new(),
         || current_unix_seconds().unwrap_or(0),
     )
@@ -130,6 +134,7 @@ pub(crate) async fn start_background_credential_upkeep_worker(
 pub(crate) async fn start_background_credential_upkeep_worker_with_client_and_clock<C, F>(
     state_db_path: PathBuf,
     secrets: EncryptedCredentialStore,
+    refresh_tasks: CredentialRefreshTaskSupervisor,
     refresh_client: C,
     observed_clock: F,
 ) -> Result<CredentialUpkeepWorker, CredentialUpkeepStartError>
@@ -141,6 +146,7 @@ where
     let (control_sender, mut control_receiver) = tokio::sync::mpsc::unbounded_channel();
     let stop_requested = CancellationToken::new();
     let worker_stop = stop_requested.clone();
+    let worker_refresh_tasks = refresh_tasks.clone();
     let shutdown_deadline = Arc::new(OnceLock::new());
     let worker_deadline = Arc::clone(&shutdown_deadline);
     let task = tokio::spawn(async move {
@@ -153,6 +159,7 @@ where
             let cycle_result = run_upkeep_cycle_until_stop(
                 &state,
                 &secrets,
+                worker_refresh_tasks.clone(),
                 refresh_client.clone(),
                 observed_now,
                 &worker_stop,
@@ -250,6 +257,7 @@ where
     run_upkeep_cycle_until_stop(
         state,
         secrets,
+        CredentialRefreshTaskSupervisor::new(),
         refresh_client,
         observed_now,
         &CancellationToken::new(),
@@ -261,6 +269,7 @@ where
 async fn run_upkeep_cycle_until_stop<C>(
     state: &AsyncSqliteStateStore,
     secrets: &EncryptedCredentialStore,
+    refresh_tasks: CredentialRefreshTaskSupervisor,
     refresh_client: C,
     observed_now: u64,
     stop_requested: &CancellationToken,
@@ -302,7 +311,8 @@ where
             secrets.clone(),
             TelemetryCredentialUpkeepRefreshClient::new(refresh_client.clone()),
             Some(observed_now),
-        );
+        )
+        .with_refresh_task_supervisor(refresh_tasks.clone());
         let account_id = account.account_id().clone();
         let health_state = state.clone();
         let account_semaphore = std::sync::Arc::clone(&semaphore);

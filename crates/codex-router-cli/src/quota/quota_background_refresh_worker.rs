@@ -1,4 +1,5 @@
 use super::*;
+use codex_router_auth::resolver::CredentialRefreshTaskSupervisor;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
@@ -183,9 +184,14 @@ pub(crate) async fn start_background_quota_refresh_worker(
     base_url: String,
     interval: Duration,
     quota_floor_notifier: WebSocketQuotaFloorNotifier,
+    refresh_tasks: CredentialRefreshTaskSupervisor,
 ) -> Result<BackgroundQuotaRefreshWorker, QuotaCommandError> {
-    let resolver =
-        AsyncCliCredentialResolver::open_with_secret_store(&state_db, credential_store).await?;
+    let resolver = AsyncCliCredentialResolver::open_with_secret_store(
+        &state_db,
+        credential_store,
+        refresh_tasks,
+    )
+    .await?;
     let provider = HttpQuotaRefreshProvider::new()?;
     Ok(start_background_quota_refresh_worker_with_reporter(
         state_db,

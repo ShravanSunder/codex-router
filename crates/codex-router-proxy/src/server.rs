@@ -27,6 +27,7 @@ use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
 use bytes::Bytes;
+use codex_router_auth::resolver::CredentialRefreshTaskSupervisor;
 use futures_util::future::BoxFuture;
 use futures_util::stream;
 use http::HeaderMap;

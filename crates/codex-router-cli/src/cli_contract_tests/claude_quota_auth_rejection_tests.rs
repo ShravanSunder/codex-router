@@ -354,6 +354,7 @@ fn claude_usage_401_after_renewal_preserves_account_for_upkeep_and_records_failu
             crate::credential_upkeep_worker::start_background_credential_upkeep_worker_with_client_and_clock(
                 state_path.clone(),
                 secrets,
+                CredentialRefreshTaskSupervisor::new(),
                 RecordingClaudeUpkeepRefreshClient {
                     observed_account_ids: observed_sender,
                 },

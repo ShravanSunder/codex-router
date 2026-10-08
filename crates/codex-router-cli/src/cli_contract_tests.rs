@@ -32,6 +32,7 @@ use tungstenite::handshake::server::Response;
 use tungstenite::http::HeaderValue;
 
 use codex_router_auth::resolver::CredentialRefreshClient;
+use codex_router_auth::resolver::CredentialRefreshTaskSupervisor;
 use codex_router_auth::resolver::CredentialResolverError;
 use codex_router_auth::resolver::NoopCredentialRefreshClient;
 use codex_router_auth::resolver::ProviderCredentialResolver;
@@ -182,6 +183,8 @@ mod router_startup_tests;
 
 #[path = "cli_contract_tests/serve_worker_lifecycle_tests.rs"]
 mod serve_worker_lifecycle_tests;
+#[path = "cli_contract_tests/shared_renewal_supervisor_tests.rs"]
+mod shared_renewal_supervisor_tests;
 
 #[path = "cli_contract_tests/quota_concurrency_tests.rs"]
 mod quota_concurrency_tests;

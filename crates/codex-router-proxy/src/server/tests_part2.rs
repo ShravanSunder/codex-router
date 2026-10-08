@@ -192,6 +192,55 @@ impl CredentialRefreshClient for ImmediateProxyRefreshClient {
     }
 }
 
+#[tokio::test]
+pub(super) async fn request_factory_rejects_renewal_after_proxy_supervisor_close() {
+    let (router, account_id, _database_path, secrets) =
+        proxy_refresh_fixture("closed-request-renewal", Duration::from_secs(1)).await;
+    assert!(matches!(router.serve_protocol_connections(0).await, Ok(0)));
+
+    let resolver = router
+        .credential_factory
+        .resolver_for_state_with_refresh_client(
+            router.credential_state_store.clone(),
+            ImmediateProxyRefreshClient,
+        );
+    let result = resolver
+        .resolve_provider_credentials(&account_id, codex_router_core::provider::Provider::Openai)
+        .await;
+    assert_eq!(
+        result,
+        Err(codex_router_auth::resolver::CredentialResolverError::RenewalAdmissionClosed)
+    );
+
+    let account = router
+        .credential_state_store
+        .load_account(&account_id)
+        .await
+        .expect("request account should remain readable")
+        .expect("request account should remain stored");
+    assert_eq!(account.active_credential_generation(), Some(1));
+    let successor_key =
+        openai_account_credential_bundle_key(&account_id, 2).expect("successor bundle key");
+    assert!(
+        secrets.read_secret(&successor_key).is_err(),
+        "closed request renewal must not write a successor credential"
+    );
+    let active_key =
+        openai_account_credential_bundle_key(&account_id, 1).expect("active bundle key");
+    let active_bundle = secrets
+        .read_secret(&active_key)
+        .expect("active credential should remain readable");
+    let active_bundle =
+        AccountCredentialBundle::from_secret_string(active_bundle).expect("active bundle");
+    assert_eq!(
+        active_bundle
+            .refresh_token()
+            .expect("active credential should remain renewable")
+            .expose_secret(),
+        "old-refresh-canary"
+    );
+}
+
 #[derive(Clone)]
 pub(super) struct HeldProxySecretWriteStore {
     pub(super) inner: EncryptedCredentialStore,

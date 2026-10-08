@@ -41,3 +41,11 @@ impl Drop for LoopbackRouterRuntime {
         self.maintenance_actor.request_shutdown();
     }
 }
+
+impl LoopbackRouterRuntime {
+    /// Returns the request credential factory's shared renewal supervisor.
+    #[must_use]
+    pub fn credential_refresh_task_supervisor(&self) -> CredentialRefreshTaskSupervisor {
+        self.credential_factory.credential_refresh_task_supervisor()
+    }
+}

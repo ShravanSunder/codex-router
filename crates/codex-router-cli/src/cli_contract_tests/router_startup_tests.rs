@@ -737,11 +737,12 @@ async fn serve_startup_maintains_idle_enabled_oauth_account_across_simulated_day
             &mut stdout,
             command,
             credential_store,
-            move |state_path, credential_store| async move {
+            move |state_path, credential_store, refresh_tasks| async move {
                 let clock = Arc::clone(&worker_clock);
                 let worker = start_background_credential_upkeep_worker_with_client_and_clock(
                     state_path,
                     credential_store,
+                    refresh_tasks,
                     oauth_client,
                     move || clock.load(Ordering::SeqCst),
                 )

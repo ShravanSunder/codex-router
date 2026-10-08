@@ -77,6 +77,7 @@ async fn served_router_http_uses_persisted_quota_while_background_refresh_is_blo
     )
     .with_quota_clock(1_030, 60);
     let runtime = must_ok(LoopbackRouterRuntime::start(runtime_config, secrets.clone()).await);
+    let refresh_tasks = runtime.credential_refresh_task_supervisor();
     let runtime_address = runtime.local_addr();
     assert_eq!(runtime_address.port(), router_port);
     let router_task = tokio::spawn(async move {
@@ -90,6 +91,7 @@ async fn served_router_http_uses_persisted_quota_while_background_refresh_is_blo
             &state_path,
             secrets,
             NoopCredentialRefreshClient,
+            refresh_tasks,
         )
         .await,
     );
@@ -244,6 +246,7 @@ async fn served_router_websocket_uses_persisted_quota_while_background_refresh_i
     )
     .with_quota_clock(1_030, 60);
     let runtime = must_ok(LoopbackRouterRuntime::start(runtime_config, secrets.clone()).await);
+    let refresh_tasks = runtime.credential_refresh_task_supervisor();
     assert_eq!(runtime.local_addr().port(), router_port);
     let router_task = tokio::spawn(async move {
         if let Err(error) = runtime.serve_protocol_connections(1).await {
@@ -256,6 +259,7 @@ async fn served_router_websocket_uses_persisted_quota_while_background_refresh_i
             &state_path,
             secrets,
             NoopCredentialRefreshClient,
+            refresh_tasks,
         )
         .await,
     );

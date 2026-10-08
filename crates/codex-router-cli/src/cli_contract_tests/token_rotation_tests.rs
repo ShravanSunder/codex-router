@@ -121,11 +121,12 @@ async fn serve_scopes_claude_token_rotation_and_keeps_codex_optional() {
             &mut stdout,
             command,
             secrets,
-            move |state_database_path, credential_store| async move {
+            move |state_database_path, credential_store, refresh_tasks| async move {
                 let _send_result = serve_ready_sender.send(());
                 credential_upkeep_worker::start_background_credential_upkeep_worker(
                     state_database_path,
                     credential_store,
+                    refresh_tasks,
                 )
                 .await
             },

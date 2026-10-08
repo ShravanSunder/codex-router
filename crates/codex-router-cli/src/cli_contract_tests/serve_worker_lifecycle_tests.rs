@@ -151,11 +151,12 @@ async fn serve_quota_start_failure_joins_active_upkeep_and_preserves_error_outpu
             &mut stdout,
             command,
             secrets,
-            move |state_db, credential_store| async move {
+            move |state_db, credential_store, refresh_tasks| async move {
                 let worker =
                     crate::credential_upkeep_worker::start_background_credential_upkeep_worker_with_client_and_clock(
                         state_db,
                         credential_store,
+                        refresh_tasks,
                         refresh_client,
                         || 1_000,
                     )
@@ -166,7 +167,7 @@ async fn serve_quota_start_failure_joins_active_upkeep_and_preserves_error_outpu
                     .expect("upkeep should send its active refresh entry");
                 Ok(worker)
             },
-            |_state_db, _secret_root, _credential_store, _base_url, _interval, _notifier| async {
+            |_state_db, _secret_root, _credential_store, _base_url, _interval, _notifier, _refresh_tasks| async {
                 Err(QuotaCommandError::BackgroundWorkerInitialization(
                     std::io::Error::other("fixture quota startup failure"),
                 ))
@@ -223,11 +224,12 @@ async fn serve_protocol_error_joins_active_upkeep_and_preserves_runtime_error() 
             &mut stdout,
             command,
             secrets,
-            move |state_db, credential_store| async move {
+            move |state_db, credential_store, refresh_tasks| async move {
                 let worker =
                     crate::credential_upkeep_worker::start_background_credential_upkeep_worker_with_client_and_clock(
                         state_db,
                         credential_store,
+                        refresh_tasks,
                         refresh_client,
                         || 1_000,
                     )

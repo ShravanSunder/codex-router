@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use codex_router_auth::resolver::AsyncRefreshLeaseRegistry;
 use codex_router_auth::resolver::AsyncRouterCredentialResolver;
 use codex_router_auth::resolver::CredentialRefreshClient;
+use codex_router_auth::resolver::CredentialRefreshTaskSupervisor;
 use codex_router_auth::resolver::CredentialResolverError;
 use codex_router_auth::resolver::ProviderCredentialRefreshClients;
 #[cfg(test)]
@@ -133,6 +134,7 @@ where
     secret_store: CliRuntimeSecretStore,
     refresh_client: C,
     refresh_leases: AsyncRefreshLeaseRegistry,
+    refresh_tasks: CredentialRefreshTaskSupervisor,
 }
 
 impl AsyncCliCredentialResolver<ProviderCredentialRefreshClients> {
@@ -150,6 +152,7 @@ impl AsyncCliCredentialResolver<ProviderCredentialRefreshClients> {
             secret_store,
             refresh_client: ProviderCredentialRefreshClients::new(),
             refresh_leases: AsyncRefreshLeaseRegistry::new(),
+            refresh_tasks: CredentialRefreshTaskSupervisor::new(),
         })
     }
 
@@ -157,6 +160,7 @@ impl AsyncCliCredentialResolver<ProviderCredentialRefreshClients> {
     pub(crate) async fn open_with_secret_store(
         state_db_path: &Path,
         secret_store: CliRuntimeSecretStore,
+        refresh_tasks: CredentialRefreshTaskSupervisor,
     ) -> Result<Self, CliCredentialResolverOpenError> {
         let state_store = AsyncSqliteStateStore::open(state_db_path).await?;
         Ok(Self {
@@ -164,6 +168,7 @@ impl AsyncCliCredentialResolver<ProviderCredentialRefreshClients> {
             secret_store,
             refresh_client: ProviderCredentialRefreshClients::new(),
             refresh_leases: AsyncRefreshLeaseRegistry::new(),
+            refresh_tasks,
         })
     }
 }
@@ -177,6 +182,7 @@ where
         state_db_path: &Path,
         secret_store: CliRuntimeSecretStore,
         refresh_client: C,
+        refresh_tasks: CredentialRefreshTaskSupervisor,
     ) -> Result<Self, CliCredentialResolverOpenError> {
         let state_store = AsyncSqliteStateStore::open(state_db_path).await?;
         Ok(Self {
@@ -184,6 +190,7 @@ where
             secret_store,
             refresh_client,
             refresh_leases: AsyncRefreshLeaseRegistry::new(),
+            refresh_tasks,
         })
     }
 }
@@ -205,6 +212,7 @@ where
             self.refresh_leases.clone(),
         );
         resolver
+            .with_refresh_task_supervisor(self.refresh_tasks.clone())
             .resolve_provider_credentials(account_id, expected_provider)
             .await
     }
@@ -223,6 +231,7 @@ where
             self.refresh_leases.clone(),
         );
         resolver
+            .with_refresh_task_supervisor(self.refresh_tasks.clone())
             .recover_unauthorized_credentials(account_id, expected_provider, rejected_generation)
             .await
     }

@@ -37,6 +37,7 @@ async fn background_quota_refresh_worker_runs_immediate_cycle_without_waiting_fo
             &state_path,
             secrets.clone(),
             NoopCredentialRefreshClient,
+            CredentialRefreshTaskSupervisor::new(),
         )
         .await,
     );
@@ -106,6 +107,7 @@ async fn background_quota_refresh_worker_start_does_not_wait_for_slow_provider()
             &state_path,
             secrets.clone(),
             NoopCredentialRefreshClient,
+            CredentialRefreshTaskSupervisor::new(),
         )
         .await,
     );
@@ -188,6 +190,7 @@ async fn background_quota_refresh_worker_uses_fresh_time_for_each_cycle() {
             &state_path,
             secrets.clone(),
             NoopCredentialRefreshClient,
+            CredentialRefreshTaskSupervisor::new(),
         )
         .await,
     );
@@ -276,6 +279,7 @@ async fn background_quota_refresh_worker_reports_refresh_failures() {
             &state_path,
             secrets.clone(),
             NoopCredentialRefreshClient,
+            CredentialRefreshTaskSupervisor::new(),
         )
         .await,
     );

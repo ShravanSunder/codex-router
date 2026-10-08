@@ -99,6 +99,7 @@ async fn enabled_exhausted_idle_account_renews_across_simulated_days_without_quo
         start_background_credential_upkeep_worker_with_client_and_clock(
             state_path.clone(),
             secrets,
+            CredentialRefreshTaskSupervisor::new(),
             client,
             move || clock.load(Ordering::SeqCst),
         )
@@ -235,6 +236,7 @@ async fn credential_upkeep_refreshes_exhausted_and_idle_claude_accounts() {
         start_background_credential_upkeep_worker_with_client_and_clock(
             state_path.clone(),
             secrets.clone(),
+            CredentialRefreshTaskSupervisor::new(),
             RecordingClaudeUpkeepRefreshClient {
                 observed_account_ids: observed_sender,
             },
@@ -363,6 +365,7 @@ async fn upkeep_shutdown_drains_in_flight_rotation_before_returning() {
         start_background_credential_upkeep_worker_with_client_and_clock(
             state_path.clone(),
             secrets,
+            CredentialRefreshTaskSupervisor::new(),
             HeldUpkeepRefreshClient {
                 entered_sender,
                 release_receiver: Arc::new(Mutex::new(release_receiver)),
@@ -464,6 +467,7 @@ async fn upkeep_shutdown_does_not_admit_a_queued_account_after_stop() {
         start_background_credential_upkeep_worker_with_client_and_clock(
             state_path.clone(),
             credential_store,
+            CredentialRefreshTaskSupervisor::new(),
             HeldQueuedUpkeepRefreshClient {
                 entered_sender,
                 release_receiver: Arc::new(Mutex::new(release_receiver)),
