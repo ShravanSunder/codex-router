@@ -6,16 +6,16 @@ The product boundary is intentionally narrow:
 
 - Codex remains the CLI, protocol client, session owner, installer, config owner, hook runner, MCP owner, and log/session/history owner.
 - `codex-router serve` owns local router authentication, upstream OAuth accounts, quota snapshots, account selection, and byte-preserving forwarding of Codex model-provider traffic.
-- The optional foreground `codex-router host` command owns one local router and one native Codex app-server child, and composes owner-local Control, native Codex relay, and ACP channels. Codex still owns native threads, queues, permissions, and agent execution.
+- The optional foreground `codex-router host` command owns one local router and one native Codex app-server child, serves the collaboration API as MCP tools, and composes the native Codex relay and ACP channels. Codex still owns native threads, queues, permissions, and agent execution.
 - The separate `agent-collaboration` CLI and reusable `collaboration-client` Rust SDK provide session discovery, explicit messaging, observation, and exact interruption. Lifecycle metadata lives separately from provider state and Codex history.
 - Prodex is source-mining reference material only. This repo is not a Prodex fork.
 
 The collaboration CLI is an interface to the Rust SDK. Reusable connection and
 session operations belong to `collaboration-client`; `collaboration-protocol`
-defines the shared RPC contracts. `collaboration-service` handles requests inside
-the Router Host. Message-board types and rules live in `message-board`, with SQLx
+defines the shared request and result types. `collaboration-service` handles
+requests inside the Router Host, and `collaboration-mcp` serves them as MCP tools. Message-board types and rules live in `message-board`, with SQLx
 persistence in `message-board-storage`.
-RPC schemas and types are available through `collaboration_client::protocol`;
+Request and result types are available through `collaboration_client::protocol`;
 board request/result types through `collaboration_client::board`. SDK consumers
 do not need to invoke the CLI or depend on its argument types.
 
@@ -86,12 +86,23 @@ cargo run -p codex-router-cli -- host
 ```
 
 The host starts `codex-router serve` when a compatible router is absent, starts
-the managed Codex app-server and enabled ACP providers, and keeps lifecycle
-control on an owner-only Unix socket. On first start it creates owner-editable
+the managed Codex app-server and enabled ACP providers, and answers its lifecycle
+commands (`host status`, `host restart`) on a separate owner-only operator socket.
+On first start it creates owner-editable
 `<router-root>/providers.json` with Claude and Cursor enabled. The default
 executables are `claude-agent-acp` and `agent acp`; explicit Host provider flags
 override the file for that start. If one provider is unavailable, the endpoint
 catalog reports its reason and fix while the other endpoints remain available.
+
+The Host serves one set of collaboration tools over MCP (Streamable HTTP) on two
+listeners: the owner-only Unix socket `control.sock` in its service directory,
+which the CLIs and SDK use, and a loopback TCP URL for models. It publishes
+`service.json` (manifest version 3) beside the socket: `serviceId`,
+`serviceEpoch`, `machineLabel`, `serviceVersion`, `api` (the socket), `mcp.url`
+(the TCP URL), `nativeSchemaDigest`, and `routerProxyEndpoint` when the proxy
+runs. Clients read these values from the manifest; there is no connection
+handshake, and older manifest versions are refused, so install the CLI and Host
+together.
 
 Hosted `agent-sessions` new/resume launches
 resolve the advertised public native selector. Backend replacement closes native
