@@ -151,6 +151,8 @@ jobs:
         run: |
           scripts/tooling/bootstrap-tools.sh ci
           echo "$GITHUB_WORKSPACE/tmp/rust-tools/bin" >> "$GITHUB_PATH"
+      - name: Build owned launch-failure fixture
+        run: cargo build --locked -p codex-router-keeper --example owned_launch_failure_fixture
       # Compile every test binary once, then run both suites in parallel from
       # the built artifacts so they don't contend for cargo's build lock.
       - name: Build test binaries
@@ -162,6 +164,8 @@ jobs:
       - name: Test Rust workspace
         id: workspace_tests
         background: true
+        env:
+          KEEPER_LAUNCH_FAILURE_FIXTURE: ${{ github.workspace }}/target/debug/examples/owned_launch_failure_fixture
         run: cargo nextest run --profile ci --workspace --features codex-router-cli/keychain-test-support --exclude codex-router-quota-reset-test-harness
       - name: Wait for tests
         wait-all:
