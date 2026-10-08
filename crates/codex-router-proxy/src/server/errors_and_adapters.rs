@@ -36,6 +36,13 @@ pub enum LoopbackRouterRuntimeError {
     /// Hyper request body collection failed.
     #[error("failed reading Hyper request body")]
     HyperBody(#[source] hyper::Error),
+    /// A real stored actor task failed after terminal completion.
+    #[error("proxy {actor:?} actor task failed")]
+    ActorJoin {
+        actor: LoopbackActorTask,
+        #[source]
+        source: tokio::task::JoinError,
+    },
     /// Hyper connection task failed.
     #[error("Hyper connection task failed")]
     ConnectionJoin(#[source] tokio::task::JoinError),
@@ -401,4 +408,12 @@ pub enum ServerConnectionError {
     /// Writing to the accepted stream failed.
     #[error("failed writing HTTP response")]
     Write(#[source] std::io::Error),
+}
+
+/// Existing actor handle whose actual completion reported a failure.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LoopbackActorTask {
+    DatabaseWrites,
+    SessionAffinity,
+    Maintenance,
 }

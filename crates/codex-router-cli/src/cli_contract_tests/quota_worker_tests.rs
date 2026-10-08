@@ -114,9 +114,13 @@ async fn background_quota_refresh_worker_start_does_not_wait_for_slow_provider()
     let provider = SlowQuotaRefreshProvider::new(Duration::from_millis(500), 72);
     let cycle_count = Arc::new(AtomicUsize::new(0));
     let observed_cycle_count = Arc::clone(&cycle_count);
+    let (cycle_started, mut observed_cycle_start) = tokio::sync::mpsc::unbounded_channel();
     let worker_runtime = BackgroundQuotaRefreshRuntime::new(
         move || {
             observed_cycle_count.fetch_add(1, Ordering::SeqCst);
+            cycle_started
+                .send(())
+                .expect("fixture observes the admitted immediate cycle");
             1_300
         },
         |_diagnostic| {},
@@ -139,6 +143,10 @@ async fn background_quota_refresh_worker_start_does_not_wait_for_slow_provider()
         elapsed < Duration::from_millis(250),
         "background worker startup waited for provider: {elapsed:?}"
     );
+    tokio::time::timeout(Duration::from_secs(2), observed_cycle_start.recv())
+        .await
+        .expect("immediate cycle starts after nonblocking construction")
+        .expect("cycle readiness registered before worker start");
     worker.shutdown().await;
     assert_eq!(
         cycle_count.load(Ordering::SeqCst),

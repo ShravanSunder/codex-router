@@ -191,6 +191,7 @@ mod runtime_preparation;
 mod runtime_serving;
 #[path = "server/runtime_startup.rs"]
 mod runtime_startup;
+pub use runtime_cleanup::{LoopbackServingStopCause, StoppedLoopbackServing};
 pub use runtime_preparation::PreparedLoopbackRouterRuntime;
 #[path = "server/runtime_activation.rs"]
 mod runtime_activation;

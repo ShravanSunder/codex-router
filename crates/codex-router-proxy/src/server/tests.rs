@@ -11,3 +11,11 @@ mod tests_part2;
 mod tests_part3;
 #[path = "tests_runtime_shutdown.rs"]
 mod tests_runtime_shutdown;
+#[path = "tests_stopped_serving.rs"]
+mod tests_stopped_serving;
+
+#[path = "tests_actor_drain.rs"]
+mod tests_actor_drain;
+
+#[path = "tests_actor_join_error.rs"]
+mod tests_actor_join_error;

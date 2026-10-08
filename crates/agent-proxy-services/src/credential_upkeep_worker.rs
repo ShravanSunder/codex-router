@@ -1,8 +1,6 @@
 //! Long-lived enabled-account OAuth upkeep, independent of quota observation.
 
 use std::path::PathBuf;
-use std::sync::Arc;
-use std::sync::OnceLock;
 use std::time::Duration;
 use std::time::Instant;
 
@@ -29,32 +27,34 @@ use telemetry::TelemetryCredentialUpkeepRefreshClient;
 const UPKEEP_CYCLE_SECONDS: u64 = 180;
 const LOCAL_FAILURE_RETRY_SECONDS: u64 = 60;
 const MAX_CONCURRENT_ACCOUNTS: usize = 4;
-const SHUTDOWN_DRAIN_SECONDS: u64 = 30;
 
-/// A running OAuth upkeep loop with a bounded shutdown drain.
+/// A running OAuth upkeep loop retaining every acquired renewal wrapper.
 pub struct CredentialUpkeepWorker {
     control_sender: UnboundedSender<WorkerControl>,
     stop_requested: CancellationToken,
-    shutdown_deadline: Arc<OnceLock<Instant>>,
     task: Option<JoinHandle<()>>,
     #[cfg(test)]
     refresh_client_type: std::any::TypeId,
 }
 
 impl CredentialUpkeepWorker {
-    fn request_stop(&self) {
-        let deadline = Instant::now() + Duration::from_secs(SHUTDOWN_DRAIN_SECONDS);
-        let _ = self.shutdown_deadline.set(deadline);
+    pub(crate) fn request_stop(&self) {
         self.stop_requested.cancel();
         let _ = self.control_sender.send(WorkerControl::Stop);
     }
 
     pub async fn shutdown(&mut self) {
         self.request_stop();
-        if let Some(task) = self.task.as_mut() {
-            let _result = task.await;
-            self.task = None;
-        }
+        let _result = self.join_stopped().await;
+    }
+
+    pub(crate) async fn join_stopped(&mut self) -> Result<(), tokio::task::JoinError> {
+        let result = match self.task.as_mut() {
+            Some(task) => task.await,
+            None => Ok(()),
+        };
+        self.task = None;
+        result
     }
 }
 
@@ -142,8 +142,6 @@ where
     let stop_requested = CancellationToken::new();
     let worker_stop = stop_requested.clone();
     let worker_refresh_tasks = refresh_tasks.clone();
-    let shutdown_deadline = Arc::new(OnceLock::new());
-    let worker_deadline = Arc::clone(&shutdown_deadline);
     let task = tokio::spawn(async move {
         loop {
             if worker_stop.is_cancelled() {
@@ -158,7 +156,6 @@ where
                 refresh_client.clone(),
                 observed_now,
                 &worker_stop,
-                &worker_deadline,
             )
             .await;
             if worker_stop.is_cancelled() {
@@ -177,31 +174,17 @@ where
                 _ = tokio::time::sleep(remaining) => {}
             }
         }
-        let close_budget = remaining_shutdown_time(&worker_deadline);
-        if !close_budget.is_zero() {
-            match tokio::time::timeout(close_budget, state.close()).await {
-                Ok(Ok(())) => {}
-                Ok(Err(error)) => eprintln!("credential upkeep state close failed: {error}"),
-                Err(_) => eprintln!("credential upkeep state close exceeded drain bound"),
-            }
+        if let Err(error) = state.close().await {
+            eprintln!("credential upkeep state close failed: {error}");
         }
     });
     Ok(CredentialUpkeepWorker {
         control_sender,
         stop_requested,
-        shutdown_deadline,
         task: Some(task),
         #[cfg(test)]
         refresh_client_type: std::any::TypeId::of::<C>(),
     })
-}
-
-fn remaining_shutdown_time(deadline: &OnceLock<Instant>) -> Duration {
-    deadline
-        .get()
-        .map_or(Duration::from_secs(SHUTDOWN_DRAIN_SECONDS), |deadline| {
-            deadline.saturating_duration_since(Instant::now())
-        })
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -258,7 +241,6 @@ where
         refresh_client,
         observed_now,
         &CancellationToken::new(),
-        &OnceLock::new(),
     )
     .await
 }
@@ -270,7 +252,6 @@ async fn run_upkeep_cycle_until_stop<C>(
     refresh_client: C,
     observed_now: u64,
     stop_requested: &CancellationToken,
-    shutdown_deadline: &OnceLock<Instant>,
 ) -> UpkeepCycleResult
 where
     C: CredentialRefreshClient + Clone + Send + Sync + 'static,
@@ -376,18 +357,7 @@ where
     let mut cycle_result = UpkeepCycleResult::default();
     loop {
         let next_result = if stop_requested.is_cancelled() {
-            let remaining = remaining_shutdown_time(shutdown_deadline);
-            if remaining.is_zero() {
-                tasks.abort_all();
-                break;
-            }
-            match tokio::time::timeout(remaining, tasks.join_next()).await {
-                Ok(result) => result,
-                Err(_) => {
-                    tasks.abort_all();
-                    break;
-                }
-            }
+            tasks.join_next().await
         } else {
             tokio::select! {
                 biased;

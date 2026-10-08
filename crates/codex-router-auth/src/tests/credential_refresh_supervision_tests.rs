@@ -318,6 +318,15 @@ async fn close_cancels_in_process_lock_waiter_but_finishes_claimed_rotation_afte
         !refresh_tasks.drain(Duration::from_millis(10)).await,
         "drain timeout must leave the claimed provider task tracked"
     );
+    assert!(
+        tokio::time::timeout(
+            Duration::from_millis(10),
+            refresh_tasks.wait_until_completed()
+        )
+        .await
+        .is_err(),
+        "cancelling the unbounded observer must retain the same claimed task"
+    );
     let in_progress = must_ok(state.load_credential_maintenance(&account_id).await)
         .expect("first task owns its refresh claim");
     assert_eq!(in_progress.state, CredentialMaintenanceState::InProgress);
@@ -331,6 +340,7 @@ async fn close_cancels_in_process_lock_waiter_but_finishes_claimed_rotation_afte
 
     must_ok(provider_release_sender.send(()));
     assert!(refresh_tasks.drain(Duration::from_secs(2)).await);
+    refresh_tasks.wait_until_completed().await;
     assert_eq!(refresh_client.calls.load(Ordering::SeqCst), 1);
     assert_eq!(
         must_ok(state.load_account(&account_id).await)

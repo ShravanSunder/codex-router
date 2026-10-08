@@ -604,6 +604,16 @@ impl DbWriteActor {
         self.shutdown.cancel();
     }
 
+    pub(crate) async fn wait_main_completed(&self) -> Result<(), tokio::task::JoinError> {
+        task_completion::await_actor_task_completion(&self.task).await
+    }
+
+    pub(crate) async fn wait_session_affinity_completed(
+        &self,
+    ) -> Result<(), tokio::task::JoinError> {
+        task_completion::await_actor_task_completion(&self.session_affinity_task).await
+    }
+
     /// Cancels the actor and waits for the task to finish.
     pub async fn shutdown(&self) {
         self.request_shutdown();
@@ -968,6 +978,9 @@ fn closed_queue_degraded(
         RouteBandQueueDegradedReason::DbWriteQueueClosed,
     )
 }
+
+#[path = "db_write_actor/task_completion.rs"]
+pub(crate) mod task_completion;
 
 #[cfg(test)]
 #[path = "db_write_actor/test_support.rs"]

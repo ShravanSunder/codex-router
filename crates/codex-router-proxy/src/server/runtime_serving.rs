@@ -1,4 +1,6 @@
-use super::runtime_cleanup::LoopbackServingCleanupContext;
+use super::runtime_cleanup::{
+    ActorDrainProgress, LoopbackServingStopCause, ServingOutcomeObservation, StoppedLoopbackServing,
+};
 use super::*;
 
 /// Receives diagnostics from detached loopback connection tasks.
@@ -30,17 +32,17 @@ pub(super) enum ConnectionFailurePolicy {
 }
 impl LoopbackRouterRuntime {
     /// Role serving retains every connection task and keeps the existing unlimited error policy.
-    pub async fn serve_owned_protocol_connections_until_cancelled(
+    pub async fn stop_owned_protocol_connections_until_cancelled(
         &self,
         max_connections: usize,
         shutdown: CancellationToken,
-    ) -> Result<usize, LoopbackRouterRuntimeError> {
+    ) -> StoppedLoopbackServing {
         let policy = if max_connections == usize::MAX {
             ConnectionFailurePolicy::ReportAndContinue
         } else {
             ConnectionFailurePolicy::StopServing
         };
-        self.serve_protocol_connections_owned(max_connections, Some(shutdown), policy)
+        self.stop_protocol_connections_owned(max_connections, Some(shutdown), policy)
             .with_subscriber(self.caller_dispatcher.clone())
             .await
     }
@@ -129,20 +131,23 @@ impl LoopbackRouterRuntime {
         } else {
             ConnectionFailurePolicy::StopServing
         };
-        self.serve_protocol_connections_owned(max_connections, shutdown, policy)
-            .await
+        let stopped = self
+            .stop_protocol_connections_owned(max_connections, shutdown, policy)
+            .await;
+        self.finish_serving(stopped).await
     }
 
-    async fn serve_protocol_connections_owned(
+    async fn stop_protocol_connections_owned(
         &self,
         max_connections: usize,
         shutdown: Option<CancellationToken>,
         policy: ConnectionFailurePolicy,
-    ) -> Result<usize, LoopbackRouterRuntimeError> {
+    ) -> StoppedLoopbackServing {
         let mut handled_connections = 0_usize;
         let mut handlers = JoinSet::new();
         let mut first_connection_error = None;
         let mut accept_error = None;
+        let mut stop_cause = LoopbackServingStopCause::ConnectionLimit;
         let session_shutdown = shutdown.clone().unwrap_or_default();
         let affinity_record_tasks = TaskTracker::new();
         let connection_handler =
@@ -154,9 +159,11 @@ impl LoopbackRouterRuntime {
             let stream = if let Some(shutdown) = shutdown.as_ref() {
                 loop {
                     tokio::select! {
-                        () = shutdown.cancelled() => break None,
+                        biased;
+                        () = shutdown.cancelled() => { stop_cause = LoopbackServingStopCause::DeactivationRequested; break None; },
                         joined = handlers.join_next(), if !handlers.is_empty() => {
                             if self.record_owned_connection_result(&mut first_connection_error,joined,policy) {
+                                stop_cause = LoopbackServingStopCause::ServingFailure;
                                 session_shutdown.cancel();
                                 break None;
                             }
@@ -165,6 +172,7 @@ impl LoopbackRouterRuntime {
                             match accepted {
                                 Ok((stream, _peer_addr)) => break Some(stream),
                                 Err(error) => {
+                                    stop_cause = LoopbackServingStopCause::ServingFailure;
                                     accept_error = Some(LoopbackRouterRuntimeError::Accept(error));
                                     break None;
                                 }
@@ -177,6 +185,7 @@ impl LoopbackRouterRuntime {
                     tokio::select! {
                         joined = handlers.join_next(), if !handlers.is_empty() => {
                             if self.record_owned_connection_result(&mut first_connection_error,joined,policy) {
+                                stop_cause = LoopbackServingStopCause::ServingFailure;
                                 session_shutdown.cancel();
                                 break None;
                             }
@@ -185,6 +194,7 @@ impl LoopbackRouterRuntime {
                             match accepted {
                                 Ok((stream, _peer_addr)) => break Some(stream),
                                 Err(error) => {
+                                    stop_cause = LoopbackServingStopCause::ServingFailure;
                                     accept_error = Some(LoopbackRouterRuntimeError::Accept(error));
                                     break None;
                                 }
@@ -208,7 +218,7 @@ impl LoopbackRouterRuntime {
             );
         }
 
-        self.finish_serving(LoopbackServingCleanupContext {
+        StoppedLoopbackServing {
             handled_connections,
             handlers,
             first_connection_error,
@@ -216,9 +226,11 @@ impl LoopbackRouterRuntime {
             session_shutdown,
             affinity_record_tasks,
             connection_failure_policy: policy,
-            caller_shutdown_requested: matches!(shutdown.as_ref(), Some(shutdown) if shutdown.is_cancelled()),
-        })
-        .await
+            stop_cause,
+            outcome_observation: ServingOutcomeObservation::Unobserved,
+            actor_progress: ActorDrainProgress::DatabaseWrites,
+            actor_join_error: None,
+        }
     }
 
     pub(super) fn record_owned_connection_result(

@@ -14,8 +14,10 @@ pub mod test_support;
 
 mod proxy_preparation_error;
 mod proxy_role_config;
+mod proxy_role_lifecycle;
 mod proxy_role_preparation;
 mod proxy_role_runtime;
+pub use proxy_role_lifecycle::{ProxyDeactivationReceipt, ProxyDrainCompletion};
 mod proxy_secret_preparation;
 pub use proxy_preparation_error::ProxyPreparationError;
 pub use proxy_role_config::{ProxyLocalTokenPolicy, ProxyQuotaRefreshPolicy, ProxyRoleConfig};
@@ -35,3 +37,8 @@ mod proxy_secret_preparation_tests;
 
 #[cfg(test)]
 mod proxy_fresh_bootstrap_tests;
+
+#[cfg(test)]
+mod proxy_drain_test_fixtures;
+#[cfg(test)]
+mod proxy_drain_tests;

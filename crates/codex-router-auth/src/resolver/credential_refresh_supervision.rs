@@ -76,6 +76,18 @@ impl CredentialRefreshTaskSupervisor {
         tokio::time::timeout(limit, tasks.wait()).await.is_ok()
     }
 
+    /// Waits for terminal completion on the same tracker without imposing a deadline.
+    /// Call `close_admission` first; observer cancellation never aborts admitted work.
+    pub async fn wait_until_completed(&self) {
+        let tasks = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .tasks
+            .clone();
+        tasks.wait().await;
+    }
+
     /// Closes admission, cancels lock waiters, and waits for admitted work.
     pub async fn drain(&self, limit: Duration) -> bool {
         self.close_admission();

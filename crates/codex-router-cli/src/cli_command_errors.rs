@@ -197,6 +197,10 @@ pub enum CliError {
         source: std::io::Error,
     },
 
+    /// Role-owned lifecycle failure; the CLI retains its original typed meaning.
+    #[error(transparent)]
+    ProxyLifecycle(agent_proxy_services::ProxyActivationError),
+
     /// Stdout write failed.
     #[error("failed to write stdout: {0}")]
     Stdout(std::io::Error),
@@ -236,6 +240,9 @@ impl From<agent_proxy_services::ProxyPreparationError> for CliError {
 impl From<agent_proxy_services::ProxyActivationError> for CliError {
     fn from(error: agent_proxy_services::ProxyActivationError) -> Self {
         match error {
+            error @ agent_proxy_services::ProxyActivationError::LifecycleUnavailable => {
+                Self::ProxyLifecycle(error)
+            }
             agent_proxy_services::ProxyActivationError::Core(error) => Self::from(error),
             agent_proxy_services::ProxyActivationError::Upkeep(error) => Self::from(error),
             agent_proxy_services::ProxyActivationError::Quota(error) => Self::from(error),

@@ -1,3 +1,4 @@
+use crate::proxy_role_lifecycle::ProxyServingLifecycle;
 use crate::{
     credential_upkeep_worker::{
         CredentialUpkeepStartError, CredentialUpkeepWorker,
@@ -14,7 +15,6 @@ use codex_router_auth::resolver::CredentialRefreshTaskSupervisor;
 use codex_router_proxy::server::{LoopbackRouterRuntime, LoopbackRouterRuntimeError};
 use codex_router_secret_store::encrypted_credential_store::EncryptedCredentialStore;
 use std::{future::Future, path::PathBuf, sync::Arc, time::Duration};
-use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 #[derive(Debug, thiserror::Error)]
 pub enum ProxyActivationError {
@@ -26,17 +26,20 @@ pub enum ProxyActivationError {
     Quota(#[from] QuotaRefreshError),
     #[error("proxy startup announcement failed")]
     StartupAnnouncement(#[source] std::io::Error),
-    #[error("proxy serving task failed")]
+    #[error("proxy owned task failed")]
     ServingTask(#[source] tokio::task::JoinError),
+    #[error("proxy serving lifecycle is not available in this state")]
+    LifecycleUnavailable,
 }
 /// Owns actual serving, token watching, quota and upkeep on the caller runtime.
 pub struct ProxyRoleRuntime {
-    core: Arc<LoopbackRouterRuntime>,
-    stop: CancellationToken,
-    serving: Option<JoinHandle<Result<usize, LoopbackRouterRuntimeError>>>,
-    upkeep: Option<CredentialUpkeepWorker>,
-    quota: Option<BackgroundQuotaRefreshWorker>,
-    watcher: Option<LocalTokenReloadWatcher>,
+    pub(crate) core: Arc<LoopbackRouterRuntime>,
+    pub(crate) stop: CancellationToken,
+    pub(crate) lifecycle: ProxyServingLifecycle,
+    pub(crate) worker_join_error: Option<tokio::task::JoinError>,
+    pub(crate) upkeep: Option<CredentialUpkeepWorker>,
+    pub(crate) quota: Option<BackgroundQuotaRefreshWorker>,
+    pub(crate) watcher: Option<LocalTokenReloadWatcher>,
 }
 impl PreparedProxyRoleRuntime {
     pub async fn activate(self) -> Result<ProxyRoleRuntime, ProxyActivationError> {
@@ -105,7 +108,8 @@ impl PreparedProxyRoleRuntime {
         let mut runtime = ProxyRoleRuntime {
             core: core.clone(),
             stop: CancellationToken::new(),
-            serving: None,
+            lifecycle: ProxyServingLifecycle::Starting,
+            worker_join_error: None,
             upkeep: None,
             quota: None,
             watcher: Some(LocalTokenReloadWatcher::start(
@@ -119,7 +123,7 @@ impl PreparedProxyRoleRuntime {
             )),
         };
         if let Err(error) = announce(&runtime.core) {
-            runtime.shutdown().await?;
+            runtime.cleanup_acquired().await;
             return Err(ProxyActivationError::StartupAnnouncement(error));
         }
         let upkeep = upkeep_start(
@@ -131,7 +135,7 @@ impl PreparedProxyRoleRuntime {
         match upkeep {
             Ok(worker) => runtime.upkeep = Some(worker),
             Err(error) => {
-                runtime.shutdown().await?;
+                runtime.cleanup_acquired().await;
                 return Err(error.into());
             }
         }
@@ -149,15 +153,15 @@ impl PreparedProxyRoleRuntime {
             match quota {
                 Ok(worker) => runtime.quota = Some(worker),
                 Err(error) => {
-                    runtime.shutdown().await?;
+                    runtime.cleanup_acquired().await;
                     return Err(error.into());
                 }
             }
         }
         let stop = runtime.stop.clone();
         let max_connections = self.config.max_connections;
-        runtime.serving = Some(tokio::spawn(async move {
-            core.serve_owned_protocol_connections_until_cancelled(max_connections, stop)
+        runtime.lifecycle = ProxyServingLifecycle::Accepting(tokio::spawn(async move {
+            core.stop_owned_protocol_connections_until_cancelled(max_connections, stop)
                 .await
         }));
         Ok(runtime)
@@ -176,46 +180,13 @@ impl ProxyRoleRuntime {
     pub fn credential_refresh_task_supervisor(&self) -> CredentialRefreshTaskSupervisor {
         self.core.credential_refresh_task_supervisor()
     }
-    pub async fn wait_serving(&mut self) -> Result<usize, ProxyActivationError> {
-        let result = match self.serving.as_mut() {
-            Some(task) => task
-                .await
-                .map_err(ProxyActivationError::ServingTask)
-                .and_then(|result| result.map_err(Into::into)),
-            None => Ok(0),
-        };
-        self.serving = None;
-        result
-    }
-    /// Retains handles across a dropped wait; a resumed call joins the same acquired work.
-    pub async fn shutdown(&mut self) -> Result<(), ProxyActivationError> {
-        self.stop.cancel();
-        if let Some(worker) = self.quota.as_mut() {
-            worker.shutdown().await;
-        }
-        self.quota = None;
-        if let Some(worker) = self.upkeep.as_mut() {
-            worker.shutdown().await;
-        }
-        self.upkeep = None;
-        if let Some(watcher) = self.watcher.as_mut() {
-            watcher.shutdown().await;
-        }
-        self.watcher = None;
-        let result = match self.serving.as_mut() {
-            Some(task) => task
-                .await
-                .map_err(ProxyActivationError::ServingTask)
-                .and_then(|result| result.map(|_| ()).map_err(Into::into)),
-            None => Ok(()),
-        };
-        self.serving = None;
-        self.core.shutdown().await;
-        result
-    }
 }
 impl Drop for ProxyRoleRuntime {
     fn drop(&mut self) {
         self.stop.cancel();
     }
 }
+
+#[cfg(test)]
+#[path = "proxy_deactivation_tests.rs"]
+mod proxy_deactivation_tests;

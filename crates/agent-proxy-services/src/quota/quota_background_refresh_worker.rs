@@ -36,16 +36,22 @@ impl<C, D> BackgroundQuotaRefreshRuntime<C, D> {
 }
 
 impl BackgroundQuotaRefreshWorker {
-    fn request_stop(&self) {
+    pub(crate) fn request_stop(&self) {
         self.stop_requested.cancel();
     }
 
     pub async fn shutdown(&mut self) {
         self.request_stop();
-        if let Some(task) = self.task.as_mut() {
-            let _result = task.await;
-            self.task = None;
-        }
+        let _result = self.join_stopped().await;
+    }
+
+    pub(crate) async fn join_stopped(&mut self) -> Result<(), tokio::task::JoinError> {
+        let result = match self.task.as_mut() {
+            Some(task) => task.await,
+            None => Ok(()),
+        };
+        self.task = None;
+        result
     }
 }
 
@@ -130,6 +136,9 @@ where
     let worker_stop = stop_requested.clone();
     let task = tokio::spawn(async move {
         loop {
+            if worker_stop.is_cancelled() {
+                break;
+            }
             let cycle_started_at = Instant::now();
             let mut sink = Vec::new();
             let observed_unix_seconds = observed_clock();

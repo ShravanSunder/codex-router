@@ -52,16 +52,22 @@ impl LocalTokenReloadWatcher {
         }
     }
 
-    fn request_stop(&self) {
+    pub(crate) fn request_stop(&self) {
         self.stop_requested.cancel();
     }
 
     pub async fn shutdown(&mut self) {
         self.request_stop();
-        if let Some(task) = self.task.as_mut() {
-            let _result = task.await;
-            self.task = None;
-        }
+        let _result = self.join_stopped().await;
+    }
+
+    pub(crate) async fn join_stopped(&mut self) -> Result<(), tokio::task::JoinError> {
+        let result = match self.task.as_mut() {
+            Some(task) => task.await,
+            None => Ok(()),
+        };
+        self.task = None;
+        result
     }
 }
 

@@ -366,6 +366,10 @@ impl MaintenanceActor {
         self.shutdown.cancel();
     }
 
+    pub(crate) async fn wait_until_completed(&self) -> Result<(), tokio::task::JoinError> {
+        crate::db_write_actor::task_completion::await_actor_task_completion(&self.task).await
+    }
+
     /// Cancels the actor and waits for the stored task to stop.
     pub async fn shutdown(&self) {
         self.request_shutdown();

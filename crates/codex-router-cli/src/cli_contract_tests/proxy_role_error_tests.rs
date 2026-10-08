@@ -157,3 +157,25 @@ async fn malformed_affinity_error_keeps_runtime_resource_origin() {
         CliError::Runtime(LoopbackRouterRuntimeError::CredentialResources(_))
     ));
 }
+
+#[test]
+fn proxy_lifecycle_failure_remains_the_original_typed_error_at_cli_boundary() {
+    let error =
+        crate::CliError::from(agent_proxy_services::ProxyActivationError::LifecycleUnavailable);
+    assert_eq!(
+        error.to_string(),
+        "proxy serving lifecycle is not available in this state"
+    );
+    assert!(matches!(
+        error,
+        crate::CliError::ProxyLifecycle(
+            agent_proxy_services::ProxyActivationError::LifecycleUnavailable
+        )
+    ));
+    let role_error = agent_proxy_services::ProxyActivationError::LifecycleUnavailable;
+    let error = crate::CliError::from(role_error);
+    assert!(
+        std::error::Error::source(&error).is_none(),
+        "transparent unit-role failure has no fabricated IO/Tokio cause"
+    );
+}
