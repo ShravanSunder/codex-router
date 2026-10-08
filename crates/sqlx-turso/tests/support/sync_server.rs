@@ -178,7 +178,7 @@ async fn verify_server_version(binary: &Path) -> TestResult {
     .await
     .map_err(|_elapsed| "tursodb --version did not finish")??;
     let reported = String::from_utf8_lossy(&output.stdout);
-    if !output.status.success() || !reported.contains(EXPECTED_VERSION) {
+    if !output.status.success() || !reports_pinned_version(&reported) {
         return Err(format!(
             "{} reports {:?}, expected {EXPECTED_VERSION}; {INSTALL_HINT}",
             binary.display(),
@@ -187,6 +187,27 @@ async fn verify_server_version(binary: &Path) -> TestResult {
         .into());
     }
     Ok(())
+}
+
+/// Whether `tursodb --version` output names exactly the pinned release
+///
+/// An exact match: `Turso 0.8.10` and `Turso 0.8.1-dev` are different engines.
+fn reports_pinned_version(version_output: &str) -> bool {
+    version_output.trim() == EXPECTED_VERSION
+}
+
+#[test]
+fn only_the_exact_pinned_version_is_accepted() {
+    assert!(reports_pinned_version("Turso 0.8.1\n"));
+    for other in [
+        "Turso 0.8.10",
+        "Turso 0.8.1-dev",
+        "Turso 0.8.12\n",
+        "Turso 0.8.1 extra",
+        "",
+    ] {
+        assert!(!reports_pinned_version(other), "{other:?}");
+    }
 }
 
 /// Installs rustls's aws-lc-rs provider as the process default
