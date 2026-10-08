@@ -1,5 +1,11 @@
 # Router-selector setup trace — unshared
 
+## 2026-10-08 — Current version checkpoint and continued delivery
+
+Merged the released quota repair from current main without conflicts and advanced the workspace and its 27 lockfile package entries to the centrally reserved unused 0.1.68. Locked/offline metadata validates package versions; dependency versions are unchanged. Agent library: 269 passed, zero failed, one existing ignored, exit 0. Strict workspace/all-target Clippy, formatting, whitespace and Rust physical-size checks each exit 0. These checks validate this checkpoint, not configured native launch/fork or whole-feature completion.
+
+The draft PR remains available for inspection. Named Browse/NEW and configured loader/resume/fork still reject in current source. Continue existing source/read/action ownership where existing supplied contracts permit; do not invent external native exposure, SSH product behavior, or policy ownership. The already-raised carrier decision and actual native proof remain open. Existing concurrent real Control-service/SQLite proof does not establish a full Router/native journey. No merge, tag, release, install, production replacement, or credential action.
+
 ## 2026-10-06 — Physical Sunbook read and native-fixture continuation
 
 Recovered an existing owner-authorized Tailscale SSH route through retained coordinator evidence, then actually observed Sunbook hostname, full service/epoch, source-bound Stored paging/continuation and Loaded runtime read. This is installed source-side CLI0.1.63 proof, not the configured Selector adapter. Private results and current checkpoint are in tmp/selector-sunbook-read-proof.md and tmp/selector-delivery-current.md. Caller-local native attachment remains a genuine Program Design gap; coordinator raised one owner decision and that carrier/exposure/security choice is held. Disposable fixture path is procedural, not an owner tradeoff: private owned temp cwd and live0.160.0 schema export prepared, no project/worktree created.
