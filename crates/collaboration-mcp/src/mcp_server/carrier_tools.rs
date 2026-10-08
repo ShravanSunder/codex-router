@@ -193,19 +193,20 @@ impl CollaborationMcpServer {
         conversation_tool_result(result, Some(operation_id))
     }
 
-    #[tool(name = "events_observe", description = "Explicitly attaches to one conversation and returns bounded call-local events. Use afterSequence with the returned epoch to continue loaded Session history; an epoch mismatch requires resync. Concurrent sends have no ordering guarantee relative to attachment.", output_schema = rmcp::handler::server::tool::schema_for_type::<McpToolOutput<BoundedObservationResult>>())]
+    #[tool(name = "events_observe", description = "Explicitly attaches to one conversation and returns bounded call-local events. Each event is also streamed as a notifications/codexRouter/observationEvent notification ({event, cursor}) while the call is open; the result still lists every event. Use afterSequence with the returned epoch to continue loaded Session history; an epoch mismatch requires resync. Concurrent sends have no ordering guarantee relative to attachment.", output_schema = rmcp::handler::server::tool::schema_for_type::<McpToolOutput<BoundedObservationResult>>())]
     pub(super) async fn events_observe(
         &self,
         Parameters(request): Parameters<BoundedObservationRequest>,
         context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
     ) -> CallToolResult {
-        match collaboration_client::SessionObservation::observe_bounded(
+        let (observed, mut streamed) = tokio::sync::mpsc::unbounded_channel();
+        let observation = collaboration_client::SessionObservation::observe_bounded(
             &self.carrier_access,
             request,
-            context.ct,
-        )
-        .await
-        {
+            context.ct.clone(),
+            Some(observed),
+        );
+        match stream_observed_events(&context.peer, &mut streamed, observation).await {
             Ok(value) => structured_result(Ok(value), OperationEffect::None),
             Err(error) => {
                 let (failure, target, turn_id) = error.into_parts();
@@ -213,4 +214,47 @@ impl CollaborationMcpServer {
             }
         }
     }
+}
+
+/// Runs one observation, sending each event it observes to the caller as an
+/// `observationEvent` notification while the call is open, then answers its result. rmcp
+/// answers the call as an SSE stream once a notification precedes the result.
+async fn stream_observed_events<TResult>(
+    peer: &rmcp::service::Peer<rmcp::service::RoleServer>,
+    streamed: &mut tokio::sync::mpsc::UnboundedReceiver<
+        collaboration_protocol::ObservationEventNotification,
+    >,
+    observation: impl std::future::Future<Output = TResult>,
+) -> TResult {
+    let mut observation = std::pin::pin!(observation);
+    let result = loop {
+        tokio::select! {
+            biased;
+            Some(event) = streamed.recv() => notify_observed_event(peer, event).await,
+            result = &mut observation => break result,
+        }
+    };
+    // The finished observation dropped its sender; send what it observed last.
+    while let Ok(event) = streamed.try_recv() {
+        notify_observed_event(peer, event).await;
+    }
+    result
+}
+
+async fn notify_observed_event(
+    peer: &rmcp::service::Peer<rmcp::service::RoleServer>,
+    event: collaboration_protocol::ObservationEventNotification,
+) {
+    let Ok(params) = serde_json::to_value(&event) else {
+        return;
+    };
+    // A caller that has gone cannot receive it; the result still lists the event.
+    let _sent = peer
+        .send_notification(rmcp::model::ServerNotification::CustomNotification(
+            rmcp::model::CustomNotification::new(
+                collaboration_protocol::OBSERVATION_EVENT_NOTIFICATION,
+                Some(params),
+            ),
+        ))
+        .await;
 }

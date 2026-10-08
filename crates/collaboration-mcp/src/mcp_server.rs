@@ -5,6 +5,7 @@
 //! carrier clients in the Host over the same application.
 use crate::collaboration_api_router::CollaborationApiConfig;
 use crate::native_schema_definitions::NativeSchemaDefinitions;
+use crate::tool_call_registry::CallEndedEarly;
 use collaboration_client::{
     BoundedObservationRequest, BoundedObservationResult, ClientError, ConversationCancelInput,
     ConversationClient, ConversationClientError, ConversationCreatePromptOutcome,
@@ -148,7 +149,9 @@ impl CollaborationMcpServer {
             carrier_access: carrier_access(&application, &service_directory),
             application,
             router_executable_relation: relation,
-            tool_calls: crate::tool_call_registry::ToolCallRegistry::default(),
+            tool_calls: crate::tool_call_registry::ToolCallRegistry::new(
+                tokio_util::sync::CancellationToken::new(),
+            ),
         }
     }
 
@@ -308,15 +311,22 @@ impl ServerHandler for CollaborationMcpServer {
         request: CallToolRequestParams,
         context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
     ) -> Result<CallToolResponse, rmcp::ErrorData> {
+        let caller = context.ct.clone();
         let routed = self
             .surface
             .router
             .call(ToolCallContext::new(self, request, context));
         self.tool_calls
-            .run(routed, || {
-                Ok(CallToolResponse::Complete(call_abandoned_at_shutdown()))
+            .run(routed, caller, |ended| {
+                Ok(CallToolResponse::Complete(match ended {
+                    CallEndedEarly::CallerDisconnected => {
+                        caller_cancelled(OperationEffect::Unknown)
+                    }
+                    CallEndedEarly::AbortedAtShutdown => call_abandoned_at_shutdown(),
+                }))
             })
             .await
+            .map(structured_argument_refusal)
     }
 
     async fn list_tools(

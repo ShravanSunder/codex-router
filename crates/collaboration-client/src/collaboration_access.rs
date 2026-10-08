@@ -48,9 +48,11 @@ pub trait LocalCollaboration: Send + Sync {
         &self,
         request: ConversationOperationWaitRequest,
     ) -> LocalFuture<'_, ConversationOperationWaitResult>;
+    /// A bounded provider observation, handing each event to `observed` as it is collected.
     fn observe_provider_session(
         &self,
         request: BoundedObservationRequest,
+        observed: Option<crate::ObservationEventSink>,
     ) -> LocalFuture<'_, BoundedObservationResult>;
 }
 

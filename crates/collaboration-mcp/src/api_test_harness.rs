@@ -12,7 +12,7 @@ use collaboration_protocol::{
 use collaboration_service::{CollaborationApplication, ManifestPublication, ServiceIdentity};
 use reqwest::header::{ACCEPT, CONTENT_TYPE};
 use rmcp::{
-    RoleClient, ServiceExt as _,
+    ClientHandler, RoleClient, ServiceExt as _,
     model::{CallToolRequestParams, CallToolResult},
     service::RunningService,
     transport::{
@@ -187,13 +187,21 @@ impl ServedApi {
 
     /// An rmcp client over this listener's transport.
     pub(crate) async fn client(&self) -> RunningService<RoleClient, ()> {
+        self.client_with(()).await
+    }
+
+    /// An rmcp client over this listener's transport whose `handler` receives what the server
+    /// sends it, such as notifications.
+    pub(crate) async fn client_with<THandler: ClientHandler>(
+        &self,
+        handler: THandler,
+    ) -> RunningService<RoleClient, THandler> {
         match &self.endpoint {
-            ServedEndpoint::LoopbackTcp(_) => {
-                ().serve(StreamableHttpClientTransport::from_uri(self.url()))
-                    .await
-                    .expect("rmcp client over TCP")
-            }
-            ServedEndpoint::UnixSocket(socket) => ()
+            ServedEndpoint::LoopbackTcp(_) => handler
+                .serve(StreamableHttpClientTransport::from_uri(self.url()))
+                .await
+                .expect("rmcp client over TCP"),
+            ServedEndpoint::UnixSocket(socket) => handler
                 .serve(StreamableHttpClientTransport::with_client(
                     UnixSocketHttpClient::new(&socket.to_string_lossy(), &self.url()),
                     StreamableHttpClientTransportConfig::with_uri(self.url()),

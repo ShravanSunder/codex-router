@@ -107,6 +107,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn bounded_cli_observe_streams_each_event_before_its_result() {
+        // Arrange and act: two buffered native events, observed with --stream.
+        let output = run_observation_case_with(
+            AttachmentCase::BufferedEvents,
+            "streamed",
+            true,
+            &["--stream"],
+        )
+        .await;
+
+        // Assert: each event is its own line before the unchanged result; native events
+        // have no cursor.
+        assert!(output.status.success());
+        let records = output_records(&output);
+        let [first, second, result] = records.as_slice() else {
+            panic!("expected two streamed events and the result: {records:?}");
+        };
+        for streamed in [first, second] {
+            assert_eq!(streamed["kind"], "observationEvent", "{streamed}");
+            assert_eq!(streamed["cursor"], Value::Null, "{streamed}");
+        }
+        assert_eq!(result["target"]["sessionId"], "observed-thread");
+        assert_eq!(result["events"], json!([first["event"], second["event"]]));
+    }
+
+    #[tokio::test]
     async fn bounded_cli_observe_distinguishes_malformed_frame_from_clean_eof() {
         let malformed =
             run_observation_case(AttachmentCase::MalformedFrame, "malformed", true).await;
@@ -180,6 +206,15 @@ mod tests {
         case: AttachmentCase,
         suffix: &str,
         bounded: bool,
+    ) -> std::process::Output {
+        run_observation_case_with(case, suffix, bounded, &[]).await
+    }
+
+    async fn run_observation_case_with(
+        case: AttachmentCase,
+        suffix: &str,
+        bounded: bool,
+        extra_arguments: &[&str],
     ) -> std::process::Output {
         let root = PathBuf::from(format!("/tmp/event-cli-{}-{suffix}", std::process::id()));
         std::fs::DirBuilder::new()
@@ -298,6 +333,7 @@ mod tests {
         if matches!(case, AttachmentCase::ByteSaturation) {
             command.args(["--max-events", "64", "--max-bytes", "128"]);
         }
+        command.args(extra_arguments);
         let output = tokio::time::timeout(Duration::from_secs(5), command.output()).await;
         served
             .stop()

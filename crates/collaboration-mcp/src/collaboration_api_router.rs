@@ -111,7 +111,7 @@ pub fn collaboration_api_router(
         CollaborationApiListener::UnixSocket => service_config.enforce_origin_validation(),
     };
     let server_config = config.clone();
-    let tool_calls = ToolCallRegistry::default();
+    let tool_calls = ToolCallRegistry::new(config.shutdown.clone());
     let server_tool_calls = tool_calls.clone();
     let surface = Arc::new(ToolSurface::new(config.native_definitions.as_ref()));
     let service: StreamableHttpService<CollaborationMcpServer, NeverSessionManager> =

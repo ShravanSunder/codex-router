@@ -759,11 +759,12 @@ async fn unavailable_catalog_vetoes_a_still_present_provider_binding() -> TestRe
 }
 
 /// The API refused the call's arguments before any operation ran. The Control decoder answered
-/// `-32602`; the API reports arguments that do not decode as a tool error with no typed payload,
-/// where every operation failure carries one.
+/// `-32602`; the API answers arguments that do not decode with its structured validation
+/// failure: nothing was dispatched, so nothing took effect.
 fn arguments_refused(response: &Value) -> bool {
-    response.get("error").is_some_and(Value::is_object)
-        && response.pointer("/error/data").is_none_or(Value::is_null)
+    response.pointer("/error/data/kind") == Some(&json!("protocolViolation"))
+        && response.pointer("/error/data/stage") == Some(&json!("validation"))
+        && response.pointer("/error/data/effect") == Some(&json!("none"))
 }
 
 fn ensure(condition: bool, message: String) -> TestResult {

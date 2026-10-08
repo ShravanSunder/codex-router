@@ -190,15 +190,14 @@ impl ServedCollaborationApi {
                 let ServerResult::CallToolResult(result) = response.result else {
                     return Err(io::Error::other("not a tool result"));
                 };
-                let text = result
-                    .content
-                    .iter()
-                    .find_map(|content| content.as_text().map(|text| text.text.clone()));
                 match (result.is_error == Some(true), result.structured_content) {
                     (true, Some(structured)) => json!({"error": published_error(structured)}),
-                    // A refusal before the tool ran, such as undecodable arguments, is text only.
+                    // Every tool error is structured, a refusal before the tool ran included;
+                    // a client could not read one that is not.
                     (true, None) => {
-                        json!({"error": {"code": -32050, "message": text, "data": null}})
+                        return Err(io::Error::other(
+                            "the API answered an unstructured tool error",
+                        ));
                     }
                     (false, structured) => json!({"result": structured.unwrap_or(Value::Null)}),
                 }

@@ -377,6 +377,11 @@ impl<'service> WakeOperations<'service> {
     /// Waits up to `timeoutSeconds` for a wake-up's first fire, or for a change that rules one
     /// out. Starts from the current state, or resumes after `after`, and always returns the
     /// cursor a later wait resumes from, so no change is lost between calls.
+    ///
+    /// The bound covers every store read, so a wait never outlasts it behind a held store: a
+    /// start that cannot read the wake-up in time is unavailable (it has no cursor yet), and a
+    /// resume or an observation read that cannot finish in time times out at the last cursor
+    /// it reached. An observation read is dropped before it advances its position.
     pub async fn wake_wait_until_first_fire(
         &self,
         request: WakeWaitRequest,
@@ -391,19 +396,28 @@ impl<'service> WakeOperations<'service> {
         }
         let deadline =
             tokio::time::Instant::now() + Duration::from_secs(u64::from(timeout_seconds));
+        let timed_out = |wakeup_id, cursor| WakeWaitResult {
+            wakeup_id,
+            outcome: WakeWaitOutcome::TimedOut,
+            cursor,
+        };
         let (store, permit) = self.wait_admission(&wakeup_id)?;
         let mut observation = match request.after {
             None => {
-                let (observation, subscription) = crate::wakeup_subscription::start(
-                    Arc::clone(store),
-                    self.service_id.clone(),
-                    WakeShowRequest {
-                        wakeup_id: wakeup_id.clone(),
-                    },
-                    permit,
+                let started = tokio::time::timeout_at(
+                    deadline,
+                    crate::wakeup_subscription::start(
+                        Arc::clone(store),
+                        self.service_id.clone(),
+                        WakeShowRequest {
+                            wakeup_id: wakeup_id.clone(),
+                        },
+                        permit,
+                    ),
                 )
                 .await
-                .map_err(|error| match error {
+                .map_err(|_| WakeWaitFailure::unavailable(wakeup_id.clone()))?;
+                let (observation, subscription) = started.map_err(|error| match error {
                     StorageError::WakeNotFound => WakeWaitFailure::not_found(wakeup_id.clone()),
                     _ => WakeWaitFailure::unavailable(wakeup_id.clone()),
                 })?;
@@ -416,28 +430,42 @@ impl<'service> WakeOperations<'service> {
                 }
                 observation
             }
-            Some(cursor) => WakeSubscriptionState::resume(
-                Arc::clone(store),
-                self.service_id.clone(),
-                wakeup_id.clone(),
-                &cursor,
-                permit,
-            )
-            .await
-            .map_err(|error| match error {
-                WakeResumeError::InvalidCursor => WakeWaitFailure::InvalidField {
-                    field: "after",
-                    constraint: "Use a cursor an earlier wait on this service returned, or omit it.",
-                },
-                WakeResumeError::NotFound => WakeWaitFailure::not_found(wakeup_id.clone()),
-                WakeResumeError::Unavailable => WakeWaitFailure::unavailable(wakeup_id.clone()),
-            })?,
+            Some(cursor) => {
+                let resumed = tokio::time::timeout_at(
+                    deadline,
+                    WakeSubscriptionState::resume(
+                        Arc::clone(store),
+                        self.service_id.clone(),
+                        wakeup_id.clone(),
+                        &cursor,
+                        permit,
+                    ),
+                )
+                .await;
+                // A resume reads the store only after it has accepted the cursor's form.
+                let Ok(resumed) = resumed else {
+                    return Ok(timed_out(wakeup_id, cursor));
+                };
+                resumed.map_err(|error| match error {
+                    WakeResumeError::InvalidCursor => WakeWaitFailure::InvalidField {
+                        field: "after",
+                        constraint: "Use a cursor an earlier wait on this service returned, or omit it.",
+                    },
+                    WakeResumeError::NotFound => WakeWaitFailure::not_found(wakeup_id.clone()),
+                    WakeResumeError::Unavailable => {
+                        WakeWaitFailure::unavailable(wakeup_id.clone())
+                    }
+                })?
+            }
         };
         loop {
-            let changes = observation
-                .next_changes()
-                .await
-                .map_err(|_| WakeWaitFailure::unavailable(wakeup_id.clone()))?;
+            let read = tokio::time::timeout_at(deadline, observation.next_changes()).await;
+            let changes = match read {
+                Ok(changes) => {
+                    changes.map_err(|_| WakeWaitFailure::unavailable(wakeup_id.clone()))?
+                }
+                Err(_) => Vec::new(),
+            };
             if let Some(changed) = changes.into_iter().next() {
                 return Ok(WakeWaitResult {
                     wakeup_id,
@@ -449,11 +477,7 @@ impl<'service> WakeOperations<'service> {
                 let cursor = observation
                     .cursor()
                     .map_err(|_| WakeWaitFailure::unavailable(wakeup_id.clone()))?;
-                return Ok(WakeWaitResult {
-                    wakeup_id,
-                    outcome: WakeWaitOutcome::TimedOut,
-                    cursor,
-                });
+                return Ok(timed_out(wakeup_id, cursor));
             }
             tokio::time::sleep_until(
                 (tokio::time::Instant::now() + WAKE_WAIT_POLL_INTERVAL).min(deadline),

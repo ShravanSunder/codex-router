@@ -4,12 +4,15 @@ use super::{CollaborationRejection, CollaborationRejectionReason, PublishedRejec
 use crate::{HubEvent, ServiceIdentity, SessionEventAttachment, SessionEventHubError};
 use collaboration_protocol::{
     BoundedObservationRequest, BoundedObservationResult, ChannelDescription, CodexGeneration,
-    EndpointAvailability, ObservationEndReason, ProviderObservationEventTooLarge,
-    ProviderObservationEventTooLargeKind, SessionRef,
+    EndpointAvailability, ObservationEndReason, ObservationEventNotification,
+    ProviderObservationEventTooLarge, ProviderObservationEventTooLargeKind, SessionRef,
 };
 use serde_json::{Value, json};
 use session_event_model::SessionEvent;
 use tokio::sync::broadcast;
+
+/// Where an observation hands each event as it observes it, before its result.
+pub type ObservedEventSink = tokio::sync::mpsc::UnboundedSender<ObservationEventNotification>;
 
 /// Observation operations over the provider Session event hub.
 pub struct ObservationOperations<'service> {
@@ -21,12 +24,14 @@ impl<'service> ObservationOperations<'service> {
         Self { identity }
     }
 
-    /// Collects events after `afterSequence` (in `epoch`) until a bound or the deadline.
+    /// Collects events after `afterSequence` (in `epoch`) until a bound or the deadline,
+    /// handing each one to `observed` as it is collected.
     pub async fn session_observe(
         &self,
         request: BoundedObservationRequest,
+        observed: Option<ObservedEventSink>,
     ) -> Result<BoundedObservationResult, ObservationFailure> {
-        collect(request, self.identity).await
+        collect(request, self.identity, observed).await
     }
 }
 
@@ -39,6 +44,7 @@ const MAX_EVENT_BYTES: usize = MAX_BYTES - 65_536;
 async fn collect(
     request: BoundedObservationRequest,
     identity: &ServiceIdentity,
+    observed: Option<ObservedEventSink>,
 ) -> Result<BoundedObservationResult, ObservationFailure> {
     if request.timeout_seconds == 0
         || request.max_events == 0
@@ -70,8 +76,12 @@ async fn collect(
             epoch: Some(current_epoch),
         });
     }
-    let mut events = Vec::new();
-    let mut bytes = 0_usize;
+    let mut events = CollectedEvents {
+        events: Vec::new(),
+        bytes: 0,
+        epoch: current_epoch,
+        observed,
+    };
     let mut snapshot = attachment.snapshot.into_iter().filter(|event| {
         request
             .after_sequence
@@ -81,12 +91,7 @@ async fn collect(
     let end_reason = loop {
         let event = if let Some(event) = snapshot.next() {
             if matches!(&event.event, SessionEvent::ResyncRequired { .. }) {
-                let _ = append_event(
-                    &mut events,
-                    &mut bytes,
-                    event_value_bounded(event),
-                    &request,
-                )?;
+                let _ = events.append(event_value_bounded(event), &request)?;
                 break ObservationEndReason::ResyncRequired;
             }
             event_value_bounded(event)
@@ -102,22 +107,12 @@ async fn collect(
                         ..
                     },
                 ) => {
-                    let _ = append_event(
-                        &mut events,
-                        &mut bytes,
-                        event_value_bounded(event),
-                        &request,
-                    )?;
+                    let _ = events.append(event_value_bounded(event), &request)?;
                     break ObservationEndReason::ResyncRequired;
                 }
                 Ok(event) => event_value_bounded(event),
                 Err(broadcast::error::RecvError::Lagged(_)) => {
-                    let _ = append_event(
-                        &mut events,
-                        &mut bytes,
-                        json!({"kind":"resyncRequired"}),
-                        &request,
-                    )?;
+                    let _ = events.append(json!({"kind":"resyncRequired"}), &request)?;
                     break ObservationEndReason::ResyncRequired;
                 }
                 Err(broadcast::error::RecvError::Closed) => {
@@ -125,10 +120,10 @@ async fn collect(
                 }
             }
         };
-        if !append_event(&mut events, &mut bytes, event, &request)? {
+        if !events.append(event, &request)? {
             break ObservationEndReason::ResultLimitReached;
         }
-        if events.len() == request.max_events || bytes == request.max_bytes {
+        if events.events.len() == request.max_events || events.bytes == request.max_bytes {
             break ObservationEndReason::ResultLimitReached;
         }
     };
@@ -136,30 +131,48 @@ async fn collect(
         target: request.target,
         generation,
         attached: true,
-        events,
+        events: events.events,
         end_reason,
         continuation_gap: true,
         epoch: Some(current_epoch),
     })
 }
 
-fn append_event(
-    events: &mut Vec<Value>,
-    bytes: &mut usize,
-    event: Value,
-    request: &BoundedObservationRequest,
-) -> Result<bool, ObservationFailure> {
-    let encoded = serde_json::to_vec(&event).map_err(|_| ObservationFailure::Unavailable)?;
-    if events.len() >= request.max_events
-        || bytes
-            .checked_add(encoded.len())
-            .is_none_or(|total| total > request.max_bytes.min(MAX_EVENT_BYTES))
-    {
-        return Ok(false);
+/// The events one observation has collected, and where it streams each as it is collected.
+struct CollectedEvents {
+    events: Vec<Value>,
+    bytes: usize,
+    epoch: u64,
+    observed: Option<ObservedEventSink>,
+}
+
+impl CollectedEvents {
+    /// Adds `event` if it fits the request's bounds, streaming it; `false` when it does not.
+    fn append(
+        &mut self,
+        event: Value,
+        request: &BoundedObservationRequest,
+    ) -> Result<bool, ObservationFailure> {
+        let encoded = serde_json::to_vec(&event).map_err(|_| ObservationFailure::Unavailable)?;
+        if self.events.len() >= request.max_events
+            || self
+                .bytes
+                .checked_add(encoded.len())
+                .is_none_or(|total| total > request.max_bytes.min(MAX_EVENT_BYTES))
+        {
+            return Ok(false);
+        }
+        self.bytes += encoded.len();
+        if let Some(observed) = &self.observed {
+            // A caller that stopped listening still gets every event in the result.
+            let _streamed = observed.send(ObservationEventNotification::provider_event(
+                event.clone(),
+                self.epoch,
+            ));
+        }
+        self.events.push(event);
+        Ok(true)
     }
-    *bytes += encoded.len();
-    events.push(event);
-    Ok(true)
 }
 
 async fn attach(

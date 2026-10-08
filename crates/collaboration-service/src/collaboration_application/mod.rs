@@ -43,7 +43,9 @@ pub use journal_operations::{JournalCursorInvalidation, JournalFailure, JournalU
 pub use message_operations::{
     MessageFailure, MessageFailureKind, MessageFailureStage, MessageOperations,
 };
-pub use provider_observation_operations::{ObservationFailure, ObservationOperations};
+pub use provider_observation_operations::{
+    ObservationFailure, ObservationOperations, ObservedEventSink,
+};
 pub use schedule_operations::ScheduleOperationFailure;
 pub(crate) use session_operations::INVALID_INVENTORY_PARAMETERS;
 pub use session_operations::{

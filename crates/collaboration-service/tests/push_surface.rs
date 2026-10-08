@@ -638,14 +638,22 @@ async fn reply_rejects_missing_reference_and_non_dm_records() {
     let missing_reference = control
         .call("message/reply", json!({"caller":target,"text":"answer"}))
         .await;
-    // The API refuses arguments that do not decode before any operation runs, as a tool error
-    // with no typed payload (Control's decoder answered a typed `invalidField`).
+    // The API refuses arguments that do not decode before any operation runs, with its
+    // structured validation failure (Control's decoder answered a typed `invalidField`).
     assert!(
         missing_reference["error"].is_object(),
         "{missing_reference}"
     );
-    assert!(
-        missing_reference["error"]["data"].is_null(),
+    assert_eq!(
+        missing_reference["error"]["data"]["kind"], "protocolViolation",
+        "{missing_reference}"
+    );
+    assert_eq!(
+        missing_reference["error"]["data"]["stage"], "validation",
+        "{missing_reference}"
+    );
+    assert_eq!(
+        missing_reference["error"]["data"]["effect"], "none",
         "{missing_reference}"
     );
 

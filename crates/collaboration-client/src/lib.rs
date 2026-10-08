@@ -132,8 +132,9 @@ mod observation_session;
 mod provider_session_observation;
 pub use collaboration_protocol::{
     BoundedObservationRequest, BoundedObservationResult, ObservationEndReason,
+    ObservationEventNotification,
 };
-pub use observation_session::NativeObservation;
+pub use observation_session::{NativeObservation, ObservationEventSink};
 pub use provider_session_observation::SessionObservation;
 
 mod acp_conversation;

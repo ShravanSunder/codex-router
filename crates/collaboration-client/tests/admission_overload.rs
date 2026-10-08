@@ -4,13 +4,15 @@
 //! wait takes that one, so every other call is shed.
 use automation_storage::AutomationStore;
 use collaboration_client::{
-    AutomationInspectionClientError, BoardClientError, ClientError, CollaborationClient,
-    ConfigurationClientError, InstructionClientError, OperationEffect, RunClientError,
+    AutomationInspectionClientError, BoardClientError, ClientError, CollaborationAccess,
+    CollaborationClient, ConfigurationClientError, InstructionClientError,
+    NativeTransportConnection, NativeTransportError, OperationEffect, RunClientError,
     ScheduleClientError, WakeClientError, WakeWaitError, operation_failure_from_client_error,
+    resolve_public_native,
 };
 use collaboration_mcp::test_support::{ServedCollaborationApi, TestServeOptions};
 use collaboration_protocol::{
-    AutomationInspectionFailureKind, ConfigurationFailureKind, ConfigurationNextAction,
+    AutomationInspectionFailureKind, ConfigurationFailureKind, ConfigurationNextAction, EndpointId,
     InstructionFailureKind, InstructionNextAction, OperationFailureKind, OperationId,
     RunFailureKind, RunNextAction, ScheduleFailureKind, ScheduleNextAction, WakeFailureReason,
     WakeNextAction, WakeShowRequest,
@@ -30,7 +32,7 @@ struct SaturatedApi {
     client: CollaborationClient,
     wakeup_id: Value,
     held: tokio::task::JoinHandle<()>,
-    _directory: tempfile::TempDir,
+    directory: tempfile::TempDir,
 }
 
 type TestResult<TValue> = Result<TValue, Box<dyn std::error::Error>>;
@@ -97,7 +99,7 @@ impl SaturatedApi {
             client,
             wakeup_id,
             held,
-            _directory: directory,
+            directory,
         })
     }
 
@@ -316,5 +318,41 @@ async fn a_shed_untyped_call_reports_no_effect_and_retry() {
     assert_eq!(failure.service_kind.as_deref(), Some("overloaded"));
     assert_eq!(failure.effect, OperationEffect::None);
     assert!(failure.message.contains("not run"), "{}", failure.message);
+    api.stop().await.expect("API stops");
+}
+
+#[tokio::test]
+async fn shed_native_discovery_keeps_the_overload_for_the_bridge_and_the_launcher() {
+    // Arrange
+    let api = SaturatedApi::start().await.expect("saturated API");
+    let directory = api.directory.path().to_owned();
+    let endpoint_id = EndpointId::try_from("codex-local".to_owned()).expect("endpoint id");
+
+    // Act: the native bridge's carrier discovery, and the hosted TUI launch's.
+    let bridged =
+        NativeTransportConnection::connect(&CollaborationAccess::api(&directory), endpoint_id)
+            .await;
+    let launched = tokio::task::spawn_blocking(move || resolve_public_native(&directory))
+        .await
+        .expect("launch discovery joins");
+
+    // Assert: both name the retryable overload, not an undifferentiated discovery failure.
+    let Err(bridge_error) = bridged else {
+        panic!("the bridge's discovery was not shed");
+    };
+    assert!(
+        matches!(bridge_error, NativeTransportError::Overloaded { .. }),
+        "{bridge_error:?}"
+    );
+    let launch_error = launched.expect_err("the launch discovery is shed");
+    assert!(
+        matches!(
+            launch_error
+                .get_ref()
+                .and_then(|source| source.downcast_ref::<NativeTransportError>()),
+            Some(NativeTransportError::Overloaded { .. })
+        ),
+        "{launch_error:?}"
+    );
     api.stop().await.expect("API stops");
 }

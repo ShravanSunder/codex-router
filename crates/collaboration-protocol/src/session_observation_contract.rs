@@ -61,6 +61,55 @@ pub enum ProviderObservationEventTooLargeKind {
     EventTooLarge,
 }
 
+/// The MCP notification method `events_observe` sends once for each event, as the event is
+/// observed and before the call's result. The result still carries every event and the
+/// resume position, so a client that ignores the notification loses nothing.
+pub const OBSERVATION_EVENT_NOTIFICATION: &str = "notifications/codexRouter/observationEvent";
+
+/// One event a bounded observation streams while its call is still open.
+#[derive(JsonSchema, Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ObservationEventNotification {
+    /// The event exactly as the call's result lists it in `events`.
+    pub event: Value,
+    /// Where a later observation resumes to continue after this event. Null for a Codex
+    /// session's native events, which have no cursor, and for a resync marker.
+    pub cursor: Option<ObservationCursor>,
+}
+
+/// A provider Session's hub position: pass both as `epoch` and `afterSequence`.
+#[derive(JsonSchema, Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ObservationCursor {
+    pub epoch: u64,
+    pub after_sequence: u64,
+}
+
+impl ObservationEventNotification {
+    /// A provider hub event: it resumes after its own `sequence` within `epoch`, when it has
+    /// one.
+    #[must_use]
+    pub fn provider_event(event: Value, epoch: u64) -> Self {
+        let cursor = event
+            .get("sequence")
+            .and_then(Value::as_u64)
+            .map(|after_sequence| ObservationCursor {
+                epoch,
+                after_sequence,
+            });
+        Self { event, cursor }
+    }
+
+    /// A Codex native event, which has no cursor.
+    #[must_use]
+    pub const fn native_event(event: Value) -> Self {
+        Self {
+            event,
+            cursor: None,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{BoundedObservationRequest, ProviderObservationEventTooLarge};

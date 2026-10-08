@@ -117,6 +117,13 @@ async fn shed_commands_report_an_overload_to_retry() {
     let (endpoints_exit, endpoints) = run_cli(directory.path(), &["endpoints", "list"])
         .await
         .expect("endpoints command output");
+    let native = tokio::process::Command::new(env!("CARGO_BIN_EXE_agent-collaboration"))
+        .args(["native", "--endpoint", "codex-local", "--service-directory"])
+        .arg(directory.path())
+        .stdin(std::process::Stdio::null())
+        .output()
+        .await
+        .expect("native bridge output");
 
     // Assert: the board refusal is its typed overload; the untyped command reports the
     // retryable overload with no effect.
@@ -134,6 +141,13 @@ async fn shed_commands_report_an_overload_to_retry() {
     assert_eq!(
         endpoints["error"]["nextAction"], "retryLater",
         "{endpoints}"
+    );
+    let native_stderr = String::from_utf8_lossy(&native.stderr);
+    assert_eq!(native.status.code(), Some(3), "{native_stderr}");
+    assert!(
+        native_stderr.contains("Error: overloaded")
+            && native_stderr.contains("Next action: retryLater"),
+        "the native bridge names the retryable overload: {native_stderr}"
     );
     held.abort();
     let _ended = held.await;

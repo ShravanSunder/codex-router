@@ -18,6 +18,10 @@ pub enum NativeTransportError {
     ServiceUnavailable,
     #[error("endpoint discovery unavailable")]
     EndpointDiscoveryUnavailable,
+    /// The API shed the endpoint listing at its request limit: nothing was run, and the same
+    /// discovery can be retried later.
+    #[error("{message}")]
+    Overloaded { message: String },
     #[error("endpoint not found")]
     EndpointNotFound,
     #[error("native endpoint unavailable")]
@@ -37,6 +41,23 @@ pub enum NativeTransportError {
 }
 
 impl NativeTransportError {
+    /// A failed endpoint listing; an overload keeps its retryable classification.
+    pub(crate) fn from_discovery(error: crate::ClientError) -> Self {
+        match error {
+            crate::ClientError::Overloaded { message } => Self::Overloaded { message },
+            _ => Self::EndpointDiscoveryUnavailable,
+        }
+    }
+
+    /// The overload's message when the API shed this discovery.
+    #[must_use]
+    pub fn overload_message(&self) -> Option<&str> {
+        match self {
+            Self::Overloaded { message } => Some(message),
+            _ => None,
+        }
+    }
+
     #[must_use]
     pub fn permission_diagnostic(&self) -> Option<&collaboration_protocol::PermissionDiagnostic> {
         match self {
@@ -71,7 +92,7 @@ impl NativeTransportConnection {
         let inventory = endpoints
             .endpoints()
             .await
-            .map_err(|_| NativeTransportError::EndpointDiscoveryUnavailable)?;
+            .map_err(NativeTransportError::from_discovery)?;
         let description = inventory
             .endpoints
             .into_iter()

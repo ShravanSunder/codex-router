@@ -15,7 +15,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::collaboration_access::EndpointDirectoryReader;
 use crate::{
-    ClientError, CollaborationAccess, CollaborationClient, NativeObservation, OperationError,
+    ClientError, CollaborationAccess, CollaborationClient, NativeObservation, ObservationEventSink,
+    OperationError,
 };
 
 /// How long one provider observation call waits for new events while following.
@@ -52,10 +53,15 @@ impl ProviderObservationAccess {
     async fn observe(
         &self,
         request: BoundedObservationRequest,
+        observed: Option<ObservationEventSink>,
     ) -> Result<BoundedObservationResult, ClientError> {
         match self {
-            Self::Api(client) => client.observe_provider_session(request).await,
-            Self::Local(router) => router.observe_provider_session(request).await,
+            Self::Api(client) => {
+                client
+                    .observe_provider_session_streaming(request, observed)
+                    .await
+            }
+            Self::Local(router) => router.observe_provider_session(request, observed).await,
         }
     }
 }
@@ -80,14 +86,17 @@ impl SessionObservation {
         if endpoint_is_provider(&endpoints, &target).await? {
             let provider = provider_access(access, endpoints);
             let first = provider
-                .observe(BoundedObservationRequest {
-                    target: target.clone(),
-                    timeout_seconds: 1,
-                    max_events: SNAPSHOT_MAX_EVENTS,
-                    max_bytes: FOLLOW_MAX_BYTES,
-                    after_sequence: None,
-                    epoch: None,
-                })
+                .observe(
+                    BoundedObservationRequest {
+                        target: target.clone(),
+                        timeout_seconds: 1,
+                        max_events: SNAPSHOT_MAX_EVENTS,
+                        max_bytes: FOLLOW_MAX_BYTES,
+                        after_sequence: None,
+                        epoch: None,
+                    },
+                    None,
+                )
                 .await
                 .map_err(|error| {
                     OperationError::before_dispatch(
@@ -114,10 +123,13 @@ impl SessionObservation {
         }
     }
 
+    /// One bounded observation of a provider or Codex session, handing each event to
+    /// `observed` as it is observed; the result still lists every event.
     pub async fn observe_bounded(
         access: &CollaborationAccess,
         request: BoundedObservationRequest,
         cancel: CancellationToken,
+        observed: Option<ObservationEventSink>,
     ) -> Result<BoundedObservationResult, OperationError> {
         let target = request.target.clone();
         crate::observation_session::validate_observation_bounds(&request).map_err(|error| {
@@ -134,7 +146,7 @@ impl SessionObservation {
             tokio::select! {
                 () = cancel.cancelled() => Err(OperationError::before_dispatch(
                     "observation-collect", Some(target), ClientError::InvalidRequest("observation cancelled"))),
-                result = provider.observe(request) => result.map_err(|error|
+                result = provider.observe(request, observed) => result.map_err(|error|
                     OperationError::before_dispatch("observation-collect", Some(target), error)),
             }
         } else {
@@ -157,7 +169,13 @@ impl SessionObservation {
             let native =
                 NativeObservation::attach_with_endpoints(access, endpoints, target.clone()).await?;
             native
-                .collect_until(deadline, request.max_events, request.max_bytes, cancel)
+                .collect_until(
+                    deadline,
+                    request.max_events,
+                    request.max_bytes,
+                    cancel,
+                    observed,
+                )
                 .await
                 .map_err(|error| {
                     OperationError::after_dispatch("observation-collect", Some(target), None, error)
@@ -206,14 +224,17 @@ impl ProviderSessionFollow {
             }
             let observed = self
                 .access
-                .observe(BoundedObservationRequest {
-                    target: self.target.clone(),
-                    timeout_seconds: FOLLOW_CALL_SECONDS,
-                    max_events: FOLLOW_EVENTS_PER_CALL,
-                    max_bytes: FOLLOW_MAX_BYTES,
-                    after_sequence: self.after_sequence,
-                    epoch: self.epoch,
-                })
+                .observe(
+                    BoundedObservationRequest {
+                        target: self.target.clone(),
+                        timeout_seconds: FOLLOW_CALL_SECONDS,
+                        max_events: FOLLOW_EVENTS_PER_CALL,
+                        max_bytes: FOLLOW_MAX_BYTES,
+                        after_sequence: self.after_sequence,
+                        epoch: self.epoch,
+                    },
+                    None,
+                )
                 .await?;
             self.accept(observed);
         }
@@ -283,16 +304,45 @@ async fn endpoint_is_provider(
 }
 
 impl CollaborationClient {
+    /// One bounded provider observation; its result lists every event.
     pub async fn observe_provider_session(
         &self,
         request: BoundedObservationRequest,
     ) -> Result<BoundedObservationResult, ClientError> {
+        self.observe_provider_session_streaming(request, None).await
+    }
+
+    /// The same observation, handing each event to `observed` as the API streams it, while
+    /// the call is still open.
+    pub async fn observe_provider_session_streaming(
+        &self,
+        request: BoundedObservationRequest,
+        observed: Option<ObservationEventSink>,
+    ) -> Result<BoundedObservationResult, ClientError> {
         let timeout = Duration::from_secs(request.timeout_seconds.saturating_add(5));
         let params = serde_json::to_value(request)
             .map_err(|_| ClientError::InvalidRequest("invalid provider observation request"))?;
+        let streamed = |notification: rmcp::model::ServerNotification| {
+            let (Some(observed), rmcp::model::ServerNotification::CustomNotification(custom)) =
+                (&observed, notification)
+            else {
+                return;
+            };
+            if custom.method != collaboration_protocol::OBSERVATION_EVENT_NOTIFICATION {
+                return;
+            }
+            if let Some(event) = custom.params.and_then(|params| {
+                serde_json::from_value::<collaboration_protocol::ObservationEventNotification>(
+                    params,
+                )
+                .ok()
+            }) {
+                let _streamed = observed.send(event);
+            }
+        };
         let response = self
             .connection
-            .call_with_timeout("events_observe", params, timeout)
+            .call_observing("events_observe", params, timeout, &streamed)
             .await?;
         serde_json::from_value(response)
             .map_err(|_| ClientError::Protocol("invalid provider observation response"))

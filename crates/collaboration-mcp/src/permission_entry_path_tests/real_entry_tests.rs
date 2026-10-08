@@ -437,7 +437,10 @@ async fn stateless_http_create_reports_discovery_failure_without_creation_uncert
                     .is_some_and(|message| message.contains("expected struct SessionRef")),
                 "{response}"
             );
-            assert!(response["result"].get("structuredContent").is_none());
+            let refusal = &response["result"]["structuredContent"];
+            assert_eq!(refusal["kind"], "protocolViolation", "{response}");
+            assert_eq!(refusal["stage"], "validation", "{response}");
+            assert_eq!(refusal["effect"], "none", "{response}");
             continue;
         }
         let failure = &response["result"]["structuredContent"];

@@ -341,6 +341,7 @@ impl crate::LocalCollaboration for ScriptedProviderRouter {
     fn observe_provider_session(
         &self,
         _request: collaboration_protocol::BoundedObservationRequest,
+        _observed: Option<crate::ObservationEventSink>,
     ) -> crate::LocalFuture<'_, collaboration_protocol::BoundedObservationResult> {
         self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Box::pin(async { Err(crate::ClientError::Protocol("unused observation")) })

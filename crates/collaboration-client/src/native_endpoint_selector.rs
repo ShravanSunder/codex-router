@@ -23,10 +23,14 @@ pub fn resolve_public_native(directory: &Path) -> io::Result<PathBuf> {
                 |diagnostic| io::Error::other(NativeTransportError::PermissionDenied(diagnostic)),
             )
         })?;
-        let inventory = client
-            .list_endpoints()
-            .await
-            .map_err(|_| io::Error::other("endpoint discovery failed"))?;
+        let inventory = client.list_endpoints().await.map_err(|error| {
+            match NativeTransportError::from_discovery(error) {
+                overloaded @ NativeTransportError::Overloaded { .. } => {
+                    io::Error::other(overloaded)
+                }
+                _ => io::Error::other("endpoint discovery failed"),
+            }
+        })?;
         let endpoint = inventory
             .endpoints
             .into_iter()

@@ -13,6 +13,10 @@ use tokio_util::sync::CancellationToken;
 const MAX_BOUNDED_EVENTS: usize = 4096;
 const MAX_BOUNDED_BYTES: usize = 1_048_576;
 
+/// Where a bounded observation hands each event as it observes it, before its result.
+pub type ObservationEventSink =
+    tokio::sync::mpsc::UnboundedSender<collaboration_protocol::ObservationEventNotification>;
+
 pub struct NativeObservation {
     connection: NativeProtocolConnection,
     target: SessionRef,
@@ -65,7 +69,13 @@ impl NativeObservation {
             observation = Self::attach_with_context(access, request.target) => observation?,
         };
         observation
-            .collect_until(deadline, request.max_events, request.max_bytes, cancel)
+            .collect_until(
+                deadline,
+                request.max_events,
+                request.max_bytes,
+                cancel,
+                None,
+            )
             .await
             .map_err(|source| {
                 crate::OperationError::after_dispatch(
@@ -298,16 +308,19 @@ impl NativeObservation {
         let deadline = tokio::time::Instant::now()
             .checked_add(timeout)
             .ok_or(ClientError::InvalidRequest("invalid observation deadline"))?;
-        self.collect_until(deadline, max_events, max_bytes, cancel)
+        self.collect_until(deadline, max_events, max_bytes, cancel, None)
             .await
     }
 
+    /// Collects until a bound, the deadline or cancellation, handing each event to
+    /// `observed` as it is collected.
     pub(crate) async fn collect_until(
         mut self,
         deadline: tokio::time::Instant,
         max_events: usize,
         max_bytes: usize,
         cancel: CancellationToken,
+        observed: Option<ObservationEventSink>,
     ) -> Result<BoundedObservationResult, ClientError> {
         let target = self.target.clone();
         let generation = self.generation.clone();
@@ -337,6 +350,14 @@ impl NativeObservation {
                 break ObservationEndReason::ResultLimitReached;
             }
             event_bytes += encoded_bytes;
+            if let Some(observed) = &observed {
+                // A caller that stopped listening still gets every event in the result.
+                let _streamed = observed.send(
+                    collaboration_protocol::ObservationEventNotification::native_event(
+                        message.clone(),
+                    ),
+                );
+            }
             events.push(message);
             if events.len() == max_events || event_bytes == max_bytes {
                 break ObservationEndReason::ResultLimitReached;

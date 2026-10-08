@@ -112,11 +112,12 @@ impl LocalCollaboration for ApplicationCollaboration {
     fn observe_provider_session(
         &self,
         request: BoundedObservationRequest,
+        observed: Option<collaboration_client::ObservationEventSink>,
     ) -> LocalFuture<'_, BoundedObservationResult> {
         Box::pin(async move {
             self.application
                 .observation()
-                .session_observe(request)
+                .session_observe(request, observed)
                 .await
                 .map_err(|failure| rejected(&failure))
         })

@@ -86,7 +86,8 @@ pub use question_contract::{
     QuestionListParams, QuestionListResult, QuestionRecord, QuestionResponse, QuestionState,
 };
 pub use session_observation_contract::{
-    BoundedObservationRequest, BoundedObservationResult, ObservationEndReason,
+    BoundedObservationRequest, BoundedObservationResult, OBSERVATION_EVENT_NOTIFICATION,
+    ObservationCursor, ObservationEndReason, ObservationEventNotification,
     ProviderObservationEventTooLarge, ProviderObservationEventTooLargeKind,
 };
 mod backend_generation;

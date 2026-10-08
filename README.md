@@ -104,6 +104,14 @@ runs. Clients read these values from the manifest; there is no connection
 handshake, and older manifest versions are refused, so install the CLI and Host
 together.
 
+Waits and observations are single bounded calls that return the cursor to resume
+from. `events_observe` also streams each event while its call is open, as a
+`notifications/codexRouter/observationEvent` notification carrying `{event,
+cursor}` (the call is then answered as SSE); its result still lists every event,
+so a client that ignores the notification loses nothing. `agent-collaboration
+events observe --stream` prints each streamed event as an `observationEvent`
+line before the result.
+
 Hosted `agent-sessions` new/resume launches
 resolve the advertised public native selector. Backend replacement closes native
 connections; the native TUI owns bounded reconnection without a Sessions supervisor.

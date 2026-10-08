@@ -24,7 +24,8 @@ pub(crate) fn report_actionable_client_error(
     Some(report_diagnostic(&diagnostic, rendering, machine_output))
 }
 
-fn report_overload(
+/// Reports a request the API shed at its request limit: nothing ran, retry later. Exit 3.
+pub(crate) fn report_overload(
     message: &str,
     rendering: PermissionDiagnosticRendering<'_>,
     machine_output: bool,
@@ -47,10 +48,7 @@ fn report_overload(
         };
         let _written = writeln!(io::stdout().lock(), "{record}");
     } else {
-        let _written = writeln!(
-            io::stderr().lock(),
-            "Error: overloaded\nStage: admission\n{message}\nNext action: retryLater"
-        );
+        let _written = writeln!(io::stderr().lock(), "{}", human_overload_text(message));
     }
     3
 }
@@ -76,6 +74,11 @@ pub(crate) fn report_diagnostic(
         let _written = writeln!(io::stderr().lock(), "{}", human_diagnostic_text(diagnostic));
     }
     3
+}
+
+/// The human form of a shed request.
+pub(crate) fn human_overload_text(message: &str) -> String {
+    format!("Error: overloaded\nStage: admission\n{message}\nNext action: retryLater")
 }
 
 pub(crate) fn human_diagnostic_text(

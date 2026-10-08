@@ -23,21 +23,50 @@ fn private_directory() -> tempfile::TempDir {
     directory
 }
 
-async fn board_application(directory: &std::path::Path) -> CollaborationApplication {
+async fn board_store(directory: &std::path::Path) -> Arc<Mutex<BoardStore>> {
     let board = BoardStore::open(&directory.join("board.sqlite"))
         .await
         .expect("board store");
-    CollaborationApplication::new(test_identity().with_board_store(Arc::new(Mutex::new(board))))
+    Arc::new(Mutex::new(board))
 }
 
-async fn wake_application(directory: &std::path::Path) -> CollaborationApplication {
+async fn board_application(directory: &std::path::Path) -> CollaborationApplication {
+    CollaborationApplication::new(test_identity().with_board_store(board_store(directory).await))
+}
+
+async fn automation_store(
+    directory: &std::path::Path,
+) -> Arc<Mutex<automation_storage::AutomationStore>> {
     let automation =
         automation_storage::AutomationStore::open(&directory.join("automation.sqlite"))
             .await
             .expect("automation store");
+    Arc::new(Mutex::new(automation))
+}
+
+async fn wake_application(directory: &std::path::Path) -> CollaborationApplication {
     CollaborationApplication::new(
-        test_identity().with_automation_store(Arc::new(Mutex::new(automation))),
+        test_identity().with_automation_store(automation_store(directory).await),
     )
+}
+
+fn project_create_arguments(name: &str) -> Value {
+    serde_json::to_value(ProjectCreateRequest {
+        project_id: ProjectId::generate(),
+        name: ResourceName::try_from(name.to_owned()).expect("name"),
+        description: Description::try_from(String::new()).expect("description"),
+        actor: owner(),
+        acting_for: None,
+    })
+    .expect("project request")
+}
+
+fn project_list_arguments() -> Value {
+    serde_json::to_value(ProjectListRequest {
+        repository: None,
+        page: PageRequest::default(),
+    })
+    .expect("list request")
 }
 
 fn owner() -> Identity {
@@ -75,26 +104,11 @@ async fn the_same_call_returns_the_same_structured_result_on_tcp_and_unix() {
     let config = api_config(board_application(directory.path()).await, directory.path());
     let tcp = ServedApi::tcp(&config).await;
     let unix = ServedApi::unix(&config, &directory.path().join("api.sock")).await;
-    let project_id = ProjectId::generate();
-    let created = tcp
-        .call_tool(
-            "board_project_create",
-            serde_json::to_value(ProjectCreateRequest {
-                project_id: project_id.clone(),
-                name: ResourceName::try_from("API listeners".to_owned()).expect("name"),
-                description: Description::try_from(String::new()).expect("description"),
-                actor: owner(),
-                acting_for: None,
-            })
-            .expect("project request"),
-        )
-        .await;
+    let create = project_create_arguments("API listeners");
+    let project_id = create["projectId"].clone();
+    let created = tcp.call_tool("board_project_create", create).await;
     assert_eq!(created.is_error, Some(false), "{created:?}");
-    let list = serde_json::to_value(ProjectListRequest {
-        repository: None,
-        page: PageRequest::default(),
-    })
-    .expect("list request");
+    let list = project_list_arguments();
 
     // Act
     let over_tcp = tcp.call_tool("board_project_list", list.clone()).await;
@@ -116,7 +130,7 @@ async fn the_same_call_returns_the_same_structured_result_on_tcp_and_unix() {
     assert_eq!(structured(&over_tcp), structured(&over_unix));
     assert_eq!(
         structured(&over_tcp)["page"]["records"][0]["projectId"],
-        json!(project_id)
+        project_id
     );
     assert_eq!(tcp_tools, unix_tools, "both listeners offer the same tools");
     tcp.stop().await;
@@ -197,6 +211,126 @@ async fn a_client_that_disconnects_cancels_its_call_on_both_listeners() {
 
         // Assert: the handler was cancelled and released the Router, long before its bound.
         api.await_active_calls(0, Duration::from_secs(5)).await;
+    }
+    tcp.stop().await;
+    unix.stop().await;
+}
+
+#[tokio::test]
+async fn a_client_that_disconnects_from_a_mutation_waiting_on_the_store_leaves_no_mutation() {
+    // Arrange: the board store is held, so an admitted project create waits on it. The board
+    // tools do not watch their cancellation themselves.
+    let directory = private_directory();
+    let board = board_store(directory.path()).await;
+    let config = api_config(
+        CollaborationApplication::new(test_identity().with_board_store(Arc::clone(&board))),
+        directory.path(),
+    );
+    let tcp = ServedApi::tcp(&config).await;
+    let unix = ServedApi::unix(&config, &directory.path().join("api.sock")).await;
+    let held = board.lock().await;
+
+    for (api, name) in [(&tcp, "Abandoned over TCP"), (&unix, "Abandoned over Unix")] {
+        // Act: the create is admitted and waits on the store, then its client goes away.
+        api.abandon_tool_call("board_project_create", project_create_arguments(name))
+            .await;
+
+        // Assert: the call ended while the store was still held.
+        api.await_active_calls(0, Duration::from_secs(5)).await;
+    }
+    drop(held);
+
+    // Assert: releasing the store runs neither abandoned create.
+    let listed = tcp
+        .call_tool("board_project_list", project_list_arguments())
+        .await;
+    assert_eq!(structured(&listed)["page"]["records"], json!([]));
+    tcp.stop().await;
+    unix.stop().await;
+}
+
+#[tokio::test]
+async fn a_wake_wait_ends_at_its_bound_while_the_store_is_held() {
+    // Arrange: a wake-up, then its store held by someone else past the waits' one-second bound.
+    let directory = private_directory();
+    let automation = automation_store(directory.path()).await;
+    let config = api_config(
+        CollaborationApplication::new(
+            test_identity().with_automation_store(Arc::clone(&automation)),
+        ),
+        directory.path(),
+    );
+    let api = ServedApi::unix(&config, &directory.path().join("api.sock")).await;
+    let wake = api.call_tool("wake_send", wake_send_arguments()).await;
+    let wakeup_id = structured(&wake)["definition"]["wakeupId"].clone();
+    let cursor = structured(&wake)["latestEventCursor"].clone();
+    let held = automation.lock().await;
+
+    // Act: one wait starts from the current state and one resumes from the cursor; both need
+    // the held store before they can observe anything.
+    let ended = tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::join!(
+            api.call_tool(
+                "wake_wait_until_first_fire",
+                json!({"wakeupId": wakeup_id, "timeoutSeconds": 1}),
+            ),
+            api.call_tool(
+                "wake_wait_until_first_fire",
+                json!({"wakeupId": wakeup_id, "after": cursor, "timeoutSeconds": 1}),
+            ),
+        )
+    })
+    .await;
+    drop(held);
+
+    // Assert: both ended at their bound while the store was still held. With no cursor yet
+    // the start is unavailable; the resumed wait times out at the cursor it was given.
+    let (starting, resuming) = ended.expect("the waits ended at their bound");
+    assert_eq!(starting.is_error, Some(true), "{starting:?}");
+    assert_eq!(structured(&starting)["kind"], "waitUnavailable");
+    assert_eq!(structured(&resuming)["outcome"]["kind"], "timedOut");
+    assert_eq!(structured(&resuming)["cursor"], cursor);
+    api.stop().await;
+}
+
+#[tokio::test]
+async fn arguments_that_do_not_decode_get_a_structured_validation_failure_on_both_listeners() {
+    // Arrange: tools whose arguments rmcp decodes before the handler runs.
+    let directory = private_directory();
+    let config = api_config(wake_application(directory.path()).await, directory.path());
+    let tcp = ServedApi::tcp(&config).await;
+    let unix = ServedApi::unix(&config, &directory.path().join("api.sock")).await;
+    let target = json!({
+        "endpoint": {"serviceId": TEST_SERVICE_ID, "endpointId": "codex-local"},
+        "sessionId": "rename-target"
+    });
+    let malformed = [
+        ("session_rename", json!({"target": target, "name": null})),
+        ("session_rename", json!({"target": target})),
+        ("approval_decide", json!({"requestId": 7})),
+        ("events_observe", json!({})),
+    ];
+
+    for api in [&tcp, &unix] {
+        for (tool, arguments) in &malformed {
+            // Act
+            let answer = api.call_tool(tool, arguments.clone()).await;
+
+            // Assert: a typed refusal before dispatch, not text a client cannot read.
+            assert_eq!(answer.is_error, Some(true), "{tool}: {answer:?}");
+            let failure = answer
+                .structured_content
+                .unwrap_or_else(|| panic!("{tool} answered without structured content"));
+            assert_eq!(failure["kind"], "protocolViolation", "{tool}: {failure}");
+            assert_eq!(failure["stage"], "validation", "{tool}: {failure}");
+            assert_eq!(failure["effect"], "none", "{tool}: {failure}");
+            assert!(
+                failure["message"]
+                    .as_str()
+                    .is_some_and(|text| !text.is_empty()),
+                "{tool}: {failure}"
+            );
+        }
     }
     tcp.stop().await;
     unix.stop().await;

@@ -164,3 +164,28 @@ pub(super) fn validation_failure(message: &str) -> CallToolResult {
         "data": null
     }))
 }
+
+/// rmcp answers arguments that do not decode into a tool's parameters with a text-only error,
+/// before the handler runs; it is the one tool error the handlers do not build themselves.
+/// It becomes the structured validation failure every other refusal before dispatch already
+/// is, so a client always reads a typed result. Nothing was dispatched, so nothing took effect.
+pub(super) fn structured_argument_refusal(response: CallToolResponse) -> CallToolResponse {
+    match response {
+        CallToolResponse::Complete(result)
+            if result.is_error == Some(true) && result.structured_content.is_none() =>
+        {
+            let message = result
+                .content
+                .iter()
+                .filter_map(|content| content.as_text().map(|text| text.text.as_str()))
+                .collect::<Vec<_>>()
+                .join("\n");
+            CallToolResponse::Complete(validation_failure(if message.is_empty() {
+                "The tool arguments do not match the tool's input schema"
+            } else {
+                &message
+            }))
+        }
+        response => response,
+    }
+}

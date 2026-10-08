@@ -16,25 +16,29 @@ use tokio::sync::Mutex;
 #[path = "support/served_api.rs"]
 mod served_api;
 
-#[tokio::test]
-async fn provider_observers_read_snapshot_and_live_order() {
-    let root = tempfile::tempdir().expect("service root");
+/// A Router whose provider endpoint's Session hub has one retained event.
+struct ProviderFixture {
+    _root: tempfile::TempDir,
+    target: SessionRef,
+    board_target: message_board::SessionRef,
+    hub: Arc<ProviderSessionEventHub>,
+    identity: ServiceIdentity,
+}
+
+async fn provider_fixture() -> Result<ProviderFixture, Box<dyn std::error::Error>> {
+    let root = tempfile::tempdir()?;
     let service_id = "00000000-0000-4000-8000-000000000001";
     let epoch = "00000000-0000-4000-8000-000000000002";
     let target: SessionRef = serde_json::from_value(json!({
         "endpoint":{"serviceId":service_id,"endpointId":"claude-local"},
         "sessionId":"provider-session"
-    }))
-    .expect("provider target");
+    }))?;
     let owner: SessionRef = serde_json::from_value(json!({
         "endpoint":{"serviceId":service_id,"endpointId":"codex-local"},
         "sessionId":"owner"
-    }))
-    .expect("owner");
+    }))?;
     let store = Arc::new(Mutex::new(
-        ProviderOperationStore::open(&root.path().join("operations.sqlite"))
-            .await
-            .expect("store"),
+        ProviderOperationStore::open(&root.path().join("operations.sqlite")).await?,
     ));
     store
         .lock()
@@ -43,8 +47,7 @@ async fn provider_observers_read_snapshot_and_live_order() {
             target: target.clone(),
             working_directory: ProviderWorkingDirectory::try_from(
                 root.path().display().to_string(),
-            )
-            .expect("cwd"),
+            )?,
             requested_policy: ProviderRequestedPolicy {
                 access: RouterAccess::WriteRestricted,
             },
@@ -52,15 +55,12 @@ async fn provider_observers_read_snapshot_and_live_order() {
             approver: owner.into(),
             updated_at_ms: 1,
         })
-        .await
-        .expect("session row");
+        .await?;
     let hub = Arc::new(ProviderSessionEventHub::with_capacity(store, 2));
     let board_target: message_board::SessionRef =
-        serde_json::from_value(serde_json::to_value(&target).expect("target JSON"))
-            .expect("board target");
+        serde_json::from_value(serde_json::to_value(&target)?)?;
     hub.publish(board_target.clone(), item("item-1", "first"))
-        .await
-        .expect("first item");
+        .await?;
     let description: EndpointDescription = serde_json::from_value(json!({
         "endpoint":target.endpoint,"label":"Claude fixture",
         "availability":{"state":"available","observedAt":"2026-09-26T00:00:00Z"},
@@ -68,15 +68,90 @@ async fn provider_observers_read_snapshot_and_live_order() {
             "bindingId":"fixture-binding","bindingGeneration":7,
             "runtime":{"provider":"claudeCode","runtimeName":"fixture"},
             "capabilities":[{"name":"create","status":"supported","evidence":"advertised"}]}]
-    }))
-    .expect("endpoint");
-    let identity = ServiceIdentity::new(service_id, epoch)
-        .expect("identity")
-        .with_provider_session_hub(hub.clone());
-    identity
-        .endpoint_directory()
-        .publish(description)
-        .expect("endpoint publication");
+    }))?;
+    let identity = ServiceIdentity::new(service_id, epoch)?.with_provider_session_hub(hub.clone());
+    identity.endpoint_directory().publish(description)?;
+    Ok(ProviderFixture {
+        _root: root,
+        target,
+        board_target,
+        hub,
+        identity,
+    })
+}
+
+#[tokio::test]
+async fn the_client_hands_on_each_streamed_event_before_the_call_returns() {
+    // Arrange: one retained event; the call is bounded at two events and thirty seconds.
+    let fixture = provider_fixture().await.expect("provider fixture");
+    let served = served_api::ServedApi::start(fixture.identity)
+        .await
+        .expect("serve the API");
+    let client = served
+        .client("streaming-observer")
+        .await
+        .expect("observing client");
+    let (observed, mut streamed) = tokio::sync::mpsc::unbounded_channel();
+    let request = BoundedObservationRequest {
+        target: fixture.target.clone(),
+        timeout_seconds: 30,
+        max_events: 2,
+        max_bytes: 262_144,
+        after_sequence: None,
+        epoch: None,
+    };
+
+    // Act
+    let call = tokio::spawn(async move {
+        client
+            .observe_provider_session_streaming(request, Some(observed))
+            .await
+    });
+    let retained = tokio::time::timeout(std::time::Duration::from_secs(5), streamed.recv())
+        .await
+        .expect("the retained event streamed while the call was open")
+        .expect("streamed event");
+    let still_open = !call.is_finished();
+    fixture
+        .hub
+        .publish(fixture.board_target.clone(), item("item-2", "second"))
+        .await
+        .expect("live item");
+    let result = call
+        .await
+        .expect("call joins")
+        .expect("bounded observation");
+    let live = streamed.recv().await.expect("live event streamed");
+
+    // Assert
+    assert!(
+        still_open,
+        "the call ended before its first event was handed on"
+    );
+    assert_eq!(retained.event["sequence"], 1);
+    let epoch = result.epoch.expect("provider epoch");
+    assert_eq!(
+        retained.cursor,
+        Some(collaboration_protocol::ObservationCursor {
+            epoch,
+            after_sequence: 1
+        })
+    );
+    assert_eq!(live.event["sequence"], 2);
+    assert_eq!(result.events, vec![retained.event, live.event]);
+    assert_eq!(result.end_reason, ObservationEndReason::ResultLimitReached);
+    served.stop().await.expect("API stops");
+}
+
+#[tokio::test]
+async fn provider_observers_read_snapshot_and_live_order() {
+    let ProviderFixture {
+        _root,
+        target,
+        board_target,
+        hub,
+        identity,
+    } = provider_fixture().await.expect("provider fixture");
 
     let served = served_api::ServedApi::start(identity)
         .await

@@ -9,7 +9,7 @@ use futures_util::StreamExt;
 use rmcp::{
     model::{
         CallToolRequest, CallToolRequestParams, ClientJsonRpcMessage, ClientRequest,
-        NumberOrString, ServerJsonRpcMessage, ServerResult,
+        NumberOrString, ServerJsonRpcMessage, ServerNotification, ServerResult,
     },
     transport::{
         UnixSocketHttpClient,
@@ -82,12 +82,35 @@ impl ApiConnection {
         arguments: Value,
         timeout: Duration,
     ) -> Result<ToolAnswer, ClientError> {
-        tokio::time::timeout(timeout, self.exchange(tool, arguments))
+        tokio::time::timeout(timeout, self.exchange(tool, arguments, None))
             .await
             .map_err(|_| ClientError::Timeout)?
     }
 
-    async fn exchange(&self, tool: &str, arguments: Value) -> Result<ToolAnswer, ClientError> {
+    /// Calls a streaming tool: each notification the server sends before the answer goes to
+    /// `notified` as it arrives, then the answer is read as `call_with_timeout` reads it.
+    pub(crate) async fn call_observing(
+        &self,
+        tool: &str,
+        arguments: Value,
+        timeout: Duration,
+        notified: &(dyn Fn(ServerNotification) + Send + Sync),
+    ) -> Result<Value, ClientError> {
+        let answer = tokio::time::timeout(timeout, self.exchange(tool, arguments, Some(notified)))
+            .await
+            .map_err(|_| ClientError::Timeout)??;
+        match answer {
+            ToolAnswer::Success(value) => Ok(value),
+            ToolAnswer::Failure(failure) => Err(rejection_from_tool_failure(failure)),
+        }
+    }
+
+    async fn exchange(
+        &self,
+        tool: &str,
+        arguments: Value,
+        notified: Option<&(dyn Fn(ServerNotification) + Send + Sync)>,
+    ) -> Result<ToolAnswer, ClientError> {
         let Value::Object(arguments) = arguments else {
             return Err(ClientError::InvalidRequest(
                 "tool arguments must be an object",
@@ -122,11 +145,16 @@ impl ApiConnection {
                 };
                 let message: ServerJsonRpcMessage = serde_json::from_str(&data)
                     .map_err(|_| ClientError::Protocol("invalid API stream message"))?;
-                if matches!(
-                    message,
-                    ServerJsonRpcMessage::Response(_) | ServerJsonRpcMessage::Error(_)
-                ) {
-                    break message;
+                match message {
+                    ServerJsonRpcMessage::Response(_) | ServerJsonRpcMessage::Error(_) => {
+                        break message;
+                    }
+                    ServerJsonRpcMessage::Notification(notification) => {
+                        if let Some(notified) = notified {
+                            notified(notification.notification);
+                        }
+                    }
+                    ServerJsonRpcMessage::Request(_) => {}
                 }
             },
             _ => {
