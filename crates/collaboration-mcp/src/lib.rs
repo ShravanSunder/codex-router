@@ -17,6 +17,8 @@ pub use native_schema_definitions::NativeSchemaDefinitions;
 #[cfg(test)]
 mod api_test_harness;
 #[cfg(test)]
+mod carrier_response_loss_http_tests;
+#[cfg(test)]
 mod codex_conversation_cancel_http_tests;
 #[cfg(test)]
 mod collaboration_api_router_tests;
