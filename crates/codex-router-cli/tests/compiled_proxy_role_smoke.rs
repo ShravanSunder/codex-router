@@ -12,10 +12,14 @@ async fn compiled_fresh_serve_uses_role_activation_and_actual_hyper()
             .await?;
     let reserved_port = port_reservation.tcp_address()?.port().to_string();
     drop(port_reservation);
+    #[cfg(target_os = "macos")]
     let mut command =
         tokio::process::Command::new(repository.join("scripts/cargo_debug_signing_runner.sh"));
+    #[cfg(target_os = "macos")]
+    command.arg(env!("CARGO_BIN_EXE_codex-router"));
+    #[cfg(not(target_os = "macos"))]
+    let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_codex-router"));
     command
-        .arg(env!("CARGO_BIN_EXE_codex-router"))
         .args([
             "serve",
             "--listen-host",
