@@ -54,6 +54,8 @@ pub struct ImageRegistry {
     entries: BTreeMap<[u8; 32], CachedImage>,
     pending_warmups: Vec<PendingWarmup>,
     #[cfg(test)]
+    last_warmup_observation: Option<crate::image_warmup::WarmupTestObservation>,
+    #[cfg(test)]
     warmup_reap_observations: Vec<(
         codex_router_keeper_protocol::ChildPid,
         std::process::ExitStatus,
@@ -93,6 +95,8 @@ impl ImageRegistry {
             entries: BTreeMap::new(),
             pending_warmups: Vec::new(),
             #[cfg(test)]
+            last_warmup_observation: None,
+            #[cfg(test)]
             warmup_reap_observations: Vec::new(),
         })
     }
@@ -128,6 +132,10 @@ impl ImageRegistry {
         budget: Duration,
         checkpoint: PostSpawnCheckpoint,
     ) -> Result<ImageLease, ImageError> {
+        #[cfg(test)]
+        {
+            self.last_warmup_observation = None;
+        }
         let source = capture(source, true).await?;
         if let Some(record) = self
             .entries
@@ -226,7 +234,15 @@ impl ImageRegistry {
                 {
                     return Err(ImageError::ImageUnavailable);
                 }
-                match warmup_with_checkpoint(&candidate, expected, budget, checkpoint.clone()).await
+                match warmup_with_checkpoint(
+                    &candidate,
+                    expected,
+                    budget,
+                    checkpoint.clone(),
+                    #[cfg(test)]
+                    &mut self.last_warmup_observation,
+                )
+                .await
                 {
                     WarmupOutcome::Verified => {}
                     WarmupOutcome::Refused {
@@ -249,6 +265,12 @@ impl ImageRegistry {
                     || after_warmup.metadata.dev() != actual.metadata.dev()
                     || after_warmup.metadata.ino() != actual.metadata.ino()
                 {
+                    #[cfg(test)]
+                    if let Some(witness) = self.last_warmup_observation.as_mut() {
+                        witness.stage = crate::image_warmup::WarmupObservedStage::Rejected(
+                            crate::image_warmup::WarmupRejectionKind::ImageUnavailable,
+                        );
+                    }
                     return Err(ImageError::ImageUnavailable);
                 }
                 // Publish without replacing a pre-existing or raced foreign node.
@@ -272,7 +294,15 @@ impl ImageRegistry {
                 // A prior copy may have a different inode. It is captured anew,
                 // but never acquires a candidate's unlink-on-failure authority.
                 let guard = OwnedImageNode::observed_existing(&actual.metadata);
-                match warmup_with_checkpoint(&retained, expected, budget, checkpoint.clone()).await
+                match warmup_with_checkpoint(
+                    &retained,
+                    expected,
+                    budget,
+                    checkpoint.clone(),
+                    #[cfg(test)]
+                    &mut self.last_warmup_observation,
+                )
+                .await
                 {
                     WarmupOutcome::Verified => {}
                     WarmupOutcome::Refused {

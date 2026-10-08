@@ -11,6 +11,12 @@ use tokio::{
     time::{Instant, timeout_at},
 };
 use tokio_util::sync::CancellationToken;
+#[cfg(test)]
+#[path = "image_warmup_test_witness.rs"]
+mod test_witness;
+#[cfg(test)]
+pub(crate) use test_witness::{WarmupObservedStage, WarmupRejectionKind, WarmupTestObservation};
+
 pub(crate) enum WarmupOutcome {
     Verified,
     Refused {
@@ -67,11 +73,13 @@ impl WarmupCleanup {
 }
 #[cfg(test)]
 pub(crate) async fn warmup(path: &Path, expected: &BuildInfo, budget: Duration) -> WarmupOutcome {
+    let mut observation = None;
     warmup_with_checkpoint(
         path,
         expected,
         budget,
         crate::owned_process_group::PostSpawnCheckpoint::Immediate,
+        &mut observation,
     )
     .await
 }
@@ -80,7 +88,12 @@ pub(crate) async fn warmup_with_checkpoint(
     expected: &BuildInfo,
     budget: Duration,
     checkpoint: crate::owned_process_group::PostSpawnCheckpoint,
+    #[cfg(test)] observation: &mut Option<WarmupTestObservation>,
 ) -> WarmupOutcome {
+    #[cfg(test)]
+    {
+        *observation = None;
+    }
     if budget.is_zero() || budget > PREPARE_DEADLINE {
         return WarmupOutcome::Refused {
             reason: ImageError::InvalidBudget,
@@ -104,7 +117,17 @@ pub(crate) async fn warmup_with_checkpoint(
     };
     let mut group = match outcome {
         GroupLaunchOutcome::Launched(group) if expired => {
-            return reject_and_cleanup(group, ImageError::WarmupTimedOut).await;
+            #[cfg(test)]
+            {
+                *observation = Some(WarmupTestObservation::started(path, &group));
+            }
+            return reject_and_cleanup(
+                group,
+                ImageError::WarmupTimedOut,
+                #[cfg(test)]
+                observation,
+            )
+            .await;
         }
         GroupLaunchOutcome::Launched(group) => group,
         GroupLaunchOutcome::Refused { reason } => {
@@ -120,6 +143,10 @@ pub(crate) async fn warmup_with_checkpoint(
             };
         }
     };
+    #[cfg(test)]
+    {
+        *observation = Some(WarmupTestObservation::started(path, &group));
+    }
     match read_and_wait(&mut group, expected, deadline).await {
         Ok(())
             if group
@@ -133,15 +160,49 @@ pub(crate) async fn warmup_with_checkpoint(
                 group.leader_exit_status(),
                 group.progress()
             );
+            #[cfg(test)]
+            if let Some(witness) = observation.as_mut() {
+                witness.stage = WarmupObservedStage::Verified;
+                witness.note_exit(&group);
+            }
             WarmupOutcome::Verified
         }
-        Ok(()) => reject_and_cleanup(group, ImageError::WarmupExit).await,
-        Err(reason) => reject_and_cleanup(group, reason).await,
+        Ok(()) => {
+            reject_and_cleanup(
+                group,
+                ImageError::WarmupExit,
+                #[cfg(test)]
+                observation,
+            )
+            .await
+        }
+        Err(reason) => {
+            reject_and_cleanup(
+                group,
+                reason,
+                #[cfg(test)]
+                observation,
+            )
+            .await
+        }
     }
 }
 
-async fn reject_and_cleanup(mut group: OwnedProcessGroup, reason: ImageError) -> WarmupOutcome {
-    match cleanup(&mut group).await {
+async fn reject_and_cleanup(
+    mut group: OwnedProcessGroup,
+    reason: ImageError,
+    #[cfg(test)] observation: &mut Option<WarmupTestObservation>,
+) -> WarmupOutcome {
+    #[cfg(test)]
+    if let Some(witness) = observation.as_mut() {
+        witness.stage = WarmupObservedStage::Rejected(WarmupRejectionKind::from_reason(&reason));
+    }
+    let cleanup_result = cleanup(&mut group).await;
+    #[cfg(test)]
+    if let Some(witness) = observation.as_mut() {
+        witness.note_exit(&group);
+    }
+    match cleanup_result {
         Ok(()) => WarmupOutcome::Refused {
             reason,
             finished_pid: Some(group.leader_pid()),

@@ -209,38 +209,7 @@ async fn every_copied_warmup_refusal_reaps_actual_process_and_exposes_no_image()
         "timeout",
         "trailing",
     ] {
-        let temp = root()?;
-        let root = private_root(&temp)?;
-        let (source, proof) = fixture(&root, "bad", mode, "BAD", 1)?;
-        let mut registry = ImageRegistry::new(&root).await?;
-        let result = registry
-            .pin_with_link(&source, &expected_build(1)?, exdev, Duration::from_secs(2))
-            .await;
-        let correct = match mode {
-            "mismatch" | "version" => matches!(result, Err(ImageError::BuildInfoMismatch)),
-            "tamper" => matches!(result, Err(ImageError::ImageUnavailable)),
-            "invalid" | "trailing" => matches!(result, Err(ImageError::BuildInfoJson(_))),
-            "nonzero" => matches!(result, Err(ImageError::WarmupExit)),
-            "oversized" => matches!(result, Err(ImageError::WarmupTooLarge)),
-            "timeout" => matches!(result, Err(ImageError::WarmupTimedOut)),
-            _ => false,
-        };
-        if !correct {
-            return Err(format!("wrong warmup refusal for {mode}: {result:?}").into());
-        }
-        let pid =
-            codex_router_keeper_protocol::ChildPid::new(std::fs::read_to_string(&proof)?.parse()?)?;
-        if rustix::process::test_kill_process(pid.as_pid()) != Err(rustix::io::Errno::SRCH)
-            || rustix::process::test_kill_process_group(pid.as_pid())
-                != Err(rustix::io::Errno::SRCH)
-        {
-            return Err(format!("warmup {mode} process/group leaked").into());
-        }
-        for directory in std::fs::read_dir(&registry.images_root)? {
-            if std::fs::read_dir(directory?.path())?.next().is_some() {
-                return Err("failed copy candidate exposed".into());
-            }
-        }
+        copied_refusal_tests::prove_copied_refusal(mode).await?;
     }
     Ok(())
 }
@@ -474,3 +443,6 @@ async fn bounded_vm_teardown_warmup_requires_normal_exit_and_actual_reap_fence()
 
 #[path = "retained_image_launch_failure_tests.rs"]
 mod launch_failure_tests;
+
+#[path = "copied_image_refusal_tests.rs"]
+mod copied_refusal_tests;
