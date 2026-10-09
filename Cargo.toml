@@ -48,7 +48,6 @@ chrono-tz = "0.10.4"
 fs2 = "=0.4.3"
 keyring-core = "1"
 uuid = { version = "1.26.0", features = ["v5", "v7"] }
-url = "2.5.8"
 codex-router-core = { path = "crates/codex-router-core", version = "0.1.6" }
 codex-native-integration = { path = "crates/codex-native-integration", version = "0.1.6" }
 codex-router-host = { path = "crates/codex-router-host", version = "0.1.6" }
