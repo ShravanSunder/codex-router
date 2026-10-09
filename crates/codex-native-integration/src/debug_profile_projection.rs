@@ -102,8 +102,10 @@ impl DebugCodexProfile {
                 return Err(DebugProfileError::UnsupportedSettings);
             }
         }
+        // The name selects upstream native compaction; it is not just display text.
         let endpoint = format!("http://127.0.0.1:{port}/v1");
-        if provider.get("base_url").and_then(toml::Value::as_str) != Some(endpoint.as_str())
+        if provider.get("name").and_then(toml::Value::as_str) != Some("OpenAI")
+            || provider.get("base_url").and_then(toml::Value::as_str) != Some(endpoint.as_str())
             || provider.get("wire_api").and_then(toml::Value::as_str) != Some("responses")
             || provider
                 .get("requires_openai_auth")
@@ -164,9 +166,15 @@ fn validate_network_experiment_configuration(table: &toml::Table) -> Result<(), 
             let features = value
                 .as_table()
                 .filter(|features| {
-                    exact_keys(features, &["image_generation"])
-                        || exact_keys(features, &["network_proxy"])
-                        || exact_keys(features, &["image_generation", "network_proxy"])
+                    features.keys().all(|key| {
+                        matches!(
+                            key.as_str(),
+                            "enable_request_compression" | "image_generation" | "network_proxy"
+                        )
+                    }) && features
+                        .get("enable_request_compression")
+                        .and_then(toml::Value::as_bool)
+                        == Some(false)
                 })
                 .ok_or(DebugProfileError::UnsupportedSettings)?;
             if features
@@ -177,7 +185,7 @@ fn validate_network_experiment_configuration(table: &toml::Table) -> Result<(), 
             }
             Some(features)
         }
-        None => None,
+        None => return Err(DebugProfileError::UnsupportedSettings),
     };
     let network_requested = table.contains_key("default_permissions")
         || table.contains_key("permissions")
