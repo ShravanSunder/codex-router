@@ -276,6 +276,16 @@ pub struct AsyncWeeklyQuotaFloorMutationStore {
 }
 
 impl AsyncSqliteStateStore {
+    /// Inspects native or recognized bootstrap state for Fresh startup, without applying it.
+    pub async fn prepare_startup_schema(
+        database_path: &Path,
+    ) -> Result<
+        crate::schema_preparation::AccountStartupSchemaPreparation,
+        crate::schema_preparation::StateSchemaPreparationError,
+    > {
+        crate::schema_preparation::prepare_startup_schema(database_path).await
+    }
+
     /// Inspects an existing account database without applying migrations or opening a store.
     pub async fn prepare_schema(
         database_path: &Path,

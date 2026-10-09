@@ -1,0 +1,39 @@
+[package]
+name = "agent-proxy-services"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+[lints]
+workspace = true
+[features]
+default = []
+test-support = ["codex-router-secret-store/test-support", "codex-router-secret-store/keychain-test-guard", "codex-router-auth/test-support", "codex-router-auth/sync-rusqlite-fixtures"]
+keychain-test-support = ["codex-router-secret-store/test-support", "codex-router-secret-store/keychain-test-guard"]
+[dependencies]
+codex-router-auth = { path = "../codex-router-auth", version = "0.1.63" }
+codex-router-proxy = { path = "../codex-router-proxy", version = "0.1.63" }
+codex-router-selection = { path = "../codex-router-selection", version = "0.1.63" }
+codex-router-secret-store = { path = "../codex-router-secret-store", version = "0.1.63" }
+codex-router-state = { path = "../codex-router-state", version = "0.1.63" }
+codex-router-keeper-protocol = { path = "../codex-router-keeper-protocol", version = "0.1.63" }
+codex-router-descriptor-boundary = { path = "../codex-router-descriptor-boundary", version = "0.1.63" }
+codex-router-core.workspace = true
+codex-router-quota.workspace = true
+chrono.workspace = true
+opentelemetry.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+[dev-dependencies]
+tracing-subscriber.workspace = true
+tempfile = "3.27.0"
+sqlx.workspace = true
+codex-router-secret-store = { path = "../codex-router-secret-store", version = "0.1.63", features = ["test-support", "keychain-test-guard"] }
+codex-router-state = { path = "../codex-router-state", version = "0.1.63", features = ["sync-rusqlite-fixtures"] }
+codex-router-auth = { path = "../codex-router-auth", version = "0.1.63", features = ["test-support", "sync-rusqlite-fixtures"] }

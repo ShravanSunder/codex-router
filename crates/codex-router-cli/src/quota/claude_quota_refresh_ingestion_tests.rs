@@ -1,6 +1,8 @@
 use super::*;
+use agent_proxy_services::credential_runtime::AsyncProviderCredentialResolver;
 use codex_router_auth::resolver::ResolvedProviderCredential;
 use codex_router_core::provider::Provider;
+use codex_router_core::redaction::SecretString;
 use codex_router_core::route_profile::WindowKind;
 use codex_router_state::quota_snapshot::QuotaRefreshStatusView;
 use codex_router_state::window_observation::WindowObservation;
@@ -11,7 +13,7 @@ use std::net::TcpListener;
 use std::sync::mpsc;
 use std::thread;
 use std::thread::JoinHandle;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
 const STALE_OBSERVATION_AT: u64 = 100;
@@ -198,7 +200,8 @@ impl ClaudeQuotaIngestionFixture {
             &provider,
             observed_unix_seconds,
         )
-        .await;
+        .await
+        .map_err(QuotaCommandError::from);
         let output = String::from_utf8(stdout).expect("refresh output should be UTF-8");
         let request = usage_endpoint.finish();
         (result, output, request)

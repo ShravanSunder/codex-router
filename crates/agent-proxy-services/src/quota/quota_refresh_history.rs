@@ -7,7 +7,7 @@ pub(super) async fn append_success_quota_history_observation(
     window: &QuotaRefreshProviderWindow,
     observed_unix_seconds: u64,
     reset_credits_available: Option<u32>,
-) -> Result<(), QuotaCommandError> {
+) -> Result<(), QuotaRefreshError> {
     let observation = success_quota_history_observation(
         account,
         route_band,
@@ -18,7 +18,7 @@ pub(super) async fn append_success_quota_history_observation(
     state
         .append_quota_history_observation(&observation)
         .await
-        .map_err(QuotaCommandError::StateStore)
+        .map_err(QuotaRefreshError::StateStore)
 }
 
 pub(super) fn success_quota_history_observation(
@@ -27,12 +27,12 @@ pub(super) fn success_quota_history_observation(
     window: &QuotaRefreshProviderWindow,
     observed_unix_seconds: u64,
     reset_credits_available: Option<u32>,
-) -> Result<PersistedQuotaHistoryObservation, QuotaCommandError> {
+) -> Result<PersistedQuotaHistoryObservation, QuotaRefreshError> {
     let remaining_headroom =
         window
             .headroom
             .percent()
-            .ok_or_else(|| QuotaCommandError::ProviderResponse {
+            .ok_or_else(|| QuotaRefreshError::ProviderResponse {
                 message: "OpenAI quota history window was not expressed as a percent".to_owned(),
             })?;
     let status = if remaining_headroom == 0 {
@@ -67,14 +67,14 @@ pub(super) async fn append_failure_quota_history_observations(
     route_band: &str,
     observed_unix_seconds: u64,
     error_class: QuotaRefreshErrorClass,
-) -> Result<(), QuotaCommandError> {
+) -> Result<(), QuotaRefreshError> {
     for observation in
         failure_quota_history_observations(account, route_band, observed_unix_seconds, error_class)
     {
         state
             .append_quota_history_observation(&observation)
             .await
-            .map_err(QuotaCommandError::StateStore)?;
+            .map_err(QuotaRefreshError::StateStore)?;
     }
     Ok(())
 }
@@ -103,10 +103,10 @@ pub(super) fn failure_quota_history_observations(
 pub(super) async fn purge_old_quota_history(
     state: &AsyncSqliteStateStore,
     observed_unix_seconds: u64,
-) -> Result<(), QuotaCommandError> {
+) -> Result<(), QuotaRefreshError> {
     let retention_floor = observed_unix_seconds.saturating_sub(V1_WEEKLY_WINDOW_SECONDS);
     state
         .purge_quota_history_before(retention_floor)
         .await
-        .map_err(QuotaCommandError::StateStore)
+        .map_err(QuotaRefreshError::StateStore)
 }

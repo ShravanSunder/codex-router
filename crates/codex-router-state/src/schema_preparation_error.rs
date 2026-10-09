@@ -5,6 +5,10 @@ use crate::sqlite::StateStoreError;
 /// A closed reason that an existing account database cannot be prepared.
 #[derive(Debug, Error)]
 pub enum StateSchemaPreparationError {
+    /// The existing bootstrap validator or conversion prerequisite refused this database.
+    #[error(transparent)]
+    InvalidBootstrapSchema { source: StateStoreError },
+
     /// The account database could not be opened or read without writes.
     #[error("account database is unavailable for schema preparation")]
     UnreadableStore {

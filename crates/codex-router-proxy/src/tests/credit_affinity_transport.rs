@@ -411,7 +411,7 @@ async fn start_credit_affinity_runtime(
         LocalRouterTokenRecord::new(SecretString::new("current-token"), TokenGeneration::new(1)),
     )
     .with_quota_clock(quota_now_unix_seconds, 300);
-    LoopbackRouterRuntime::start(config, secrets)
+    LoopbackRouterRuntime::start_with_credentials_for_test(config, secrets)
         .await
         .unwrap_or_else(|error| panic!("real affinity router runtime should start: {error}"))
 }

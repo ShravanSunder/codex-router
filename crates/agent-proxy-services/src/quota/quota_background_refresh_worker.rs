@@ -4,12 +4,12 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 /// Stoppable background quota refresh worker.
-pub(crate) struct BackgroundQuotaRefreshWorker {
+pub struct BackgroundQuotaRefreshWorker {
     stop_requested: CancellationToken,
     task: Option<JoinHandle<()>>,
 }
 
-pub(crate) struct BackgroundQuotaRefreshRuntime<C, D> {
+pub struct BackgroundQuotaRefreshRuntime<C, D> {
     observed_clock: C,
     diagnostic_reporter: D,
     interval: Duration,
@@ -17,7 +17,7 @@ pub(crate) struct BackgroundQuotaRefreshRuntime<C, D> {
 }
 
 impl<C, D> BackgroundQuotaRefreshRuntime<C, D> {
-    pub(crate) const fn new(observed_clock: C, diagnostic_reporter: D, interval: Duration) -> Self {
+    pub const fn new(observed_clock: C, diagnostic_reporter: D, interval: Duration) -> Self {
         Self {
             observed_clock,
             diagnostic_reporter,
@@ -26,7 +26,7 @@ impl<C, D> BackgroundQuotaRefreshRuntime<C, D> {
         }
     }
 
-    pub(crate) fn with_quota_floor_notifier(
+    pub fn with_quota_floor_notifier(
         mut self,
         quota_floor_notifier: WebSocketQuotaFloorNotifier,
     ) -> Self {
@@ -40,7 +40,7 @@ impl BackgroundQuotaRefreshWorker {
         self.stop_requested.cancel();
     }
 
-    pub(crate) async fn shutdown(&mut self) {
+    pub async fn shutdown(&mut self) {
         self.request_stop();
         if let Some(task) = self.task.as_mut() {
             let _result = task.await;
@@ -55,8 +55,8 @@ impl Drop for BackgroundQuotaRefreshWorker {
     }
 }
 
-#[cfg(test)]
-pub(crate) async fn start_background_quota_refresh_worker_with_dependencies<R, P>(
+#[cfg(any(test, feature = "test-support"))]
+pub async fn start_background_quota_refresh_worker_with_dependencies<R, P>(
     state_db: PathBuf,
     secret_root: PathBuf,
     base_url: String,
@@ -80,8 +80,8 @@ where
     .await
 }
 
-#[cfg(test)]
-pub(crate) async fn start_background_quota_refresh_worker_with_clock<R, P, C>(
+#[cfg(any(test, feature = "test-support"))]
+pub async fn start_background_quota_refresh_worker_with_clock<R, P, C>(
     state_db: PathBuf,
     secret_root: PathBuf,
     base_url: String,
@@ -106,7 +106,7 @@ where
     .await
 }
 
-pub(crate) async fn start_background_quota_refresh_worker_with_reporter<R, P, C, D>(
+pub async fn start_background_quota_refresh_worker_with_reporter<R, P, C, D>(
     state_db: PathBuf,
     secret_root: PathBuf,
     base_url: String,
@@ -177,15 +177,15 @@ where
     }
 }
 
-pub(crate) async fn start_background_quota_refresh_worker(
+pub async fn start_background_quota_refresh_worker(
     state_db: PathBuf,
     secret_root: PathBuf,
-    credential_store: crate::secret_store_factory::CliRuntimeSecretStore,
+    credential_store: codex_router_secret_store::encrypted_credential_store::EncryptedCredentialStore,
     base_url: String,
     interval: Duration,
     quota_floor_notifier: WebSocketQuotaFloorNotifier,
     refresh_tasks: CredentialRefreshTaskSupervisor,
-) -> Result<BackgroundQuotaRefreshWorker, QuotaCommandError> {
+) -> Result<BackgroundQuotaRefreshWorker, QuotaRefreshError> {
     let resolver = AsyncCliCredentialResolver::open_with_secret_store(
         &state_db,
         credential_store,
@@ -209,6 +209,6 @@ pub(crate) async fn start_background_quota_refresh_worker(
     .await)
 }
 
-pub(crate) fn refresh_cycle_delay(interval: Duration, elapsed: Duration) -> Duration {
+pub fn refresh_cycle_delay(interval: Duration, elapsed: Duration) -> Duration {
     interval.saturating_sub(elapsed)
 }

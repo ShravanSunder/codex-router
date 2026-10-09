@@ -10,13 +10,13 @@ impl QuotaRefreshProvider for FirstUnauthorizedQuotaProvider {
     async fn fetch_quota(
         &self,
         request: QuotaRefreshProviderRequest,
-    ) -> Result<QuotaRefreshProviderResponse, crate::quota::QuotaCommandError> {
+    ) -> Result<QuotaRefreshProviderResponse, crate::quota::QuotaRefreshError> {
         let mut tokens = lock_test_mutex(&self.seen_tokens, "quota 401 token record");
         tokens.push(request.access_token().expose_secret().to_owned());
         let call = tokens.len();
         drop(tokens);
         if call == 1 || (self.reject_retry && call == 2) {
-            return Err(crate::quota::QuotaCommandError::ProviderStatus { status: 401 });
+            return Err(crate::quota::QuotaRefreshError::ProviderStatus { status: 401 });
         }
         Ok(QuotaRefreshProviderResponse {
             windows: vec![QuotaRefreshProviderWindow {
@@ -129,7 +129,7 @@ impl QuotaRefreshProvider for ConcurrentGenerationQuotaProvider {
     async fn fetch_quota(
         &self,
         request: QuotaRefreshProviderRequest,
-    ) -> Result<QuotaRefreshProviderResponse, crate::quota::QuotaCommandError> {
+    ) -> Result<QuotaRefreshProviderResponse, crate::quota::QuotaRefreshError> {
         let call = {
             let mut seen_tokens = lock_test_mutex(&self.seen_tokens, "quota generation race");
             seen_tokens.push(request.access_token().expose_secret().to_owned());
@@ -159,7 +159,7 @@ impl QuotaRefreshProvider for ConcurrentGenerationQuotaProvider {
                 )
                 .with_active_credential_generation(2),
             ));
-            return Err(crate::quota::QuotaCommandError::ProviderStatus { status: 401 });
+            return Err(crate::quota::QuotaRefreshError::ProviderStatus { status: 401 });
         }
         Ok(QuotaRefreshProviderResponse {
             windows: vec![QuotaRefreshProviderWindow {

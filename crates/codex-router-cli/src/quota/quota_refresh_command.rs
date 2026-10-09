@@ -24,6 +24,7 @@ pub(super) async fn refresh_quota(
     )
     .await
     .map(|_report| ())
+    .map_err(Into::into)
 }
 
 pub(crate) fn is_allowed_quota_refresh_base_url(base_url: &str) -> bool {

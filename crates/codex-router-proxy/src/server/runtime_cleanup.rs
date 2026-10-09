@@ -1,3 +1,4 @@
+use super::runtime_serving::ConnectionFailurePolicy;
 use super::*;
 
 pub(super) struct LoopbackServingCleanupContext {
@@ -7,6 +8,7 @@ pub(super) struct LoopbackServingCleanupContext {
     pub(super) accept_error: Option<LoopbackRouterRuntimeError>,
     pub(super) session_shutdown: CancellationToken,
     pub(super) affinity_record_tasks: TaskTracker,
+    pub(super) connection_failure_policy: ConnectionFailurePolicy,
     pub(super) caller_shutdown_requested: bool,
 }
 
@@ -29,13 +31,18 @@ impl LoopbackRouterRuntime {
             session_shutdown,
             affinity_record_tasks,
             caller_shutdown_requested,
+            connection_failure_policy,
         } = context;
         if first_connection_error.is_some() || accept_error.is_some() || caller_shutdown_requested {
             session_shutdown.cancel();
         }
 
         while let Some(joined) = handlers.join_next().await {
-            store_connection_join_error(&mut first_connection_error, joined);
+            self.record_owned_connection_result(
+                &mut first_connection_error,
+                Some(joined),
+                connection_failure_policy,
+            );
         }
         affinity_record_tasks.close();
         affinity_record_tasks.wait().await;

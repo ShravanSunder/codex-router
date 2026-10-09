@@ -17,6 +17,7 @@ members = [
     "crates/agent-collaboration",
     "crates/codex-router-auth",
     "crates/codex-router-cli",
+    "crates/agent-proxy-services",
     "crates/codex-native-integration",
     "crates/codex-router-descriptor-boundary",
     "crates/codex-router-keeper-protocol",
@@ -34,7 +35,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.73"
+version = "0.1.74"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 publish = false

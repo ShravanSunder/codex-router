@@ -165,7 +165,7 @@ impl QuotaRefreshProvider for SupersededResponsesQuotaProvider {
     async fn fetch_quota(
         &self,
         request: QuotaRefreshProviderRequest,
-    ) -> Result<QuotaRefreshProviderResponse, crate::quota::QuotaCommandError> {
+    ) -> Result<QuotaRefreshProviderResponse, crate::quota::QuotaRefreshError> {
         if request.route_band() == "responses" {
             self.response_started.notify_one();
             self.release_response.notified().await;

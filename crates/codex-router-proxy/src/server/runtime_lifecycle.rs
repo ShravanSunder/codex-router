@@ -72,6 +72,7 @@ pub(super) fn store_optional_connection_join_error(
     }
 }
 
+#[cfg(test)]
 pub(super) fn supervise_detached_connection_handler(
     handler: UpgradeTaskHandle,
     reporter: Arc<dyn LoopbackConnectionErrorReporter>,

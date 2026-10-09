@@ -185,10 +185,18 @@ mod runtime_config;
 mod runtime_lifecycle;
 #[path = "server/runtime_maintenance.rs"]
 mod runtime_maintenance;
+#[path = "server/runtime_preparation.rs"]
+mod runtime_preparation;
 #[path = "server/runtime_serving.rs"]
 mod runtime_serving;
 #[path = "server/runtime_startup.rs"]
 mod runtime_startup;
+pub use runtime_preparation::PreparedLoopbackRouterRuntime;
+#[path = "server/runtime_activation.rs"]
+mod runtime_activation;
+#[cfg(test)]
+#[path = "server/runtime_fixture.rs"]
+mod runtime_fixture;
 #[path = "server/runtime_state.rs"]
 mod runtime_state;
 

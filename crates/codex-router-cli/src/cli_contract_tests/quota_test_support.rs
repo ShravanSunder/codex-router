@@ -11,7 +11,7 @@ impl QuotaRefreshProvider for JoinedFloorCrossingProvider {
     async fn fetch_quota(
         &self,
         request: QuotaRefreshProviderRequest,
-    ) -> Result<QuotaRefreshProviderResponse, crate::quota::QuotaCommandError> {
+    ) -> Result<QuotaRefreshProviderResponse, crate::quota::QuotaRefreshError> {
         let weekly_remaining = if request.account_id() == &self.floor_account_id {
             8
         } else {
@@ -60,6 +60,7 @@ where
             observed_unix_seconds,
         ))
         .map(|_report| ())
+        .map_err(Into::into)
 }
 
 pub(super) fn refresh_quota_store_paths_with_dependencies<R, P>(
@@ -86,6 +87,7 @@ where
             observed_unix_seconds,
         ))
         .map(|_report| ())
+        .map_err(Into::into)
 }
 
 pub(super) fn refresh_quota_store_paths_with_floor_observer<R, P>(
@@ -114,6 +116,7 @@ where
             ),
         )
         .map(|_report| ())
+        .map_err(Into::into)
 }
 
 #[derive(Default)]
@@ -126,26 +129,6 @@ impl WeeklyQuotaFloorIntentObserver for RecordingWeeklyFloorObserver {
     fn weekly_quota_floor_intent(&self, account_id: &AccountId, intent: WeeklyQuotaFloorIntent) {
         lock_test_mutex(&self.account_ids, "weekly floor observer").push(account_id.clone());
         lock_test_mutex(&self.intents, "weekly floor intents").push(intent);
-    }
-}
-
-impl<S, C> AsyncProviderCredentialResolver for RouterCredentialResolver<'_, S, C>
-where
-    S: SecretStore,
-    C: CredentialRefreshClient,
-{
-    fn resolve_provider_credentials_async(
-        &self,
-        account_id: &AccountId,
-        expected_provider: codex_router_core::provider::Provider,
-    ) -> impl std::future::Future<
-        Output = Result<ResolvedProviderCredential, CredentialResolverError>,
-    > + Send {
-        std::future::ready(ProviderCredentialResolver::resolve_provider_credentials(
-            self,
-            account_id,
-            expected_provider,
-        ))
     }
 }
 
@@ -215,7 +198,7 @@ impl QuotaRefreshProvider for RecordingQuotaRefreshProvider {
         &self,
         request: QuotaRefreshProviderRequest,
     ) -> impl std::future::Future<
-        Output = Result<QuotaRefreshProviderResponse, crate::quota::QuotaCommandError>,
+        Output = Result<QuotaRefreshProviderResponse, crate::quota::QuotaRefreshError>,
     > + Send {
         self.recorded.borrow_mut().push((
             request.account_id().as_str().to_owned(),
@@ -263,7 +246,7 @@ impl QuotaRefreshProvider for FloorNotificationOrderingQuotaProvider {
     async fn fetch_quota(
         &self,
         request: QuotaRefreshProviderRequest,
-    ) -> Result<QuotaRefreshProviderResponse, crate::quota::QuotaCommandError> {
+    ) -> Result<QuotaRefreshProviderResponse, crate::quota::QuotaRefreshError> {
         if request.account_id() == &self.healthy_account_id && request.route_band() == "responses" {
             assert_eq!(
                 *lock_test_mutex(&self.floor_observer.account_ids, "weekly floor observer"),
@@ -341,7 +324,7 @@ impl QuotaRefreshProvider for StaticQuotaRefreshProvider {
     async fn fetch_quota(
         &self,
         _request: QuotaRefreshProviderRequest,
-    ) -> Result<QuotaRefreshProviderResponse, crate::quota::QuotaCommandError> {
+    ) -> Result<QuotaRefreshProviderResponse, crate::quota::QuotaRefreshError> {
         Ok(QuotaRefreshProviderResponse {
             windows: self.windows.clone(),
             reset_credits_available: None,
@@ -368,7 +351,7 @@ impl QuotaRefreshProvider for SlowQuotaRefreshProvider {
     async fn fetch_quota(
         &self,
         _request: QuotaRefreshProviderRequest,
-    ) -> Result<QuotaRefreshProviderResponse, crate::quota::QuotaCommandError> {
+    ) -> Result<QuotaRefreshProviderResponse, crate::quota::QuotaRefreshError> {
         tokio::time::sleep(self.delay).await;
         Ok(QuotaRefreshProviderResponse {
             windows: verified_quota_windows(self.remaining_headroom),
@@ -404,7 +387,7 @@ impl QuotaRefreshProvider for BlockingQuotaRefreshProvider {
     async fn fetch_quota(
         &self,
         _request: QuotaRefreshProviderRequest,
-    ) -> Result<QuotaRefreshProviderResponse, crate::quota::QuotaCommandError> {
+    ) -> Result<QuotaRefreshProviderResponse, crate::quota::QuotaRefreshError> {
         if !self.blocked_once.swap(true, Ordering::SeqCst) {
             let maybe_started_sender =
                 lock_test_mutex(&self.started_sender, "started sender").take();
@@ -449,7 +432,7 @@ impl QuotaRefreshProvider for SignalingQuotaRefreshProvider {
     async fn fetch_quota(
         &self,
         request: QuotaRefreshProviderRequest,
-    ) -> Result<QuotaRefreshProviderResponse, crate::quota::QuotaCommandError> {
+    ) -> Result<QuotaRefreshProviderResponse, crate::quota::QuotaRefreshError> {
         if let Err(error) = self.sender.send(request.route_band().to_owned()) {
             panic!("background refresh signal should send: {error}");
         }
@@ -485,9 +468,9 @@ impl QuotaRefreshProvider for AccountFailingQuotaRefreshProvider {
     async fn fetch_quota(
         &self,
         request: QuotaRefreshProviderRequest,
-    ) -> Result<QuotaRefreshProviderResponse, crate::quota::QuotaCommandError> {
+    ) -> Result<QuotaRefreshProviderResponse, crate::quota::QuotaRefreshError> {
         if request.account_label() == self.failing_account_label {
-            return Err(crate::quota::QuotaCommandError::ProviderStatus {
+            return Err(crate::quota::QuotaRefreshError::ProviderStatus {
                 status: self.status,
             });
         }

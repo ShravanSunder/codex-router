@@ -16,16 +16,23 @@ fn loopback_server_binds_ephemeral_tcp_listener_on_loopback() {
 }
 
 #[tokio::test]
-async fn async_loopback_server_binds_ephemeral_listener_and_stops_on_cancellation() {
+async fn async_loopback_server_adopts_granted_listener_and_stops_on_cancellation() {
     let address = match LoopbackBindAddress::new("127.0.0.1", 0) {
         Ok(address) => address,
         Err(error) => panic!("loopback address should validate: {error}"),
     };
-    let runtime = match AsyncLoopbackServerRuntime::bind(address).await {
+    let gate = codex_router_descriptor_boundary::DescriptorGate::global();
+    let listener =
+        codex_router_descriptor_boundary::OwnedListener::bind_tcp(address.socket_addr(), gate)
+            .await
+            .expect("real owned listening socket");
+    let granted_address = listener.tcp_address().expect("actual kernel address");
+    let runtime = match AsyncLoopbackServerRuntime::from_granted(listener, address, gate).await {
         Ok(runtime) => runtime,
         Err(error) => panic!("async loopback bind should succeed: {error}"),
     };
     let local_addr = runtime.local_addr();
+    assert_eq!(local_addr, granted_address);
     let shutdown = tokio_util::sync::CancellationToken::new();
     let shutdown_for_task = shutdown.clone();
     let serve_task =

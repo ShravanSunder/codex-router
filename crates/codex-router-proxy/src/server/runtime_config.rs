@@ -20,6 +20,19 @@ pub struct LoopbackRouterRuntimeConfig {
 }
 
 impl LoopbackRouterRuntimeConfig {
+    #[must_use]
+    pub fn state_database_path(&self) -> &Path {
+        &self.state_database_path
+    }
+    #[must_use]
+    pub fn secret_store_root(&self) -> &Path {
+        &self.secret_store_root
+    }
+    #[must_use]
+    pub const fn bind_address(&self) -> LoopbackBindAddress {
+        self.bind_address
+    }
+
     /// Creates runtime configuration with conservative quota freshness defaults.
     #[must_use]
     pub const fn new(

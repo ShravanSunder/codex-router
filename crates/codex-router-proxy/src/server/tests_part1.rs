@@ -259,7 +259,7 @@ pub(super) async fn proxy_refresh_fixture(
         secret_root,
     )
     .with_quota_clock(1_000, 300);
-    let router = LoopbackRouterRuntime::start(config, secrets.clone())
+    let router = LoopbackRouterRuntime::start_with_credentials_for_test(config, secrets.clone())
         .await
         .expect("fixture router should start")
         .with_credential_refresh_shutdown_drain(drain_limit);

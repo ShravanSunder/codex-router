@@ -40,7 +40,8 @@ async fn fake_usage_endpoint_receives_oauth_headers_and_returns_windows() {
             )
             .expect("write fake usage response");
     });
-    let fetcher = ClaudeQuotaFetcher::new_with_endpoint_for_test(Duration::from_secs(2), endpoint);
+    let fetcher = ClaudeQuotaFetcher::new_with_endpoint_for_test(Duration::from_secs(2), endpoint)
+        .expect("fixture client");
     let account_id = AccountId::new("acct_claude_usage").expect("account id");
     let response = fetcher
         .fetch_quota(QuotaRefreshProviderRequest::new_for_provider(
@@ -136,7 +137,8 @@ async fn fake_usage_endpoint_accepts_overlapping_legacy_and_limits_windows() {
             )
             .expect("write fake usage response");
     });
-    let fetcher = ClaudeQuotaFetcher::new_with_endpoint_for_test(Duration::from_secs(2), endpoint);
+    let fetcher = ClaudeQuotaFetcher::new_with_endpoint_for_test(Duration::from_secs(2), endpoint)
+        .expect("fixture client");
     let account_id = AccountId::new("acct_claude_overlap").expect("account id");
     let response = fetcher
         .fetch_quota(QuotaRefreshProviderRequest::new_for_provider(

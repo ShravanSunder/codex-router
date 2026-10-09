@@ -191,9 +191,12 @@ async fn assembled_websocket_credit_source_yields_after_terminal_to_included_pee
     let runtime_secrets = secrets.clone();
     let (router_address_sender, router_address_receiver) = mpsc::channel();
     let runtime_thread = tokio::spawn(async move {
-        let runtime = LoopbackRouterRuntime::start(config, runtime_secrets)
-            .await
-            .unwrap_or_else(|error| panic!("assembled WebSocket runtime should start: {error}"));
+        let runtime =
+            LoopbackRouterRuntime::start_with_credentials_for_test(config, runtime_secrets)
+                .await
+                .unwrap_or_else(|error| {
+                    panic!("assembled WebSocket runtime should start: {error}")
+                });
         router_address_sender
             .send(runtime.local_addr())
             .unwrap_or_else(|error| panic!("router address should reach the test: {error}"));

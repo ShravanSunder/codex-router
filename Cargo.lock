@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "acp-client-runtime"
-version = "0.1.73"
+version = "0.1.74"
 dependencies = [
  "agent-client-protocol",
  "futures-util",
@@ -65,7 +65,7 @@ dependencies = [
 
 [[package]]
 name = "agent-automation"
-version = "0.1.73"
+version = "0.1.74"
 dependencies = [
  "chrono",
  "chrono-tz",
@@ -130,7 +130,7 @@ dependencies = [
 
 [[package]]
 name = "agent-collaboration"
-version = "0.1.73"
+version = "0.1.74"
 dependencies = [
  "agent-automation",
  "automation-storage",
@@ -164,6 +164,34 @@ dependencies = [
  "tracing-subscriber",
  "unicode-width 0.2.2",
  "uuid",
+]
+
+[[package]]
+name = "agent-proxy-services"
+version = "0.1.74"
+dependencies = [
+ "chrono",
+ "codex-router-auth",
+ "codex-router-core",
+ "codex-router-descriptor-boundary",
+ "codex-router-keeper-protocol",
+ "codex-router-proxy",
+ "codex-router-quota",
+ "codex-router-secret-store",
+ "codex-router-selection",
+ "codex-router-state",
+ "opentelemetry",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "sqlx",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -421,7 +449,7 @@ checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 
 [[package]]
 name = "automation-storage"
-version = "0.1.73"
+version = "0.1.74"
 dependencies = [
  "agent-automation",
  "chrono",
@@ -734,7 +762,7 @@ checksum = "c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9"
 
 [[package]]
 name = "claude-code-peer-messaging"
-version = "0.1.73"
+version = "0.1.74"
 dependencies = [
  "agent-automation",
  "collaboration-protocol",
@@ -755,7 +783,7 @@ checksum = "0c9ea0ac24bc397ab3c98583a3c9ba74fa56b09a4449bbe172b9b1ddb016027a"
 
 [[package]]
 name = "codex-acp-adapter"
-version = "0.1.73"
+version = "0.1.74"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -777,7 +805,7 @@ dependencies = [
 
 [[package]]
 name = "codex-native-integration"
-version = "0.1.73"
+version = "0.1.74"
 dependencies = [
  "futures-util",
  "jsonschema",
@@ -797,7 +825,7 @@ dependencies = [
 
 [[package]]
 name = "codex-router-auth"
-version = "0.1.73"
+version = "0.1.74"
 dependencies = [
  "base64 0.22.1",
  "codex-router-core",
@@ -817,16 +845,19 @@ dependencies = [
 
 [[package]]
 name = "codex-router-cli"
-version = "0.1.73"
+version = "0.1.74"
 dependencies = [
  "agent-collaboration",
+ "agent-proxy-services",
  "base64 0.22.1",
  "chrono",
  "clap",
  "codex-native-integration",
  "codex-router-auth",
  "codex-router-core",
+ "codex-router-descriptor-boundary",
  "codex-router-host",
+ "codex-router-keeper-protocol",
  "codex-router-proxy",
  "codex-router-secret-store",
  "codex-router-selection",
@@ -864,7 +895,7 @@ dependencies = [
 
 [[package]]
 name = "codex-router-core"
-version = "0.1.73"
+version = "0.1.74"
 dependencies = [
  "hmac 0.12.1",
  "serde",
@@ -876,7 +907,7 @@ dependencies = [
 
 [[package]]
 name = "codex-router-descriptor-boundary"
-version = "0.1.73"
+version = "0.1.74"
 dependencies = [
  "rustix",
  "serde",
@@ -889,7 +920,7 @@ dependencies = [
 
 [[package]]
 name = "codex-router-host"
-version = "0.1.73"
+version = "0.1.74"
 dependencies = [
  "acp-client-runtime",
  "agent-automation",
@@ -930,7 +961,7 @@ dependencies = [
 
 [[package]]
 name = "codex-router-keeper"
-version = "0.1.73"
+version = "0.1.74"
 dependencies = [
  "codex-native-integration",
  "codex-router-descriptor-boundary",
@@ -950,7 +981,7 @@ dependencies = [
 
 [[package]]
 name = "codex-router-keeper-protocol"
-version = "0.1.73"
+version = "0.1.74"
 dependencies = [
  "codex-native-integration",
  "codex-router-descriptor-boundary",
@@ -968,12 +999,13 @@ dependencies = [
 
 [[package]]
 name = "codex-router-proxy"
-version = "0.1.73"
+version = "0.1.74"
 dependencies = [
  "async-compression",
  "bytes",
  "codex-router-auth",
  "codex-router-core",
+ "codex-router-descriptor-boundary",
  "codex-router-quota",
  "codex-router-secret-store",
  "codex-router-selection",
@@ -1003,7 +1035,7 @@ dependencies = [
 
 [[package]]
 name = "codex-router-quota"
-version = "0.1.73"
+version = "0.1.74"
 dependencies = [
  "codex-router-core",
  "thiserror 2.0.18",
@@ -1011,7 +1043,7 @@ dependencies = [
 
 [[package]]
 name = "codex-router-quota-reset-test-harness"
-version = "0.1.73"
+version = "0.1.74"
 dependencies = [
  "codex-router-cli",
  "codex-router-core",
@@ -1024,7 +1056,7 @@ dependencies = [
 
 [[package]]
 name = "codex-router-secret-store"
-version = "0.1.73"
+version = "0.1.74"
 dependencies = [
  "aes-gcm",
  "apple-native-keyring-store",
@@ -1046,7 +1078,7 @@ dependencies = [
 
 [[package]]
 name = "codex-router-selection"
-version = "0.1.73"
+version = "0.1.74"
 dependencies = [
  "base64 0.22.1",
  "codex-router-core",
@@ -1061,7 +1093,7 @@ dependencies = [
 
 [[package]]
 name = "codex-router-state"
-version = "0.1.73"
+version = "0.1.74"
 dependencies = [
  "codex-router-core",
  "codex-router-selection",
@@ -1074,8 +1106,9 @@ dependencies = [
 
 [[package]]
 name = "codex-router-test-support"
-version = "0.1.73"
+version = "0.1.74"
 dependencies = [
+ "agent-proxy-services",
  "codex-native-integration",
  "codex-router-cli",
  "codex-router-core",
@@ -1094,14 +1127,14 @@ dependencies = [
 
 [[package]]
 name = "codex-router-ux-prototype"
-version = "0.1.73"
+version = "0.1.74"
 dependencies = [
  "iocraft",
 ]
 
 [[package]]
 name = "collaboration-client"
-version = "0.1.73"
+version = "0.1.74"
 dependencies = [
  "automation-storage",
  "codex-acp-adapter",
@@ -1128,7 +1161,7 @@ dependencies = [
 
 [[package]]
 name = "collaboration-mcp"
-version = "0.1.73"
+version = "0.1.74"
 dependencies = [
  "agent-collaboration",
  "automation-storage",
@@ -1160,7 +1193,7 @@ dependencies = [
 
 [[package]]
 name = "collaboration-protocol"
-version = "0.1.73"
+version = "0.1.74"
 dependencies = [
  "agent-automation",
  "chrono",
@@ -1179,7 +1212,7 @@ dependencies = [
 
 [[package]]
 name = "collaboration-service"
-version = "0.1.73"
+version = "0.1.74"
 dependencies = [
  "agent-automation",
  "automation-storage",
@@ -2744,7 +2777,7 @@ dependencies = [
 
 [[package]]
 name = "lifecycle-observation"
-version = "0.1.73"
+version = "0.1.74"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -2833,7 +2866,7 @@ checksum = "88904434abc2901f197fe8cc55f0445e7ded921dba5911dad2e2b39b48e663c4"
 
 [[package]]
 name = "message-board"
-version = "0.1.73"
+version = "0.1.74"
 dependencies = [
  "chrono",
  "schemars 1.2.2",
@@ -2845,7 +2878,7 @@ dependencies = [
 
 [[package]]
 name = "message-board-storage"
-version = "0.1.73"
+version = "0.1.74"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -4036,7 +4069,7 @@ dependencies = [
 
 [[package]]
 name = "session-event-model"
-version = "0.1.73"
+version = "0.1.74"
 dependencies = [
  "base64 0.22.1",
  "message-board",

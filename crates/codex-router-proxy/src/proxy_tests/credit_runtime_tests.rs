@@ -79,7 +79,7 @@ async fn assembled_loopback_http_routes_known_exhaustion_to_opted_in_credit_acco
         LocalRouterTokenRecord::new(SecretString::new("current-token"), TokenGeneration::new(1)),
     )
     .with_quota_clock(1_030, 60);
-    let runtime = LoopbackRouterRuntime::start(config, secrets)
+    let runtime = LoopbackRouterRuntime::start_with_credentials_for_test(config, secrets)
         .await
         .unwrap_or_else(|error| panic!("credit proxy runtime should start: {error}"));
     let router_address = runtime.local_addr();

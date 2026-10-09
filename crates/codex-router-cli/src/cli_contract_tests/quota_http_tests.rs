@@ -58,12 +58,12 @@ impl QuotaRefreshProvider for ReversedResponsesRefreshProvider {
     async fn fetch_quota(
         &self,
         request: QuotaRefreshProviderRequest,
-    ) -> Result<QuotaRefreshProviderResponse, QuotaCommandError> {
+    ) -> Result<QuotaRefreshProviderResponse, QuotaRefreshError> {
         match (request.base_url(), request.route_band()) {
             ("older-run", "responses") => {
                 self.older_responses_read_started.notify_one();
                 self.allow_older_responses_failure.notified().await;
-                Err(QuotaCommandError::ProviderStatus { status: 429 })
+                Err(QuotaRefreshError::ProviderStatus { status: 429 })
             }
             ("newer-run", "responses") => Ok(Self::quota_response("responses")),
             ("newer-run", "models") => {

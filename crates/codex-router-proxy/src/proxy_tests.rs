@@ -258,6 +258,9 @@ mod reservation_projection_tests;
 #[path = "proxy_tests/runtime_shutdown_tests.rs"]
 mod runtime_shutdown_tests;
 
+#[path = "proxy_tests/runtime_preparation_tests.rs"]
+mod runtime_preparation_tests;
+
 #[path = "proxy_tests/selector_affinity_tests.rs"]
 mod selector_affinity_tests;
 

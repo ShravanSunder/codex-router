@@ -76,7 +76,10 @@ async fn served_router_http_uses_persisted_quota_while_background_refresh_is_blo
         local_token.clone(),
     )
     .with_quota_clock(1_030, 60);
-    let runtime = must_ok(LoopbackRouterRuntime::start(runtime_config, secrets.clone()).await);
+    let runtime = must_ok(
+        agent_proxy_services::test_support::activate_core_fixture(runtime_config, secrets.clone())
+            .await,
+    );
     let refresh_tasks = runtime.credential_refresh_task_supervisor();
     let runtime_address = runtime.local_addr();
     assert_eq!(runtime_address.port(), router_port);
@@ -245,7 +248,10 @@ async fn served_router_websocket_uses_persisted_quota_while_background_refresh_i
         local_token.clone(),
     )
     .with_quota_clock(1_030, 60);
-    let runtime = must_ok(LoopbackRouterRuntime::start(runtime_config, secrets.clone()).await);
+    let runtime = must_ok(
+        agent_proxy_services::test_support::activate_core_fixture(runtime_config, secrets.clone())
+            .await,
+    );
     let refresh_tasks = runtime.credential_refresh_task_supervisor();
     assert_eq!(runtime.local_addr().port(), router_port);
     let router_task = tokio::spawn(async move {

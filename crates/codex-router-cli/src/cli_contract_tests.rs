@@ -42,7 +42,6 @@ use codex_router_core::ids::AccountId;
 use codex_router_core::ids::ReservationId;
 use codex_router_core::redaction::SecretString;
 use codex_router_proxy::server::LoopbackBindAddress;
-use codex_router_proxy::server::LoopbackRouterRuntime;
 use codex_router_proxy::server::LoopbackRouterRuntimeConfig;
 use codex_router_proxy::upstream::UpstreamEndpoint;
 use codex_router_proxy::websocket::WebSocketRegistrySnapshot;
@@ -191,3 +190,8 @@ mod quota_concurrency_tests;
 
 #[path = "cli_contract_tests/token_rotation_tests.rs"]
 mod token_rotation_tests;
+
+use agent_proxy_services::quota::QuotaRefreshError;
+
+#[path = "cli_contract_tests/proxy_role_error_tests.rs"]
+mod proxy_role_error_tests;

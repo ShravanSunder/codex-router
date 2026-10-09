@@ -14,6 +14,7 @@ use std::time::Duration;
 use codex_native_integration::CodexRouterProfile;
 use codex_router_cli::profile::CodexRouterProfileWriter;
 use codex_router_proxy::server::LoopbackBindAddress;
+#[cfg(not(test))]
 use codex_router_proxy::server::LoopbackRouterRuntime;
 use codex_router_proxy::server::LoopbackRouterRuntimeConfig;
 use codex_router_proxy::upstream::UpstreamEndpoint;
@@ -148,7 +149,7 @@ impl FloorRouter {
         let credential_store =
             codex_router_secret_store::test_support::open_encrypted_credential_store(secret_root)
                 .map_err(|error| format!("floor fixture credential store failed to open: {error}"))?;
-        let runtime = LoopbackRouterRuntime::start(
+        let runtime = agent_proxy_services::test_support::activate_core_fixture(
             LoopbackRouterRuntimeConfig::new_tokenless(
                 bind_address,
                 endpoint,

@@ -168,7 +168,7 @@ async fn serve_quota_start_failure_joins_active_upkeep_and_preserves_error_outpu
                 Ok(worker)
             },
             |_state_db, _secret_root, _credential_store, _base_url, _interval, _notifier, _refresh_tasks| async {
-                Err(QuotaCommandError::BackgroundWorkerInitialization(
+                Err(QuotaRefreshError::BackgroundWorkerInitialization(
                     std::io::Error::other("fixture quota startup failure"),
                 ))
             },

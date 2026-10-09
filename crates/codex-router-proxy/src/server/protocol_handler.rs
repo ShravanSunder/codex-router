@@ -59,11 +59,16 @@ impl LoopbackProtocolConnectionHandler {
 
         let mut http_builder = http1::Builder::new();
         http_builder.half_close(true);
-        let serve_result = http_builder
-            .serve_connection(io, service)
-            .with_upgrades()
-            .await
-            .map_err(LoopbackRouterRuntimeError::HyperConnection);
+        let connection = http_builder.serve_connection(io, service).with_upgrades();
+        tokio::pin!(connection);
+        let serve_result = tokio::select! {
+            result=&mut connection=>result,
+            ()=self.session_shutdown.cancelled()=>{
+                connection.as_mut().graceful_shutdown();
+                connection.await
+            }
+        }
+        .map_err(LoopbackRouterRuntimeError::HyperConnection);
         finish_hyper_connection_after_serve_result(serve_result, upgrade_tasks).await
     }
 

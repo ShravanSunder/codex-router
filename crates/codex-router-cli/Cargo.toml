@@ -17,6 +17,7 @@ quota-reset-test-harness = [
     "keychain-test-support",
 ]
 keychain-test-support = [
+    "agent-proxy-services/keychain-test-support",
     "codex-router-secret-store/keychain-test-guard",
     "codex-router-secret-store/test-support",
     "codex-router-host/keychain-test-support",
@@ -26,6 +27,9 @@ keychain-test-support = [
 workspace = true
 
 [dependencies]
+codex-router-descriptor-boundary = { path = "../codex-router-descriptor-boundary", version = "0.1.63" }
+codex-router-keeper-protocol = { path = "../codex-router-keeper-protocol", version = "0.1.63" }
+agent-proxy-services = { path = "../agent-proxy-services", version = "0.1.63" }
 agent-collaboration = { path = "../agent-collaboration", version = "0.1.14", optional = true }
 base64.workspace = true
 chrono.workspace = true
@@ -63,6 +67,7 @@ tracing-subscriber.workspace = true
 unicode-width.workspace = true
 
 [dev-dependencies]
+agent-proxy-services = { path = "../agent-proxy-services", version = "0.1.63", features = ["test-support"] }
 tempfile = "3.27.0"
 codex-router-host = { path = "../codex-router-host", version = "0.1.4", features = ["keychain-test-support"] }
 collaboration-client = { path = "../collaboration-client", version = "0.1.14" }

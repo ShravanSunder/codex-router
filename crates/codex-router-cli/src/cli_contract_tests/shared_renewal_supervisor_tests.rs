@@ -77,12 +77,12 @@ impl QuotaRefreshProvider for UnauthorizedQuotaRefreshProvider {
     async fn fetch_quota(
         &self,
         _request: QuotaRefreshProviderRequest,
-    ) -> Result<QuotaRefreshProviderResponse, QuotaCommandError> {
+    ) -> Result<QuotaRefreshProviderResponse, QuotaRefreshError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         self.entered_sender
             .send(())
             .expect("401 quota attempt should be observed");
-        Err(QuotaCommandError::ProviderStatus { status: 401 })
+        Err(QuotaRefreshError::ProviderStatus { status: 401 })
     }
 }
 
@@ -161,7 +161,10 @@ async fn closing_request_supervisor_rejects_late_upkeep_and_quota_renewals() {
         upkeep_state_path.clone(),
         secret_root.clone(),
     );
-    let runtime = must_ok(LoopbackRouterRuntime::start(runtime_config, secrets.clone()).await);
+    let runtime = must_ok(
+        agent_proxy_services::test_support::activate_core_fixture(runtime_config, secrets.clone())
+            .await,
+    );
     let refresh_tasks = runtime.credential_refresh_task_supervisor();
     assert!(matches!(runtime.serve_protocol_connections(0).await, Ok(0)));
     drop(runtime);
@@ -192,7 +195,7 @@ async fn closing_request_supervisor_rejects_late_upkeep_and_quota_renewals() {
         .expect("upkeep scheduler should start its first cycle")
         .expect("upkeep scheduler should report its first cycle");
     let _ = upkeep_release.send(());
-    upkeep_worker.wake_for_test();
+    must_ok(upkeep_worker.wake_for_test());
     tokio::time::timeout(Duration::from_secs(3), upkeep_cycle_receiver.recv())
         .await
         .expect("upkeep should finish the closed-admission cycle and honor its wake")
@@ -297,7 +300,10 @@ async fn shared_close_rejects_quota_and_retains_upkeep_claim_to_successor() {
         state_path.clone(),
         secret_root.clone(),
     );
-    let runtime = must_ok(LoopbackRouterRuntime::start(runtime_config, secrets.clone()).await);
+    let runtime = must_ok(
+        agent_proxy_services::test_support::activate_core_fixture(runtime_config, secrets.clone())
+            .await,
+    );
     let refresh_tasks = runtime.credential_refresh_task_supervisor();
     let (refresh_client, mut provider_entries, release_provider) = held_producer_refresh_client(
         account_id.clone(),
@@ -429,7 +435,10 @@ async fn closed_supervisor_rejects_quota_401_recovery_without_spending_refresh_t
         state_path.clone(),
         secret_root.clone(),
     );
-    let runtime = must_ok(LoopbackRouterRuntime::start(runtime_config, secrets.clone()).await);
+    let runtime = must_ok(
+        agent_proxy_services::test_support::activate_core_fixture(runtime_config, secrets.clone())
+            .await,
+    );
     let refresh_tasks = runtime.credential_refresh_task_supervisor();
     assert!(matches!(runtime.serve_protocol_connections(0).await, Ok(0)));
     drop(runtime);

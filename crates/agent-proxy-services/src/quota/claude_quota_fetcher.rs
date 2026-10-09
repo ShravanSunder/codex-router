@@ -21,25 +21,27 @@ impl ClaudeQuotaFetcher {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(super) fn new_with_endpoint_for_test(
         timeout: Duration,
         usage_endpoint: impl Into<String>,
-    ) -> Self {
+    ) -> Result<Self, QuotaRefreshError> {
         let client = reqwest::Client::builder()
             .user_agent("codex-router-claude-quota-refresh")
             .timeout(timeout)
             .build()
-            .expect("test HTTP client should build");
+            .map_err(|error| QuotaRefreshError::ProviderRequest {
+                message: error.to_string(),
+            })?;
         let mut fetcher = Self::new(client);
         fetcher.usage_endpoint = usage_endpoint.into();
-        fetcher
+        Ok(fetcher)
     }
 
     pub(super) async fn fetch_quota(
         &self,
         request: QuotaRefreshProviderRequest,
-    ) -> Result<QuotaRefreshProviderResponse, QuotaCommandError> {
+    ) -> Result<QuotaRefreshProviderResponse, QuotaRefreshError> {
         // Endpoint and oauth beta are pinned in claude-oauth-external-facts.md §3 and
         // claude-oss-proxy-source-audit.md §3.4 (CRS usage fetcher anchors).
         let response = self
@@ -49,19 +51,19 @@ impl ClaudeQuotaFetcher {
             .header("anthropic-beta", CLAUDE_OAUTH_BETA)
             .send()
             .await
-            .map_err(|error| QuotaCommandError::ProviderRequest {
+            .map_err(|error| QuotaRefreshError::ProviderRequest {
                 message: error.to_string(),
             })?;
         let status = response.status();
         if !status.is_success() {
-            return Err(QuotaCommandError::ProviderStatus {
+            return Err(QuotaRefreshError::ProviderStatus {
                 status: status.as_u16(),
             });
         }
         let body = response
             .text()
             .await
-            .map_err(|error| QuotaCommandError::ProviderRequest {
+            .map_err(|error| QuotaRefreshError::ProviderRequest {
                 message: error.to_string(),
             })?;
         parse_claude_usage_response(&body)
@@ -91,9 +93,9 @@ struct ClaudeUsageLimit {
 
 fn parse_claude_usage_response(
     body: &str,
-) -> Result<QuotaRefreshProviderResponse, QuotaCommandError> {
+) -> Result<QuotaRefreshProviderResponse, QuotaRefreshError> {
     let usage: ClaudeUsageResponse =
-        serde_json::from_str(body).map_err(|error| QuotaCommandError::ProviderResponse {
+        serde_json::from_str(body).map_err(|error| QuotaRefreshError::ProviderResponse {
             message: error.to_string(),
         })?;
     let mut structured_five_hour = None;
@@ -107,7 +109,7 @@ fn parse_claude_usage_response(
                 structured_weekly = Some(parse_limit_window(&limit)?);
             }
             "session" | "weekly_all" => {
-                return Err(QuotaCommandError::ProviderResponse {
+                return Err(QuotaRefreshError::ProviderResponse {
                     message: "duplicate Claude quota window in usage response".to_owned(),
                 });
             }
@@ -158,12 +160,12 @@ fn parse_claude_usage_response(
 
 fn parse_limit_window(
     limit: &ClaudeUsageLimit,
-) -> Result<ParsedClaudeUsageWindow, QuotaCommandError> {
+) -> Result<ParsedClaudeUsageWindow, QuotaRefreshError> {
     let utilization_percent =
         limit
             .percent
             .as_f64()
-            .ok_or_else(|| QuotaCommandError::ProviderResponse {
+            .ok_or_else(|| QuotaRefreshError::ProviderResponse {
                 message: "Claude quota utilization percentage is not numeric".to_owned(),
             })?;
     parse_percent_window(utilization_percent, limit.resets_at.as_deref())
@@ -177,7 +179,7 @@ struct ParsedClaudeUsageWindow {
 
 fn parse_legacy_window(
     window: ClaudeLegacyUsageWindow,
-) -> Result<Option<ParsedClaudeUsageWindow>, QuotaCommandError> {
+) -> Result<Option<ParsedClaudeUsageWindow>, QuotaRefreshError> {
     window
         .utilization
         .map(|percent| parse_percent_window(percent, window.resets_at.as_deref()))
@@ -187,9 +189,9 @@ fn parse_legacy_window(
 fn parse_percent_window(
     utilization_percent: f64,
     resets_at: Option<&str>,
-) -> Result<ParsedClaudeUsageWindow, QuotaCommandError> {
+) -> Result<ParsedClaudeUsageWindow, QuotaRefreshError> {
     if !utilization_percent.is_finite() || utilization_percent < 0.0 {
-        return Err(QuotaCommandError::ProviderResponse {
+        return Err(QuotaRefreshError::ProviderResponse {
             message: "Claude quota utilization percentage is negative or not finite".to_owned(),
         });
     }
@@ -198,7 +200,7 @@ fn parse_percent_window(
         .map(|reset| {
             chrono::DateTime::parse_from_rfc3339(reset)
                 .map(|date_time| date_time.timestamp())
-                .map_err(|error| QuotaCommandError::ProviderResponse {
+                .map_err(|error| QuotaRefreshError::ProviderResponse {
                     message: error.to_string(),
                 })
         })

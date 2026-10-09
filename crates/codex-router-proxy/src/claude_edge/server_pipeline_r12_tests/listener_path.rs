@@ -176,7 +176,7 @@ async fn loopback_claude_key_unavailable_returns_reason_two() {
     let file_store = FileSecretStore::open(&secret_root)
         .unwrap_or_else(|error| panic!("fixture file store should open: {error}"));
     let (endpoint, probe_start, upstream_probe) = fake_claude_upstream_probe();
-    let runtime = LoopbackRouterRuntime::start(
+    let runtime = LoopbackRouterRuntime::start_with_credentials_for_test(
         runtime_config(&database_path, &secret_root).with_debug_claude_upstream_endpoint(endpoint),
         EncryptedCredentialStore::key_unavailable(file_store),
     )
@@ -196,7 +196,7 @@ async fn loopback_claude_migration_incomplete_returns_reason_two() {
     let file_store = FileSecretStore::open(&secret_root)
         .unwrap_or_else(|error| panic!("fixture file store should open: {error}"));
     let (endpoint, probe_start, upstream_probe) = fake_claude_upstream_probe();
-    let runtime = LoopbackRouterRuntime::start(
+    let runtime = LoopbackRouterRuntime::start_with_credentials_for_test(
         runtime_config(&database_path, &secret_root).with_debug_claude_upstream_endpoint(endpoint),
         EncryptedCredentialStore::migration_incomplete(
             file_store,
@@ -326,7 +326,7 @@ async fn loopback_claude_hard_weekly_floor_returns_reason_five() {
     let config = runtime_config(&database_path, &secret_root)
         .with_quota_clock(1_100, 300)
         .with_debug_claude_upstream_endpoint(endpoint);
-    let runtime = LoopbackRouterRuntime::start(config, credentials)
+    let runtime = LoopbackRouterRuntime::start_with_credentials_for_test(config, credentials)
         .await
         .unwrap_or_else(|error| panic!("fixture Router should start: {error}"));
 
@@ -453,7 +453,7 @@ async fn loopback_exhaustion_preserves_provider_attempt_one_usage_limit_response
                 panic!("isolated fixture Claude upstream should be valid: {error}")
             }),
         );
-    let runtime = LoopbackRouterRuntime::start(config, credentials)
+    let runtime = LoopbackRouterRuntime::start_with_credentials_for_test(config, credentials)
         .await
         .unwrap_or_else(|error| panic!("fixture Router should start: {error}"));
 

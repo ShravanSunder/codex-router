@@ -1,18 +1,18 @@
 //! Reloads local authentication when the stored token generation changes.
-use crate::token::LocalRouterTokenService;
 use codex_router_core::local_auth::LocalRouterAuth;
 use codex_router_secret_store::file_backend::FileSecretStore;
+use codex_router_secret_store::local_router_token::LocalRouterTokenService;
 use std::time::Duration;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-pub(super) struct LocalTokenReloadWatcher {
+pub struct LocalTokenReloadWatcher {
     stop_requested: CancellationToken,
     task: Option<JoinHandle<()>>,
 }
 
 impl LocalTokenReloadWatcher {
-    pub(super) fn start(
+    pub fn start(
         secret_store: FileSecretStore,
         initial_generation: codex_router_core::ids::TokenGeneration,
         reload_auth: impl Fn(LocalRouterAuth) + Send + 'static,
@@ -56,7 +56,7 @@ impl LocalTokenReloadWatcher {
         self.stop_requested.cancel();
     }
 
-    pub(super) async fn shutdown(&mut self) {
+    pub async fn shutdown(&mut self) {
         self.request_stop();
         if let Some(task) = self.task.as_mut() {
             let _result = task.await;
