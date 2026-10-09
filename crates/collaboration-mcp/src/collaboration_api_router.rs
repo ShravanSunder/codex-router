@@ -13,7 +13,6 @@ use axum::{
 };
 use collaboration_protocol::RouterExecutableRelation;
 use collaboration_service::CollaborationApplication;
-use futures_util::StreamExt;
 use rmcp::{
     model::{
         CallToolResult, ClientJsonRpcMessage, ClientRequest, ErrorCode, ErrorData,
@@ -24,7 +23,7 @@ use rmcp::{
     },
 };
 use std::{io, net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
-use tokio::sync::{Semaphore, watch};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, watch};
 use tokio_util::sync::CancellationToken;
 
 /// The path every listener serves the collaboration API on.
@@ -196,34 +195,33 @@ fn not_stopped(what: &str) -> io::Error {
     )
 }
 
+/// A listener's request slot, shared by the request and the tool call it runs.
+#[derive(Clone)]
+pub(crate) struct CallAdmission {
+    _permit: Arc<OwnedSemaphorePermit>,
+}
+
 /// Admits a request if this listener has capacity; otherwise answers it as `overloaded`
 /// without running it.
 ///
 /// A tower `ConcurrencyLimit` with `LoadShed` would shed the same requests, but its error
 /// handler sees no request body, so it could not answer a shed tool call with a tool result
-/// carrying that call's id. A streamed (SSE) answer keeps its permit until the stream ends; a
-/// JSON answer is complete when the handler returns.
+/// carrying that call's id. The slot is held until both the answer's headers are out and the
+/// tool call has ended: a streamed (SSE) call keeps its share while it runs, and a reader
+/// that stops reading the rest of the stream does not keep the slot after the call ends.
 async fn shed_past_capacity(
     State(admission): State<Arc<Semaphore>>,
-    request: Request,
+    mut request: Request,
     next: Next,
 ) -> Response {
     if let Ok(permit) = Arc::clone(&admission).try_acquire_owned() {
+        let admitted = CallAdmission {
+            _permit: Arc::new(permit),
+        };
+        request.extensions_mut().insert(admitted.clone());
         let response = next.run(request).await;
-        let streamed = response
-            .headers()
-            .get(axum::http::header::CONTENT_TYPE)
-            .and_then(|value| value.to_str().ok())
-            .is_some_and(|value| value.starts_with("text/event-stream"));
-        if !streamed {
-            return response;
-        }
-        let (parts, body) = response.into_parts();
-        let body = Body::from_stream(body.into_data_stream().map(move |chunk| {
-            let _admitted = &permit;
-            chunk
-        }));
-        return Response::from_parts(parts, body);
+        drop(admitted);
+        return response;
     }
     let (parts, body) = request.into_parts();
     let Ok(bytes) = axum::body::to_bytes(body, MAX_REQUEST_BODY_BYTES).await else {

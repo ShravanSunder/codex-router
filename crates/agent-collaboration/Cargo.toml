@@ -42,7 +42,7 @@ tempfile = "3.27.0"
 jsonschema.workspace = true
 reqwest = { workspace = true, features = ["json"] }
 sha2.workspace = true
-sqlx.workspace = true
+sqlx = { workspace = true, features = ["sqlite"] }
 uuid.workspace = true
 agent-automation = { path = "../agent-automation", version = "0.1.16" }
 automation-storage = { path = "../automation-storage", version = "0.1.16" }

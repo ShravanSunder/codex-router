@@ -11,7 +11,7 @@ futures-util.workspace = true
 http.workspace = true
 rmcp = { workspace = true, features = ["client", "transport-streamable-http-client-unix-socket"] }
 tokio-tungstenite.workspace = true
-sqlx.workspace = true
+sqlx = { workspace = true, features = ["sqlite"] }
 message-board = { path = "../message-board", version = "0.1.20" }
 tokio-util.workspace = true
 codex-native-integration.workspace = true
