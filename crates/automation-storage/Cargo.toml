@@ -13,7 +13,7 @@ uuid.workspace = true
 chrono.workspace = true
 agent-automation = { path = "../agent-automation", version = "0.1.16" }
 collaboration-protocol = { path = "../collaboration-protocol", version = "0.1.47" }
-sqlx = { workspace = true, features = ["macros", "migrate"] }
+sqlx = { workspace = true, features = ["macros", "migrate", "sqlite"] }
 thiserror.workspace = true
 serde.workspace = true
 serde_json.workspace = true

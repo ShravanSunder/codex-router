@@ -50,7 +50,7 @@ agent-client-protocol.workspace = true
 sha2.workspace = true
 tempfile = "3.27.0"
 toml = "1.1.2"
-sqlx.workspace = true
+sqlx = { workspace = true, features = ["sqlite"] }
 uuid.workspace = true
 tokio = { workspace = true, features = ["io-std", "test-util"] }
 futures-util.workspace = true
