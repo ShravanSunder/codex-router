@@ -1,10 +1,9 @@
-//! Shared DTO schemas. The complete Control method catalog is assembled separately.
+//! Shared DTO schemas for the CLI's printed records and the published manifest.
 use schemars::{JsonSchema, generate::SchemaSettings};
 use serde_json::Value;
 use std::collections::BTreeMap;
 
 /// Generates serialized wire shapes, retaining required nullable result fields.
-/// This DTO catalog alone is not a complete Control schema or a publishable Control digest.
 pub fn protocol_type_schemas() -> Result<BTreeMap<String, Value>, serde_json::Error> {
     let mut schemas = BTreeMap::new();
     add_type::<crate::EndpointDescription>(&mut schemas)?;
@@ -12,10 +11,7 @@ pub fn protocol_type_schemas() -> Result<BTreeMap<String, Value>, serde_json::Er
     add_type::<crate::SessionRef>(&mut schemas)?;
     add_type::<crate::AddressPage>(&mut schemas)?;
     add_type::<crate::JournalPage>(&mut schemas)?;
-    add_type::<crate::ControlInitializationParams>(&mut schemas)?;
-    add_type::<crate::ControlInitializationResult>(&mut schemas)?;
     add_type::<crate::EndpointInventory>(&mut schemas)?;
-    add_type::<crate::EndpointChange>(&mut schemas)?;
     add_type::<crate::JournalStatus>(&mut schemas)?;
     add_type::<crate::JournalReadParams>(&mut schemas)?;
     add_type::<crate::AddressListParams>(&mut schemas)?;

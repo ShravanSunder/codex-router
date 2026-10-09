@@ -8,16 +8,19 @@ publish.workspace = true
 [lints]
 workspace = true
 
+[features]
+# The API served the way a Host serves it, for other crates' tests.
+test-support = []
+
 [dependencies]
+axum.workspace = true
 collaboration-client = { path = "../collaboration-client", version = "0.1.30" }
 collaboration-protocol = { path = "../collaboration-protocol", version = "0.1.30" }
+collaboration-service = { path = "../collaboration-service", version = "0.1.30" }
 codex-native-integration.workspace = true
 futures-util.workspace = true
-bytes.workspace = true
 http.workspace = true
-http-body-util.workspace = true
-hyper.workspace = true
-hyper-util.workspace = true
+message-board = { path = "../message-board", version = "0.1.20" }
 rmcp.workspace = true
 schemars.workspace = true
 serde.workspace = true
@@ -25,7 +28,6 @@ serde_json.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 thiserror.workspace = true
-tower-service = "0.3.3"
 
 [dev-dependencies]
 agent-collaboration = { path = "../agent-collaboration", version = "0.1.30" }
@@ -33,13 +35,11 @@ automation-storage = { path = "../automation-storage", version = "0.1.16" }
 codex-acp-adapter = { path = "../codex-acp-adapter", version = "0.1.30" }
 codex-router-host = { path = "../codex-router-host", version = "0.1.31" }
 codex-native-integration.workspace = true
-collaboration-service = { path = "../collaboration-service", version = "0.1.30" }
 futures-util.workspace = true
 jsonschema.workspace = true
-message-board = { path = "../message-board", version = "0.1.20" }
 message-board-storage = { path = "../message-board-storage", version = "0.1.20" }
 reqwest = { workspace = true, features = ["json"] }
-rmcp = { workspace = true, features = ["client"] }
+rmcp = { workspace = true, features = ["client", "transport-streamable-http-client-reqwest", "transport-streamable-http-client-unix-socket"] }
 tempfile = "3.27.0"
 tokio-tungstenite.workspace = true
 tracing.workspace = true

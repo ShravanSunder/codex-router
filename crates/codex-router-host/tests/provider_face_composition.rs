@@ -8,9 +8,9 @@ use std::os::unix::fs::PermissionsExt as _;
 
 #[allow(clippy::expect_used)]
 async fn assert_provider_ready(directory: &std::path::Path) {
-    let mut client = collaboration_client::ControlClient::connect(directory, "face-proof", "1")
+    let client = collaboration_client::CollaborationClient::connect(directory, "face-proof", "1")
         .await
-        .expect("Control client");
+        .expect("collaboration API client");
     let inventory = client.list_endpoints().await.expect("endpoint inventory");
     let provider = inventory
         .endpoints

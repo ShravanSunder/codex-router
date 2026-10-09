@@ -128,6 +128,18 @@ pub fn operation_failure_from_client_error(
             None,
         ),
         ClientError::Timeout => (OperationFailureKind::Timeout, None, "response", None, None),
+        ClientError::Overloaded { message } => (
+            OperationFailureKind::Unavailable,
+            Some("overloaded".to_owned()),
+            "admission",
+            Some(crate::api_connection::OPERATION_FAILED),
+            Some(serde_json::json!({
+                "kind": "overloaded",
+                "stage": "admission",
+                "effect": "none",
+                "message": message,
+            })),
+        ),
         ClientError::Rejected { code, data } => (
             OperationFailureKind::Rejected,
             data.as_ref()
@@ -143,6 +155,8 @@ pub fn operation_failure_from_client_error(
         ),
     };
     let possible_effect = match &error {
+        // An overloaded request was not run.
+        ClientError::Overloaded { .. } => OperationEffect::None,
         ClientError::Rejected { data, .. }
             if native_control_rejection_has_no_effect(data.as_ref()) =>
         {
@@ -151,6 +165,7 @@ pub fn operation_failure_from_client_error(
         _ => effect,
     };
     let message = match &error {
+        ClientError::Overloaded { message } => message.clone(),
         ClientError::Rejected { data, .. } => data
             .as_ref()
             .and_then(|value| value.get("message"))

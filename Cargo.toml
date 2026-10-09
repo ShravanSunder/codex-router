@@ -31,7 +31,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.67"
+version = "0.1.79"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 publish = false
@@ -49,6 +49,7 @@ codex-router-core = { path = "crates/codex-router-core", version = "0.1.6" }
 codex-native-integration = { path = "crates/codex-native-integration", version = "0.1.6" }
 codex-router-host = { path = "crates/codex-router-host", version = "0.1.6" }
 codex-router-quota = { path = "crates/codex-router-quota", version = "0.1.6" }
+axum = { version = "0.8.8", default-features = false, features = ["http1", "tokio"] }
 base64 = "0.22.1"
 bytes = "1.11.0"
 chrono = "0.4.45"

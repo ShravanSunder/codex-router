@@ -118,9 +118,6 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p target/protocol-schemas/communication-control target/protocol-schemas/acp-protocol
-          cargo run --locked --release -p collaboration-protocol --example export_control_schema \
-            > target/protocol-schemas/communication-control/control-schema.json \
-            2> target/control-schema-export.log
           cargo run --locked --release -p collaboration-protocol --example export_protocol_types \
             > target/protocol-schemas/communication-control/protocol-types.json
           cp protocol-schemas/acp-protocol/stable-schema.json protocol-schemas/acp-protocol/upstream-license.txt \

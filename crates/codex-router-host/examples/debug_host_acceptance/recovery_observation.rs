@@ -1,30 +1,45 @@
 //! Timestamped debug recovery observations; never resumes or submits to the target.
+//!
+//! The endpoint directory is read through the collaboration API every half second; each new
+//! publication sequence is one timeline event.
 use codex_native_integration::NativeProtocolConnection;
-use collaboration_client::ControlClient;
+use collaboration_client::CollaborationClient;
 use serde_json::{Value, json};
-use std::{error::Error, path::Path};
+use std::{error::Error, path::Path, time::Duration};
 use tokio::io::AsyncBufReadExt;
 
+const DIRECTORY_POLL_INTERVAL: Duration = Duration::from_millis(500);
+
 pub async fn hold(directory: &Path, socket: &Path, thread: &str) -> Result<(), Box<dyn Error>> {
-    let mut control =
-        ControlClient::connect(directory, "recovery-timeline", env!("CARGO_PKG_VERSION")).await?;
+    let client =
+        CollaborationClient::connect(directory, "recovery-timeline", env!("CARGO_PKG_VERSION"))
+            .await?;
     let started = std::time::Instant::now();
-    let snapshot = control.list_endpoints().await?;
+    let snapshot = client.list_endpoints().await?;
     println!(
         "{}",
         json!({"kind":"recoveryTimelineInitial","elapsedMs":0,"endpoints":snapshot.endpoints})
     );
+    let mut sequence = snapshot.sequence;
     let mut input = tokio::io::BufReader::new(tokio::io::stdin()).lines();
+    let mut poll = tokio::time::interval(DIRECTORY_POLL_INTERVAL);
     loop {
         tokio::select! {
             line=input.next_line()=>{
                 if line?.as_deref()!=Some("finish"){return Err("unexpected recovery control input".into());}
                 break;
             },
-            event=control.next_notification()=>{
-                let event=event?;
+            _=poll.tick()=>{
+                let current=client.list_endpoints().await?;
+                if current.sequence==sequence { continue; }
+                sequence=current.sequence;
+                let event=json!({"sequence":current.sequence,"endpoints":current.endpoints});
                 println!("{}",json!({"kind":"recoveryTimelineEvent","elapsedMs":started.elapsed().as_millis(),"event":event}));
-                if event.pointer("/params/endpoint/availability/state").and_then(Value::as_str)==Some("available") {
+                let available=event.get("endpoints").and_then(Value::as_array).is_some_and(|endpoints| endpoints.iter().any(|endpoint| {
+                    endpoint.pointer("/endpoint/endpointId").and_then(Value::as_str)==Some("codex-local")
+                        && endpoint.pointer("/availability/state").and_then(Value::as_str)==Some("available")
+                }));
+                if available {
                     let probe=async {
                         let mut native=NativeProtocolConnection::connect(socket).await?;
                         let _config=native.request("config/read",json!({"includeLayers":false})).await?;
@@ -39,6 +54,5 @@ pub async fn hold(directory: &Path, socket: &Path, thread: &str) -> Result<(), B
             }
         }
     }
-    control.close().await?;
     Ok(())
 }

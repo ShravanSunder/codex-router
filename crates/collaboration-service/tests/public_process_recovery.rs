@@ -1,12 +1,14 @@
 //! Abrupt process loss cannot promote persisted observations into live coverage.
+#[path = "support/served_api.rs"]
+mod served_api;
 #[cfg(test)]
 mod tests {
-    use collaboration_client::ControlClient;
+    use collaboration_client::CollaborationClient;
     use collaboration_protocol::{
         AddressPage, CoverageState, EndpointRef, JournalPosition, LifecycleChange,
         LifecycleObservation,
     };
-    use collaboration_service::{ServiceIdentity, serve_control_connection};
+    use collaboration_service::ServiceIdentity;
     use lifecycle_observation::{LifecycleStore, ObservationJournal};
     use serde_json::json;
     use std::{
@@ -22,7 +24,7 @@ mod tests {
 
     #[tokio::test]
     async fn killed_writer_preserves_commits_but_invalidates_public_live_coverage() {
-        // Arrange: a distinct process owns the real journal and public Control server.
+        // Arrange: a distinct process owns the real journal and public API server.
         let path = std::env::temp_dir().join(format!(
             "process-crash-journal-{}.sqlite",
             std::process::id()
@@ -67,7 +69,7 @@ mod tests {
             .unwrap();
         assert_eq!(status.signal(), Some(9));
         let store = open_store(&path).await;
-        let (mut client, server) = public_reader(Arc::clone(&store), NEW_EPOCH).await;
+        let (client, server) = public_reader(Arc::clone(&store), NEW_EPOCH).await;
         let after = client.list_addresses(&endpoint(), 100, None).await.unwrap();
         let history = client
             .read_journal(
@@ -108,8 +110,8 @@ mod tests {
                 .iter()
                 .any(|row| matches!(row.observation.change, LifecycleChange::CoverageLost))
         );
-        client.close().await.unwrap();
-        server.await.unwrap().unwrap();
+        drop(client);
+        server.stop().await.unwrap();
         Arc::try_unwrap(store)
             .unwrap_or_else(|_| panic!("store retained"))
             .close()
@@ -148,7 +150,7 @@ mod tests {
             .unwrap();
             store.append(&observation, 100).await.unwrap();
         }
-        let (mut client, _server) = public_reader(Arc::clone(&store), OLD_EPOCH).await;
+        let (client, _server) = public_reader(Arc::clone(&store), OLD_EPOCH).await;
         let before = client.list_addresses(&endpoint(), 100, None).await.unwrap();
         println!("CRASH_READY:{}", serde_json::to_string(&before).unwrap());
         std::io::stdout().flush().unwrap();
@@ -172,19 +174,16 @@ mod tests {
     async fn public_reader(
         store: Arc<LifecycleStore>,
         epoch: &str,
-    ) -> (ControlClient, tokio::task::JoinHandle<std::io::Result<()>>) {
-        let identity = ServiceIdentity::new(SERVICE, epoch, &format!("sha256:{}", "a".repeat(64))).unwrap()
+    ) -> (CollaborationClient, crate::served_api::ServedApi) {
+        let identity = ServiceIdentity::new(SERVICE, epoch).unwrap()
             .with_endpoints(vec![serde_json::from_value(json!({"endpoint":endpoint(),"label":"Fixture Codex",
                 "availability":{"state":"unprobed"},"channels":[{"kind":"nativeCodex","transport":"unixWebSocket",
                 "path":"native.sock","schemaDigest":null,"generation":null}]})).unwrap()]).unwrap()
             .with_journal(store);
-        let (client, server) = tokio::net::UnixStream::pair().unwrap();
-        let task = tokio::spawn(serve_control_connection(server, identity));
+        let served = crate::served_api::ServedApi::start(identity).await.unwrap();
         (
-            ControlClient::initialize(client, "process-recovery-proof", "1")
-                .await
-                .unwrap(),
-            task,
+            served.client("process-recovery-proof").await.unwrap(),
+            served,
         )
     }
 }

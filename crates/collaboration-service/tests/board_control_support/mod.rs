@@ -1,38 +1,44 @@
-use collaboration_service::{ServiceIdentity, serve_control_connection};
+use collaboration_service::ServiceIdentity;
 use serde_json::{Value, json};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+#[path = "../support/served_api.rs"]
+pub mod served_api;
 
+/// Sends each `{"id", "method", "params"}` request as one call of the matching board tool and
+/// answers `{"id", "result"}` or `{"id", "error": {"code", "message", "data"}}` in order.
 pub async fn send_raw_board_requests(
     identity: ServiceIdentity,
     requests: Vec<Value>,
 ) -> Result<Vec<Value>, Box<dyn std::error::Error>> {
-    let (client, server) = tokio::net::UnixStream::pair()?;
-    let task = tokio::spawn(serve_control_connection(server, identity));
-    let (reader, mut writer) = client.into_split();
-    let mut lines = BufReader::new(reader).lines();
-    let initialize = json!({
-        "jsonrpc":"2.0","id":"initialize","method":"control/initialize",
-        "params":{"version":{"major":1,"minor":0},"client":{"name":"board-validation","version":"1"}}
-    });
-    writer
-        .write_all(format!("{initialize}\n").as_bytes())
-        .await?;
-    let initialization: Value = serde_json::from_str(
-        &lines
-            .next_line()
-            .await?
-            .ok_or("initialization response missing")?,
-    )?;
-    if initialization.get("result").is_none() {
-        return Err("Control initialization failed".into());
-    }
+    let served = served_api::ServedApi::start(identity).await?;
     let mut responses = Vec::with_capacity(requests.len());
     for request in requests {
-        writer.write_all(format!("{request}\n").as_bytes()).await?;
-        let response = lines.next_line().await?.ok_or("board response missing")?;
-        responses.push(serde_json::from_str(&response)?);
+        let method = request
+            .get("method")
+            .and_then(Value::as_str)
+            .ok_or("board request method missing")?;
+        let params = request.get("params").cloned().unwrap_or_else(|| json!({}));
+        let mut response = served.call(&tool_name(method), params).await?;
+        if let (Some(fields), Some(id)) = (response.as_object_mut(), request.get("id")) {
+            fields.insert("id".to_owned(), id.clone());
+        }
+        responses.push(response);
     }
-    writer.shutdown().await?;
-    task.await??;
+    served.stop().await?;
     Ok(responses)
+}
+
+/// `board/projectCreate` names the tool `board_project_create`.
+fn tool_name(method: &str) -> String {
+    let mut tool = String::with_capacity(method.len() + 4);
+    for character in method.chars() {
+        if character == '/' {
+            tool.push('_');
+        } else if character.is_ascii_uppercase() {
+            tool.push('_');
+            tool.push(character.to_ascii_lowercase());
+        } else {
+            tool.push(character);
+        }
+    }
+    tool
 }

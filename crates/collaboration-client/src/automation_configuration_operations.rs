@@ -1,5 +1,5 @@
-//! Configure future attempt budgets and inspect service readiness through typed Control calls.
-use crate::{ClientError, ControlClient};
+//! Configure future attempt budgets and inspect service readiness through typed collaboration API calls.
+use crate::{ClientError, CollaborationClient};
 use collaboration_protocol::{
     AutomationConfiguration, AutomationConfigureRequest, AutomationStatus, ConfigurationFailure,
 };
@@ -11,27 +11,26 @@ pub enum ConfigurationClientError {
     #[error(transparent)]
     Connection(#[from] ClientError),
 }
-impl ControlClient {
+impl CollaborationClient {
     pub async fn configure_automation(
-        &mut self,
+        &self,
         request: AutomationConfigureRequest,
     ) -> Result<AutomationConfiguration, ConfigurationClientError> {
-        self.configuration_call("automation/configure", request)
+        self.configuration_call("automation_configure", request)
             .await
     }
-    pub async fn automation_status(
-        &mut self,
-    ) -> Result<AutomationStatus, ConfigurationClientError> {
-        self.configuration_call("automation/status", serde_json::json!({}))
+    pub async fn automation_status(&self) -> Result<AutomationStatus, ConfigurationClientError> {
+        self.configuration_call("automation_status", serde_json::json!({}))
             .await
     }
     async fn configuration_call<TRequest: Serialize, TResponse: DeserializeOwned>(
-        &mut self,
+        &self,
         method: &str,
         request: TRequest,
     ) -> Result<TResponse, ConfigurationClientError> {
         let params = serde_json::to_value(request)
             .map_err(|_| ClientError::Protocol("invalid configuration request"))?;
+        let shed = crate::admission_overload::ShedRequest::of(&params);
         let result = match self.connection.call(method, params).await {
             Ok(result) => result,
             Err(ClientError::Rejected {
@@ -41,6 +40,11 @@ impl ControlClient {
                 return Err(ConfigurationClientError::Rejected(
                     serde_json::from_value(data)
                         .map_err(|_| ClientError::Protocol("invalid configuration error"))?,
+                ));
+            }
+            Err(ClientError::Overloaded { message }) => {
+                return Err(ConfigurationClientError::Rejected(
+                    crate::admission_overload::configuration(message, &shed).into(),
                 ));
             }
             Err(error) => return Err(error.into()),

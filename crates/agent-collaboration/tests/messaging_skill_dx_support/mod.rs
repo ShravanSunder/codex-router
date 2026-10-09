@@ -104,7 +104,6 @@ pub(super) async fn prepare_recipient() -> ProofResult<()> {
         "messagingRecipientPrepared",
         json!({"target":recipient,"state":state::STATE_FILENAME,"trace":PREPARE_TRACE}),
     )?;
-    proof.client.close().await?;
     Ok(())
 }
 
@@ -219,7 +218,6 @@ pub(super) async fn exercise_round_trip() -> ProofResult<()> {
         "messagingSkillRoundTripVerified",
         json!({"sender":sender,"recipient":proof_state.recipient,"trace":ROUND_TRIP_TRACE}),
     )?;
-    proof.client.close().await?;
     Ok(())
 }
 

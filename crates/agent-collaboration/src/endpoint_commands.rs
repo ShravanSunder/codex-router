@@ -1,7 +1,7 @@
 //! Descriptive endpoint discovery through the public Rust client.
 use clap::{Parser, Subcommand};
 use collaboration_client::{
-    ClientError, ControlClient, ServiceDirectoryOptions, resolve_service_directory,
+    ClientError, CollaborationClient, ServiceDirectoryOptions, resolve_service_directory,
 };
 use serde_json::json;
 use std::{
@@ -142,11 +142,13 @@ pub fn run_endpoint_command(arguments: Vec<OsString>) -> i32 {
         }
     };
     let result = runtime.block_on(async {
-        let mut client =
-            ControlClient::connect(&directory, "agent-collaboration", env!("CARGO_PKG_VERSION"))
-                .await?;
+        let client = CollaborationClient::connect(
+            &directory,
+            "agent-collaboration",
+            env!("CARGO_PKG_VERSION"),
+        )
+        .await?;
         let inventory = client.list_endpoints().await?;
-        client.close().await?;
         Ok::<_, ClientError>(inventory)
     });
     match result {
@@ -179,7 +181,7 @@ pub fn run_endpoint_command(arguments: Vec<OsString>) -> i32 {
         Err(ClientError::Protocol(message)) => {
             report_failure("unavailable", message, 3, machine_output)
         }
-        Err(error) => crate::permission_diagnostic_reporting::report_permission_error(
+        Err(error) => crate::permission_diagnostic_reporting::report_actionable_client_error(
             &error,
             crate::permission_diagnostic_reporting::PermissionDiagnosticRendering::Command,
             machine_output,

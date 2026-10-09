@@ -37,17 +37,12 @@ impl ProviderAcpRouteClaim {
         if !self.serves(target) {
             return RouteClaim::NotMine;
         }
-        let endpoint = self
-            .directory
-            .subscribe()
-            .and_then(|subscription| subscription.snapshot())
-            .ok()
-            .and_then(|snapshot| {
-                snapshot
-                    .endpoints
-                    .into_iter()
-                    .find(|entry| entry.endpoint == target.endpoint)
-            });
+        let endpoint = self.directory.inventory().ok().and_then(|snapshot| {
+            snapshot
+                .endpoints
+                .into_iter()
+                .find(|entry| entry.endpoint == target.endpoint)
+        });
         let Some(endpoint) = endpoint else {
             return unavailable(
                 "provider endpoint is not registered",

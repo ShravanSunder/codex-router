@@ -122,14 +122,10 @@ impl SubscriptionExpansionFixture {
                 .expect("watch thread as the target session");
         }
 
-        let identity = ServiceIdentity::new(
-            SERVICE_ID,
-            SERVICE_ID,
-            &format!("sha256:{}", "a".repeat(64)),
-        )
-        .expect("service identity")
-        .with_board_store(Arc::clone(&board))
-        .with_automation_store(Arc::clone(&pushes));
+        let identity = ServiceIdentity::new(SERVICE_ID, SERVICE_ID)
+            .expect("service identity")
+            .with_board_store(Arc::clone(&board))
+            .with_automation_store(Arc::clone(&pushes));
         let control = ControlHarness::start(identity).await;
 
         Self {

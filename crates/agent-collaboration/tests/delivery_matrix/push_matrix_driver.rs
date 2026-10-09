@@ -31,7 +31,11 @@ async fn create_conversation_fixture(
     settings: ConversationFixtureSettings,
 ) -> ProofResult<SessionRef> {
     let endpoint = settings.endpoint.clone();
-    let conversation = ConversationClient::connect(&proof.service_directory, &endpoint).await?;
+    let conversation = ConversationClient::connect(
+        &collaboration_client::CollaborationAccess::api(&proof.service_directory),
+        &endpoint,
+    )
+    .await?;
     match conversation
         .create(
             ConversationCreateInput {
@@ -280,11 +284,7 @@ pub(super) async fn dm_notice_and_show(
 }
 
 pub(super) fn machine_label(proof: &ProofContext) -> ProofResult<MachineLabel> {
-    proof
-        .client
-        .machine_label()
-        .cloned()
-        .ok_or_else(|| "debug Host service manifest omitted machine label".into())
+    Ok(proof.client.machine_label().clone())
 }
 
 pub(super) fn expected_push_line(

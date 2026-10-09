@@ -1,6 +1,6 @@
 //! Real Host-owned local persistence and CLI processes, without Codex or model execution.
 use codex_router_host::{CollaborationRuntime, CollaborationRuntimeInputs};
-use collaboration_client::ControlClient;
+use collaboration_client::CollaborationClient;
 use collaboration_client::protocol::{InstructionCreateParams, InstructionText, OperationId};
 use serde_json::{Value, json};
 use std::os::unix::fs::DirBuilderExt;
@@ -20,14 +20,13 @@ async fn cli_creates_and_inspects_disabled_schedule() -> Result<(), Box<dyn std:
         owner_human_id: None,
     })
     .await?;
-    let mut client = ControlClient::connect(&root, "schedule-cli-fixture", "1").await?;
+    let client = CollaborationClient::connect(&root, "schedule-cli-fixture", "1").await?;
     let instruction = client
         .create_instruction(InstructionCreateParams {
             operation_id: OperationId::generate(),
             text: InstructionText::try_from("Inspect job status".to_owned())?,
         })
         .await?;
-    client.close().await?;
     let definition = root.join("schedule-definition.json");
     std::fs::write(
         &definition,

@@ -2,15 +2,15 @@
 #[cfg(test)]
 mod tests {
     use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
-    use collaboration_client::{ClientError, ControlClient, JournalStatus};
+    use collaboration_client::{ClientError, JournalStatus};
+    use collaboration_mcp::test_support::ServedCollaborationApi;
     use collaboration_protocol::{
         MachineId, MachineLabel, NativeSessionListParams, NativeSessionScope, NativeSessionSource,
         NativeSessionView, PushHeaderFacts, PushId, PushLineInput, PushOrigin, RouterLink,
         SessionDisplayNameLookup, parse_push_line_header, render_push_line, session_identity,
     };
     use collaboration_service::{
-        LocalControlService, ManifestPublication, NativeControlBackend, NativeGenerationGate,
-        ServiceIdentity,
+        CollaborationApplication, NativeControlBackend, NativeGenerationGate, ServiceIdentity,
     };
     use lifecycle_observation::{LifecycleStore, ObservationJournal};
     use serde_json::json;
@@ -19,7 +19,6 @@ mod tests {
         path::PathBuf,
         sync::Arc,
     };
-    use tokio_util::sync::CancellationToken;
 
     #[tokio::test]
     async fn stored_inventory_does_not_cache_a_short_title_as_display_name() {
@@ -66,7 +65,7 @@ mod tests {
             }]
         }))
         .unwrap();
-        let identity = ServiceIdentity::new(id, epoch, &format!("sha256:{}", "a".repeat(64)))
+        let identity = ServiceIdentity::new(id, epoch)
             .unwrap()
             .with_endpoints(vec![description])
             .unwrap()
@@ -77,23 +76,11 @@ mod tests {
             })
             .unwrap();
         let display_names = identity.session_display_name_cache();
-        let listener =
-            LocalControlService::bind(&root.path().join("control.sock"), identity).unwrap();
-        let manifest = serde_json::from_value(json!({
-            "version": 2,
-            "serviceId": id,
-            "serviceEpoch": epoch,
-            "machineLabel":"fixture-host","control": {"transport": "unixJsonLines", "path": "control.sock"},
-            "controlSchemaDigest": format!("sha256:{}", "a".repeat(64)),
-            "mcp": {"transport": "streamableHttp", "url": "http://127.0.0.1:0/mcp"}
-        }))
-        .unwrap();
-        let publication = ManifestPublication::publish(root.path(), &manifest).unwrap();
-        let stop = CancellationToken::new();
-        let server = tokio::spawn(listener.run(stop.clone()));
-        let mut client = ControlClient::connect(root.path(), "stored-title-test", "1")
-            .await
-            .unwrap();
+        let served =
+            ServedCollaborationApi::start(root.path(), CollaborationApplication::new(identity))
+                .await
+                .unwrap();
+        let client = served.client("stored-title-test").await.unwrap();
         let inventory = client
             .list_sessions(NativeSessionListParams {
                 endpoint: endpoint.clone(),
@@ -107,10 +94,8 @@ mod tests {
             })
             .await
             .unwrap();
-        client.close().await.unwrap();
-        stop.cancel();
-        server.await.unwrap().unwrap();
-        drop(publication);
+        drop(client);
+        served.stop().await.unwrap();
 
         let session = inventory
             .sessions
@@ -185,9 +170,8 @@ mod tests {
         .await
         .unwrap();
         let store = Arc::new(LifecycleStore::new(journal));
-        let digest = format!("sha256:{}", "a".repeat(64));
         let description = serde_json::from_value(json!({"endpoint":endpoint,"label":"Stored fixture","availability":{"state":"unprobed"},"channels":[{"kind":"nativeCodex","transport":"unixWebSocket","path":"absent-native.sock","schemaDigest":null,"generation":null}]})).unwrap();
-        let identity = ServiceIdentity::new(id, epoch, &digest)
+        let identity = ServiceIdentity::new(id, epoch)
             .unwrap()
             .with_endpoints(vec![description])
             .unwrap()
@@ -198,14 +182,10 @@ mod tests {
                 codex_home: home.clone(),
             })
             .unwrap();
-        let listener = LocalControlService::bind(&root.join("control.sock"), identity).unwrap();
-        let manifest = serde_json::from_value(json!({"version":2,"serviceId":id,"serviceEpoch":epoch,"machineLabel":"fixture-host","control":{"transport":"unixJsonLines","path":"control.sock"},"controlSchemaDigest":digest,"mcp":{"transport":"streamableHttp","url":"http://127.0.0.1:0/mcp"}})).unwrap();
-        let publication = ManifestPublication::publish(&root, &manifest).unwrap();
-        let stop = CancellationToken::new();
-        let server = tokio::spawn(listener.run(stop.clone()));
-        let mut client = ControlClient::connect(&root, "stored-journal-test", "1")
+        let served = ServedCollaborationApi::start(&root, CollaborationApplication::new(identity))
             .await
             .unwrap();
+        let client = served.client("stored-journal-test").await.unwrap();
         let request = |cursor| NativeSessionListParams {
             endpoint: endpoint.clone(),
             view: NativeSessionView::Stored,
@@ -248,9 +228,7 @@ mod tests {
                 URL_SAFE_NO_PAD.encode(serde_json::to_vec(&malformed).unwrap()),
             )))
             .await;
-        let mut changed_filter_client = ControlClient::connect(&root, "stored-journal-test", "1")
-            .await
-            .unwrap();
+        let changed_filter_client = served.client("stored-journal-test").await.unwrap();
         let changed_empty_filter = changed_filter_client
             .list_sessions(NativeSessionListParams {
                 endpoint: endpoint.clone(),
@@ -263,11 +241,9 @@ mod tests {
                 cursor: first.next_cursor.clone(),
             })
             .await;
-        changed_filter_client.close().await.unwrap();
-        client.close().await.unwrap();
-        stop.cancel();
-        server.await.unwrap().unwrap();
-        drop(publication);
+        drop(changed_filter_client);
+        drop(client);
+        served.stop().await.unwrap();
         Arc::try_unwrap(store)
             .unwrap_or_else(|_| panic!("journal still shared"))
             .close()
@@ -373,9 +349,8 @@ mod tests {
         .await
         .unwrap();
         let store = Arc::new(LifecycleStore::new(journal));
-        let digest = format!("sha256:{}", "a".repeat(64));
         let description = serde_json::from_value(json!({"endpoint":endpoint,"label":"Scoped fixture","availability":{"state":"unprobed"},"channels":[{"kind":"nativeCodex","transport":"unixWebSocket","path":"absent-native.sock","schemaDigest":null,"generation":null}]})).unwrap();
-        let identity = ServiceIdentity::new(id, epoch, &digest)
+        let identity = ServiceIdentity::new(id, epoch)
             .unwrap()
             .with_endpoints(vec![description])
             .unwrap()
@@ -386,14 +361,10 @@ mod tests {
                 codex_home: home,
             })
             .unwrap();
-        let listener = LocalControlService::bind(&root.join("control.sock"), identity).unwrap();
-        let manifest = serde_json::from_value(json!({"version":2,"serviceId":id,"serviceEpoch":epoch,"machineLabel":"fixture-host","control":{"transport":"unixJsonLines","path":"control.sock"},"controlSchemaDigest":digest,"mcp":{"transport":"streamableHttp","url":"http://127.0.0.1:0/mcp"}})).unwrap();
-        let publication = ManifestPublication::publish(root, &manifest).unwrap();
-        let stop = CancellationToken::new();
-        let server = tokio::spawn(listener.run(stop.clone()));
-        let mut client = ControlClient::connect(root, "scoped-listing-test", "1")
+        let served = ServedCollaborationApi::start(root, CollaborationApplication::new(identity))
             .await
             .unwrap();
+        let client = served.client("scoped-listing-test").await.unwrap();
         let mut pages = Vec::new();
         let mut cursor = None;
         loop {
@@ -416,10 +387,8 @@ mod tests {
                 break;
             }
         }
-        client.close().await.unwrap();
-        stop.cancel();
-        server.await.unwrap().unwrap();
-        drop(publication);
+        drop(client);
+        served.stop().await.unwrap();
         Arc::try_unwrap(store)
             .unwrap_or_else(|_| panic!("journal still shared"))
             .close()

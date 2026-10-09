@@ -44,7 +44,7 @@ pub struct AcpConversation {
 }
 impl AcpConversation {
     pub async fn create_and_prompt(
-        directory: &Path,
+        access: &crate::CollaborationAccess,
         request: ConversationCreatePromptRequest,
         cancel: CancellationToken,
     ) -> Result<ConversationCreatePromptResult, ConversationCreatePromptError> {
@@ -64,7 +64,7 @@ impl AcpConversation {
             ));
         }
         let endpoint_id = request.create.endpoint.endpoint_id.clone();
-        let mut conversation = Self::connect_with_context(directory, endpoint_id).await?;
+        let mut conversation = Self::connect_with_context(access, endpoint_id).await?;
         validate_conversation_endpoint(conversation.endpoint(), &request.create.endpoint)
             .map_err(|source| crate::OperationError::before_dispatch("validation", None, source))?;
         let mut output = None;
@@ -141,7 +141,7 @@ impl AcpConversation {
     }
 
     pub async fn prompt_existing(
-        directory: &Path,
+        access: &crate::CollaborationAccess,
         request: ExistingConversationPromptRequest,
         cancel: CancellationToken,
     ) -> Result<ExistingConversationPromptResult, ExistingConversationPromptError> {
@@ -154,7 +154,7 @@ impl AcpConversation {
             )
         })?;
         let endpoint = requested_target.endpoint.clone();
-        let mut conversation = Self::connect_with_context(directory, endpoint.endpoint_id.clone())
+        let mut conversation = Self::connect_with_context(access, endpoint.endpoint_id.clone())
             .await
             .map_err(|error| error.with_known_target(requested_target.clone()))?;
         conversation
@@ -233,17 +233,20 @@ impl AcpConversation {
     pub fn endpoint(&self) -> &EndpointRef {
         &self.endpoint
     }
-    pub async fn connect(directory: &Path, endpoint_id: EndpointId) -> Result<Self, ClientError> {
-        Self::connect_with_context(directory, endpoint_id)
+    pub async fn connect(
+        access: &crate::CollaborationAccess,
+        endpoint_id: EndpointId,
+    ) -> Result<Self, ClientError> {
+        Self::connect_with_context(access, endpoint_id)
             .await
             .map_err(crate::OperationError::into_source)
     }
 
     pub async fn connect_with_context(
-        directory: &Path,
+        access: &crate::CollaborationAccess,
         endpoint_id: EndpointId,
     ) -> Result<Self, crate::OperationError> {
-        let transport = AcpTransportConnection::connect(directory, endpoint_id)
+        let transport = AcpTransportConnection::connect(access, endpoint_id)
             .await
             .map_err(|source| crate::OperationError::before_dispatch("connect", None, source))?;
         if String::from(transport.schema_digest.clone())
@@ -267,7 +270,7 @@ impl AcpConversation {
             frame: Vec::new(),
             schemas,
             endpoint: transport.endpoint,
-            service_directory: directory.to_owned(),
+            service_directory: access.directory().to_owned(),
             target: None,
             session_ready: false,
             next_id: 0,
@@ -308,14 +311,14 @@ impl AcpConversation {
     /// Codex conversation. The returned client remains attached for a following
     /// prompt; dropping it never deletes the backend conversation.
     pub async fn create(
-        directory: &Path,
+        access: &crate::CollaborationAccess,
         request: ConversationCreateRequest,
         emit: &mut impl FnMut(ConversationEvent) -> Result<(), ClientError>,
     ) -> Result<(Self, ConversationCreateResult), crate::OperationError> {
         validate_conversation_create_request(&request)
             .map_err(|source| crate::OperationError::before_dispatch("validation", None, source))?;
         let endpoint_id = request.endpoint.endpoint_id.clone();
-        let mut client = Self::connect_with_context(directory, endpoint_id).await?;
+        let mut client = Self::connect_with_context(access, endpoint_id).await?;
         validate_conversation_endpoint(&client.endpoint, &request.endpoint)
             .map_err(|source| crate::OperationError::before_dispatch("validation", None, source))?;
         let target = client
