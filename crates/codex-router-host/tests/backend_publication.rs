@@ -11,9 +11,16 @@ async fn replacement_clears_advertised_generation_before_new_readiness() {
     )
     .unwrap_or_else(|e| panic!("endpoint: {e}"));
     let directory = EndpointDirectory::new(endpoint.service_id.clone());
-    let mut events = directory
-        .subscribe()
-        .unwrap_or_else(|e| panic!("subscribe: {e}"));
+    let inventory = directory.clone();
+    let published = || {
+        inventory
+            .inventory()
+            .unwrap_or_else(|e| panic!("inventory: {e}"))
+            .endpoints
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| panic!("no endpoint published"))
+    };
     let epoch = "00000000-0000-4000-8000-000000000002"
         .to_owned()
         .try_into()
@@ -37,12 +44,7 @@ async fn replacement_clears_advertised_generation_before_new_readiness() {
     let admitted = gate.acquire().unwrap_or_else(|e| panic!("admission: {e}"));
     assert_eq!(admitted.generation(), &first);
     assert!(matches!(
-        events
-            .next()
-            .await
-            .unwrap_or_else(|e| panic!("event: {e}"))
-            .endpoint
-            .availability,
+        published().availability,
         EndpointAvailability::Available { .. }
     ));
     publication
@@ -56,9 +58,9 @@ async fn replacement_clears_advertised_generation_before_new_readiness() {
         .unwrap_or_else(|e| panic!("loss: {e}"));
     assert!(admitted.retirement().is_cancelled());
     assert!(gate.acquire().is_err());
-    let unavailable = events.next().await.unwrap_or_else(|e| panic!("event: {e}"));
+    let unavailable = published();
     assert!(matches!(
-        unavailable.endpoint.channels.first(),
+        unavailable.channels.first(),
         Some(ChannelDescription::NativeCodex {
             generation: None,
             schema_digest: None,

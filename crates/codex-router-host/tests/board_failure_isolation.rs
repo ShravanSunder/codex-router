@@ -1,5 +1,5 @@
 use codex_router_host::{CollaborationRuntime, CollaborationRuntimeInputs};
-use collaboration_client::{BoardClientError, ControlClient};
+use collaboration_client::{BoardClientError, CollaborationClient};
 use message_board::{BoardFailureKind, PageLimit, PageRequest, ProjectListRequest};
 use std::os::unix::fs::DirBuilderExt;
 
@@ -26,7 +26,7 @@ async fn board_open_failure_keeps_unrelated_control_methods_available()
         owner_human_id: None,
     })
     .await?;
-    let mut client = ControlClient::connect(&root, "board-failure-isolation", "1").await?;
+    let client = CollaborationClient::connect(&root, "board-failure-isolation", "1").await?;
 
     let _endpoints = client.list_endpoints().await?;
     let board_result = client
@@ -38,7 +38,6 @@ async fn board_open_failure_keeps_unrelated_control_methods_available()
             },
         })
         .await;
-    let _close = client.close().await;
     runtime.shutdown().await?;
     if root.join("provider-operations.sqlite-wal").exists()
         || root.join("provider-operations.sqlite-shm").exists()

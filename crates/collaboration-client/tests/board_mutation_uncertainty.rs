@@ -1,37 +1,44 @@
 #![allow(clippy::unwrap_used)]
 
-use collaboration_client::{BoardClientError, ClientError, ControlClient};
+use collaboration_client::{BoardClientError, CollaborationClient};
 use message_board::{
     ActingForIdentity, Description, HumanId, Identity, ProjectCreateRequest, ProjectId,
     ResourceIdentity, ResourceName,
 };
-use serde_json::{Value, json};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use serde_json::Value;
+
+#[path = "support/scripted_api.rs"]
+mod scripted_api;
+use scripted_api::ScriptedApi;
 
 #[tokio::test]
 async fn response_loss_after_board_write_transmission_returns_typed_inspection_identity() {
     let project_id = ProjectId::generate();
-    let (mut client, peer) = initialized_client().await;
+    let (api, mut calls) = ScriptedApi::start().await.unwrap();
+    let client = CollaborationClient::connect(api.directory(), "board-uncertainty-test", "1")
+        .await
+        .unwrap();
     let expected_project_id = project_id.clone();
     let server = tokio::spawn(async move {
-        let mut peer = peer;
-        let request = read_request(&mut peer).await;
+        let request = calls.next().await.unwrap();
+        assert_eq!(request.tool, "board_project_create");
         assert_eq!(
-            request.get("method").and_then(Value::as_str),
-            Some("board/projectCreate")
-        );
-        assert_eq!(
-            request.pointer("/params/projectId").and_then(Value::as_str),
+            request
+                .arguments
+                .pointer("/projectId")
+                .and_then(Value::as_str),
             Some(expected_project_id.as_str())
         );
-        // The complete write frame was consumed. Drop without replying.
+        // The complete write was received. Close without replying.
+        request.lose_response();
+        calls
     });
 
     let error = client
         .board_project_create(project_create_request(project_id.clone()))
         .await
         .unwrap_err();
-    server.await.unwrap();
+    let mut calls = server.await.unwrap();
 
     match error {
         BoardClientError::OutcomeUnknown {
@@ -45,92 +52,12 @@ async fn response_loss_after_board_write_transmission_returns_typed_inspection_i
         }
         other => panic!("expected typed uncertain mutation outcome, got {other:?}"),
     }
-}
-
-#[tokio::test]
-async fn retired_connection_rejects_mutation_before_transmission_without_claiming_uncertainty() {
-    let (mut client, mut peer) = initialized_client().await;
-    let server = tokio::spawn(async move {
-        let read = read_request(&mut peer).await;
-        assert_eq!(
-            read.get("method").and_then(Value::as_str),
-            Some("board/projectShow")
-        );
-        peer.get_mut()
-            .write_all(
-                format!(
-                    "{}\n",
-                    json!({"jsonrpc":"2.0","id":"wrong-response-id","result":{}})
-                )
-                .as_bytes(),
-            )
+    // The uncertain write is never replayed.
+    assert!(
+        calls
+            .none_within(std::time::Duration::from_millis(100))
             .await
-            .unwrap();
-        // A preflight-rejected second call must never reach this peer.
-        let mut unexpected = String::new();
-        let read = tokio::time::timeout(
-            std::time::Duration::from_millis(300),
-            peer.read_line(&mut unexpected),
-        )
-        .await;
-        assert!(read.is_err() || unexpected.is_empty());
-    });
-    let read_error = client
-        .board_project_show(message_board::ProjectShowRequest {
-            project_id: ProjectId::generate(),
-        })
-        .await
-        .unwrap_err();
-    assert!(matches!(
-        read_error,
-        BoardClientError::Connection(ClientError::Protocol("response ID mismatch"))
-    ));
-
-    let mutation_error = client
-        .board_project_create(project_create_request(ProjectId::generate()))
-        .await
-        .unwrap_err();
-    assert!(matches!(
-        mutation_error,
-        BoardClientError::Connection(ClientError::Protocol("connection is retired"))
-    ));
-    server.await.unwrap();
-}
-
-async fn initialized_client() -> (ControlClient, BufReader<tokio::net::UnixStream>) {
-    let (client_stream, server_stream) = tokio::net::UnixStream::pair().unwrap();
-    let initialize = tokio::spawn(async move {
-        ControlClient::initialize(client_stream, "board-uncertainty-test", "1")
-            .await
-            .unwrap()
-    });
-    let mut peer = BufReader::new(server_stream);
-    let request = read_request(&mut peer).await;
-    assert_eq!(
-        request.get("method").and_then(Value::as_str),
-        Some("control/initialize")
     );
-    let response = json!({
-        "jsonrpc":"2.0",
-        "id":request.get("id").cloned().unwrap(),
-        "result":{
-            "version":{"major":1,"minor":0},
-            "serviceId":"00000000-0000-4000-8000-000000000001",
-            "serviceEpoch":"00000000-0000-4000-8000-000000000002",
-            "controlSchemaDigest":format!("sha256:{}", "a".repeat(64)),
-        }
-    });
-    peer.get_mut()
-        .write_all(format!("{response}\n").as_bytes())
-        .await
-        .unwrap();
-    (initialize.await.unwrap(), peer)
-}
-
-async fn read_request(peer: &mut BufReader<tokio::net::UnixStream>) -> Value {
-    let mut line = String::new();
-    peer.read_line(&mut line).await.unwrap();
-    serde_json::from_str(&line).unwrap()
 }
 
 fn project_create_request(project_id: ProjectId) -> ProjectCreateRequest {

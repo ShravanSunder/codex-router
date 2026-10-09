@@ -10,7 +10,7 @@ use std::{
 use clap::{Args, Parser, Subcommand};
 use collaboration_client::protocol::{QuestionAnswerParams, QuestionAnswerValue, QuestionResponse};
 use collaboration_client::{
-    ClientError, ControlClient, OperationEffect, OperationFailureKind,
+    ClientError, CollaborationClient, OperationEffect, OperationFailureKind,
     operation_failure_from_client_error,
 };
 
@@ -139,7 +139,7 @@ pub fn run_question_command(arguments: Vec<OsString>) -> i32 {
     };
     let result: Result<serde_json::Value, Box<collaboration_client::OperationFailure>> = runtime
         .block_on(async {
-            let mut client = ControlClient::connect(
+            let client = CollaborationClient::connect(
                 &directory,
                 "agent-collaboration",
                 env!("CARGO_PKG_VERSION"),
@@ -168,7 +168,6 @@ pub fn run_question_command(arguments: Vec<OsString>) -> i32 {
                         ))
                     }),
             };
-            let _ = client.close().await;
             result.and_then(|encoded| {
                 encoded.map_err(|_| {
                     Box::new(operation_failure_from_client_error(

@@ -4,7 +4,7 @@ use collaboration_client::protocol::{
     ConversationOperationReconcileRequest, ConversationOperationShowRequest,
     ConversationOperationWaitRequest, OperationId, PositiveSeconds,
 };
-use collaboration_client::{ClientError, ControlClient};
+use collaboration_client::{ClientError, CollaborationClient};
 use std::path::PathBuf;
 
 #[derive(Subcommand)]
@@ -50,7 +50,10 @@ enum OperationRead {
 }
 
 impl OperationRead {
-    async fn execute(self, client: &mut ControlClient) -> Result<serde_json::Value, ClientError> {
+    async fn execute(
+        self,
+        client: &mut CollaborationClient,
+    ) -> Result<serde_json::Value, ClientError> {
         let response = match self {
             Self::Show(request) => {
                 serde_json::to_value(client.show_provider_conversation_operation(request).await?)
@@ -97,7 +100,7 @@ pub(crate) fn run_conversation_operation_command(command: ConversationOperationC
         Err(_) => return 3,
     };
     runtime.block_on(async move {
-        let mut client = match ControlClient::connect(
+        let mut client = match CollaborationClient::connect(
             &directory,
             "agent-collaboration",
             env!("CARGO_PKG_VERSION"),
@@ -115,7 +118,6 @@ pub(crate) fn run_conversation_operation_command(command: ConversationOperationC
             }
         };
         let result = request.execute(&mut client).await;
-        let _closed = client.close().await;
         match result {
             Ok(value) => {
                 crate::provider_conversation_commands::report_success(value, connection.json)

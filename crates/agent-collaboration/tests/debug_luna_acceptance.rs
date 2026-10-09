@@ -45,7 +45,6 @@ async fn summary_recovery_and_durable_delivery_preserve_original_work() -> Proof
     worker_timeout_proof::exercise(&mut proof).await?;
     let portable = summary_failure_recovery::exercise(&mut proof).await?;
     durable_delivery_recovery::exercise(&mut proof, portable).await?;
-    proof.client.close().await?;
     Ok(())
 }
 
@@ -147,7 +146,6 @@ async fn fresh_native_history_becomes_readable_without_resubmission() -> ProofRe
                         && proof_context::agent_text(turn).contains("HISTORY_READY")
                 }) {
                     metadata.close().await;
-                    proof.client.close().await?;
                     return Ok(());
                 }
             }
@@ -375,7 +373,6 @@ async fn luna_agents_arrange_wake_and_reply_through_the_real_cli() -> ProofResul
         return Err("A's acknowledgement did not follow the actual stored reply push line".into());
     }
     proof.record("agentCliRoundTripVerified", json!({"alpha":alpha,"beta":beta,"wakeupId":wake.definition.wakeup_id,"firstFire":wake.first_fire,"explicitReplyReceipt":explicit_reply,"deliveries":deliveries.records,"acknowledgement":acknowledgement}))?;
-    proof.client.close().await?;
     Ok(())
 }
 
@@ -442,6 +439,5 @@ async fn recorded_test_history_is_readable_without_resume() -> ProofResult<()> {
         "readOnlySavedHistoryVerified",
         json!({"target":target,"response":result}),
     )?;
-    proof.client.close().await?;
     Ok(())
 }

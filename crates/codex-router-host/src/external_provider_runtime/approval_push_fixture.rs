@@ -27,14 +27,10 @@ impl ApprovalPushFixture {
         ));
         let machine_identity = MachineIdentity::new(service_id.clone(), Some("approval-fixture"))?;
         let service_id_text = String::from(service_id.clone());
-        let identity = ServiceIdentity::new(
-            &service_id_text,
-            &service_id_text,
-            "sha256:0000000000000000000000000000000000000000000000000000000000000000",
-        )?
-        .with_machine_identity(machine_identity.clone())?
-        .with_automation_store(Arc::clone(&store))
-        .with_approval_broker(Arc::clone(broker));
+        let identity = ServiceIdentity::new(&service_id_text, &service_id_text)?
+            .with_machine_identity(machine_identity.clone())?
+            .with_automation_store(Arc::clone(&store))
+            .with_approval_broker(Arc::clone(broker));
         drop(identity);
         Ok(Self {
             store,

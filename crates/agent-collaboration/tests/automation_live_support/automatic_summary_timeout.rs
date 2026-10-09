@@ -178,6 +178,5 @@ pub async fn exercise() -> ProofResult<()> {
         "automaticNativeSummaryTimeoutVerified",
         json!({"run":blocked,"summary":summary}),
     )?;
-    proof.client.close().await?;
     Ok(())
 }

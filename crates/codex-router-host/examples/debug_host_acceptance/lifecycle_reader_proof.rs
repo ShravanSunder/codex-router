@@ -1,7 +1,7 @@
 //! Real public lifecycle readers fed by the owned backend and normal read-only catalog.
 use super::owned_thread_registry::OwnedThreadRegistry;
 use codex_native_integration::NativeProtocolConnection;
-use collaboration_client::ControlClient;
+use collaboration_client::CollaborationClient;
 use collaboration_protocol::{
     AddressEntry, CoverageState, CoverageView, JournalPosition, JournalStatus, LifecycleChange,
     LifecycleSubject, NativeSessionListParams, NativeSessionView, NativeThreadStatus,
@@ -15,8 +15,9 @@ pub async fn run_reader_proof(
     owned: &mut OwnedThreadRegistry,
     directory: &Path,
 ) -> Result<(), Box<dyn Error>> {
-    let mut client =
-        ControlClient::connect(directory, "lifecycle-proof", env!("CARGO_PKG_VERSION")).await?;
+    let client =
+        CollaborationClient::connect(directory, "lifecycle-proof", env!("CARGO_PKG_VERSION"))
+            .await?;
     let before = match client.journal_status().await? {
         JournalStatus::Available { bounds } => JournalPosition {
             journal_id: bounds.journal_id,
@@ -142,7 +143,6 @@ pub async fn run_reader_proof(
     if native_statuses == 0 || stored_discoveries == 0 {
         return Err("public journal did not contain both actual observation sources".into());
     }
-    client.close().await?;
     println!(
         "{}",
         json!({"kind":"ownedLifecycleReadersPassed","threadId":target,"blankThreadId":blank,"snapshotPages":pages,"entry":entry,"coverage":coverage,"nativeStatusRecords":native_statuses,"storedDiscoveryRecords":stored_discoveries})

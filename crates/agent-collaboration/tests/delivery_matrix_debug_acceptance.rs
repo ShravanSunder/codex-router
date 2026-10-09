@@ -52,7 +52,6 @@ async fn codex_acp_cli_create_then_prompt_load_route() -> ProofResult<()> {
         json!({"target":target,"status":"passedLoadRoute"}),
     )?;
     config_guard.verify()?;
-    proof.client.close().await?;
     Ok(())
 }
 
@@ -104,7 +103,6 @@ async fn sequential_approval_notices_reach_codex_and_claude_recipients() -> Proo
         )
         .await?;
         peer.shutdown().await?;
-        proof.client.close().await?;
         Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
     }
     .await;
@@ -264,7 +262,6 @@ async fn exercise_delivery_matrix(config_guard: &ConfigHashGuard) -> ProofResult
 
     proof.record("deliveryMatrix", json!({"cells":records}))?;
     peer.shutdown().await?;
-    proof.client.close().await?;
     Ok(())
 }
 
@@ -358,8 +355,11 @@ async fn create_empty_conversation(
     proof: &ProofContext,
     creator: &SessionRef,
 ) -> ProofResult<SessionRef> {
-    let conversation =
-        ConversationClient::connect(&proof.service_directory, &proof.endpoint).await?;
+    let conversation = ConversationClient::connect(
+        &collaboration_client::CollaborationAccess::api(&proof.service_directory),
+        &proof.endpoint,
+    )
+    .await?;
     let created = conversation
         .create(
             ConversationCreateInput {

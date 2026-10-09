@@ -1,6 +1,6 @@
 use collaboration_protocol::{
     ProviderSettingsAcceptRequest, ProviderSettingsFailure, ProviderSettingsResult,
-    ProviderSettingsSetRequest, control_error_is_valid,
+    ProviderSettingsSetRequest,
 };
 use serde_json::json;
 
@@ -20,8 +20,4 @@ fn immediate_settings_contract_has_no_operation_identity() {
     let decoded: ProviderSettingsFailure =
         serde_json::from_value(failure.clone()).expect("failure");
     assert_eq!(serde_json::to_value(decoded).expect("encode"), failure);
-    let frame = json!({"jsonrpc":"2.0","id":"set","error":{"code":-32050,
-        "message":"invalid mode","data":failure}});
-    assert!(control_error_is_valid("conversation/settingsSet", &frame));
-    assert!(!control_error_is_valid("conversation/create", &frame));
 }

@@ -75,7 +75,12 @@ pub fn run_arguments(arguments: Vec<OsString>) -> Result<(), RunArgumentsFailure
     let context = CliContext::new(std::env::vars().collect());
     crate::sessions::run_sessions_command(&mut std::io::stdout(), command, &context).map_err(
         |error| {
-            if let Some(diagnostic) = error.permission_diagnostic() {
+            if let Some(message) = error.overload_message() {
+                RunArgumentsFailure {
+                    message: crate::permission_diagnostic_reporting::human_overload_text(message),
+                    exit_code: 3,
+                }
+            } else if let Some(diagnostic) = error.permission_diagnostic() {
                 RunArgumentsFailure {
                     message: crate::permission_diagnostic_reporting::human_diagnostic_text(
                         diagnostic,

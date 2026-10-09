@@ -1,7 +1,7 @@
 //! Failed pending-state writes must resolve their selected batch before new work.
 use super::super::SubscriptionClock;
 use super::owner_fixture::*;
-use crate::control_service_context::subscription_delivery::subscription_service::OwnerObservation;
+use crate::service_identity::subscription_delivery::subscription_service::OwnerObservation;
 use collaboration_protocol::DeliveryOutcome;
 use message_board::SubscriptionScope;
 use sqlx::Connection;

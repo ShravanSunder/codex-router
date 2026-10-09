@@ -13,7 +13,7 @@ message-board = { path = "../message-board", version = "0.1.20" }
 session-event-model = { path = "../session-event-model", version = "0.1.40" }
 base64.workspace = true
 chrono.workspace = true
-sqlx.workspace = true
+sqlx = { workspace = true, features = ["sqlite"] }
 tokio.workspace = true
 tokio-util.workspace = true
 collaboration-protocol = { path = "../collaboration-protocol", version = "0.1.14" }

@@ -1,60 +1,29 @@
 use serde_json::{Value, json};
-use std::os::unix::fs::DirBuilderExt;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+mod fake_api_support;
+use fake_api_support::{FakeCollaborationApi, FakeReply};
+
+/// One available Codex endpoint with a native carrier at generation 1.
+fn native_inventory(service_id: &str, epoch: &str) -> Value {
+    json!({"serviceEpoch":epoch,"sequence":0,"endpoints":[{
+        "endpoint":{"serviceId":service_id,"endpointId":"codex-local"},"label":"Fixture Codex",
+        "availability":{"state":"available","observedAt":"2026-09-05T12:00:00Z"},
+        "channels":[{"kind":"nativeCodex","transport":"unixWebSocket","path":"codex-native.sock",
+            "schemaDigest":null,"generation":{"serviceEpoch":epoch,"generation":1}}]
+    }]})
+}
 
 #[tokio::test]
-async fn interrupt_cli_reports_unknown_when_control_disconnects_after_submission() {
-    // Arrange: a Control fixture accepts the exact command and drops its response.
-    let root = std::path::PathBuf::from(format!("/tmp/interrupt-cli-{}", std::process::id()));
-    std::fs::DirBuilder::new()
-        .mode(0o700)
-        .create(&root)
-        .unwrap_or_else(|error| panic!("directory: {error}"));
-    let listener = tokio::net::UnixListener::bind(root.join("control.sock"))
-        .unwrap_or_else(|error| panic!("listener: {error}"));
+async fn interrupt_cli_reports_unknown_when_the_api_disconnects_after_submission() {
+    // Arrange: a stand-in API accepts the exact command and drops its response.
     let service_id = "00000000-0000-4000-8000-000000000001";
     let epoch = "00000000-0000-4000-8000-000000000002";
-    let digest = format!("sha256:{}", "a".repeat(64));
-    let manifest = serde_json::from_value(json!({"version":2,"serviceId":service_id,"serviceEpoch":epoch,"machineLabel":"fixture-host","control":{"transport":"unixJsonLines","path":"control.sock"},"controlSchemaDigest":digest,"mcp":{"transport":"streamableHttp","url":"http://127.0.0.1:0/mcp"}})).unwrap_or_else(|error| panic!("manifest: {error}"));
-    let publication = collaboration_service::ManifestPublication::publish(&root, &manifest)
-        .unwrap_or_else(|error| panic!("publish: {error}"));
-    let fixture = tokio::spawn(async move {
-        let (stream, _) = listener
-            .accept()
-            .await
-            .unwrap_or_else(|error| panic!("accept: {error}"));
-        let mut stream = BufReader::new(stream);
-        for method in ["control/initialize", "endpoint/list", "codex/turnInterrupt"] {
-            let mut line = String::new();
-            stream
-                .read_line(&mut line)
-                .await
-                .unwrap_or_else(|error| panic!("read: {error}"));
-            let request: Value =
-                serde_json::from_str(&line).unwrap_or_else(|error| panic!("request: {error}"));
-            assert_eq!(request["method"], method);
-            if method == "codex/turnInterrupt" {
-                assert_eq!(request["params"]["target"]["sessionId"], "proof-thread");
-                assert_eq!(request["params"]["turnId"], "proof-turn");
-                assert_eq!(request["params"]["generation"]["generation"], 1);
-                break;
-            }
-            let result = if method == "control/initialize" {
-                json!({"version":{"major":1,"minor":0},"serviceId":service_id,"serviceEpoch":epoch,"controlSchemaDigest":digest})
-            } else {
-                json!({"serviceEpoch":epoch,"sequence":0,"endpoints":[{"endpoint":{"serviceId":service_id,"endpointId":"codex-local"},"label":"Fixture Codex","availability":{"state":"available","observedAt":"2026-09-05T12:00:00Z"},"channels":[{"kind":"nativeCodex","transport":"unixWebSocket","path":"codex-native.sock","schemaDigest":null,"generation":{"serviceEpoch":epoch,"generation":1}}]}]})
-            };
-            let response = format!(
-                "{}\n",
-                json!({"jsonrpc":"2.0","id":request["id"],"result":result})
-            );
-            stream
-                .get_mut()
-                .write_all(response.as_bytes())
-                .await
-                .unwrap_or_else(|error| panic!("response: {error}"));
-        }
-    });
+    let mut fixture = FakeCollaborationApi::new(service_id, epoch)
+        .unwrap_or_else(|error| panic!("fixture: {error}"));
+    let served = fixture.serve(vec![
+        FakeReply::Result(native_inventory(service_id, epoch)),
+        FakeReply::Disconnect,
+    ]);
     // Act.
     let output = tokio::time::timeout(
         std::time::Duration::from_secs(3),
@@ -71,20 +40,23 @@ async fn interrupt_cli_reports_unknown_when_control_disconnects_after_submission
                 "--json",
                 "--service-directory",
             ])
-            .arg(&root)
+            .arg(fixture.directory())
             .output(),
     )
     .await
     .unwrap_or_else(|error| panic!("command deadline: {error}"))
     .unwrap_or_else(|error| panic!("command: {error}"));
-    fixture
+    let calls = served
         .await
+        .unwrap_or_else(|error| panic!("fixture: {error}"))
         .unwrap_or_else(|error| panic!("fixture: {error}"));
-    drop(publication);
-    std::fs::remove_file(root.join("control.sock"))
-        .unwrap_or_else(|error| panic!("socket cleanup: {error}"));
-    std::fs::remove_dir(root).unwrap_or_else(|error| panic!("directory cleanup: {error}"));
     // Assert.
+    let tools: Vec<&Value> = calls.iter().map(|call| &call["tool"]).collect();
+    assert_eq!(tools, [&json!("endpoints_list"), &json!("turn_interrupt")]);
+    let interrupt = &calls[1]["arguments"];
+    assert_eq!(interrupt["target"]["sessionId"], "proof-thread");
+    assert_eq!(interrupt["turnId"], "proof-turn");
+    assert_eq!(interrupt["generation"]["generation"], 1);
     assert_eq!(output.status.code(), Some(5));
     let result: Value =
         serde_json::from_slice(&output.stdout).unwrap_or_else(|error| panic!("output: {error}"));
@@ -94,89 +66,20 @@ async fn interrupt_cli_reports_unknown_when_control_disconnects_after_submission
 
 #[tokio::test]
 async fn session_inspect_cli_preserves_native_rejection_message() {
-    let root = std::path::PathBuf::from(format!("/tmp/session-inspect-cli-{}", std::process::id()));
-    std::fs::DirBuilder::new()
-        .mode(0o700)
-        .create(&root)
-        .unwrap_or_else(|error| panic!("directory: {error}"));
-    let listener = tokio::net::UnixListener::bind(root.join("control.sock"))
-        .unwrap_or_else(|error| panic!("listener: {error}"));
     let service_id = "00000000-0000-4000-8000-000000000001";
     let epoch = "00000000-0000-4000-8000-000000000002";
-    let digest = format!("sha256:{}", "a".repeat(64));
-    let manifest = serde_json::from_value(json!({
-        "version":2,"serviceId":service_id,"serviceEpoch":epoch,
-        "machineLabel":"fixture-host","control":{"transport":"unixJsonLines","path":"control.sock"},
-        "controlSchemaDigest":digest,
-        "mcp":{"transport":"streamableHttp","url":"http://127.0.0.1:0/mcp"}
-    }))
-    .unwrap_or_else(|error| panic!("manifest: {error}"));
-    let publication = collaboration_service::ManifestPublication::publish(&root, &manifest)
-        .unwrap_or_else(|error| panic!("publish: {error}"));
-    let peer = tokio::spawn(async move {
-        let (stream, _) = listener.accept().await.expect("Control accept");
-        let (read, mut write) = stream.into_split();
-        let mut lines = BufReader::new(read).lines();
-        let initialize: Value = serde_json::from_str(
-            &lines
-                .next_line()
-                .await
-                .expect("read init")
-                .expect("init frame"),
-        )
-        .expect("init JSON");
-        let initialized = json!({"jsonrpc":"2.0","id":initialize["id"],"result":{
-            "version":{"major":1,"minor":0},"serviceId":service_id,
-            "serviceEpoch":epoch,"serviceVersion":env!("CARGO_PKG_VERSION"),"controlSchemaDigest":digest
-        }});
-        write
-            .write_all(format!("{initialized}\n").as_bytes())
-            .await
-            .expect("write init");
-        let discovery: Value = serde_json::from_str(
-            &lines
-                .next_line()
-                .await
-                .expect("read discovery")
-                .expect("discovery frame"),
-        )
-        .expect("discovery JSON");
-        assert_eq!(discovery["method"], "endpoint/list");
-        let inventory = json!({"jsonrpc":"2.0","id":discovery["id"],"result":{
-            "serviceEpoch":epoch,"sequence":0,"endpoints":[{
-                "endpoint":{"serviceId":service_id,"endpointId":"codex-local"},
-                "label":"Fixture Codex",
-                "availability":{"state":"available","observedAt":"2026-09-05T12:00:00Z"},
-                "channels":[{"kind":"nativeCodex","transport":"unixWebSocket",
-                    "path":"codex-native.sock","schemaDigest":null,
-                    "generation":{"serviceEpoch":epoch,"generation":1}}]
-            }]
-        }});
-        write
-            .write_all(format!("{inventory}\n").as_bytes())
-            .await
-            .expect("write discovery");
-        let inspect: Value = serde_json::from_str(
-            &lines
-                .next_line()
-                .await
-                .expect("read inspect")
-                .expect("inspect frame"),
-        )
-        .expect("inspect JSON");
-        assert_eq!(inspect["method"], "codex/sessionInspect");
-        let message = "native thread is unreadable: fixture refusal";
-        let response = json!({"jsonrpc":"2.0","id":inspect["id"],"error":{
+    let mut fixture = FakeCollaborationApi::new(service_id, epoch)
+        .unwrap_or_else(|error| panic!("fixture: {error}"));
+    let message = "native thread is unreadable: fixture refusal";
+    let peer = fixture.serve(vec![
+        FakeReply::Result(native_inventory(service_id, epoch)),
+        FakeReply::Error(json!({
             "code":-32050,"message":message,"data":{
                 "kind":"nativeRejected","stage":"inspect","message":message,
                 "reason":"unknown","nextAction":"inspectTarget","nativeCode":-32600
             }
-        }});
-        write
-            .write_all(format!("{response}\n").as_bytes())
-            .await
-            .expect("write rejection");
-    });
+        })),
+    ]);
 
     let output = tokio::time::timeout(
         std::time::Duration::from_secs(5),
@@ -191,18 +94,18 @@ async fn session_inspect_cli_preserves_native_rejection_message() {
                 "--json",
                 "--service-directory",
             ])
-            .arg(&root)
+            .arg(fixture.directory())
             .output(),
     )
     .await
     .unwrap_or_else(|error| panic!("command deadline: {error}"))
     .unwrap_or_else(|error| panic!("command: {error}"));
-    peer.await
-        .unwrap_or_else(|error| panic!("Control fixture: {error}"));
-    drop(publication);
-    std::fs::remove_file(root.join("control.sock"))
-        .unwrap_or_else(|error| panic!("socket cleanup: {error}"));
-    std::fs::remove_dir(root).unwrap_or_else(|error| panic!("directory cleanup: {error}"));
+    let calls = peer
+        .await
+        .unwrap_or_else(|error| panic!("API fixture: {error}"))
+        .unwrap_or_else(|error| panic!("API fixture: {error}"));
+    let tools: Vec<&Value> = calls.iter().map(|call| &call["tool"]).collect();
+    assert_eq!(tools, [&json!("endpoints_list"), &json!("session_inspect")]);
 
     assert_eq!(
         output.status.code(),
@@ -226,93 +129,36 @@ async fn message_cli_retains_target_after_response_loss_and_keeps_refusal_distin
         ("outcome-unknown", Some("outcomeUnknown"), 5),
         ("native-refusal", Some("nativeRejected"), 4),
     ] {
-        let root =
-            std::path::PathBuf::from(format!("/tmp/message-cli-{label}-{}", std::process::id()));
-        std::fs::DirBuilder::new()
-            .mode(0o700)
-            .create(&root)
-            .unwrap_or_else(|error| panic!("directory: {error}"));
-        let listener = tokio::net::UnixListener::bind(root.join("control.sock"))
-            .unwrap_or_else(|error| panic!("listener: {error}"));
         let service_id = "00000000-0000-4000-8000-000000000001";
         let epoch = "00000000-0000-4000-8000-000000000002";
-        let digest = format!("sha256:{}", "a".repeat(64));
-        let manifest = serde_json::from_value(json!({
-            "version":2,"serviceId":service_id,"serviceEpoch":epoch,
-            "machineLabel":"fixture-host","control":{"transport":"unixJsonLines","path":"control.sock"},
-            "controlSchemaDigest":digest,"mcp":{"transport":"streamableHttp","url":"http://127.0.0.1:0/mcp"}
-        }))
-        .unwrap_or_else(|error| panic!("manifest: {error}"));
-        let publication = collaboration_service::ManifestPublication::publish(&root, &manifest)
-            .unwrap_or_else(|error| panic!("publish: {error}"));
-        let peer = tokio::spawn(async move {
-            let (stream, _) = listener.accept().await.expect("Control accept");
-            let (read, mut write) = stream.into_split();
-            let mut lines = BufReader::new(read).lines();
-            for method in ["control/initialize", "message/send"] {
-                let request: Value = serde_json::from_str(
-                    &lines
-                        .next_line()
-                        .await
-                        .expect("Control read")
-                        .expect("Control frame"),
-                )
-                .expect("Control JSON");
-                assert_eq!(request["method"], method);
-                if method == "message/send" {
-                    assert_eq!(request["params"]["target"]["sessionId"], "proof-thread");
-                    if let Some(kind) = rejection_kind {
-                        let outcome = if kind == "nativeRejected" {
-                            json!({"kind":"rejected","reason":"busy","nextAction":"inspectTarget","clientCode":-32000,"detail":"native client is busy"})
-                        } else {
-                            json!({"kind":"unknown"})
-                        };
-                        let delivery_state = if kind == "nativeRejected" {
-                            "rejected"
-                        } else {
-                            "outcome-unknown"
-                        };
-                        let push_id = "019f0000-0000-7000-8000-000000000101";
-                        let link = format!("router://{service_id}/push/{push_id}");
-                        let response = json!({
-                            "jsonrpc":"2.0","id":request["id"],
-                            "result":{
-                                "pushId":push_id,
-                                "link":link,
-                                "target":request["params"]["target"].clone(),
-                                "targetIdentity":"Codex target",
-                                "deliveryState":delivery_state,
-                                "receipt":{"outcome":outcome,"reachability":"codexAppServer","client":null}
-                            }
-                        });
-                        write
-                            .write_all(format!("{response}\n").as_bytes())
-                            .await
-                            .expect("rejection response");
-                    }
-                    break;
-                }
-                let result = if method == "control/initialize" {
-                    json!({"version":{"major":1,"minor":0},"serviceId":service_id,"serviceEpoch":epoch,"serviceVersion":env!("CARGO_PKG_VERSION"),"controlSchemaDigest":digest})
+        let mut fixture = FakeCollaborationApi::new(service_id, epoch)
+            .unwrap_or_else(|error| panic!("fixture: {error}"));
+        let reply = match rejection_kind {
+            None => FakeReply::Disconnect,
+            Some(kind) => {
+                let outcome = if kind == "nativeRejected" {
+                    json!({"kind":"rejected","reason":"busy","nextAction":"inspectTarget","clientCode":-32000,"detail":"native client is busy"})
                 } else {
-                    json!({"serviceEpoch":epoch,"sequence":0,"endpoints":[{
-                        "endpoint":{"serviceId":service_id,"endpointId":"codex-local"},"label":"Fixture Codex",
-                        "availability":{"state":"available","observedAt":"2026-09-19T00:00:00Z"},
-                        "channels":[{"kind":"nativeCodex","transport":"unixWebSocket","path":"codex-native.sock","schemaDigest":null,"generation":{"serviceEpoch":epoch,"generation":1}}]
-                    }]})
+                    json!({"kind":"unknown"})
                 };
-                write
-                    .write_all(
-                        format!(
-                            "{}\n",
-                            json!({"jsonrpc":"2.0","id":request["id"],"result":result})
-                        )
-                        .as_bytes(),
-                    )
-                    .await
-                    .expect("Control response");
+                let delivery_state = if kind == "nativeRejected" {
+                    "rejected"
+                } else {
+                    "outcome-unknown"
+                };
+                let push_id = "019f0000-0000-7000-8000-000000000101";
+                let link = format!("router://{service_id}/push/{push_id}");
+                FakeReply::Receipt(json!({
+                    "pushId":push_id,
+                    "link":link,
+                    "target":{"endpoint":{"serviceId":service_id,"endpointId":"codex-local"},"sessionId":"proof-thread"},
+                    "targetIdentity":"Codex target",
+                    "deliveryState":delivery_state,
+                    "receipt":{"outcome":outcome,"reachability":"codexAppServer","client":null}
+                }))
             }
-        });
+        };
+        let peer = fixture.serve(vec![reply]);
         let target = json!({"endpoint":{"serviceId":service_id,"endpointId":"codex-local"},"sessionId":"proof-thread"}).to_string();
         let output = tokio::time::timeout(
             std::time::Duration::from_secs(10),
@@ -328,16 +174,18 @@ async fn message_cli_retains_target_after_response_loss_and_keeps_refusal_distin
                     "--json",
                     "--service-directory",
                 ])
-                .arg(&root)
+                .arg(fixture.directory())
                 .output(),
         )
         .await
         .unwrap_or_else(|error| panic!("{label} command deadline: {error}"))
         .unwrap_or_else(|error| panic!("command: {error}"));
-        peer.await.expect("peer join");
-        drop(publication);
-        std::fs::remove_file(root.join("control.sock")).expect("socket cleanup");
-        std::fs::remove_dir(&root).expect("directory cleanup");
+        let calls = peer.await.expect("peer join").expect("API fixture");
+        assert_eq!(calls[0]["tool"], "message_send", "{label}");
+        assert_eq!(
+            calls[0]["arguments"]["target"]["sessionId"], "proof-thread",
+            "{label}"
+        );
 
         assert_eq!(output.status.code(), Some(expected_exit), "{label}");
         let result: Value = serde_json::from_slice(&output.stdout).expect("CLI JSON");

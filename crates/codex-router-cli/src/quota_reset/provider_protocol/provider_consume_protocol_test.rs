@@ -84,7 +84,7 @@ async fn consume_adapter_maps_non_success_status_to_unknown_after_one_post() {
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn consume_adapter_maps_timeout_to_unknown_after_one_post() {
     let (outcome, requests) =
         invoke_consume_with_behavior(ResponseBehavior::WaitForClientTimeout).await;
@@ -205,11 +205,13 @@ async fn invoke_consume_with_behavior(
         .unwrap_or_else(|error| panic!("consume listener should clone: {error}"));
     let (release_sender, release_receiver) = mpsc::channel();
     let should_time_out = matches!(behavior, ResponseBehavior::WaitForClientTimeout);
+    let (request_received_sender, request_received) = tokio::sync::oneshot::channel();
     let server = std::thread::spawn(move || {
         let (mut stream, _) = listener
             .accept()
             .unwrap_or_else(|error| panic!("consume request should connect: {error}"));
         let request = read_complete_request(&mut stream);
+        let _acknowledged = request_received_sender.send(());
         match behavior {
             ResponseBehavior::RawResponse(response) => {
                 let _write_result = stream.write_all(&response);
@@ -241,7 +243,40 @@ async fn invoke_consume_with_behavior(
         *prepared.request.timeout_mut() = Some(TEST_REQUEST_TIMEOUT);
     }
 
-    let outcome = provider.invoke_prepared_consume(prepared).await;
+    let outcome = if should_time_out {
+        let (release_clock, clock_release) = mpsc::channel();
+        let clock_guard =
+            tokio::task::spawn_blocking(move || clock_release.recv_timeout(Duration::from_secs(5)));
+        let invocation = provider.invoke_prepared_consume(prepared);
+        tokio::pin!(invocation);
+        tokio::select! {
+            outcome = &mut invocation => panic!("consume completed before its full POST acknowledgement: {outcome:?}"),
+            acknowledged = request_received => acknowledged.expect("server should acknowledge the complete POST"),
+        }
+        tokio::time::advance(Duration::from_millis(99)).await;
+        let before_deadline = std::future::poll_fn(|context| {
+            std::task::Poll::Ready(std::future::Future::poll(invocation.as_mut(), context))
+        })
+        .await;
+        assert!(
+            before_deadline.is_pending(),
+            "consume must remain pending before 100ms"
+        );
+        tokio::time::advance(Duration::from_millis(2)).await;
+        let outcome = tokio::time::timeout(Duration::from_secs(2), &mut invocation)
+            .await
+            .expect("consume should time out across its unchanged deadline");
+        release_clock
+            .send(())
+            .expect("clock guard should remain active through the timeout proof");
+        clock_guard
+            .await
+            .expect("clock guard task should join")
+            .expect("real I/O should finish before the guard expires");
+        outcome
+    } else {
+        provider.invoke_prepared_consume(prepared).await
+    };
     let _release_result = release_sender.send(());
     let request = server
         .join()

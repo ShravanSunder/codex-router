@@ -1,15 +1,16 @@
 use collaboration_service::{
     BoardAvailability, MachineIdentity, ServiceIdentity, SessionDeliveryRouter,
     SessionMessageDelivery, SubscriptionDeliveryService, SubscriptionDeliveryServiceProps,
-    SystemSubscriptionClock, TargetPresenceProbe, serve_control_connection,
+    SystemSubscriptionClock, TargetPresenceProbe,
 };
-use serde_json::{Value, json};
+use serde_json::json;
 use std::sync::Arc;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+#[path = "support/served_api.rs"]
+mod served_api;
 
 #[tokio::test]
 async fn message_to_missing_endpoint_reports_no_native_effects() {
-    // Arrange: an initialized real Control socket without a backend.
+    // Arrange: the served API without a backend.
     let id = "00000000-0000-4000-8000-000000000001";
     let directory = tempfile::tempdir().unwrap();
     let automation_store = Arc::new(tokio::sync::Mutex::new(
@@ -31,32 +32,23 @@ async fn message_to_missing_endpoint_reports_no_native_effects() {
             clock: Arc::new(SystemSubscriptionClock),
         });
     subscription_delivery.start().await.unwrap();
-    let identity = ServiceIdentity::new(id, id, &format!("sha256:{}", "a".repeat(64)))
+    let identity = ServiceIdentity::new(id, id)
         .unwrap()
         .with_automation_store(Arc::clone(&automation_store))
         .with_session_delivery(delivery)
         .with_subscription_delivery_service(subscription_delivery.clone(), presence);
-    let (client, server) = tokio::net::UnixStream::pair().unwrap();
-    let task = tokio::spawn(serve_control_connection(server, identity));
-    let (reader, mut writer) = client.into_split();
-    let mut lines = BufReader::new(reader).lines();
+    let served = served_api::ServedApi::start(identity).await.unwrap();
     let target =
         json!({"endpoint":{"serviceId":id,"endpointId":"codex-local"},"sessionId":"thread"});
-    let requests = [
-        json!({"jsonrpc":"2.0","id":"init","method":"control/initialize","params":{"version":{"major":1,"minor":0},"client":{"name":"fixture","version":"1"}}}),
-        json!({"jsonrpc":"2.0","id":"send","method":"message/send","params":{"target":target,"generationGuard":{"serviceEpoch":id,"generation":1},"message":{"kind":"agent","sender":target,"text":"information"}}}),
-    ];
-    // Act: submit through the actual dispatcher, not an error helper.
-    let mut last = Value::Null;
-    for request in requests {
-        writer
-            .write_all(format!("{request}\n").as_bytes())
-            .await
-            .unwrap();
-        last = serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
-    }
-    writer.shutdown().await.unwrap();
-    task.await.unwrap().unwrap();
+    // Act: submit through the actual tool, not an error helper.
+    let last = served
+        .call(
+            "message_send",
+            json!({"target":target,"generationGuard":{"serviceEpoch":id,"generation":1},"message":{"kind":"agent","sender":target,"text":"information"}}),
+        )
+        .await
+        .unwrap();
+    served.stop().await.unwrap();
     subscription_delivery.shutdown().await;
     drop(subscription_delivery);
     Arc::try_unwrap(automation_store)
@@ -65,9 +57,12 @@ async fn message_to_missing_endpoint_reports_no_native_effects() {
         .close()
         .await
         .unwrap();
-    // Assert: method exists and rejection truthfully establishes no effects.
-    assert_eq!(last["result"]["receipt"]["outcome"]["kind"], "rejected");
-    assert_eq!(last["result"]["receipt"]["outcome"]["reason"], "noRoute");
-    assert!(last["result"]["receipt"]["reachability"].is_null());
-    assert!(last["result"]["receipt"]["client"].is_null());
+    // Assert: the tool exists and its rejection truthfully establishes no effects. The API
+    // publishes a rejected delivery as a tool error carrying the stored push's receipt.
+    let receipt = &last["error"]["data"]["receipt"];
+    assert_eq!(receipt["outcome"]["kind"], "rejected", "{last}");
+    assert_eq!(receipt["outcome"]["reason"], "noRoute");
+    assert!(receipt["reachability"].is_null());
+    assert!(receipt["client"].is_null());
+    assert_eq!(last["error"]["data"]["effect"], "none");
 }

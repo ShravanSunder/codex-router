@@ -10,13 +10,47 @@ pub(crate) enum PermissionDiagnosticRendering<'a> {
     Operation(Option<&'a OperationId>),
 }
 
-pub(crate) fn report_permission_error(
+/// Reports a client error the caller acts on before retrying, if it is one: missing socket
+/// permission, or the API at its request limit (the request was not run; retry it).
+pub(crate) fn report_actionable_client_error(
     error: &ClientError,
     rendering: PermissionDiagnosticRendering<'_>,
     machine_output: bool,
 ) -> Option<i32> {
+    if let ClientError::Overloaded { message } = error {
+        return Some(report_overload(message, rendering, machine_output));
+    }
     let diagnostic = error.permission_diagnostic()?;
     Some(report_diagnostic(&diagnostic, rendering, machine_output))
+}
+
+/// Reports a request the API shed at its request limit: nothing ran, retry later. Exit 3.
+pub(crate) fn report_overload(
+    message: &str,
+    rendering: PermissionDiagnosticRendering<'_>,
+    machine_output: bool,
+) -> i32 {
+    let failure = json!({
+        "kind": "overloaded",
+        "stage": "admission",
+        "effect": "none",
+        "message": message,
+        "nextAction": "retryLater",
+    });
+    if machine_output {
+        let record = match rendering {
+            PermissionDiagnosticRendering::Command => json!({"kind": "error", "error": failure}),
+            PermissionDiagnosticRendering::Operation(operation_id) => json!({
+                "kind": "error",
+                "operationId": operation_id,
+                "error": failure,
+            }),
+        };
+        let _written = writeln!(io::stdout().lock(), "{record}");
+    } else {
+        let _written = writeln!(io::stderr().lock(), "{}", human_overload_text(message));
+    }
+    3
 }
 
 pub(crate) fn report_diagnostic(
@@ -40,6 +74,11 @@ pub(crate) fn report_diagnostic(
         let _written = writeln!(io::stderr().lock(), "{}", human_diagnostic_text(diagnostic));
     }
     3
+}
+
+/// The human form of a shed request.
+pub(crate) fn human_overload_text(message: &str) -> String {
+    format!("Error: overloaded\nStage: admission\n{message}\nNext action: retryLater")
 }
 
 pub(crate) fn human_diagnostic_text(

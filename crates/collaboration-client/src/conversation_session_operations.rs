@@ -3,6 +3,10 @@ use crate::conversation_client::{
     ConversationCancelInput, ConversationClient, ConversationClientError, ConversationLoadInput,
     ConversationPromptInput, unsupported,
 };
+use crate::provider_conversations::{
+    CompositeAnswer, LocalProviderOperations, ProviderConversations, composite_arguments,
+    composite_call,
+};
 use crate::{
     ClientError, ConversationEnd, ConversationOperationResult,
     ConversationPromptRequest as CodexPromptRequest, ConversationSettlement,
@@ -15,7 +19,7 @@ use collaboration_protocol::{
     ConversationOperationSettlement, ConversationOperationSubmission,
     ConversationOperationWaitOutput, ConversationOperationWaitRequest,
     ConversationPromptRequest as ProviderPromptRequest, NonEmptyText, OperationId, PositiveSeconds,
-    ProviderOperationEffect, ProviderOperationStage, ProviderPromptStopReason,
+    ProviderIdentity, ProviderOperationEffect, ProviderOperationStage, ProviderPromptStopReason,
     ProviderRequestedPolicy, ProviderWorkingDirectory, SessionRef,
 };
 use std::{path::Path, time::Duration};
@@ -77,12 +81,13 @@ impl ConversationClient {
                     },
                 })
             }
-            Self::ExternalProvider(control) => {
+            Self::ExternalProvider(provider) => {
                 let operation_id =
                     operation_id.ok_or_else(|| ConversationClientError::MissingOperationId {
                         endpoint: target.endpoint.clone(),
                         operation: "load",
                     })?;
+                let api_arguments = composite_arguments(&input, timeout)?;
                 let working_directory = provider_working_directory(&input.working_directory)?;
                 let request = ConversationLoadRequest {
                     operation_id: operation_id.clone(),
@@ -90,15 +95,40 @@ impl ConversationClient {
                     generation: input.generation,
                     working_directory,
                     requested_by: input.requested_by.clone().into(),
-                    approver: input.approver.unwrap_or(input.requested_by).into(),
+                    approver: input
+                        .approver
+                        .unwrap_or_else(|| ProviderIdentity::from(input.requested_by)),
                     requested_policy: ProviderRequestedPolicy {
                         access: input.access,
                     },
                 };
                 let wait_seconds = provider_wait_seconds(timeout)?;
+                let router = match provider {
+                    ProviderConversations::Api(client) => {
+                        return match composite_call(
+                            client,
+                            "conversation_load",
+                            api_arguments,
+                            timeout,
+                            None,
+                        )
+                        .await?
+                        {
+                            CompositeAnswer::Settled(result) => Ok(result),
+                            CompositeAnswer::StillRunning => {
+                                Ok(ConversationOperationResult::Pending {
+                                    operation_id,
+                                    target,
+                                })
+                            }
+                        };
+                    }
+                    ProviderConversations::Local(router) => router,
+                };
+                let operations = LocalProviderOperations(router.as_ref());
                 let submitted = tokio::time::timeout(timeout, async {
-                    control.load_provider_conversation(request).await?;
-                    let waited = control
+                    operations.load_provider_conversation(request).await?;
+                    let waited = operations
                         .wait_for_provider_conversation_operation(
                             ConversationOperationWaitRequest {
                                 operation_id: operation_id.clone(),
@@ -195,12 +225,13 @@ impl ConversationClient {
                     },
                 })
             }
-            Self::ExternalProvider(control) => {
+            Self::ExternalProvider(provider) => {
                 let operation_id =
                     operation_id.ok_or_else(|| ConversationClientError::MissingOperationId {
                         endpoint: target.endpoint.clone(),
                         operation: "prompt",
                     })?;
+                let api_arguments = composite_arguments(&input, timeout)?;
                 for (field, present) in [
                     ("workingDirectory", input.working_directory.is_some()),
                     ("effort", input.effort.is_some()),
@@ -219,13 +250,38 @@ impl ConversationClient {
                     target: target.clone(),
                     generation: input.generation,
                     requested_by: input.requested_by.clone().into(),
-                    approver: input.approver.unwrap_or(input.requested_by).into(),
+                    approver: input
+                        .approver
+                        .unwrap_or_else(|| ProviderIdentity::from(input.requested_by)),
                     prompt: input.message.into(),
                 };
                 let wait_seconds = provider_wait_seconds(timeout)?;
+                let router = match provider {
+                    ProviderConversations::Api(client) => {
+                        return match composite_call(
+                            client,
+                            "conversation_prompt",
+                            api_arguments,
+                            timeout,
+                            Some((&cancel, &operation_id)),
+                        )
+                        .await?
+                        {
+                            CompositeAnswer::Settled(result) => Ok(result),
+                            CompositeAnswer::StillRunning => {
+                                Ok(ConversationOperationResult::Pending {
+                                    operation_id,
+                                    target,
+                                })
+                            }
+                        };
+                    }
+                    ProviderConversations::Local(router) => router,
+                };
+                let operations = LocalProviderOperations(router.as_ref());
                 let submitted = tokio::time::timeout(timeout, async {
-                    control.prompt_provider_conversation(request).await?;
-                    let waited = control
+                    operations.prompt_provider_conversation(request).await?;
+                    let waited = operations
                         .wait_for_provider_conversation_operation(
                             ConversationOperationWaitRequest {
                                 operation_id: operation_id.clone(),
@@ -265,16 +321,37 @@ impl ConversationClient {
                 "cancel",
                 "use `turn interrupt` for a Codex session",
             )),
-            Self::ExternalProvider(control) => Ok(control
-                .cancel_provider_conversation_operation(ConversationCancelRequest {
-                    operation_id: input.operation_id,
-                    target_operation_id: input.target_operation_id,
-                    target: input.target,
-                    generation: input.generation,
-                    requested_by: input.requested_by.clone().into(),
-                    approver: input.approver.unwrap_or(input.requested_by).into(),
-                })
-                .await?),
+            Self::ExternalProvider(ProviderConversations::Api(client)) => {
+                let arguments = serde_json::to_value(&input).map_err(|_| {
+                    ConversationClientError::InvalidInput("invalid conversation cancel input")
+                })?;
+                match composite_call(
+                    client,
+                    "conversation_cancel",
+                    arguments,
+                    crate::api_connection::DEFAULT_CALL_TIMEOUT,
+                    None,
+                )
+                .await?
+                {
+                    CompositeAnswer::Settled(submission) => Ok(submission),
+                    CompositeAnswer::StillRunning => Err(ClientError::Timeout.into()),
+                }
+            }
+            Self::ExternalProvider(ProviderConversations::Local(router)) => {
+                Ok(LocalProviderOperations(router.as_ref())
+                    .cancel_provider_conversation_operation(ConversationCancelRequest {
+                        operation_id: input.operation_id,
+                        target_operation_id: input.target_operation_id,
+                        target: input.target,
+                        generation: input.generation,
+                        requested_by: input.requested_by.clone().into(),
+                        approver: input
+                            .approver
+                            .unwrap_or_else(|| ProviderIdentity::from(input.requested_by)),
+                    })
+                    .await?)
+            }
         }
     }
 }
@@ -429,13 +506,16 @@ fn operation_settlement_failure(
     }))
 }
 
+/// A Session requester or approver must belong to the target's service; a Human approver
+/// belongs to no service.
 fn validate_target_operation(
     target: &SessionRef,
     requested_by: &SessionRef,
-    approver: Option<&SessionRef>,
+    approver: Option<&ProviderIdentity>,
 ) -> Result<(), ConversationClientError> {
     if requested_by.endpoint.service_id != target.endpoint.service_id
         || approver
+            .and_then(ProviderIdentity::session)
             .is_some_and(|approver| approver.endpoint.service_id != target.endpoint.service_id)
     {
         return Err(ConversationClientError::InvalidInput(

@@ -1,7 +1,7 @@
 use super::super::SubscriptionClock;
 use super::super::subscription_push::target_session;
 use super::owner_fixture::*;
-use crate::control_service_context::subscription_delivery::subscription_service::OwnerObservation;
+use crate::service_identity::subscription_delivery::subscription_service::OwnerObservation;
 use collaboration_protocol::{DeliveryOutcome, PushId, UuidIdentity};
 use message_board::{SubscriptionScope, ThreadSubscriptionUnsubscribeRequest};
 use serde_json::{Value, json};
@@ -338,18 +338,15 @@ async fn hold_next_push(runtime: &OwnerRuntime) -> PushId {
 
 fn service_identity(fixture: &OwnerFixture) -> crate::ServiceIdentity {
     let service_id = UuidIdentity::try_from(SERVICE_ID.to_owned()).unwrap();
-    crate::ServiceIdentity::new(
-        SERVICE_ID,
-        SERVICE_ID,
-        &format!("sha256:{}", "a".repeat(64)),
-    )
-    .unwrap()
-    .with_machine_identity(
-        crate::MachineIdentity::new(service_id, Some("held-push-test")).expect("machine identity"),
-    )
-    .unwrap()
-    .with_automation_store(std::sync::Arc::clone(&fixture.push_store))
-    .with_board_store(std::sync::Arc::clone(&fixture.store))
+    crate::ServiceIdentity::new(SERVICE_ID, SERVICE_ID)
+        .unwrap()
+        .with_machine_identity(
+            crate::MachineIdentity::new(service_id, Some("held-push-test"))
+                .expect("machine identity"),
+        )
+        .unwrap()
+        .with_automation_store(std::sync::Arc::clone(&fixture.push_store))
+        .with_board_store(std::sync::Arc::clone(&fixture.store))
 }
 
 async fn show_record(
@@ -365,13 +362,17 @@ async fn show_record(
         .await
         .unwrap()
         .unwrap();
-    crate::push_record_resolver::show(
-        json!("show-held-push"),
-        json!({
-            "caller": target_session(&fixture.reader).unwrap(),
-            "reference": crate::push_record_resolver::link_for(&record, identity),
+    let shown = crate::CollaborationApplication::new(identity.clone())
+        .messages()
+        .push_show(collaboration_protocol::PushRecordShowParams {
+            caller: target_session(&fixture.reader).unwrap(),
+            reference: crate::push_record_resolver::link_for(&record, identity),
+        })
+        .await;
+    match shown {
+        Ok(result) => json!({ "result": result }),
+        Err(failure) => json!({
+            "error": crate::collaboration_application::CollaborationRejection::published_rejection(&failure)
         }),
-        identity,
-    )
-    .await
+    }
 }

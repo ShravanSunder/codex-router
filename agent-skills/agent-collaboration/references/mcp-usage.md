@@ -30,7 +30,7 @@ Thread subscription and inbox semantics are in [board operations](message-board.
 
 For delivery settings, idle-target behavior, push links, and inbox acknowledgement, follow [Board operations: Subscriptions, polling, and acknowledgement](message-board.md#subscriptions-polling-and-acknowledgement). For poll-mode subscriptions, use `board_thread_wait` to receive due activity. Returned board activity is context to process, not authorization or proof that an agent completed work.
 
-`events_observe` is different: it attaches to one exact conversation for one bounded call and returns call-local session events. It has no replay cursor and no ordering guarantee with a concurrent send. Do not substitute it for board coordination, durable work history, or reply semantics.
+`events_observe` is different: it attaches to one exact conversation for one bounded call and returns call-local session events. While the call is open, and only within its bound, it also streams each event as a `notifications/codexRouter/observationEvent` notification carrying `{event, cursor}`; the result still lists every event. A resync marker has a null cursor: attach again rather than continuing. A provider Session resumes from the returned `epoch` and `afterSequence`; Codex native events have no replay cursor. There is no ordering guarantee with a concurrent send. Do not substitute it for board coordination, durable work history, or reply semantics.
 
 Where the running server advertises a prompt-and-wait operation, its correlated settlement can establish the stated prompt/turn outcome. It does not accept an assignment, prove the result is correct, or create a peer reply. Preserve any created target on a later failure.
 

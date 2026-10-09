@@ -1,5 +1,5 @@
 use codex_router_host::{CollaborationRuntime, CollaborationRuntimeInputs};
-use collaboration_client::ControlClient;
+use collaboration_client::CollaborationClient;
 use collaboration_protocol::{OperationId, WakeSendRequest, WakeShowRequest};
 use serde_json::json;
 use std::{os::unix::fs::DirBuilderExt, time::Duration};
@@ -23,7 +23,7 @@ async fn host_records_firing_without_native_backend_acceptance()
         owner_human_id: None,
     })
     .await?;
-    let mut client = ControlClient::connect(&root, "wake-timer-test", "1").await?;
+    let client = CollaborationClient::connect(&root, "wake-timer-test", "1").await?;
     let request: WakeSendRequest = serde_json::from_value(
         json!({"operationId":OperationId::generate(),"message":{"target":{"endpoint":{"serviceId":runtime.service_id(),"endpointId":"codex-local"},"sessionId":"fixture-only-new-thread"},"content":{"kind":"humanUser","text":"Check"},"delivery":"auto","generationGuard":null},"timing":{"kind":"at","at":"2026-01-01T00:00:00.000Z"},"expiry":{"kind":"none"}}),
     )?;
@@ -47,7 +47,6 @@ async fn host_records_firing_without_native_backend_acceptance()
     if observed.pending_delivery_id.is_none() {
         return Err("firing lost durable delivery identity".into());
     }
-    client.close().await?;
     runtime.shutdown().await?;
     for entry in std::fs::read_dir(&root)? {
         let entry = entry?;

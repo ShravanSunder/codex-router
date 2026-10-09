@@ -145,12 +145,12 @@ async fn live_current_source_catalog_is_accepted_by_cursor_and_claude() {
     runtime.shutdown().await.expect("runtime shutdown");
 }
 
-/// Proves the shared initialized HTTP surface against an explicitly selected
+/// Proves the shared stateless HTTP surface against an explicitly selected
 /// authenticated ACP provider. Provider-specific MCP execution has separate
 /// acceptance and is intentionally not inferred from this journey.
 #[tokio::test]
 #[ignore = "requires an explicitly selected authenticated external ACP provider"]
-async fn live_provider_create_and_prompt_through_initialized_http() {
+async fn live_provider_create_and_prompt_through_stateless_http() {
     let executable = std::env::var_os("CODEX_ROUTER_TEST_EXTERNAL_ACP_EXECUTABLE")
         .map(PathBuf::from)
         .expect("CODEX_ROUTER_TEST_EXTERNAL_ACP_EXECUTABLE");
@@ -197,16 +197,7 @@ async fn live_provider_create_and_prompt_through_initialized_http() {
     )
     .expect("typed service manifest");
     let client = reqwest::Client::new();
-    let session = initialize_mcp(&client, &manifest.mcp.url).await;
-    let inventory = call_tool(
-        &client,
-        &manifest.mcp.url,
-        &session,
-        2,
-        "endpoints_list",
-        json!({}),
-    )
-    .await;
+    let inventory = call_tool(&client, &manifest.mcp.url, 2, "endpoints_list", json!({})).await;
     let endpoints = inventory["result"]["structuredContent"]["endpoints"]
         .as_array()
         .expect("endpoint inventory");
@@ -230,11 +221,10 @@ async fn live_provider_create_and_prompt_through_initialized_http() {
     let generation = json!({"serviceEpoch":inventory["result"]["structuredContent"]["serviceEpoch"],"generation":generation_number});
     let actor = json!({"endpoint":{"serviceId":endpoint["serviceId"],"endpointId":"codex-local"},"sessionId":"mcp-live-provider-caller"});
 
-    let create = call_tool(&client, &manifest.mcp.url, &session, 3, "conversation_create", json!({"operationId":CREATE_OPERATION,"endpoint":endpoint,"generation":generation,"workingDirectory":provider_cwd,"createdBy":actor,"approver":actor,"access":"write-restricted","timeoutSeconds":20})).await;
+    let create = call_tool(&client, &manifest.mcp.url, 3, "conversation_create", json!({"operationId":CREATE_OPERATION,"endpoint":endpoint,"generation":generation,"workingDirectory":provider_cwd,"createdBy":actor,"approver":actor,"access":"write-restricted","timeoutSeconds":20})).await;
     assert_tool_success(&create, "conversation create");
     assert_eq!(create["result"]["structuredContent"]["kind"], "created");
-    let create_wait =
-        wait_for_operation(&client, &manifest.mcp.url, &session, 4, CREATE_OPERATION).await;
+    let create_wait = wait_for_operation(&client, &manifest.mcp.url, 4, CREATE_OPERATION).await;
     let target =
         create_wait["result"]["structuredContent"]["output"]["settlement"]["target"].clone();
     assert_eq!(
@@ -242,7 +232,7 @@ async fn live_provider_create_and_prompt_through_initialized_http() {
         "created"
     );
 
-    let prompt = call_tool(&client, &manifest.mcp.url, &session, 5, "conversation_prompt", json!({"operationId":PROMPT_OPERATION,"target":target,"generation":generation,"requestedBy":actor,"approver":actor,"message":{"kind":"humanUser","text":"Reply with exactly PR2_MCP_LIVE_PROVIDER_OK and no other text."},"timeoutSeconds":20})).await;
+    let prompt = call_tool(&client, &manifest.mcp.url, 5, "conversation_prompt", json!({"operationId":PROMPT_OPERATION,"target":target,"generation":generation,"requestedBy":actor,"approver":actor,"message":{"kind":"humanUser","text":"Reply with exactly PR2_MCP_LIVE_PROVIDER_OK and no other text."},"timeoutSeconds":20})).await;
     assert_tool_success(&prompt, "conversation prompt");
     assert_eq!(prompt["result"]["structuredContent"]["kind"], "completed");
     assert_eq!(
@@ -257,8 +247,7 @@ async fn live_provider_create_and_prompt_through_initialized_http() {
         prompt["result"]["structuredContent"]["settlement"]["detail"]["output"]["text"],
         "PR2_MCP_LIVE_PROVIDER_OK"
     );
-    let prompt_wait =
-        wait_for_operation(&client, &manifest.mcp.url, &session, 6, PROMPT_OPERATION).await;
+    let prompt_wait = wait_for_operation(&client, &manifest.mcp.url, 6, PROMPT_OPERATION).await;
     assert_eq!(
         prompt_wait["result"]["structuredContent"]["output"]["settlement"]["target"],
         target
@@ -277,14 +266,12 @@ async fn live_provider_create_and_prompt_through_initialized_http() {
 async fn wait_for_operation(
     client: &reqwest::Client,
     mcp_url: &str,
-    session: &reqwest::header::HeaderValue,
     request_id: u64,
     operation_id: &str,
 ) -> Value {
     let response = call_tool(
         client,
         mcp_url,
-        session,
         request_id,
         "conversation_operation_wait",
         json!({"operationId":operation_id,"timeoutSeconds":20}),
@@ -301,37 +288,14 @@ fn assert_tool_success(response: &Value, label: &str) {
     );
 }
 
-async fn initialize_mcp(client: &reqwest::Client, mcp_url: &str) -> reqwest::header::HeaderValue {
-    let response = client.post(mcp_url).header(CONTENT_TYPE, "application/json").header(ACCEPT, "application/json, text/event-stream").json(&json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"provider-live-http-test","version":"1"}}})).send().await.expect("MCP initialize");
-    assert!(response.status().is_success(), "MCP initialize status");
-    let session = response
-        .headers()
-        .get("mcp-session-id")
-        .expect("MCP session header")
-        .clone();
-    let initialized = client
-        .post(mcp_url)
-        .header(CONTENT_TYPE, "application/json")
-        .header(ACCEPT, "application/json, text/event-stream")
-        .header("mcp-session-id", &session)
-        .header("mcp-protocol-version", "2025-11-25")
-        .json(&json!({"jsonrpc":"2.0","method":"notifications/initialized","params":{}}))
-        .send()
-        .await
-        .expect("MCP initialized notification");
-    assert!(initialized.status().is_success(), "MCP initialized status");
-    session
-}
-
 async fn call_tool(
     client: &reqwest::Client,
     mcp_url: &str,
-    session: &reqwest::header::HeaderValue,
     request_id: u64,
     tool_name: &str,
     arguments: Value,
 ) -> Value {
-    let response = client.post(mcp_url).header(CONTENT_TYPE, "application/json").header(ACCEPT, "application/json, text/event-stream").header("mcp-session-id", session).header("mcp-protocol-version", "2025-11-25").json(&json!({"jsonrpc":"2.0","id":request_id,"method":"tools/call","params":{"name":tool_name,"arguments":arguments}})).send().await.expect("MCP tools/call");
+    let response = client.post(mcp_url).header(CONTENT_TYPE, "application/json").header(ACCEPT, "application/json, text/event-stream").header("mcp-protocol-version", "2025-11-25").json(&json!({"jsonrpc":"2.0","id":request_id,"method":"tools/call","params":{"name":tool_name,"arguments":arguments}})).send().await.expect("MCP tools/call");
     protocol_response_json(response).await
 }
 

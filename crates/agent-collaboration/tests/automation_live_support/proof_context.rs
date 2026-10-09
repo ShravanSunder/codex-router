@@ -4,7 +4,7 @@ mod native_notification_diagnostics;
 use codex_native_integration::{
     NativeOperation, NativePayloadSchemas, NativeProtocolConnection, NativeSchemaExport,
 };
-use collaboration_client::ControlClient;
+use collaboration_client::CollaborationClient;
 use collaboration_client::protocol::{
     ChannelDescription, CodexGeneration, EndpointRef, SessionRef,
 };
@@ -24,7 +24,7 @@ pub struct ProofContext {
     pub service_directory: PathBuf,
     pub endpoint: EndpointRef,
     pub generation: CodexGeneration,
-    pub client: ControlClient,
+    pub client: CollaborationClient,
     pub native: NativeProtocolConnection,
     pub schemas: Arc<NativePayloadSchemas>,
     private_codex_home: Option<PathBuf>,
@@ -109,8 +109,9 @@ impl ProofContext {
                 .write_all(b"{\"model\":\"gpt-5.6-luna\"}\n")?;
         }
         let service_directory = root.join("agent-communication");
-        let mut client =
-            ControlClient::connect(&service_directory, "automation-luna-acceptance", "1").await?;
+        let client =
+            CollaborationClient::connect(&service_directory, "automation-luna-acceptance", "1")
+                .await?;
         let inventory = client.list_endpoints().await?;
         let endpoint = inventory
             .endpoints

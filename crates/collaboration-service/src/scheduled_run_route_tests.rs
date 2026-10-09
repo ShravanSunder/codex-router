@@ -1,4 +1,5 @@
-//! A fake execution route drives provider and peer runs through stored Control inspection.
+//! A fake execution route drives provider and peer runs through the application's stored
+//! inspection.
 use super::*;
 use crate::scheduled_run_contract::ScheduledRunPayload;
 use crate::{
@@ -14,7 +15,6 @@ use agent_automation::{
     ScheduleDefinition, SubmissionEffect, TimingRule,
 };
 use automation_storage::ScheduleCreate;
-use collaboration_client::ControlClient;
 use collaboration_protocol::{
     DeliveryClientReceipt, DeliveryNextAction, DeliveryOutcome, DeliveryReceipt, DeliveryRejection,
     DeliveryRejectionReason, DeliveryRouteEvidence, PushDeliveryState, PushKind, RouterLink,
@@ -594,14 +594,15 @@ async fn provider_and_peer_routes_drive_run_show_without_native_turns() -> TestR
                 .await
                 .map_err(|error| format!("fake provider settle: {error}"))?;
         }
-        let identity =
-            crate::ServiceIdentity::new(service, service, &format!("sha256:{}", "a".repeat(64)))?
-                .with_automation_store(Arc::clone(&store))
-                .with_scheduled_run_execution(fake);
-        let (socket, server) = tokio::net::UnixStream::pair()?;
-        let service_task = tokio::spawn(crate::serve_control_connection(server, identity));
-        let mut client = ControlClient::initialize(socket, "fake-run-show", "1").await?;
-        let shown = client.read_run(RunShowRequest { run_id }).await?;
+        let identity = crate::ServiceIdentity::new(service, service)?
+            .with_automation_store(Arc::clone(&store))
+            .with_scheduled_run_execution(fake);
+        let application = crate::CollaborationApplication::new(identity);
+        let shown = application
+            .automation()
+            .run_show(RunShowRequest { run_id })
+            .await
+            .map_err(|failure| format!("run show failed: {failure:?}"))?;
         match (kind, shown.state) {
             (
                 FakeRouteKind::Provider,
@@ -622,8 +623,7 @@ async fn provider_and_peer_routes_drive_run_show_without_native_turns() -> TestR
         if shown.summary.is_some() || shown.execution_evidence.route.is_none() {
             return Err("run/show invented a summary or lost route evidence".into());
         }
-        client.close().await?;
-        service_task.await??;
+        drop(application);
         drop(worker);
         drop(store);
         for entry in std::fs::read_dir(&root)? {
@@ -694,15 +694,13 @@ async fn provider_existing_preparation_is_inspectable_and_fresh_activation_is_re
             .await?;
         schedules.push(schedule.schedule_id);
     }
-    let identity =
-        crate::ServiceIdentity::new(service, service, &format!("sha256:{}", "a".repeat(64)))?
-            .with_automation_store(Arc::clone(&store))
-            .with_scheduled_run_execution(fake);
-    let (socket, server) = tokio::net::UnixStream::pair()?;
-    let service_task = tokio::spawn(crate::serve_control_connection(server, identity.clone()));
-    let mut client = ControlClient::initialize(socket, "provider-preparation", "1").await?;
-    let fresh = client
-        .create_schedule(serde_json::from_value(json!({
+    let identity = crate::ServiceIdentity::new(service, service)?
+        .with_automation_store(Arc::clone(&store))
+        .with_scheduled_run_execution(fake);
+    let application = crate::CollaborationApplication::new(identity);
+    let fresh = application
+        .automation()
+        .schedule_create(serde_json::from_value(json!({
             "operationId": OperationId::generate(),
             "definition": {
                 "instructionId": instruction.instruction_id.clone(),
@@ -715,21 +713,16 @@ async fn provider_existing_preparation_is_inspectable_and_fresh_activation_is_re
             }
         }))?)
         .await;
-    if !matches!(fresh, Err(collaboration_client::ScheduleClientError::Rejected(failure))
+    if !matches!(fresh.as_ref().map_err(crate::collaboration_application::ScheduleOperationFailure::failure), Err(failure)
         if failure.field.as_deref() == Some("destination")
             && failure.constraint.as_deref().is_some_and(|fix| fix.contains("conversation create")))
     {
         return Err("fresh provider schedule activation lacked the create-first fix".into());
     }
-    drop(client);
-    service_task.await??;
-    let (socket, server) = tokio::net::UnixStream::pair()?;
-    let service_task = tokio::spawn(crate::serve_control_connection(server, identity.clone()));
-    let mut client =
-        ControlClient::initialize(socket, "provider-preparation-existing", "1").await?;
     let operation_id = OperationId::generate();
-    let prepared = client
-        .prepare_schedule(serde_json::from_value(json!({
+    let prepared = application
+        .automation()
+        .schedule_prepare(serde_json::from_value(json!({
             "operationId":operation_id,"scheduleId":schedules[0],
             "destination":{"kind":"existing","target":target.clone(),"cwd":root}
         }))?)
@@ -738,9 +731,14 @@ async fn provider_existing_preparation_is_inspectable_and_fresh_activation_is_re
     {
         return Err("provider preparation did not bind the prepared target".into());
     }
-    let shown = client
-        .read_operation(collaboration_protocol::OperationShowRequest { operation_id })
-        .await?;
+    let shown = application
+        .automation()
+        .operation_show(
+            collaboration_protocol::OperationShowRequest { operation_id },
+            crate::collaboration_application::API_RESULT_BUDGET,
+        )
+        .await
+        .map_err(|failure| format!("operation show failed: {failure:?}"))?;
     if !matches!(
         shown.state,
         collaboration_protocol::OperationState::Succeeded { .. }
@@ -748,28 +746,29 @@ async fn provider_existing_preparation_is_inspectable_and_fresh_activation_is_re
         return Err("provider preparation did not complete in operation/show".into());
     }
     let fork_operation = OperationId::generate();
-    let fork = client
-        .prepare_schedule(serde_json::from_value(json!({
+    let fork = application
+        .automation()
+        .schedule_prepare(serde_json::from_value(json!({
             "operationId":fork_operation,"scheduleId":schedules[1],
             "destination":{"kind":"fork","source":target,"throughTurnId":"turn-one","cwd":root}
         }))?)
         .await;
-    if !matches!(fork, Err(collaboration_client::ScheduleClientError::Rejected(failure))
+    if !matches!(fork.as_ref().map_err(crate::collaboration_application::ScheduleOperationFailure::failure), Err(failure)
         if matches!(failure.kind, collaboration_protocol::ScheduleFailureKind::UnsupportedCapability)
             && matches!(failure.effects, collaboration_protocol::ScheduleEffects::Route { evidence: DeliveryRouteEvidence::ProviderAcp { .. } }))
     {
         return Err("provider fork did not report route-specific unsupported capability".into());
     }
-    let (inspection_socket, inspection_server) = tokio::net::UnixStream::pair()?;
-    let inspection_task =
-        tokio::spawn(crate::serve_control_connection(inspection_server, identity));
-    let mut inspection_client =
-        ControlClient::initialize(inspection_socket, "provider-operation-show", "1").await?;
-    let fork_shown = inspection_client
-        .read_operation(collaboration_protocol::OperationShowRequest {
-            operation_id: fork_operation,
-        })
-        .await?;
+    let fork_shown = application
+        .automation()
+        .operation_show(
+            collaboration_protocol::OperationShowRequest {
+                operation_id: fork_operation,
+            },
+            crate::collaboration_application::API_RESULT_BUDGET,
+        )
+        .await
+        .map_err(|failure| format!("operation show failed: {failure:?}"))?;
     if !matches!(fork_shown.state, collaboration_protocol::OperationState::Failed { ref error }
         if matches!(&error.effects, collaboration_protocol::OperationEffects::Route {
             evidence,
@@ -777,10 +776,7 @@ async fn provider_existing_preparation_is_inspectable_and_fresh_activation_is_re
     {
         return Err("operation/show lost the provider preparation evidence".into());
     }
-    inspection_client.close().await?;
-    inspection_task.await??;
-    let _ = client.close().await;
-    service_task.await??;
+    drop(application);
     drop(store);
     for entry in std::fs::read_dir(&root)? {
         std::fs::remove_file(entry?.path())?;
