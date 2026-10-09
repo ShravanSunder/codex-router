@@ -1,5 +1,5 @@
 //! Non-creating inspection of the exact owned interaction schema and migration lineage.
-use super::{HistoryStorageFailure, MIGRATOR, read_metadata, read_records};
+use super::{HistoryStorageFailure, MIGRATOR, read_records, read_revision};
 use sqlx::SqliteConnection;
 
 #[derive(Eq, PartialEq)]
@@ -71,7 +71,7 @@ pub(super) async fn inspect_schema(
     }
     let expected_names = [
         "_sqlx_migrations",
-        "interaction_history_import",
+        "interaction_history_revision",
         "typed_interaction_history",
     ];
     if objects.len() != expected_names.len()
@@ -141,7 +141,7 @@ pub(super) async fn inspect_schema(
     {
         return Err(HistoryStorageFailure::InvalidSchema);
     }
-    read_metadata(connection).await?;
+    read_revision(connection).await?;
     read_records(connection).await?;
     Ok(SchemaAdmission::Owned)
 }

@@ -7,9 +7,9 @@ use super::*;
 use std::{sync::Arc, time::Duration as WaitDuration};
 
 #[tokio::test]
-async fn mixed_typed_import_preserves_content_and_settlement_never_resets_creation_time() {
-    let directory = tempfile::tempdir().expect("mixed typed import");
-    let source = directory.path().join("interaction-history.json");
+async fn mixed_typed_creation_preserves_content_and_settlement_never_resets_creation_time() {
+    let directory = tempfile::tempdir().expect("mixed typed creation");
+    let source = directory.path().join("interaction.sqlite");
     let requester = session_ref("requester");
     let approver = Identity::Session {
         session: session_ref("approver"),
@@ -32,39 +32,42 @@ async fn mixed_typed_import_preserves_content_and_settlement_never_resets_creati
         request: question("question"),
         state: QuestionHistoryState::Pending,
     };
-    let mut dated_approval = serde_json::to_value(&approval).expect("approval source");
-    dated_approval["createdAt"] = "2026-09-18T00:00:00.000000007Z".into();
-    let input = serde_json::json!({"approval":dated_approval,"question":pending_question,
-        "refusal":refused_approval("refusal")});
-    let original = serde_json::to_vec_pretty(&input).expect("mixed source");
-    tokio::fs::write(&source, &original).await.expect("source");
     let store = InteractionHistoryStore::load(source.clone())
         .await
-        .expect("whole mixed import");
+        .expect("empty store");
+    store
+        .record(approval.clone())
+        .await
+        .expect("create approval");
+    let InteractionHistoryRecord::Question {
+        requester,
+        approver: question_approver,
+        request,
+        ..
+    } = pending_question.clone()
+    else {
+        panic!("question fixture")
+    };
+    store
+        .record_question(requester, question_approver, request)
+        .await
+        .expect("create question");
+    add_refusal(&store, "refusal")
+        .await
+        .expect("create refusal");
     assert_eq!(
-        serde_json::to_value(store.interaction("approval").await.expect("approval row"))
-            .expect("approval value"),
-        serde_json::to_value(approval).expect("original approval")
+        store.interaction("approval").await.expect("approval"),
+        approval
     );
     assert_eq!(
-        serde_json::to_value(store.interaction("question").await.expect("question row"))
-            .expect("question value"),
-        input["question"]
+        store.interaction("question").await.expect("question"),
+        pending_question
     );
     assert_eq!(
-        serde_json::to_value(store.interaction("refusal").await.expect("refusal row"))
-            .expect("refusal value"),
-        input["refusal"]
+        store.interaction("refusal").await.expect("refusal"),
+        refused_approval("refusal")
     );
     let timestamps = store.data.lock().await.created_at.clone();
-    assert_eq!(
-        timestamps["approval"].to_rfc3339_opts(chrono::SecondsFormat::Nanos, true),
-        "2026-09-18T00:00:00.000000007Z"
-    );
-    assert_eq!(
-        timestamps["question"], timestamps["refusal"],
-        "undated rows stamp once at the same import instant"
-    );
     store
         .decide("approval", &approver, "allow-once", false)
         .await
@@ -82,10 +85,6 @@ async fn mixed_typed_import_preserves_content_and_settlement_never_resets_creati
     assert!(matches!(reopened.interaction("approval").await,
         Some(InteractionHistoryRecord::Approval { state: InteractionHistoryState::Decided { option_id }, .. })
         if option_id.as_str()=="allow-once"));
-    assert_eq!(
-        tokio::fs::read(source).await.expect("original recovery"),
-        original
-    );
 }
 
 #[tokio::test]
@@ -103,20 +102,26 @@ async fn retention_removes_oldest_then_id_in_bounded_batches_and_keeps_exact_cut
         ("exact", cutoff),
         ("recent", now),
     ];
-    let mut input = serde_json::Map::new();
-    for (request_id, created_at) in fixtures {
-        let mut record = serde_json::to_value(refused_approval(request_id)).expect("record");
-        record["createdAt"] = created_at
-            .to_rfc3339_opts(chrono::SecondsFormat::Nanos, true)
-            .into();
-        input.insert(request_id.into(), record);
-    }
-    let original = serde_json::to_vec(&input).expect("retention source");
-    let source = directory.path().join("interaction-history.json");
-    tokio::fs::write(&source, &original).await.expect("source");
+    let source = directory.path().join("interaction.sqlite");
     let store = InteractionHistoryStore::load(source.clone())
         .await
-        .expect("store");
+        .expect("fresh owned schema");
+    drop(store);
+    let mut independent = observer(directory.path()).await;
+    for (request_id, created_at) in fixtures {
+        sqlx::query("INSERT INTO typed_interaction_history (request_id,record_json,created_at) VALUES (?,?,?)")
+            .bind(request_id).bind(serde_json::to_string(&refused_approval(request_id)).expect("record"))
+            .bind(created_at.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true))
+            .execute(&mut independent).await.expect("independent retention seed");
+    }
+    sqlx::query("UPDATE interaction_history_revision SET revision=revision+1")
+        .execute(&mut independent)
+        .await
+        .expect("seed revision");
+    independent.close().await.expect("close seed writer");
+    let store = InteractionHistoryStore::load(source.clone())
+        .await
+        .expect("retention store");
     assert!(store.prune_expired(now, 0).await.is_err());
     assert!(store.prune_expired(now, 501).await.is_err());
     assert_eq!(store.prune_expired(now, 2).await.expect("bounded prune"), 2);
@@ -147,16 +152,12 @@ async fn retention_removes_oldest_then_id_in_bounded_batches_and_keeps_exact_cut
             .collect::<Vec<_>>(),
         ["exact", "recent"]
     );
-    assert_eq!(
-        tokio::fs::read(source).await.expect("protected source"),
-        original
-    );
 }
 
 #[tokio::test]
 async fn low_level_observer_reopen_does_not_reconcile_live_pending_records() {
     let directory = tempfile::tempdir().expect("pending fixture");
-    let source = directory.path().join("interaction-history.json");
+    let source = directory.path().join("interaction.sqlite");
     let store = InteractionHistoryStore::load(source.clone())
         .await
         .expect("store");
@@ -197,7 +198,7 @@ async fn low_level_observer_reopen_does_not_reconcile_live_pending_records() {
 #[tokio::test]
 async fn independent_connections_refresh_before_writing_without_losing_unrelated_rows() {
     let directory = tempfile::tempdir().expect("writer fixture");
-    let source = directory.path().join("interaction-history.json");
+    let source = directory.path().join("interaction.sqlite");
     let first = InteractionHistoryStore::load(source.clone())
         .await
         .expect("first writer");
@@ -224,7 +225,7 @@ async fn independent_connections_refresh_before_writing_without_losing_unrelated
 #[tokio::test]
 async fn independently_stale_settlement_attempts_have_one_durable_winner() {
     let directory = tempfile::tempdir().expect("settlement fixture");
-    let source = directory.path().join("interaction-history.json");
+    let source = directory.path().join("interaction.sqlite");
     let first = InteractionHistoryStore::load(source.clone())
         .await
         .expect("first writer");
@@ -269,7 +270,7 @@ async fn independently_stale_settlement_attempts_have_one_durable_winner() {
 #[tokio::test]
 async fn aborted_commit_before_cache_publication_recovers_on_same_store_next_mutation() {
     let directory = tempfile::tempdir().expect("commit/cache fixture");
-    let source = directory.path().join("interaction-history.json");
+    let source = directory.path().join("interaction.sqlite");
     let store = Arc::new(
         InteractionHistoryStore::load(source.clone())
             .await
@@ -314,28 +315,30 @@ async fn aborted_commit_before_cache_publication_recovers_on_same_store_next_mut
 }
 
 #[tokio::test]
-async fn reconciliation_failure_after_import_keeps_committed_stamp_for_next_owning_startup() {
-    let directory = tempfile::tempdir().expect("import/reconciliation gap");
-    let source = directory.path().join("interaction-history.json");
-    let pending = InteractionHistoryRecord::Question {
-        requester: session_ref("requester"),
-        approver: Identity::Session {
-            session: session_ref("approver"),
-        },
-        request: question("pending"),
-        state: QuestionHistoryState::Pending,
-    };
-    let original = serde_json::to_vec(&BTreeMap::from([("pending", pending)])).expect("source");
-    tokio::fs::write(&source, &original)
-        .await
-        .expect("source before first import");
+async fn reconciliation_failure_keeps_committed_stamp_for_next_owning_startup() {
+    let directory = tempfile::tempdir().expect("creation/reconciliation gap");
+    let source = directory.path().join("interaction.sqlite");
     let store = InteractionHistoryStore::load(source.clone())
         .await
-        .expect("committed first import");
+        .expect("fresh store");
+    store
+        .record_question(
+            session_ref("requester"),
+            Identity::Session {
+                session: session_ref("approver"),
+            },
+            question("pending"),
+        )
+        .await
+        .expect("commit pending question");
+    drop(store);
+    let store = InteractionHistoryStore::load(source.clone())
+        .await
+        .expect("reopen pending question");
     let committed_stamp = store.data.lock().await.created_at["pending"];
     let mut connection = observer(directory.path()).await;
     sqlx::query("CREATE TRIGGER reject_reconciliation BEFORE UPDATE ON typed_interaction_history BEGIN SELECT RAISE(ABORT, 'fixture reconciliation failure'); END")
-        .execute(&mut connection).await.expect("real post-import failure");
+        .execute(&mut connection).await.expect("real reconciliation failure");
     assert!(matches!(
         store.reconcile_pending_on_startup().await,
         Err(InteractionHistoryError::Unavailable)
@@ -345,7 +348,7 @@ async fn reconciliation_failure_after_import_keeps_committed_stamp_for_next_owni
     )
     .fetch_one(&mut connection)
     .await
-    .expect("prior import survived failed reconciliation");
+    .expect("prior creation survived failed reconciliation");
     assert!(matches!(
         serde_json::from_str::<InteractionHistoryRecord>(&json).expect("pending row"),
         InteractionHistoryRecord::Question {
@@ -360,7 +363,7 @@ async fn reconciliation_failure_after_import_keeps_committed_stamp_for_next_owni
     drop(store);
     let next_startup = InteractionHistoryStore::load(source.clone())
         .await
-        .expect("no second import");
+        .expect("durable reopen");
     next_startup
         .reconcile_pending_on_startup()
         .await
@@ -372,21 +375,15 @@ async fn reconciliation_failure_after_import_keeps_committed_stamp_for_next_owni
     assert!(matches!(next_startup.interaction("pending").await,
         Some(InteractionHistoryRecord::Question {state:QuestionHistoryState::Cancelled {reason},..})
         if reason.as_str()=="hostRestarted"));
-    assert_eq!(
-        tokio::fs::read(source)
-            .await
-            .expect("original source retained"),
-        original
-    );
 }
 
 #[tokio::test]
 async fn revision_overflow_rejects_mutation_without_wrapping_or_committing_rows() {
     let directory = tempfile::tempdir().expect("revision overflow fixture");
-    let source = directory.path().join("interaction-history.json");
+    let source = directory.path().join("interaction.sqlite");
     let store = InteractionHistoryStore::load(source).await.expect("store");
     let mut independent = observer(directory.path()).await;
-    sqlx::query("UPDATE interaction_history_import SET revision=9223372036854775807")
+    sqlx::query("UPDATE interaction_history_revision SET revision=9223372036854775807")
         .execute(&mut independent)
         .await
         .expect("maximal valid stored revision");
@@ -394,7 +391,7 @@ async fn revision_overflow_rejects_mutation_without_wrapping_or_committing_rows(
         add_refusal(&store, "must-not-commit").await,
         Err(InteractionHistoryError::Unavailable)
     ));
-    let revision: i64 = sqlx::query_scalar("SELECT revision FROM interaction_history_import")
+    let revision: i64 = sqlx::query_scalar("SELECT revision FROM interaction_history_revision")
         .fetch_one(&mut independent)
         .await
         .expect("unchanged revision");
@@ -410,7 +407,7 @@ async fn revision_overflow_rejects_mutation_without_wrapping_or_committing_rows(
 #[tokio::test]
 async fn real_sqlite_write_failure_rolls_back_delta_and_retains_acknowledged_cache() {
     let directory = tempfile::tempdir().expect("write failure fixture");
-    let source = directory.path().join("interaction-history.json");
+    let source = directory.path().join("interaction.sqlite");
     let store = InteractionHistoryStore::load(source.clone())
         .await
         .expect("store");

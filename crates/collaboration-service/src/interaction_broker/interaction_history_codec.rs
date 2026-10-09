@@ -1,5 +1,5 @@
-//! Duplicate-rejecting recovery import and validated durable record decoding.
-use super::{InteractionHistoryData, InteractionHistoryRecord, parse_history_timestamp};
+//! Duplicate-rejecting, validated durable record decoding.
+use super::{InteractionHistoryRecord, parse_history_timestamp};
 use chrono::{DateTime, Utc};
 use serde::{
     Deserialize, Deserializer,
@@ -79,36 +79,6 @@ impl<'de> Deserialize<'de> for UniqueJsonValue {
         }
         deserializer.deserialize_any(JsonValueVisitor)
     }
-}
-
-pub(super) fn decode_import(
-    bytes: &[u8],
-    imported_at: DateTime<Utc>,
-) -> Result<InteractionHistoryData, HistoryStorageFailure> {
-    let UniqueJsonValue(value) =
-        serde_json::from_slice(bytes).map_err(|_| HistoryStorageFailure::InvalidImportSource)?;
-    let Value::Object(values) = value else {
-        return Err(HistoryStorageFailure::InvalidImportSource);
-    };
-    let mut data = InteractionHistoryData::default();
-    for (request_id, mut value) in values {
-        let object = value
-            .as_object_mut()
-            .ok_or(HistoryStorageFailure::InvalidImportSource)?;
-        let created_at = match object.remove("createdAt") {
-            None => imported_at,
-            Some(Value::String(value)) => parse_history_timestamp(&value)
-                .map_err(|_| HistoryStorageFailure::InvalidImportSource)?,
-            Some(_) => return Err(HistoryStorageFailure::InvalidImportSource),
-        };
-        let record: InteractionHistoryRecord = serde_json::from_value(value)
-            .map_err(|_| HistoryStorageFailure::InvalidImportSource)?;
-        if request_id != record.request_id() || !record.is_valid_stored_value() {
-            return Err(HistoryStorageFailure::InvalidImportSource);
-        }
-        data.insert_with_timestamp(request_id, record, created_at);
-    }
-    Ok(data)
 }
 
 pub(super) fn decode_stored_record(

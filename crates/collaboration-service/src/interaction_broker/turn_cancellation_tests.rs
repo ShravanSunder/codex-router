@@ -368,7 +368,7 @@ async fn question_answer_delivery_reports_later_history_write_failure() {
         .expect("poison transaction");
     sqlx::query("UPDATE typed_interaction_history SET record_json='{}' WHERE request_id='write-failure-question'")
         .execute(&mut *transaction).await.expect("corrupt actual record after validation");
-    sqlx::query("UPDATE interaction_history_import SET revision=revision+1")
+    sqlx::query("UPDATE interaction_history_revision SET revision=revision+1")
         .execute(&mut *transaction)
         .await
         .expect("publish independent revision");

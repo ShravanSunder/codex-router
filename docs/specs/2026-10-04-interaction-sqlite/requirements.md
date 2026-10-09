@@ -1,23 +1,13 @@
-# Typed interaction storage migration
+# Typed interaction SQLite requirements
 
-The owner requested a baby step: move typed interaction history from its JSON file into `interaction.sqlite`. Approvers, requesters and operators need durable history without a change to approval or Question behavior. This is a storage migration, not the future unified messages/inbox/outbox/lifecycle database.
+Router users need typed approvals, refused approvals and Questions to survive process restarts with transactional updates and explicit storage failures. The owner chose a hard cutover to SQLite and explicitly removed JSON migration/import support: “we just stop supporting json”. Existing typed JSON records therefore do not appear in the new history. Existing files are left untouched.
 
-| Need | Consumer and outcome | Authority / priority |
-|---|---|---|
-| U1 | Requesters and approvers retain typed approval, refused-approval and Question history in `interaction.sqlite`. | Owner's 2026-10-04 bounded migration commission; authorized, required by owner. |
-| U2 | Operators can import existing typed JSON transactionally, reject malformed data and recover without deleting the original file. Legacy history retains its frozen 0.1.38 shape and separate runtime writer. | Same commission; authorized, required by owner. |
-| U3 | Requesters and approvers retain actor validation, offered-choice validation, settlement, cancellation, response ordering and 30-day creation-time retention. | Commission's explicit preservation constraints; authorized, required by owner. |
-| U4 | Operators can distinguish a safe cutover/restart from old-writer divergence or unsafe rollback. No automatic destructive recovery. | Commission's old-writer/restart/rollback and no-deletion constraints; authorized, required by owner. |
-| U5 | Owner receives real SQLite and broker proof, independent review, coherent local checkpoints with signing preferred and this lane's merge-ready, non-draft PR, left unmerged. | Original commission plus latest explicit merge-ready delivery criterion; authorized, required by owner. |
+| Need | Required outcome |
+|---|---|
+| U1 Durable typed history | New typed interactions and their terminal states persist in interaction.sqlite and survive reopen. |
+| U2 One storage authority | No reads, imports, hashes, provenance checks, writes or deletion of interaction-history.json. Fresh SQLite history starts empty regardless of that path's contents or accessibility. |
+| U3 Preserve interaction behavior | Approval and Question authorization, offered options, response validation, cancellation, response ordering, cold-start reconciliation and strict 30-day creation-time retention remain observable as before. |
+| U4 Safe persistence | Corrupt/foreign databases and invalid stored rows fail explicitly without automatic clearing or fallback. Concurrent mutations and uncertain commit/cache publication cannot lose unrelated rows or replay responses. |
+| U5 Evidence and delivery | Focused real SQLite and broker tests, independent implementation review, required debug proof, applicable quality checks and a merge-ready unmerged PR. Incomplete gates are reported as incomplete. |
 
-There is no new product interface, authorization policy, provider transcript, credential, global setting or legal-acceptance behavior. Automation and message storage stay outside this task. The fixes design's Question caller-work lifetime is separately owned by the fixes Lead; this document's U3 preservation obligation remains in scope. Host quiescence/handover is separately owned by the Host Lead. The owner's later delivery criterion permits this lane's merge-ready, non-draft PR, left unmerged; merge, release and production restart remain unauthorized.
-
-| Today | Requested outcome | Preserved boundary |
-|---|---|---|
-| Typed history uses whole-file JSON writes and rename. | Typed history has SQLite transactional persistence. | Same typed broker and domain records. |
-| Startup validates history and cancels orphaned pending records. | Import/reopen validates durable state and retains ordinary startup cancellation. | No new answer, replay or lifetime policy. |
-| Legacy approval history has a frozen 0.1.38 record shape and its existing writer. | Typed import, reconcile, prune and persistence neither import, modify nor delete that file; ordinary legacy activity retains its own writer. | Existing legacy readers and writers. |
-
-See [Specification](specification.md) for observable obligations and [Program Design](program-design.md) for their realization.
-
-The latest owner-supplied AGENTS signing policy permits a per-commit unsigned fallback after two failed signing attempts. Keep hooks and global signing configuration intact, report each failure, and label unsigned checkpoints explicitly. This operational fallback does not change the storage contract.
+Only typed interaction persistence changes. The frozen legacy approval-history.json, automation, messages, inbox/outbox, provider transcripts/session files, U3 caller-work lifetime and Host replacement remain separate. No account/security/global setting changes, production replacement or release are authorized by this work. The owner retains control of merge/release.

@@ -1,8 +1,7 @@
 //! Owned interaction database initialization, checked rows and row-delta commits.
-use super::interaction_history_codec::{decode_import, decode_stored_record};
+use super::interaction_history_codec::decode_stored_record;
 use super::{InteractionHistoryData, InteractionHistoryError};
 use chrono::{DateTime, Utc};
-use sha2::{Digest, Sha256};
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqliteSynchronous};
 use sqlx::{Connection, Sqlite, SqliteConnection, Transaction};
 use std::{
@@ -20,10 +19,8 @@ pub(super) static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./interact
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum HistoryStorageFailure {
     StorageUnavailable,
-    InvalidImportSource,
     InvalidSchema,
     InvalidStoredRecord,
-    RecoverySourceChanged,
 }
 
 impl HistoryStorageFailure {
@@ -64,53 +61,31 @@ struct StoredInteractionRow {
     timestamp_storage: String,
 }
 
-pub(super) struct ImportMetadataRow {
-    pub(super) metadata_id: i64,
-    pub(super) source_present: i64,
-    pub(super) source_sha256: Option<String>,
+struct HistoryRevisionRow {
+    metadata_id: i64,
     pub(super) revision: i64,
     metadata_storage: String,
-    presence_storage: String,
-    digest_storage: String,
     revision_storage: String,
 }
 
-pub(super) async fn read_metadata(
+pub(super) async fn read_revision(
     connection: &mut SqliteConnection,
-) -> Result<ImportMetadataRow, HistoryStorageFailure> {
-    let mut rows = sqlx::query_as!(ImportMetadataRow,
-        "SELECT metadata_id, source_present, source_sha256, revision, typeof(metadata_id) AS \"metadata_storage!: String\", typeof(source_present) AS \"presence_storage!: String\", typeof(source_sha256) AS \"digest_storage!: String\", typeof(revision) AS \"revision_storage!: String\" FROM interaction_history_import")
+) -> Result<i64, HistoryStorageFailure> {
+    let mut rows = sqlx::query_as!(HistoryRevisionRow,
+        "SELECT metadata_id, revision, typeof(metadata_id) AS \"metadata_storage!: String\", typeof(revision) AS \"revision_storage!: String\" FROM interaction_history_revision")
         .fetch_all(connection).await.map_err(|_| HistoryStorageFailure::InvalidSchema)?;
     if rows.len() != 1 {
         return Err(HistoryStorageFailure::InvalidSchema);
     }
     let row = rows.pop().ok_or(HistoryStorageFailure::InvalidSchema)?;
-    let provenance_valid = match (row.source_present, row.source_sha256.as_deref()) {
-        (0, None) => true,
-        (1, Some(digest)) => {
-            digest.len() == 64
-                && digest
-                    .bytes()
-                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-        }
-        _ => false,
-    };
     if row.metadata_id != 1
         || row.revision < 0
-        || !provenance_valid
         || row.metadata_storage != "integer"
-        || row.presence_storage != "integer"
         || row.revision_storage != "integer"
-        || row.digest_storage
-            != if row.source_present == 0 {
-                "null"
-            } else {
-                "text"
-            }
     {
         return Err(HistoryStorageFailure::InvalidSchema);
     }
-    Ok(row)
+    Ok(row.revision)
 }
 
 pub(super) async fn read_records(
@@ -140,46 +115,7 @@ fn format_timestamp(created_at: DateTime<Utc>) -> String {
 
 pub(super) async fn initialize_history(
     database_path: &Path,
-    source_path: &Path,
 ) -> Result<HistoryDatabaseState, HistoryStorageFailure> {
-    initialize_history_impl(
-        database_path,
-        source_path,
-        #[cfg(test)]
-        ImportTestFault::None,
-    )
-    .await
-}
-
-#[cfg(test)]
-#[derive(Clone, Copy)]
-pub(super) enum ImportTestFault {
-    None,
-    ConstraintFailureAfterRows,
-}
-
-#[cfg(test)]
-pub(super) async fn initialize_history_with_fault(
-    database_path: &Path,
-    source_path: &Path,
-    fault: ImportTestFault,
-) -> Result<HistoryDatabaseState, HistoryStorageFailure> {
-    initialize_history_impl(database_path, source_path, fault).await
-}
-
-async fn initialize_history_impl(
-    database_path: &Path,
-    source_path: &Path,
-    #[cfg(test)] fault: ImportTestFault,
-) -> Result<HistoryDatabaseState, HistoryStorageFailure> {
-    let source = match tokio::fs::read(source_path).await {
-        Ok(bytes) => Some(bytes),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-        Err(_) => return Err(HistoryStorageFailure::StorageUnavailable),
-    };
-    let source_digest = source
-        .as_ref()
-        .map(|bytes| format!("{:x}", Sha256::digest(bytes)));
     match tokio::fs::metadata(database_path).await {
         Ok(metadata) if metadata.is_file() => {
             let options = SqliteConnectOptions::new()
@@ -212,53 +148,20 @@ async fn initialize_history_impl(
         .begin_with("BEGIN IMMEDIATE")
         .await
         .map_err(|_| HistoryStorageFailure::StorageUnavailable)?;
-    match inspect_schema(&mut transaction).await? {
-        SchemaAdmission::Pristine => {
-            let imported = match source.as_ref() {
-                Some(bytes) => decode_import(bytes, Utc::now())?,
-                None => InteractionHistoryData::default(),
-            };
-            MIGRATOR
-                .run_direct(None, &mut *transaction, false)
-                .await
-                .map_err(|_| HistoryStorageFailure::InvalidSchema)?;
-            for (request_id, record) in &imported.records {
-                let record_json = serde_json::to_string(record)
-                    .map_err(|_| HistoryStorageFailure::InvalidStoredRecord)?;
-                let created_at = format_timestamp(
-                    *imported
-                        .created_at
-                        .get(request_id)
-                        .ok_or(HistoryStorageFailure::InvalidStoredRecord)?,
-                );
-                sqlx::query!("INSERT INTO typed_interaction_history (request_id, record_json, created_at) VALUES (?, ?, ?)",
-                    request_id, record_json, created_at).execute(&mut *transaction).await
-                    .map_err(|_| HistoryStorageFailure::StorageUnavailable)?;
-            }
-            let source_present = i64::from(source.is_some());
-            #[cfg(test)]
-            if matches!(fault, ImportTestFault::ConstraintFailureAfterRows) {
-                // Actual SQLite failure after schema and populated rows, before the import marker.
-                sqlx::query!("INSERT INTO typed_interaction_history (request_id, record_json, created_at) VALUES (NULL, '{}', '2026-10-01T00:00:00.000000000Z')")
-                    .execute(&mut *transaction).await
-                    .map_err(|_| HistoryStorageFailure::StorageUnavailable)?;
-            }
-            sqlx::query!("INSERT INTO interaction_history_import (metadata_id, source_present, source_sha256, revision) VALUES (1, ?, ?, 0)",
-                source_present, source_digest).execute(&mut *transaction).await
-                .map_err(|_| HistoryStorageFailure::StorageUnavailable)?;
-        }
-        SchemaAdmission::Owned => {
-            let metadata = read_metadata(&mut transaction).await?;
-            if metadata.source_sha256 != source_digest {
-                return Err(HistoryStorageFailure::RecoverySourceChanged);
-            }
-            MIGRATOR
-                .run_direct(None, &mut *transaction, false)
-                .await
-                .map_err(|_| HistoryStorageFailure::InvalidSchema)?;
-        }
+    let admission = inspect_schema(&mut transaction).await?;
+    MIGRATOR
+        .run_direct(None, &mut *transaction, false)
+        .await
+        .map_err(|_| HistoryStorageFailure::InvalidSchema)?;
+    if admission == SchemaAdmission::Pristine {
+        sqlx::query!(
+            "INSERT INTO interaction_history_revision (metadata_id, revision) VALUES (1, 0)"
+        )
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| HistoryStorageFailure::StorageUnavailable)?;
     }
-    let metadata = read_metadata(&mut transaction).await?;
+    let revision = read_revision(&mut transaction).await?;
     let cache = read_records(&mut transaction).await?;
     transaction
         .commit()
@@ -267,7 +170,7 @@ async fn initialize_history_impl(
     Ok(HistoryDatabaseState {
         connection,
         cache,
-        revision: metadata.revision,
+        revision,
     })
 }
 
@@ -375,7 +278,7 @@ pub(super) async fn commit_delta(
         }
     }
     let updated = sqlx::query!(
-        "UPDATE interaction_history_import SET revision = ? WHERE metadata_id = 1 AND revision = ?",
+        "UPDATE interaction_history_revision SET revision = ? WHERE metadata_id = 1 AND revision = ?",
         next_revision,
         revision
     )

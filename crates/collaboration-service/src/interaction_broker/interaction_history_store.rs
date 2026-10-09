@@ -60,7 +60,7 @@ mod interaction_history_codec;
 #[path = "interaction_history_database.rs"]
 mod interaction_history_database;
 use interaction_history_database::{
-    HistoryDatabaseState, commit_delta, initialize_history, read_metadata, read_records,
+    HistoryDatabaseState, commit_delta, initialize_history, read_records, read_revision,
 };
 use sqlx::Connection;
 
@@ -74,7 +74,7 @@ impl InteractionHistoryStore {
     pub(in crate::interaction_broker) async fn load(
         path: PathBuf,
     ) -> Result<Self, InteractionHistoryError> {
-        let state = initialize_history(&path.with_file_name("interaction.sqlite"), &path)
+        let state = initialize_history(&path)
             .await
             .map_err(|failure| failure.public_error(true))?;
         Ok(Self {
@@ -131,10 +131,10 @@ impl InteractionHistoryStore {
                 interaction_history_database::HistoryStorageFailure::StorageUnavailable
                     .public_error(false)
             })?;
-        let metadata = read_metadata(&mut transaction)
+        let revision = read_revision(&mut transaction)
             .await
             .map_err(|failure| failure.public_error(false))?;
-        let baseline = if metadata.revision == previous_revision {
+        let baseline = if revision == previous_revision {
             previous_cache
         } else {
             read_records(&mut transaction)
@@ -146,11 +146,11 @@ impl InteractionHistoryStore {
             Err(error) => (baseline.clone(), Err(error)),
         };
         let revision = if outcome.is_ok() {
-            commit_delta(&mut transaction, &baseline, &next, metadata.revision)
+            commit_delta(&mut transaction, &baseline, &next, revision)
                 .await
                 .map_err(|failure| failure.public_error(false))?
         } else {
-            metadata.revision
+            revision
         };
         transaction.commit().await.map_err(|_| {
             interaction_history_database::HistoryStorageFailure::StorageUnavailable

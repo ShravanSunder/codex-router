@@ -18,20 +18,10 @@ async fn question_list_and_answer_cross_the_real_api() {
         "serviceId":service_id,"endpointId":"claude-local"
     }))
     .expect("endpoint");
-    let imported = collaboration_service::InteractionHistoryRecord::RefusedApproval {
-        requester: serde_json::from_value(json!({"endpoint":{"serviceId":service_id,"endpointId":"claude-local"},"sessionId":"imported-requester"})).expect("imported identity"),
-        approver: Identity::Human { human_id: HumanId::try_from("owner".to_owned()).expect("human") },
-        refusal: collaboration_service::RefusedTypedApproval { request_id:"imported-refusal".into(),
-            title:"Imported refusal".into(), description:None, subject:None, options:vec![], reason:"fixture".into() }
-    };
-    let original = serde_json::to_vec_pretty(&std::collections::BTreeMap::from([(
-        "imported-refusal",
-        imported,
-    )]))
-    .expect("preexisting typed JSON");
-    tokio::fs::write(root.path().join("interaction-history.json"), &original)
+    let original = b"obsolete JSON must be ignored, including malformed content";
+    tokio::fs::write(root.path().join("interaction-history.json"), original)
         .await
-        .expect("source before broker load");
+        .expect("ignored JSON before broker load");
     let broker = ServiceInteractionBroker::load(
         service_id.to_owned().try_into().expect("service ID"),
         NativeControlBackend {
@@ -182,12 +172,12 @@ async fn question_list_and_answer_cross_the_real_api() {
     let count: i64 = sqlx::query_scalar("SELECT count(*) FROM typed_interaction_history")
         .fetch_one(&mut observer)
         .await
-        .expect("import plus real route mutation");
-    assert_eq!(count, 2);
+        .expect("real route mutation only");
+    assert_eq!(count, 1);
     assert_eq!(
         tokio::fs::read(root.path().join("interaction-history.json"))
             .await
-            .expect("recovery bytes"),
+            .expect("ignored JSON bytes"),
         original
     );
     sqlx::Connection::close(observer)

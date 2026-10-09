@@ -298,7 +298,7 @@ impl ServiceInteractionBroker {
             Err(_) => return Err(ApprovalBrokerError::Unavailable),
         };
         let interaction_history =
-            InteractionHistoryStore::load(routes_path.with_file_name("interaction-history.json"))
+            InteractionHistoryStore::load(routes_path.with_file_name("interaction.sqlite"))
                 .await
                 .map_err(|_| ApprovalBrokerError::Unavailable)?;
         interaction_history
