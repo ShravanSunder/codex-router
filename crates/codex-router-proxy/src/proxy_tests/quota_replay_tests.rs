@@ -1,7 +1,7 @@
 use super::*;
 
-#[test]
-fn assembled_loopback_router_runtime_retries_http_quota_error_on_fallback_account() {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn assembled_loopback_router_runtime_retries_http_quota_error_on_fallback_account() {
     let temp_dir = ProxyTestTempDir::new("assembled_runtime_http_quota_retry");
     let database_path = temp_dir.path().join("state.sqlite");
     let secret_path = temp_dir.path().join("secrets");
@@ -89,7 +89,7 @@ fn assembled_loopback_router_runtime_retries_http_quota_error_on_fallback_accoun
         LocalRouterTokenRecord::new(SecretString::new("current-token"), TokenGeneration::new(1)),
     )
     .with_quota_clock(1_030, 60);
-    let runtime = match LoopbackRouterRuntime::start_for_test(config) {
+    let runtime = match LoopbackRouterRuntime::start_for_test(config).await {
         Ok(runtime) => runtime,
         Err(error) => panic!("router runtime should start: {error}"),
     };
@@ -102,7 +102,7 @@ fn assembled_loopback_router_runtime_retries_http_quota_error_on_fallback_accoun
         )
     });
 
-    let handled = match runtime.serve_http_connections(1) {
+    let handled = match runtime.serve_http_connections(1).await {
         Ok(handled) => handled,
         Err(error) => panic!("router runtime should serve one client connection: {error}"),
     };
@@ -146,8 +146,9 @@ fn assembled_loopback_router_runtime_retries_http_quota_error_on_fallback_accoun
     );
 }
 
-#[test]
-fn assembled_loopback_router_runtime_retries_large_http_json_quota_error_on_fallback_account() {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn assembled_loopback_router_runtime_retries_large_http_json_quota_error_on_fallback_account()
+{
     let temp_dir = ProxyTestTempDir::new("assembled_runtime_large_http_quota_retry");
     let database_path = temp_dir.path().join("state.sqlite");
     let secret_path = temp_dir.path().join("secrets");
@@ -237,19 +238,22 @@ fn assembled_loopback_router_runtime_retries_large_http_json_quota_error_on_fall
         LocalRouterTokenRecord::new(SecretString::new("current-token"), TokenGeneration::new(1)),
     )
     .with_quota_clock(1_030, 60);
-    let runtime = match LoopbackRouterRuntime::start_for_test(config) {
+    let runtime = match LoopbackRouterRuntime::start_for_test(config).await {
         Ok(runtime) => runtime,
         Err(error) => panic!("router runtime should start: {error}"),
     };
     let router_address = runtime.local_addr();
-    let lock_runtime = must_ok(
-        tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build(),
-    );
-    let lock_state = must_ok(lock_runtime.block_on(AsyncSqliteStateStore::open(&database_path)));
-    let mut write_lock = must_ok(lock_runtime.block_on(lock_state.acquire_connection_for_test()));
-    must_ok(lock_runtime.block_on(sqlx::query("BEGIN IMMEDIATE").execute(&mut *write_lock)));
+    let lock_state = AsyncSqliteStateStore::open(&database_path)
+        .await
+        .unwrap_or_else(|error| panic!("lock state should open: {error}"));
+    let mut write_lock = lock_state
+        .acquire_connection_for_test()
+        .await
+        .unwrap_or_else(|error| panic!("write lock should acquire: {error}"));
+    sqlx::query("BEGIN IMMEDIATE")
+        .execute(&mut *write_lock)
+        .await
+        .unwrap_or_else(|error| panic!("write transaction should begin: {error}"));
     let large_body = format!(
         r#"{{"model":"gpt-5","large_padding":"{}"}}"#,
         "x".repeat(17 * 1024)
@@ -264,8 +268,10 @@ fn assembled_loopback_router_runtime_retries_large_http_json_quota_error_on_fall
 
     let shutdown = tokio_util::sync::CancellationToken::new();
     let server_shutdown = shutdown.clone();
-    let server_thread = thread::spawn(move || {
-        runtime.serve_protocol_connections_until_cancelled(usize::MAX, server_shutdown)
+    let server_thread = tokio::spawn(async move {
+        runtime
+            .serve_protocol_connections_until_cancelled(usize::MAX, server_shutdown)
+            .await
     });
     let response = match client_thread.join() {
         Ok(response) => response,
@@ -302,10 +308,15 @@ fn assembled_loopback_router_runtime_retries_large_http_json_quota_error_on_fall
             .expect("initial snapshot should remain readable");
     assert_eq!(before_commit.source(), QuotaSnapshotSource::MockEndpoint);
     assert_eq!(before_commit.remaining_headroom(), 90);
-    lock_runtime.block_on(async move {
-        must_ok(sqlx::query("COMMIT").execute(&mut *write_lock).await);
-        drop(write_lock);
-    });
+    sqlx::query("COMMIT")
+        .execute(&mut *write_lock)
+        .await
+        .unwrap_or_else(|error| panic!("write transaction should commit: {error}"));
+    drop(write_lock);
+    lock_state
+        .close()
+        .await
+        .unwrap_or_else(|error| panic!("lock state should close: {error}"));
     wait_for_durable_quota_exhaustion(&state, &[primary.account_id()]);
     wait_for_repository_selected_account(
         &state,
@@ -313,7 +324,7 @@ fn assembled_loopback_router_runtime_retries_large_http_json_quota_error_on_fall
         "durable quota state should select the fallback while serving",
     );
     shutdown.cancel();
-    match server_thread.join() {
+    match server_thread.await {
         Ok(Ok(handled)) => assert_eq!(handled, 1),
         Ok(Err(error)) => panic!("router shutdown should succeed: {error}"),
         Err(error) => panic!("router server thread panicked: {error:?}"),
@@ -327,8 +338,8 @@ fn assembled_loopback_router_runtime_retries_large_http_json_quota_error_on_fall
     );
 }
 
-#[test]
-fn assembled_loopback_router_runtime_returns_safe_error_for_unreplayable_http_quota_error() {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn assembled_loopback_router_runtime_returns_safe_error_for_unreplayable_http_quota_error() {
     let temp_dir = ProxyTestTempDir::new("assembled_runtime_unreplayable_http_quota");
     let database_path = temp_dir.path().join("state.sqlite");
     let secret_path = temp_dir.path().join("secrets");
@@ -410,7 +421,7 @@ fn assembled_loopback_router_runtime_returns_safe_error_for_unreplayable_http_qu
         LocalRouterTokenRecord::new(SecretString::new("current-token"), TokenGeneration::new(1)),
     )
     .with_quota_clock(1_030, 60);
-    let runtime = match LoopbackRouterRuntime::start_for_test(config) {
+    let runtime = match LoopbackRouterRuntime::start_for_test(config).await {
         Ok(runtime) => runtime,
         Err(error) => panic!("router runtime should start: {error}"),
     };
@@ -429,8 +440,10 @@ fn assembled_loopback_router_runtime_returns_safe_error_for_unreplayable_http_qu
 
     let shutdown = tokio_util::sync::CancellationToken::new();
     let server_shutdown = shutdown.clone();
-    let server_thread = thread::spawn(move || {
-        runtime.serve_protocol_connections_until_cancelled(usize::MAX, server_shutdown)
+    let server_thread = tokio::spawn(async move {
+        runtime
+            .serve_protocol_connections_until_cancelled(usize::MAX, server_shutdown)
+            .await
     });
     let response = match client_thread.join() {
         Ok(response) => response,
@@ -464,7 +477,7 @@ fn assembled_loopback_router_runtime_returns_safe_error_for_unreplayable_http_qu
         "durable quota state should select the fallback while serving",
     );
     shutdown.cancel();
-    match server_thread.join() {
+    match server_thread.await {
         Ok(Ok(handled)) => assert_eq!(handled, 1),
         Ok(Err(error)) => panic!("router shutdown should succeed: {error}"),
         Err(error) => panic!("router server thread panicked: {error:?}"),

@@ -9,3 +9,5 @@ mod tests_part1;
 mod tests_part2;
 #[path = "tests_part3.rs"]
 mod tests_part3;
+#[path = "tests_runtime_shutdown.rs"]
+mod tests_runtime_shutdown;

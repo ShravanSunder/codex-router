@@ -9,6 +9,11 @@ use zeroize::Zeroizing;
 use crate::file_backend::FileSecretStore;
 use crate::model::SecretStoreError;
 
+mod existing;
+#[cfg(all(target_os = "macos", not(any(test, feature = "keychain-test-guard"))))]
+mod noninteractive_read;
+pub(crate) use existing::load_existing_pooled_credential_data_key;
+
 /// The only Keychain service accepted by Router's production adapter.
 pub const ROUTER_KEYCHAIN_SERVICE: &str = "codex-router";
 
@@ -56,6 +61,22 @@ pub trait KeychainAccess: Send + Sync {
         account: &str,
     ) -> Result<Option<Vec<u8>>, KeychainAccessError>;
 
+    /// Reads an existing item without presenting authentication UI.
+    ///
+    /// Implementations that cannot guarantee this behavior fail closed. This
+    /// method never delegates to `read_secret`, whose production behavior may
+    /// prompt for Keychain authentication.
+    fn read_secret_without_user_interaction(
+        &self,
+        service: &str,
+        _account: &str,
+    ) -> Result<Option<Vec<u8>>, KeychainAccessError> {
+        if service != ROUTER_KEYCHAIN_SERVICE {
+            return Err(KeychainAccessError::ServiceRejected);
+        }
+        Err(KeychainAccessError::Unavailable)
+    }
+
     /// Adds an item only when the service/account pair is absent.
     fn add_secret(
         &self,
@@ -97,6 +118,14 @@ impl KeychainAccess for PlatformKeychainAccess {
             Err(keyring_core::Error::NoEntry) => Ok(None),
             Err(_) => Err(KeychainAccessError::Unavailable),
         }
+    }
+
+    fn read_secret_without_user_interaction(
+        &self,
+        service: &str,
+        account: &str,
+    ) -> Result<Option<Vec<u8>>, KeychainAccessError> {
+        noninteractive_read::read_secret_without_user_interaction(service, account)
     }
 
     fn add_secret(

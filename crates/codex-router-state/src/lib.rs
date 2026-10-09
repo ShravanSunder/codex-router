@@ -10,6 +10,8 @@ mod credential_maintenance_store;
 pub mod credit_store;
 pub mod quota_snapshot;
 pub mod repositories;
+pub mod schema_preparation;
+mod schema_preparation_error;
 pub mod selection_projection;
 pub mod session_account_affinity;
 pub mod sqlite;

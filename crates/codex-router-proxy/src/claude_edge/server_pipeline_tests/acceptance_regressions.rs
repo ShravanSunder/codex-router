@@ -31,7 +31,7 @@ fn local_router_token(token: &str, generation: u64) -> LocalRouterTokenRecord {
     LocalRouterTokenRecord::new(SecretString::new(token), TokenGeneration::new(generation))
 }
 
-fn run_claude_r9_scenario(
+async fn run_claude_r9_scenario(
     case: &'static str,
     issuer_outcome: FakeClaudeOAuthIssuerOutcome,
 ) -> ClaudeLoopbackReceipt {
@@ -56,6 +56,7 @@ fn run_claude_r9_scenario(
         },
         Some((refresh_client, issuer)),
     )
+    .await
 }
 
 fn assert_claude_attempt_authentication(
@@ -83,26 +84,26 @@ fn assert_claude_attempt_authentication(
     );
 }
 
-pub(super) fn run_claude_loopback_scenario(
+pub(super) async fn run_claude_loopback_scenario(
     scenario: ClaudeLoopbackScenario,
 ) -> ClaudeLoopbackReceipt {
-    run_claude_loopback_scenario_with_refresh(scenario, None)
+    run_claude_loopback_scenario_with_refresh(scenario, None).await
 }
 
-fn run_claude_loopback_scenario_with_refresh(
+async fn run_claude_loopback_scenario_with_refresh(
     scenario: ClaudeLoopbackScenario,
     refresh: Option<(ClaudeOAuthRefreshClient, FakeClaudeOAuthIssuer)>,
 ) -> ClaudeLoopbackReceipt {
-    run_claude_loopback_scenario_with_store(scenario, refresh, false, false)
+    run_claude_loopback_scenario_with_store(scenario, refresh, false, false).await
 }
 
-fn run_claude_loopback_scenario_with_unavailable_credential_store(
+async fn run_claude_loopback_scenario_with_unavailable_credential_store(
     scenario: ClaudeLoopbackScenario,
 ) -> ClaudeLoopbackReceipt {
-    run_claude_loopback_scenario_with_store(scenario, None, true, true)
+    run_claude_loopback_scenario_with_store(scenario, None, true, true).await
 }
 
-fn run_claude_loopback_scenario_with_store(
+async fn run_claude_loopback_scenario_with_store(
     scenario: ClaudeLoopbackScenario,
     refresh: Option<(ClaudeOAuthRefreshClient, FakeClaudeOAuthIssuer)>,
     credential_store_unavailable: bool,
@@ -184,10 +185,9 @@ fn run_claude_loopback_scenario_with_store(
     let secrets =
         codex_router_secret_store::test_support::open_encrypted_credential_store(&secret_root)
             .expect("fixture secrets");
-    let state_runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("state runtime");
+    let state = AsyncSqliteStateStore::open(&database_path)
+        .await
+        .expect("fixture state");
     let account_ids = vec![
         AccountId::new("claude-primary").expect("account"),
         AccountId::new("claude-secondary").expect("account"),
@@ -205,23 +205,18 @@ fn run_claude_loopback_scenario_with_store(
         ),
     ];
     for (index, account_id) in account_ids.iter().enumerate() {
-        state_runtime.block_on(async {
-            let state = AsyncSqliteStateStore::open(&database_path)
-                .await
-                .expect("fixture state");
-            state
-                .upsert_account(
-                    &AccountRecord::new(
-                        Provider::Claude,
-                        account_id.clone(),
-                        format!("claude-{index}"),
-                        AccountStatus::Enabled,
-                    )
-                    .with_active_credential_generation(1),
+        state
+            .upsert_account(
+                &AccountRecord::new(
+                    Provider::Claude,
+                    account_id.clone(),
+                    format!("claude-{index}"),
+                    AccountStatus::Enabled,
                 )
-                .await
-                .expect("fixture account");
-        });
+                .with_active_credential_generation(1),
+            )
+            .await
+            .expect("fixture account");
         let access_token = format!("claude-access-{index}");
         let refresh_token = format!("claude-refresh-{index}");
         credential_patterns.push((
@@ -245,53 +240,49 @@ fn run_claude_loopback_scenario_with_store(
             )
             .expect("fixture credential");
     }
-    state_runtime.block_on(async {
-        let state = AsyncSqliteStateStore::open(&database_path)
-            .await
-            .expect("async state");
-        for (account_index, account_id) in account_ids.iter().enumerate() {
-            for window_kind in [
-                codex_router_core::route_profile::WindowKind::FiveHour,
-                codex_router_core::route_profile::WindowKind::Weekly,
-            ] {
-                state
-                    .record_window_observation(
-                        &codex_router_state::window_observation::WindowObservation::new(
-                            codex_router_state::window_observation::WindowObservationProps::new(
-                                account_id.clone(),
-                                window_kind,
-                                if reserve_primary
-                                    && account_index == 0
-                                    && window_kind
-                                        == codex_router_core::route_profile::WindowKind::FiveHour
-                                {
-                                    500
-                                } else {
-                                    10_000
-                                },
-                                1_000,
-                            )
-                            .with_reset_unix_seconds(2_000)
-                            .with_fresh_until_unix_seconds(2_000),
+    for (account_index, account_id) in account_ids.iter().enumerate() {
+        for window_kind in [
+            codex_router_core::route_profile::WindowKind::FiveHour,
+            codex_router_core::route_profile::WindowKind::Weekly,
+        ] {
+            state
+                .record_window_observation(
+                    &codex_router_state::window_observation::WindowObservation::new(
+                        codex_router_state::window_observation::WindowObservationProps::new(
+                            account_id.clone(),
+                            window_kind,
+                            if reserve_primary
+                                && account_index == 0
+                                && window_kind
+                                    == codex_router_core::route_profile::WindowKind::FiveHour
+                            {
+                                500
+                            } else {
+                                10_000
+                            },
+                            1_000,
                         )
-                        .expect("fixture observation"),
-                        || 1_100,
+                        .with_reset_unix_seconds(2_000)
+                        .with_fresh_until_unix_seconds(2_000),
                     )
-                    .await
-                    .expect("fixture quota");
-            }
+                    .expect("fixture observation"),
+                    || 1_100,
+                )
+                .await
+                .expect("fixture quota");
         }
-        state
-            .upsert_session_account_affinity(&SessionAccountAffinity::with_pin_state(
-                Provider::Claude,
-                "claude-session",
-                Some(account_ids[0].clone()),
-                3,
-                1_000,
-            ))
-            .await
-            .expect("fixture pin");
-    });
+    }
+    state
+        .upsert_session_account_affinity(&SessionAccountAffinity::with_pin_state(
+            Provider::Claude,
+            "claude-session",
+            Some(account_ids[0].clone()),
+            3,
+            1_000,
+        ))
+        .await
+        .expect("fixture pin");
+    state.close().await.expect("close fixture state");
     let credential_store = if credential_store_unavailable {
         assert!(
             secrets
@@ -332,12 +323,12 @@ fn run_claude_loopback_scenario_with_store(
     } else {
         1
     };
-    let (router_address_sender, router_address_receiver) = std::sync::mpsc::sync_channel(1);
-    let router_thread = std::thread::spawn(move || {
-        let mut serve_result = None;
-        let logs = crate::test_log_capture::capture_log_output(|| {
-            let runtime =
-                LoopbackRouterRuntime::start(config, credential_store).expect("fixture router");
+    let (router_address_sender, router_address_receiver) = tokio::sync::oneshot::channel();
+    let mut router_capture = Box::pin(crate::test_log_capture::capture_log_output_async(
+        async move {
+            let runtime = LoopbackRouterRuntime::start(config, credential_store)
+                .await
+                .expect("fixture router");
             let runtime = match refresh_client {
                 Some(refresh_client) => runtime.with_test_claude_refresh_client(refresh_client),
                 None => runtime,
@@ -345,13 +336,19 @@ fn run_claude_loopback_scenario_with_store(
             router_address_sender
                 .send(runtime.local_addr())
                 .expect("router address receiver should be ready");
-            serve_result = Some(runtime.serve_http_connections(max_connections));
-        });
-        (serve_result.expect("router result recorded"), logs)
-    });
-    let router_address = router_address_receiver
-        .recv_timeout(Duration::from_secs(3))
-        .expect("scoped listener runtime should publish its address before serving");
+            tokio::spawn(async move { runtime.serve_http_connections(max_connections).await })
+                .await
+                .expect("router serve task should join")
+        },
+    ));
+    let router_address = tokio::select! {
+        address = router_address_receiver => {
+            address.expect("scoped listener runtime should publish its address before serving")
+        }
+        capture = &mut router_capture => {
+            panic!("router exited before publishing its listener address: {capture:?}")
+        }
+    };
     let mut client = TcpStream::connect(router_address).expect("fixture client");
     client
         .set_read_timeout(Some(Duration::from_secs(5)))
@@ -375,7 +372,7 @@ fn run_claude_loopback_scenario_with_store(
             Some("Bearer claude-access-0")
         );
         let prefix = read_until_response_marker(&mut client, b"message_start");
-        mark_claude_primary_reserve(&database_path, &account_ids[0]);
+        mark_claude_primary_reserve(&database_path, &account_ids[0]).await;
         resume_stream_sender
             .send(())
             .expect("resume streamed response");
@@ -404,7 +401,7 @@ fn run_claude_loopback_scenario_with_store(
     };
     let response =
         String::from_utf8(std::mem::take(&mut response_bytes)).expect("fixture response utf-8");
-    let (router_result, logs) = router_thread.join().expect("router join");
+    let (logs, router_result) = router_capture.await;
     assert_eq!(router_result.expect("router result"), max_connections);
     let requests = upstream_thread.join().expect("upstream join");
     let oauth_request = refresh.map(|(_client, issuer)| issuer.finish());
@@ -441,8 +438,9 @@ fn run_claude_loopback_scenario_with_store(
     receipt
 }
 
-#[test]
-fn unavailable_credential_store_short_circuits_body_and_account_selection_for_active_credentials() {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unavailable_credential_store_short_circuits_body_and_account_selection_for_active_credentials()
+ {
     let receipt =
         run_claude_loopback_scenario_with_unavailable_credential_store(ClaudeLoopbackScenario {
             case: "claude-key-unavailable",
@@ -451,7 +449,8 @@ fn unavailable_credential_store_short_circuits_body_and_account_selection_for_ac
             reserve_primary_while_streaming: false,
             quota_refresh_interval: Duration::from_secs(180),
             responses: Vec::new(),
-        });
+        })
+        .await;
 
     assert!(
         receipt
@@ -467,8 +466,8 @@ fn unavailable_credential_store_short_circuits_body_and_account_selection_for_ac
     );
 }
 
-#[test]
-fn claude_server_stream_completes_after_primary_enters_reserve_and_next_request_switches() {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn claude_server_stream_completes_after_primary_enters_reserve_and_next_request_switches() {
     let body = b"{}".to_vec();
     let receipt = run_claude_loopback_scenario(ClaudeLoopbackScenario {
         case: "claude_server_reserve_during_stream",
@@ -480,7 +479,8 @@ fn claude_server_stream_completes_after_primary_enters_reserve_and_next_request_
             String::new(),
             claude_fixture_response("200 OK", "Content-Type: application/json\r\n", "{}"),
         ],
-    });
+    })
+    .await;
 
     assert!(receipt.response.starts_with("HTTP/1.1 200 OK"));
     assert!(receipt.response.contains("message_start"));
@@ -501,13 +501,13 @@ fn claude_server_stream_completes_after_primary_enters_reserve_and_next_request_
         receipt.requests[1].header_value("authorization"),
         Some("Bearer claude-access-1")
     );
-    let pin = read_claude_fixture_pin(&receipt);
+    let pin = read_claude_fixture_pin(&receipt).await;
     assert_eq!(pin.account_id(), Some(&receipt.account_ids[1]));
     assert_eq!(pin.pin_version(), 5);
 }
 
-#[test]
-fn claude_server_provider_unreachable_returns_exact_502_body_without_retry() {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn claude_server_provider_unreachable_returns_exact_502_body_without_retry() {
     const EXPECTED_BODY: &str = r#"{"type":"error","error":{"type":"provider_unreachable","message":"Claude provider could not be reached."}}"#;
 
     let receipt = run_claude_loopback_scenario(ClaudeLoopbackScenario {
@@ -517,7 +517,8 @@ fn claude_server_provider_unreachable_returns_exact_502_body_without_retry() {
         reserve_primary_while_streaming: false,
         quota_refresh_interval: Duration::from_secs(180),
         responses: vec![String::new()],
-    });
+    })
+    .await;
 
     assert_eq!(
         receipt.response.lines().next(),
@@ -531,56 +532,59 @@ fn claude_server_provider_unreachable_returns_exact_502_body_without_retry() {
     );
 }
 
-#[test]
-fn claude_server_successful_refresh_retries_same_account_with_rotated_credential() {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn claude_server_successful_refresh_retries_same_account_with_rotated_credential() {
     let receipt = run_claude_r9_scenario(
         "claude_server_refresh_rotated",
         FakeClaudeOAuthIssuerOutcome::Rotated,
-    );
+    )
+    .await;
 
     assert_claude_attempt_authentication(&receipt, "Bearer claude-access-rotated");
-    let maintenance = read_claude_credential_maintenance(&receipt, &receipt.account_ids[0]);
+    let maintenance = read_claude_credential_maintenance(&receipt, &receipt.account_ids[0]).await;
     assert_eq!(maintenance.state, CredentialMaintenanceState::Healthy);
     assert_eq!(maintenance.credential_generation, 2);
-    let pin = read_claude_fixture_pin(&receipt);
+    let pin = read_claude_fixture_pin(&receipt).await;
     assert_eq!(pin.account_id(), Some(&receipt.account_ids[0]));
     assert_eq!(pin.pin_version(), 3);
 }
 
-#[test]
-fn claude_server_refused_refresh_marks_primary_needs_login_and_retries_secondary() {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn claude_server_refused_refresh_marks_primary_needs_login_and_retries_secondary() {
     let receipt = run_claude_r9_scenario(
         "claude_server_refresh_refused",
         FakeClaudeOAuthIssuerOutcome::Refused,
-    );
+    )
+    .await;
 
     assert_claude_attempt_authentication(&receipt, "Bearer claude-access-1");
-    let maintenance = read_claude_credential_maintenance(&receipt, &receipt.account_ids[0]);
+    let maintenance = read_claude_credential_maintenance(&receipt, &receipt.account_ids[0]).await;
     assert_eq!(
         maintenance.state,
         CredentialMaintenanceState::ReauthRequired
     );
     assert_eq!(maintenance.credential_generation, 1);
-    let pin = read_claude_fixture_pin(&receipt);
+    let pin = read_claude_fixture_pin(&receipt).await;
     assert_eq!(pin.account_id(), Some(&receipt.account_ids[1]));
     assert_eq!(pin.pin_version(), 5);
 }
 
-#[test]
-fn claude_server_uncertain_refresh_marks_primary_needs_login_and_retries_secondary() {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn claude_server_uncertain_refresh_marks_primary_needs_login_and_retries_secondary() {
     let receipt = run_claude_r9_scenario(
         "claude_server_refresh_uncertain",
         FakeClaudeOAuthIssuerOutcome::Uncertain,
-    );
+    )
+    .await;
 
     assert_claude_attempt_authentication(&receipt, "Bearer claude-access-1");
-    let maintenance = read_claude_credential_maintenance(&receipt, &receipt.account_ids[0]);
+    let maintenance = read_claude_credential_maintenance(&receipt, &receipt.account_ids[0]).await;
     assert_eq!(
         maintenance.state,
         CredentialMaintenanceState::ReauthRequired
     );
     assert_eq!(maintenance.credential_generation, 1);
-    let pin = read_claude_fixture_pin(&receipt);
+    let pin = read_claude_fixture_pin(&receipt).await;
     assert_eq!(pin.account_id(), Some(&receipt.account_ids[1]));
     assert_eq!(pin.pin_version(), 5);
 }

@@ -1,8 +1,10 @@
 use std::env;
+use std::future::Future;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
+use std::task::Poll;
 use std::time::Duration;
 
 use codex_router_core::ids::AccountId;
@@ -320,6 +322,71 @@ async fn maintenance_actor_shutdown_releases_sqlite_handle_without_socket_wait()
         .close()
         .await
         .unwrap_or_else(|error| panic!("reopened sqlite store should close: {error}"));
+}
+
+#[tokio::test]
+async fn request_shutdown_closes_maintenance_admission_before_joining_task() {
+    let repository = Arc::new(FailingOnceMaintenanceRepository::default());
+    let actor = MaintenanceActor::start(repository, 8);
+
+    actor.request_shutdown();
+
+    assert_eq!(
+        actor.try_enqueue(refresh_rollups_hint()),
+        MaintenanceEnqueueResult::ClosedDegraded
+    );
+    actor.shutdown().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn cancelled_shutdown_retains_maintenance_handle_for_concurrent_retry() {
+    let actor = MaintenanceActor::start(Arc::new(FailingOnceMaintenanceRepository::default()), 8);
+
+    let mut interrupted_shutdown = Box::pin(actor.shutdown());
+    let interrupted_poll = futures_util::future::poll_fn(|context| {
+        Poll::Ready(interrupted_shutdown.as_mut().poll(context))
+    })
+    .await;
+    assert!(
+        matches!(interrupted_poll, Poll::Pending),
+        "shutdown should await the actual maintenance task"
+    );
+    drop(interrupted_shutdown);
+
+    assert_eq!(
+        actor.try_enqueue(refresh_rollups_hint()),
+        MaintenanceEnqueueResult::ClosedDegraded
+    );
+    let mut repeated_shutdown = Box::pin(actor.shutdown());
+    let repeated_poll = futures_util::future::poll_fn(|context| {
+        Poll::Ready(repeated_shutdown.as_mut().poll(context))
+    })
+    .await;
+    assert!(
+        matches!(repeated_poll, Poll::Pending),
+        "a repeated shutdown must retain and join the same maintenance task"
+    );
+    let mut concurrent_shutdown = Box::pin(actor.shutdown());
+    let concurrent_poll = futures_util::future::poll_fn(|context| {
+        Poll::Ready(concurrent_shutdown.as_mut().poll(context))
+    })
+    .await;
+    assert!(
+        matches!(concurrent_poll, Poll::Pending),
+        "concurrent shutdown must wait behind the stored task join"
+    );
+
+    tokio::task::yield_now().await;
+    tokio::time::timeout(Duration::from_secs(1), async {
+        tokio::join!(repeated_shutdown, concurrent_shutdown);
+        actor.shutdown().await;
+    })
+    .await
+    .unwrap_or_else(|_elapsed| panic!("all repeated maintenance shutdown joins should complete"));
+    assert_eq!(
+        actor.try_enqueue(refresh_rollups_hint()),
+        MaintenanceEnqueueResult::ClosedDegraded
+    );
 }
 
 #[tokio::test]

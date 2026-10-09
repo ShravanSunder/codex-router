@@ -8,6 +8,8 @@ use serde_json::Value;
 use super::native_protocol_observation::CONTROL_RESPONSE_TIMEOUT;
 use super::native_protocol_observation::CodexProtocolError;
 use super::native_protocol_observation::InitializedControlExchange;
+use crate::app_server_probe_action::AppServerProbeAction;
+use crate::native_observation_stage::NativeObservationStage;
 
 const REMOTE_STATUS_REQUEST_ID: u64 = 2;
 
@@ -44,21 +46,40 @@ pub enum RemoteControlObservation {
     },
 }
 
-pub(crate) async fn observe(
-    exchange: &mut InitializedControlExchange,
+pub(crate) async fn observe<TTransport>(
+    exchange: &mut InitializedControlExchange<TTransport>,
+    action: AppServerProbeAction,
     remote_control_wait: Duration,
-) -> Result<RemoteControlObservation, CodexProtocolError> {
+) -> Result<RemoteControlObservation, CodexProtocolError>
+where
+    TTransport: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
     exchange
         .send_json(&serde_json::json!({ "method": "initialized" }))
         .await?;
-    exchange
-        .send_json(&serde_json::json!({
-            "id": REMOTE_STATUS_REQUEST_ID,
-            "method": "remoteControl/status/read",
-        }))
-        .await?;
+    let response_stage = match action {
+        AppServerProbeAction::Observe | AppServerProbeAction::WaitForReady => {
+            exchange
+                .send_json(&serde_json::json!({
+                    "id": REMOTE_STATUS_REQUEST_ID,
+                    "method": "remoteControl/status/read",
+                }))
+                .await?;
+            NativeObservationStage::RemoteControlStatus
+        }
+        AppServerProbeAction::EnableAndObserve => {
+            exchange
+                .send_json(&serde_json::json!({
+                    "id": REMOTE_STATUS_REQUEST_ID,
+                    "method": "remoteControl/enable",
+                    "params": { "ephemeral": true },
+                }))
+                .await?;
+            NativeObservationStage::RemoteControlEnable
+        }
+    };
     let status_result = exchange
-        .read_response(REMOTE_STATUS_REQUEST_ID, "Remote Control status")
+        .read_response(REMOTE_STATUS_REQUEST_ID, response_stage)
         .await
         .and_then(|result| {
             serde_json::from_value::<RemoteStatus>(result).map_err(CodexProtocolError::Json)
@@ -70,15 +91,21 @@ pub(crate) async fn observe(
     }
 }
 
-async fn wait_for_remote_status_change(
-    exchange: &mut InitializedControlExchange,
+async fn wait_for_remote_status_change<TTransport>(
+    exchange: &mut InitializedControlExchange<TTransport>,
     initial: RemoteStatus,
     remote_control_wait: Duration,
-) -> Result<RemoteControlObservation, CodexProtocolError> {
+) -> Result<RemoteControlObservation, CodexProtocolError>
+where
+    TTransport: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
     let changed = tokio::time::timeout(remote_control_wait, async {
         loop {
             let value = exchange
-                .read_json(CONTROL_RESPONSE_TIMEOUT, "Remote Control status change")
+                .read_json(
+                    CONTROL_RESPONSE_TIMEOUT,
+                    NativeObservationStage::RemoteControlStatusChange,
+                )
                 .await?;
             if value.get("method").and_then(Value::as_str) != Some("remoteControl/status/changed") {
                 continue;
@@ -88,7 +115,7 @@ async fn wait_for_remote_status_change(
                     .get("params")
                     .cloned()
                     .ok_or(CodexProtocolError::InvalidResponse {
-                        stage: "Remote Control status change",
+                        stage: NativeObservationStage::RemoteControlStatusChange,
                     })?;
             let status = serde_json::from_value::<RemoteStatus>(params)?;
             return Ok::<RemoteStatus, CodexProtocolError>(status);

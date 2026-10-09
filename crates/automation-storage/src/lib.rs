@@ -1,6 +1,13 @@
 //! SQLite persistence for local automation, independent of the Host executable.
 mod automation_connection;
 pub use automation_connection::{AutomationStore, StorageError};
+mod automation_migration_history;
+mod schema_preparation;
+pub use schema_preparation::{
+    AutomationMigrationVersion, AutomationSchemaPreparation, PendingAutomationMigrationVersions,
+};
+mod schema_preparation_error;
+pub use schema_preparation_error::AutomationSchemaPreparationError;
 mod automation_retention;
 pub use collaboration_protocol::{PushDeliveryState, PushRecord, PushRecordDraft};
 mod instruction_repository;
@@ -9,6 +16,8 @@ mod instruction_updates;
 pub use instruction_revision_read::InstructionRevisionRecord;
 mod push_record_rows;
 mod schema_initialization;
+#[cfg(test)]
+mod schema_preparation_tests;
 mod schema_validation;
 pub use instruction_updates::InstructionUpdate;
 mod run_admission;

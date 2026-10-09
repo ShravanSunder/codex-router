@@ -12,6 +12,8 @@ use crate::account_schema::validate_legacy_schema;
 use crate::account_schema::validate_target_schema;
 use crate::sqlite::StateStoreError;
 
+pub(crate) mod migration_history;
+
 pub(crate) static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
 const BASELINE_SQL: &str = include_str!("../migrations/202609100001_account_baseline.sql");
@@ -50,7 +52,10 @@ pub(crate) async fn migrate(pool: &SqlitePool) -> Result<(), StateStoreError> {
 async fn migrate_transaction(
     transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
 ) -> Result<(), StateStoreError> {
-    if native_history_table_exists(&mut *transaction).await? {
+    if native_history_table_exists(&mut *transaction)
+        .await
+        .map_err(crate::sqlite::sqlx_error)?
+    {
         MIGRATOR
             .run_direct(None, &mut **transaction, false)
             .await
@@ -127,46 +132,7 @@ fn process_checkpoint_handshake() -> Result<(), StateStoreError> {
 pub(crate) async fn migration_authority(
     connection: &mut SqliteConnection,
 ) -> Result<MigrationAuthority, StateStoreError> {
-    if !native_history_table_exists(&mut *connection).await? {
-        return Ok(MigrationAuthority::Legacy);
-    }
-
-    let applied_rows =
-        sqlx::query("SELECT version, success, checksum FROM _sqlx_migrations ORDER BY version")
-            .fetch_all(connection)
-            .await
-            .map_err(|_| static_sqlite_error(INCOMPATIBLE_HISTORY_MESSAGE))?;
-    let migrations = MIGRATOR.iter().collect::<Vec<_>>();
-
-    for row in &applied_rows {
-        let version = row
-            .try_get::<i64, _>(0)
-            .map_err(|_| static_sqlite_error(INCOMPATIBLE_HISTORY_MESSAGE))?;
-        let success = row
-            .try_get::<bool, _>(1)
-            .map_err(|_| static_sqlite_error(INCOMPATIBLE_HISTORY_MESSAGE))?;
-        if !success {
-            return Err(static_sqlite_error(DIRTY_HISTORY_MESSAGE));
-        }
-        let Some(migration) = migrations
-            .iter()
-            .find(|migration| migration.version == version)
-        else {
-            return Err(static_sqlite_error(INCOMPATIBLE_HISTORY_MESSAGE));
-        };
-        let checksum = row
-            .try_get::<Vec<u8>, _>(2)
-            .map_err(|_| static_sqlite_error(INCOMPATIBLE_HISTORY_MESSAGE))?;
-        if checksum.as_slice() != migration.checksum.as_ref() {
-            return Err(static_sqlite_error(INCOMPATIBLE_HISTORY_MESSAGE));
-        }
-    }
-
-    if applied_rows.len() == migrations.len() {
-        Ok(MigrationAuthority::NativeCurrent)
-    } else {
-        Ok(MigrationAuthority::NativeUpgradeRequired)
-    }
+    migration_history::existing_authority(connection).await
 }
 
 pub(crate) async fn validate_native_read_only_schema(
@@ -301,7 +267,7 @@ async fn apply_legacy_conversion(
 
 async fn native_history_table_exists(
     connection: &mut SqliteConnection,
-) -> Result<bool, StateStoreError> {
+) -> Result<bool, sqlx::Error> {
     sqlx::query_scalar(
         "SELECT EXISTS(
             SELECT 1 FROM sqlite_master
@@ -310,7 +276,6 @@ async fn native_history_table_exists(
     )
     .fetch_one(&mut *connection)
     .await
-    .map_err(crate::sqlite::sqlx_error)
 }
 
 async fn router_object_count(connection: &mut SqliteConnection) -> Result<i64, StateStoreError> {

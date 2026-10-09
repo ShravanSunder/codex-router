@@ -72,8 +72,8 @@ pub(super) fn send_loopback_http_request(
     response
 }
 
-#[test]
-pub(super) fn claude_edge_local_token_is_scoped_and_reloaded_without_enabling_codex_auth() {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+pub(super) async fn claude_edge_local_token_is_scoped_and_reloaded_without_enabling_codex_auth() {
     use codex_router_core::local_auth::LocalRouterAuth;
     use std::io::ErrorKind;
     use std::net::TcpListener;
@@ -102,10 +102,11 @@ pub(super) fn claude_edge_local_token_is_scoped_and_reloaded_without_enabling_co
         Duration::from_secs(400),
     );
     let runtime = LoopbackRouterRuntime::start_for_test(config)
+        .await
         .expect("router runtime should start for token-scope test");
     let router_address = runtime.local_addr();
     let local_auth_reloader = runtime.local_auth_reloader();
-    let server_thread = std::thread::spawn(move || runtime.serve_http_connections(6));
+    let server_thread = tokio::spawn(async move { runtime.serve_http_connections(6).await });
 
     let unsupported_claude =
         send_loopback_http_request(router_address, "/anthropic/v1/messages/count_tokens", None);
@@ -168,7 +169,7 @@ pub(super) fn claude_edge_local_token_is_scoped_and_reloaded_without_enabling_co
 
     assert_eq!(
         server_thread
-            .join()
+            .await
             .unwrap_or_else(|error| panic!("router server thread should join: {error:?}"))
             .expect("router should serve all six test requests"),
         6
@@ -212,7 +213,7 @@ impl CredentialRefreshClient for HeldProxyRefreshClient {
     }
 }
 
-pub(super) fn proxy_refresh_fixture(
+pub(super) async fn proxy_refresh_fixture(
     case: &str,
     drain_limit: Duration,
 ) -> (
@@ -259,6 +260,7 @@ pub(super) fn proxy_refresh_fixture(
     )
     .with_quota_clock(1_000, 300);
     let router = LoopbackRouterRuntime::start(config, secrets.clone())
+        .await
         .expect("fixture router should start")
         .with_credential_refresh_shutdown_drain(drain_limit);
     (router, account_id, database_path, secrets)

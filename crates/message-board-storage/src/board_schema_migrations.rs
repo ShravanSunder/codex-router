@@ -2,8 +2,8 @@
 use crate::BoardStorageError;
 use sqlx::{Connection, Row, SqliteConnection};
 
-static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
-const THREAD_SUBSCRIPTIONS_VERSION: i64 = 202609170001;
+pub(crate) static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
+pub(crate) const THREAD_SUBSCRIPTIONS_VERSION: i64 = 202609170001;
 const BASELINE: &str = include_str!("../migrations/202609120001_project_board.sql");
 const THREAD_DELIVERY_POSITIONS: &str =
     include_str!("../migrations/202609140001_thread_delivery_positions.sql");
@@ -20,14 +20,8 @@ const PARTICIPANT_HISTORY: &str =
     include_str!("../migrations/202610020001_participant_history.sql");
 
 pub(crate) async fn initialize(connection: &mut SqliteConnection) -> Result<(), BoardStorageError> {
-    initialize_with(
-        connection,
-        &MIGRATOR,
-        &format!(
-            "{BASELINE} {THREAD_DELIVERY_POSITIONS} {THREAD_PARTICIPANTS} {THREAD_IMPLEMENTER} {TOPIC_WATCHES} {THREAD_SUBSCRIPTIONS} {TOPIC_WATCHES_EMPTY_BOUNDARY} {PARTICIPANT_HISTORY}"
-        ),
-    )
-    .await
+    let expected_schema = embedded_expected_schema();
+    initialize_with(connection, &MIGRATOR, &expected_schema).await
 }
 
 async fn initialize_with(
@@ -70,24 +64,44 @@ async fn initialize_with(
             .await
             .map_err(|_| BoardStorageError::InvalidSchema)?;
     }
+    validate_expected_schema(&mut transaction, expected_schema).await?;
+    transaction.commit().await?;
+    enable_foreign_keys(connection).await
+}
+
+pub(crate) async fn validate_current_schema(
+    connection: &mut SqliteConnection,
+) -> Result<(), BoardStorageError> {
+    validate_expected_schema(connection, embedded_expected_schema().as_str()).await
+}
+
+async fn validate_expected_schema(
+    connection: &mut SqliteConnection,
+    expected_schema: &str,
+) -> Result<(), BoardStorageError> {
     if !sqlx::query("PRAGMA foreign_key_check")
-        .fetch_all(&mut *transaction)
+        .fetch_all(&mut *connection)
         .await?
         .is_empty()
     {
         return Err(BoardStorageError::InvalidSchema);
     }
-    validate_schema(&mut transaction, expected_schema).await?;
+    validate_schema(connection, expected_schema).await?;
     let checkpoint: i64 = sqlx::query_scalar!(
         "SELECT count(*) FROM activity_checkpoint WHERE singleton=1 AND last_sequence>=0 AND length(cursor_key)=32 AND (SELECT count(*) FROM activity_checkpoint)=1"
     )
-    .fetch_one(&mut *transaction)
+    .fetch_one(connection)
     .await?;
     if checkpoint != 1 {
         return Err(BoardStorageError::InvalidSchema);
     }
-    transaction.commit().await?;
-    enable_foreign_keys(connection).await
+    Ok(())
+}
+
+fn embedded_expected_schema() -> String {
+    format!(
+        "{BASELINE} {THREAD_DELIVERY_POSITIONS} {THREAD_PARTICIPANTS} {THREAD_IMPLEMENTER} {TOPIC_WATCHES} {THREAD_SUBSCRIPTIONS} {TOPIC_WATCHES_EMPTY_BOUNDARY} {PARTICIPANT_HISTORY}"
+    )
 }
 
 async fn enable_foreign_keys(connection: &mut SqliteConnection) -> Result<(), BoardStorageError> {

@@ -85,6 +85,8 @@ mod tests {
     mod credential_activation_tests;
     mod credential_maintenance_reauth_tests;
     mod credential_provider_mismatch_tests;
+    mod credential_refresh_file_lock_tests;
+    mod credential_refresh_supervision_tests;
     mod credential_renewal_http_outcome_tests;
     mod credential_renewal_outcome_tests;
     mod credential_renewal_tests;

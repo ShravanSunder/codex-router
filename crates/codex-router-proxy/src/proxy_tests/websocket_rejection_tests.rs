@@ -1,7 +1,7 @@
 use super::*;
 
-#[test]
-fn loopback_router_runtime_rejects_websocket_upgrade_without_token() {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn loopback_router_runtime_rejects_websocket_upgrade_without_token() {
     let temp_dir = ProxyTestTempDir::new("runtime_websocket_missing_token");
     let database_path = temp_dir.path().join("state.sqlite");
     let secret_path = temp_dir.path().join("secrets");
@@ -20,14 +20,16 @@ fn loopback_router_runtime_rejects_websocket_upgrade_without_token() {
         secret_path,
         LocalRouterTokenRecord::new(SecretString::new("current-token"), TokenGeneration::new(1)),
     );
-    let runtime = match LoopbackRouterRuntime::start_for_test(config) {
+    let runtime = match LoopbackRouterRuntime::start_for_test(config).await {
         Ok(runtime) => runtime,
         Err(error) => panic!("router runtime should start: {error}"),
     };
     let router_address = runtime.local_addr();
-    let server_thread = thread::spawn(move || match runtime.serve_protocol_connections(1) {
-        Ok(handled) => handled,
-        Err(error) => panic!("router runtime should serve rejected websocket: {error}"),
+    let server_thread = tokio::spawn(async move {
+        match runtime.serve_protocol_connections(1).await {
+            Ok(handled) => handled,
+            Err(error) => panic!("router runtime should serve rejected websocket: {error}"),
+        }
     });
 
     let request = match format!("ws://{router_address}/v1/responses").into_client_request() {
@@ -42,7 +44,7 @@ fn loopback_router_runtime_rejects_websocket_upgrade_without_token() {
         Err(_error) => false,
     };
 
-    match server_thread.join() {
+    match server_thread.await {
         Ok(handled) => assert_eq!(handled, 1),
         Err(error) => panic!("server thread panicked: {error:?}"),
     }
@@ -52,8 +54,8 @@ fn loopback_router_runtime_rejects_websocket_upgrade_without_token() {
     );
 }
 
-#[test]
-fn loopback_router_runtime_rejects_websocket_subprotocol_token_smuggling_before_accept() {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn loopback_router_runtime_rejects_websocket_subprotocol_token_smuggling_before_accept() {
     let temp_dir = ProxyTestTempDir::new("runtime_websocket_subprotocol_auth");
     let database_path = temp_dir.path().join("state.sqlite");
     let secret_path = temp_dir.path().join("secrets");
@@ -72,14 +74,16 @@ fn loopback_router_runtime_rejects_websocket_subprotocol_token_smuggling_before_
         secret_path,
         LocalRouterTokenRecord::new(SecretString::new("current-token"), TokenGeneration::new(1)),
     );
-    let runtime = match LoopbackRouterRuntime::start_for_test(config) {
+    let runtime = match LoopbackRouterRuntime::start_for_test(config).await {
         Ok(runtime) => runtime,
         Err(error) => panic!("router runtime should start: {error}"),
     };
     let router_address = runtime.local_addr();
-    let server_thread = thread::spawn(move || match runtime.serve_protocol_connections(1) {
-        Ok(handled) => handled,
-        Err(error) => panic!("router runtime should serve rejected websocket: {error}"),
+    let server_thread = tokio::spawn(async move {
+        match runtime.serve_protocol_connections(1).await {
+            Ok(handled) => handled,
+            Err(error) => panic!("router runtime should serve rejected websocket: {error}"),
+        }
     });
 
     let mut request = match format!("ws://{router_address}/v1/responses").into_client_request() {
@@ -102,7 +106,7 @@ fn loopback_router_runtime_rejects_websocket_subprotocol_token_smuggling_before_
         Err(_error) => false,
     };
 
-    match server_thread.join() {
+    match server_thread.await {
         Ok(handled) => assert_eq!(handled, 1),
         Err(error) => panic!("server thread panicked: {error:?}"),
     }
@@ -112,8 +116,8 @@ fn loopback_router_runtime_rejects_websocket_subprotocol_token_smuggling_before_
     );
 }
 
-#[test]
-fn loopback_router_runtime_rejects_unsupported_websocket_path_before_accept() {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn loopback_router_runtime_rejects_unsupported_websocket_path_before_accept() {
     let temp_dir = ProxyTestTempDir::new("runtime_websocket_unsupported_path");
     let database_path = temp_dir.path().join("state.sqlite");
     let secret_path = temp_dir.path().join("secrets");
@@ -132,14 +136,16 @@ fn loopback_router_runtime_rejects_unsupported_websocket_path_before_accept() {
         secret_path,
         LocalRouterTokenRecord::new(SecretString::new("current-token"), TokenGeneration::new(1)),
     );
-    let runtime = match LoopbackRouterRuntime::start_for_test(config) {
+    let runtime = match LoopbackRouterRuntime::start_for_test(config).await {
         Ok(runtime) => runtime,
         Err(error) => panic!("router runtime should start: {error}"),
     };
     let router_address = runtime.local_addr();
-    let server_thread = thread::spawn(move || match runtime.serve_protocol_connections(1) {
-        Ok(handled) => handled,
-        Err(error) => panic!("router runtime should serve rejected websocket: {error}"),
+    let server_thread = tokio::spawn(async move {
+        match runtime.serve_protocol_connections(1).await {
+            Ok(handled) => handled,
+            Err(error) => panic!("router runtime should serve rejected websocket: {error}"),
+        }
     });
 
     let mut request = match format!("ws://{router_address}/v1/realtime").into_client_request() {
@@ -158,7 +164,7 @@ fn loopback_router_runtime_rejects_unsupported_websocket_path_before_accept() {
         Err(_error) => false,
     };
 
-    match server_thread.join() {
+    match server_thread.await {
         Ok(handled) => assert_eq!(handled, 1),
         Err(error) => panic!("server thread panicked: {error:?}"),
     }
@@ -168,8 +174,8 @@ fn loopback_router_runtime_rejects_unsupported_websocket_path_before_accept() {
     );
 }
 
-#[test]
-fn loopback_router_runtime_keeps_websocket_preconnect_open_until_client_close() {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn loopback_router_runtime_keeps_websocket_preconnect_open_until_client_close() {
     let temp_dir = ProxyTestTempDir::new("runtime_websocket_preconnect");
     let database_path = temp_dir.path().join("state.sqlite");
     let secret_path = temp_dir.path().join("secrets");
@@ -188,15 +194,16 @@ fn loopback_router_runtime_keeps_websocket_preconnect_open_until_client_close() 
         secret_path,
         LocalRouterTokenRecord::new(SecretString::new("current-token"), TokenGeneration::new(1)),
     );
-    let runtime = match LoopbackRouterRuntime::start_for_test(config) {
+    let runtime = match LoopbackRouterRuntime::start_for_test(config).await {
         Ok(runtime) => runtime,
         Err(error) => panic!("router runtime should start: {error}"),
     };
     let router_address = runtime.local_addr();
     let (done_sender, done_receiver) = mpsc::channel();
-    let server_thread = thread::spawn(move || {
+    let server_thread = tokio::spawn(async move {
         let result = runtime
             .serve_protocol_connections(1)
+            .await
             .map_err(|error| error.to_string());
         if let Err(error) = done_sender.send(result) {
             panic!("server completion should send: {error}");
@@ -226,7 +233,7 @@ fn loopback_router_runtime_keeps_websocket_preconnect_open_until_client_close() 
         Err(error) => panic!("server should complete after client close: {error}"),
     };
 
-    match server_thread.join() {
+    match server_thread.await {
         Ok(()) => {}
         Err(error) => panic!("server thread panicked: {error:?}"),
     }
@@ -236,9 +243,9 @@ fn loopback_router_runtime_keeps_websocket_preconnect_open_until_client_close() 
     }
 }
 
-#[test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[allow(clippy::result_large_err)]
-fn loopback_router_runtime_drains_affinity_tasks_after_handler_error() {
+async fn loopback_router_runtime_drains_affinity_tasks_after_handler_error() {
     let temp_dir = ProxyTestTempDir::new("runtime_error_drains_affinity_tasks");
     let database_path = temp_dir.path().join("state.sqlite");
     let secret_path = temp_dir.path().join("secrets");
@@ -314,15 +321,16 @@ fn loopback_router_runtime_drains_affinity_tasks_after_handler_error() {
         LocalRouterTokenRecord::new(SecretString::new("current-token"), TokenGeneration::new(1)),
     )
     .with_quota_clock(1_030, 60);
-    let runtime = match LoopbackRouterRuntime::start_for_test(config) {
+    let runtime = match LoopbackRouterRuntime::start_for_test(config).await {
         Ok(runtime) => runtime.with_affinity_owner_recorder(recorder.clone()),
         Err(error) => panic!("router runtime should start: {error}"),
     };
     let router_address = runtime.local_addr();
     let (done_sender, done_receiver) = mpsc::channel();
-    let server_thread = thread::spawn(move || {
+    let server_thread = tokio::spawn(async move {
         let result = runtime
             .serve_protocol_connections(2)
+            .await
             .map_err(|error| error.to_string());
         if let Err(error) = done_sender.send(result) {
             panic!("server completion should send: {error}");
@@ -381,7 +389,7 @@ fn loopback_router_runtime_drains_affinity_tasks_after_handler_error() {
         }
         Err(error) => panic!("serve should return after recorder release: {error}"),
     }
-    match server_thread.join() {
+    match server_thread.await {
         Ok(()) => {}
         Err(error) => panic!("server thread panicked: {error:?}"),
     }

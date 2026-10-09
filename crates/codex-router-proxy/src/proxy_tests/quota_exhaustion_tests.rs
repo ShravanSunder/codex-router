@@ -1,7 +1,7 @@
 use super::*;
 
-#[test]
-fn assembled_loopback_router_runtime_retries_http_quota_errors_until_account_can_serve() {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn assembled_loopback_router_runtime_retries_http_quota_errors_until_account_can_serve() {
     let temp_dir = ProxyTestTempDir::new("assembled_runtime_http_quota_retry_chain");
     let database_path = temp_dir.path().join("state.sqlite");
     let secret_path = temp_dir.path().join("secrets");
@@ -96,7 +96,7 @@ fn assembled_loopback_router_runtime_retries_http_quota_errors_until_account_can
         LocalRouterTokenRecord::new(SecretString::new("current-token"), TokenGeneration::new(1)),
     )
     .with_quota_clock(1_030, 60);
-    let runtime = match LoopbackRouterRuntime::start_for_test(config) {
+    let runtime = match LoopbackRouterRuntime::start_for_test(config).await {
         Ok(runtime) => runtime,
         Err(error) => panic!("router runtime should start: {error}"),
     };
@@ -111,8 +111,10 @@ fn assembled_loopback_router_runtime_retries_http_quota_errors_until_account_can
 
     let shutdown = tokio_util::sync::CancellationToken::new();
     let server_shutdown = shutdown.clone();
-    let server_thread = thread::spawn(move || {
-        runtime.serve_protocol_connections_until_cancelled(usize::MAX, server_shutdown)
+    let server_thread = tokio::spawn(async move {
+        runtime
+            .serve_protocol_connections_until_cancelled(usize::MAX, server_shutdown)
+            .await
     });
     let response = match client_thread.join() {
         Ok(response) => response,
@@ -152,7 +154,7 @@ fn assembled_loopback_router_runtime_retries_http_quota_errors_until_account_can
         "durable quota state should select the fallback while serving",
     );
     shutdown.cancel();
-    match server_thread.join() {
+    match server_thread.await {
         Ok(Ok(handled)) => assert_eq!(handled, 1),
         Ok(Err(error)) => panic!("router shutdown should succeed: {error}"),
         Err(error) => panic!("router server thread panicked: {error:?}"),
@@ -166,8 +168,8 @@ fn assembled_loopback_router_runtime_retries_http_quota_errors_until_account_can
     );
 }
 
-#[test]
-fn assembled_loopback_router_runtime_hides_http_quota_errors_when_all_accounts_exhausted() {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn assembled_loopback_router_runtime_hides_http_quota_errors_when_all_accounts_exhausted() {
     let temp_dir = ProxyTestTempDir::new("assembled_runtime_http_all_quota_exhausted");
     let database_path = temp_dir.path().join("state.sqlite");
     let secret_path = temp_dir.path().join("secrets");
@@ -249,7 +251,7 @@ fn assembled_loopback_router_runtime_hides_http_quota_errors_when_all_accounts_e
         LocalRouterTokenRecord::new(SecretString::new("current-token"), TokenGeneration::new(1)),
     )
     .with_quota_clock(1_030, 60);
-    let runtime = match LoopbackRouterRuntime::start_for_test(config) {
+    let runtime = match LoopbackRouterRuntime::start_for_test(config).await {
         Ok(runtime) => runtime,
         Err(error) => panic!("router runtime should start: {error}"),
     };
@@ -262,7 +264,7 @@ fn assembled_loopback_router_runtime_hides_http_quota_errors_when_all_accounts_e
         )
     });
 
-    let handled = match runtime.serve_http_connections(1) {
+    let handled = match runtime.serve_http_connections(1).await {
         Ok(handled) => handled,
         Err(error) => panic!("router runtime should serve one client connection: {error}"),
     };
@@ -301,8 +303,8 @@ fn assembled_loopback_router_runtime_hides_http_quota_errors_when_all_accounts_e
     }
 }
 
-#[test]
-fn loopback_router_runtime_balances_active_account_inside_hold_cooldown() {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn loopback_router_runtime_balances_active_account_inside_hold_cooldown() {
     let temp_dir = ProxyTestTempDir::new("runtime_cross_connection_balance");
     let database_path = temp_dir.path().join("state.sqlite");
     let secret_path = temp_dir.path().join("secrets");
@@ -392,12 +394,12 @@ fn loopback_router_runtime_balances_active_account_inside_hold_cooldown() {
         LocalRouterTokenRecord::new(SecretString::new("current-token"), TokenGeneration::new(1)),
     )
     .with_quota_clock(1_030, 60);
-    let runtime = match LoopbackRouterRuntime::start_for_test(config) {
+    let runtime = match LoopbackRouterRuntime::start_for_test(config).await {
         Ok(runtime) => runtime,
         Err(error) => panic!("router runtime should start: {error}"),
     };
     let router_address = runtime.local_addr();
-    let runtime_thread = thread::spawn(move || runtime.serve_protocol_connections(2));
+    let runtime_thread = tokio::spawn(async move { runtime.serve_protocol_connections(2).await });
     let first_client_thread = thread::spawn(move || {
         send_loopback_request(
             router_address,
@@ -417,7 +419,7 @@ fn loopback_router_runtime_balances_active_account_inside_hold_cooldown() {
         )
     });
 
-    let handled = match runtime_thread.join() {
+    let handled = match runtime_thread.await {
         Ok(Ok(handled)) => handled,
         Ok(Err(error)) => panic!("router runtime should serve two connections: {error}"),
         Err(error) => panic!("router runtime thread panicked: {error:?}"),

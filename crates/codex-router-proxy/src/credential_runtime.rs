@@ -180,6 +180,10 @@ impl AsyncProxyCredentialResolverFactory {
         }
     }
 
+    pub(crate) fn credential_refresh_task_supervisor(&self) -> CredentialRefreshTaskSupervisor {
+        self.refresh_tasks.clone()
+    }
+
     #[cfg(test)]
     pub(crate) fn set_test_claude_refresh_client<C>(&mut self, refresh_client: C)
     where

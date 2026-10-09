@@ -15,6 +15,10 @@ use session_event_model::{
     QuestionField, QuestionRequest,
 };
 
+#[path = "interaction_history_parse.rs"]
+mod parse;
+pub(super) use parse::parse_interaction_history_file;
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
 pub enum InteractionHistoryRecord {

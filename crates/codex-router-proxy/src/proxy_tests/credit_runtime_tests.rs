@@ -1,7 +1,7 @@
 use super::*;
 
-#[test]
-fn assembled_loopback_http_routes_known_exhaustion_to_opted_in_credit_account() {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn assembled_loopback_http_routes_known_exhaustion_to_opted_in_credit_account() {
     let temp_dir = ProxyTestTempDir::new("assembled_runtime_http_credit_backing");
     let database_path = temp_dir.path().join("state.sqlite");
     let secret_path = temp_dir.path().join("secrets");
@@ -41,7 +41,8 @@ fn assembled_loopback_http_routes_known_exhaustion_to_opted_in_credit_account() 
         "credit-backed-token",
         1_030,
         true,
-    );
+    )
+    .await;
 
     let upstream_listener = TcpListener::bind("127.0.0.1:0")
         .unwrap_or_else(|error| panic!("credit mock upstream should bind: {error}"));
@@ -79,6 +80,7 @@ fn assembled_loopback_http_routes_known_exhaustion_to_opted_in_credit_account() 
     )
     .with_quota_clock(1_030, 60);
     let runtime = LoopbackRouterRuntime::start(config, secrets)
+        .await
         .unwrap_or_else(|error| panic!("credit proxy runtime should start: {error}"));
     let router_address = runtime.local_addr();
     let client_thread = thread::spawn(move || {
@@ -91,6 +93,7 @@ fn assembled_loopback_http_routes_known_exhaustion_to_opted_in_credit_account() 
     assert_eq!(
         runtime
             .serve_http_connections(1)
+            .await
             .unwrap_or_else(|error| panic!("credit runtime should serve request: {error}")),
         1
     );

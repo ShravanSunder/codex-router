@@ -225,3 +225,63 @@ impl Drop for TestDirectory {
         let _cleanup_result = std::fs::remove_dir_all(&self.path);
     }
 }
+#[test]
+fn recorded_identity_serde_uses_the_literal_record_and_fixed_digest_bytes()
+-> Result<(), Box<dyn std::error::Error>> {
+    let literal = r#"{"recorded_path":"/absent/codex-router","content_digest":[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31]}"#;
+    let identity = RecordedExecutableIdentity::new(
+        PathBuf::from("/absent/codex-router"),
+        [
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
+            24, 25, 26, 27, 28, 29, 30, 31,
+        ],
+    )?;
+
+    let encoded = serde_json::to_string(&identity)?;
+    let decoded = serde_json::from_str::<RecordedExecutableIdentity>(literal)?;
+
+    if encoded != literal || decoded != identity {
+        return Err(
+            "recorded identity wire must retain its literal field names and byte array".into(),
+        );
+    }
+    if Path::new(identity.recorded_path()).exists() {
+        return Err("literal recorded path fixture unexpectedly exists".into());
+    }
+
+    for malformed in [
+        r#"{"recorded_path":"relative/codex-router","content_digest":[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31]}"#,
+        r#"{"recorded_path":"/tmp/../codex-router","content_digest":[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31]}"#,
+        r#"{"recorded_path":"/absent/codex-router","content_digest":[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30]}"#,
+        r#"{"recorded_path":"/absent/codex-router","content_digest":[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32]}"#,
+    ] {
+        if serde_json::from_str::<RecordedExecutableIdentity>(malformed).is_ok() {
+            return Err("malformed captured identity record was accepted".into());
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn recorded_identity_serialization_uses_only_captured_bytes_after_mutation_and_removal()
+-> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::tempdir()?;
+    let executable = directory.path().join("codex");
+    std::fs::write(&executable, b"captured executable")?;
+    let observed = executable_identity(&executable).await?;
+    let captured = RecordedExecutableIdentity::from(&observed);
+    let before = serde_json::to_vec(&captured)?;
+
+    std::fs::write(&executable, b"changed executable")?;
+    std::fs::remove_file(&executable)?;
+    let after = serde_json::to_vec(&captured)?;
+    let decoded_after_removal = serde_json::from_slice::<RecordedExecutableIdentity>(&after)?;
+
+    if before != after || decoded_after_removal != captured || !captured.matches_observed(&observed)
+    {
+        return Err(
+            "serialized captured identity must not re-observe changed or removed bytes".into(),
+        );
+    }
+    Ok(())
+}

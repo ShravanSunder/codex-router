@@ -1,20 +1,27 @@
 use super::*;
 
-pub(super) async fn await_db_write_task_shutdown(task: Option<JoinHandle<()>>) {
-    let Some(mut task) = task else {
-        return;
-    };
-    let drain_grace = tokio::time::sleep(std::time::Duration::from_millis(
-        DB_WRITE_SHUTDOWN_DRAIN_GRACE_MS,
-    ));
-    tokio::pin!(drain_grace);
-    tokio::select! {
-        _join_result = &mut task => {}
-        () = &mut drain_grace => {
-            task.abort();
-            let _join_result = task.await;
+/// Joins the actor-owned handle without releasing it when this future is cancelled.
+pub(super) async fn await_db_write_task_shutdown(
+    task: &Arc<tokio::sync::Mutex<Option<JoinHandle<()>>>>,
+) {
+    let mut stored_task = task.lock().await;
+    {
+        let Some(join_task) = stored_task.as_mut() else {
+            return;
+        };
+        let drain_grace = tokio::time::sleep(std::time::Duration::from_millis(
+            DB_WRITE_SHUTDOWN_DRAIN_GRACE_MS,
+        ));
+        tokio::pin!(drain_grace);
+        tokio::select! {
+            _join_result = &mut *join_task => {}
+            () = &mut drain_grace => {
+                join_task.abort();
+                let _join_result = (&mut *join_task).await;
+            }
         }
     }
+    *stored_task = None;
 }
 
 pub(super) async fn run_session_affinity_scheduler(

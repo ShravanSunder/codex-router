@@ -14,6 +14,23 @@ use std::{
 use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
+#[cfg(test)]
+use super::reader_delivery_owner::ReaderStorageBarrier;
+
+#[cfg(test)]
+pub(super) struct ReaderStorageHold {
+    release_permit: Option<oneshot::Sender<()>>,
+}
+
+#[cfg(test)]
+impl Drop for ReaderStorageHold {
+    fn drop(&mut self) {
+        if let Some(release_permit) = self.release_permit.take() {
+            let _ = release_permit.send(());
+        }
+    }
+}
+
 pub struct SubscriptionDeliveryServiceProps {
     pub board_availability: BoardAvailability,
     pub push_store: Arc<Mutex<automation_storage::AutomationStore>>,
@@ -318,12 +335,40 @@ impl SubscriptionDeliveryService {
         self.ensure_owner(reader)
             .await
             .expect("active owner")
-            .send(ReaderDeliveryCommand::Barrier(reply))
+            .send(ReaderDeliveryCommand::Barrier(
+                ReaderStorageBarrier::Observe { ack: reply },
+            ))
             .await
             .expect("owner command");
         response
             .await
             .expect("owner reached storage-derived sleep boundary");
+    }
+
+    #[cfg(test)]
+    pub(super) async fn hold_reader_at_storage_boundary(
+        &self,
+        reader: Identity,
+    ) -> ReaderStorageHold {
+        let (ack, acknowledged) = oneshot::channel();
+        let (release_permit, release) = oneshot::channel();
+        // Construct before awaiting: abandoning this helper also releases the owner.
+        let hold = ReaderStorageHold {
+            release_permit: Some(release_permit),
+        };
+        self.ensure_owner(reader)
+            .await
+            .expect("active owner")
+            .send(ReaderDeliveryCommand::Barrier(ReaderStorageBarrier::Hold {
+                ack,
+                release,
+            }))
+            .await
+            .expect("owner command");
+        acknowledged
+            .await
+            .expect("owner held at storage-derived sleep boundary");
+        hold
     }
 
     #[cfg(test)]

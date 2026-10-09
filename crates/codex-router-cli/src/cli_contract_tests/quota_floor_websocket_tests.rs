@@ -2,9 +2,9 @@ use super::quota_snapshot_tests::FaultingFloorRefreshProvider;
 use super::*;
 use sqlx::Connection;
 
-#[test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[allow(clippy::result_large_err)]
-fn saved_floor_refresh_reconnects_established_websocket_before_later_response_create() {
+async fn saved_floor_refresh_reconnects_established_websocket_before_later_response_create() {
     let test_root = TestRoot::new("joined-floor-websocket");
     must_ok(fs::create_dir(test_root.path()));
     let state_path = test_root.path().join("state.sqlite");
@@ -87,9 +87,11 @@ fn saved_floor_refresh_reconnects_established_websocket_before_later_response_cr
         9,
         "floor-socket-access-canary",
     );
-    migrate_test_state_database(&state_path);
+    let async_state =
+        must_ok(codex_router_state::sqlite::AsyncSqliteStateStore::open(&state_path).await);
+    must_ok(async_state.close().await);
 
-    let initial_status = run_cli(
+    let initial_status = run_cli_async(
         [
             "codex-router",
             "quota",
@@ -103,7 +105,8 @@ fn saved_floor_refresh_reconnects_established_websocket_before_later_response_cr
             "1100",
         ],
         CliContext::new(Vec::new()),
-    );
+    )
+    .await;
     let initial_json: serde_json::Value = must_ok(serde_json::from_str(&initial_status.stdout));
     assert!(
         initial_json["accounts"]
@@ -199,10 +202,14 @@ fn saved_floor_refresh_reconnects_established_websocket_before_later_response_cr
         secret_root.clone(),
     )
     .with_quota_clock(1_201, 300);
-    let router = must_ok(LoopbackRouterRuntime::start(config, secrets.clone()));
+    let router = must_ok(LoopbackRouterRuntime::start(config, secrets.clone()).await);
     let router_port = router.local_addr().port();
     let floor_notifier = router.websocket_quota_floor_notifier();
-    let router_thread = thread::spawn(move || router.serve_protocol_connections(2));
+    let router_task = tokio::spawn(async move {
+        if let Err(error) = router.serve_protocol_connections(2).await {
+            panic!("router runtime should serve websocket connections: {error}");
+        }
+    });
 
     let mut first_client = connect_tokenless_websocket_with_retry(router_port);
     match first_client.get_mut() {
@@ -245,27 +252,25 @@ fn saved_floor_refresh_reconnects_established_websocket_before_later_response_cr
         9,
         "floor-excluded-cli-access-canary",
     );
-    test_async_runtime().block_on(async {
-        let mutation = must_ok(AsyncWeeklyQuotaFloorMutationStore::open(&state_path).await);
-        must_ok(
-            mutation
-                .set_weekly_quota_floor_by_account_id(
-                    &floor_account_id,
-                    Some(must_ok(WeeklyQuotaFloorBasisPoints::new(1_000))),
-                )
-                .await,
-        );
-        must_ok(
-            mutation
-                .set_weekly_quota_floor_by_account_id(
-                    &excluded_cli_account_id,
-                    Some(must_ok(WeeklyQuotaFloorBasisPoints::new(1_000))),
-                )
-                .await,
-        );
-        mutation.close().await;
-    });
-    let edited_status = run_cli(
+    let mutation = must_ok(AsyncWeeklyQuotaFloorMutationStore::open(&state_path).await);
+    must_ok(
+        mutation
+            .set_weekly_quota_floor_by_account_id(
+                &floor_account_id,
+                Some(must_ok(WeeklyQuotaFloorBasisPoints::new(1_000))),
+            )
+            .await,
+    );
+    must_ok(
+        mutation
+            .set_weekly_quota_floor_by_account_id(
+                &excluded_cli_account_id,
+                Some(must_ok(WeeklyQuotaFloorBasisPoints::new(1_000))),
+            )
+            .await,
+    );
+    mutation.close().await;
+    let edited_status = run_cli_async(
         [
             "codex-router",
             "quota",
@@ -279,7 +284,8 @@ fn saved_floor_refresh_reconnects_established_websocket_before_later_response_cr
             "1100",
         ],
         CliContext::new(Vec::new()),
-    );
+    )
+    .await;
     let edited_json: serde_json::Value = must_ok(serde_json::from_str(&edited_status.stdout));
     assert!(
         edited_json["accounts"]
@@ -326,19 +332,22 @@ fn saved_floor_refresh_reconnects_established_websocket_before_later_response_cr
         failure_stage: "history",
     };
     let mut failed_output = Vec::new();
-    let failed = must_err(refresh_quota_store_paths_with_floor_observer(
-        &mut failed_output,
-        &state_path,
-        &secret_root,
-        "https://chatgpt.com/backend-api".to_owned(),
-        &resolver,
-        &failed_provider,
-        QuotaRefreshObservationContext {
-            observed_unix_seconds: 1_200,
-            schedule: crate::quota::QuotaRefreshSchedule::Manual,
-            weekly_floor_observer: Some(&floor_notifier),
-        },
-    ));
+    let failed = must_err(
+        refresh_quota_store_paths_with_dependencies_and_floor_notifier_async(
+            &mut failed_output,
+            &state_path,
+            &secret_root,
+            "https://chatgpt.com/backend-api".to_owned(),
+            &resolver,
+            &failed_provider,
+            QuotaRefreshObservationContext {
+                observed_unix_seconds: 1_200,
+                schedule: crate::quota::QuotaRefreshSchedule::Manual,
+                weekly_floor_observer: Some(&floor_notifier),
+            },
+        )
+        .await,
+    );
     assert!(failed.to_string().contains("sqlite state store failed"));
     let retained_after_failed_refresh = must_ok(
         SelectorQuotaRepository::selector_inputs_for_route_band(&state, "responses", 1_200),
@@ -381,30 +390,34 @@ fn saved_floor_refresh_reconnects_established_websocket_before_later_response_cr
     let options = sqlx::sqlite::SqliteConnectOptions::new()
         .filename(&state_path)
         .create_if_missing(false);
-    let mut fault_connection =
-        must_ok(test_async_runtime().block_on(sqlx::SqliteConnection::connect_with(&options)));
-    must_ok(test_async_runtime().block_on(
-        sqlx::query("DROP TRIGGER injected_history_failure").execute(&mut fault_connection),
-    ));
-    must_ok(test_async_runtime().block_on(fault_connection.close()));
+    let mut fault_connection = must_ok(sqlx::SqliteConnection::connect_with(&options).await);
+    must_ok(
+        sqlx::query("DROP TRIGGER injected_history_failure")
+            .execute(&mut fault_connection)
+            .await,
+    );
+    must_ok(fault_connection.close().await);
 
     let provider = JoinedFloorCrossingProvider {
         floor_account_id: floor_account_id.clone(),
     };
     let mut output = Vec::new();
-    must_ok(refresh_quota_store_paths_with_floor_observer(
-        &mut output,
-        &state_path,
-        &secret_root,
-        "https://chatgpt.com/backend-api".to_owned(),
-        &resolver,
-        &provider,
-        QuotaRefreshObservationContext {
-            observed_unix_seconds: 1_200,
-            schedule: crate::quota::QuotaRefreshSchedule::Manual,
-            weekly_floor_observer: Some(&floor_notifier),
-        },
-    ));
+    let _report = must_ok(
+        refresh_quota_store_paths_with_dependencies_and_floor_notifier_async(
+            &mut output,
+            &state_path,
+            &secret_root,
+            "https://chatgpt.com/backend-api".to_owned(),
+            &resolver,
+            &provider,
+            QuotaRefreshObservationContext {
+                observed_unix_seconds: 1_200,
+                schedule: crate::quota::QuotaRefreshSchedule::Manual,
+                weekly_floor_observer: Some(&floor_notifier),
+            },
+        )
+        .await,
+    );
     let saved = must_ok(SelectorQuotaRepository::selector_inputs_for_route_band(
         &state,
         "responses",
@@ -439,8 +452,6 @@ fn saved_floor_refresh_reconnects_established_websocket_before_later_response_cr
         "Bearer healthy-socket-access-canary"
     );
     drop(second_client);
-    must_ok(must_ok(
-        router_thread.join().map_err(|_| "router thread failed"),
-    ));
+    must_ok(router_task.await.map_err(|_| "router task failed"));
     must_ok(upstream_thread.join().map_err(|_| "upstream thread failed"));
 }

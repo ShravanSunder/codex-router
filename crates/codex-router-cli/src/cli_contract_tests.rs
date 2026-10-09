@@ -15,7 +15,6 @@ use std::process::Command as ProcessCommand;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::MutexGuard;
-use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
@@ -33,6 +32,7 @@ use tungstenite::handshake::server::Response;
 use tungstenite::http::HeaderValue;
 
 use codex_router_auth::resolver::CredentialRefreshClient;
+use codex_router_auth::resolver::CredentialRefreshTaskSupervisor;
 use codex_router_auth::resolver::CredentialResolverError;
 use codex_router_auth::resolver::NoopCredentialRefreshClient;
 use codex_router_auth::resolver::ProviderCredentialResolver;
@@ -180,6 +180,11 @@ mod account_policy_tests;
 
 #[path = "cli_contract_tests/router_startup_tests.rs"]
 mod router_startup_tests;
+
+#[path = "cli_contract_tests/serve_worker_lifecycle_tests.rs"]
+mod serve_worker_lifecycle_tests;
+#[path = "cli_contract_tests/shared_renewal_supervisor_tests.rs"]
+mod shared_renewal_supervisor_tests;
 
 #[path = "cli_contract_tests/quota_concurrency_tests.rs"]
 mod quota_concurrency_tests;

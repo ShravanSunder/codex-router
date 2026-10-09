@@ -227,26 +227,21 @@ fn store_claude_fixture_credential<S: SecretStore>(
         .unwrap_or_else(|error| panic!("fixture Claude credential should be stored: {error}"));
 }
 
-#[test]
-fn loopback_b1_credential_maintenance_refusal_excludes_account_on_next_request() {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn loopback_b1_credential_maintenance_refusal_excludes_account_on_next_request() {
     let database_path = test_database_path("b1-r9-next-request");
     let secret_root = database_path.with_extension("secrets");
     let credentials =
         codex_router_secret_store::test_support::open_encrypted_credential_store(&secret_root)
             .unwrap_or_else(|error| panic!("fixture encrypted store should open: {error}"));
-    let setup_runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap_or_else(|error| panic!("fixture setup runtime should build: {error}"));
-    let (primary_account, secondary_account) = setup_runtime.block_on(async {
-        let state = AsyncSqliteStateStore::open(&database_path)
-            .await
-            .unwrap_or_else(|error| panic!("fixture state should open: {error}"));
-        let primary = add_healthy_claude_account(&state, "b1_primary", "B1 Claude Primary").await;
-        let secondary =
-            add_healthy_claude_account(&state, "b1_secondary", "B1 Claude Secondary").await;
-        (primary, secondary)
-    });
+    let state = AsyncSqliteStateStore::open(&database_path)
+        .await
+        .unwrap_or_else(|error| panic!("fixture state should open: {error}"));
+    let primary_account =
+        add_healthy_claude_account(&state, "b1_primary", "B1 Claude Primary").await;
+    let secondary_account =
+        add_healthy_claude_account(&state, "b1_secondary", "B1 Claude Secondary").await;
+    state.close().await.expect("close fixture state");
     store_claude_fixture_credential(
         &credentials,
         &primary_account,
@@ -277,15 +272,16 @@ fn loopback_b1_credential_maintenance_refusal_excludes_account_on_next_request()
             .with_debug_claude_upstream_endpoint(upstream_endpoint),
         credentials,
     )
+    .await
     .unwrap_or_else(|error| panic!("fixture Router should start: {error}"))
     .with_test_claude_refresh_client(refresh_client);
     let router_address = runtime.local_addr();
-    let router_thread = thread::spawn(move || runtime.serve_http_connections(2));
+    let router_thread = tokio::spawn(async move { runtime.serve_http_connections(2).await });
 
     let first_response = send_claude_request(router_address);
     let next_response = send_claude_request(router_address);
     let served_connections = router_thread
-        .join()
+        .await
         .unwrap_or_else(|_error| panic!("fixture Router thread should join"))
         .unwrap_or_else(|error| panic!("fixture Router should serve both requests: {error}"));
     assert_eq!(served_connections, 2);
@@ -327,15 +323,18 @@ fn loopback_b1_credential_maintenance_refusal_excludes_account_on_next_request()
         refresh_body["refresh_token"], "claude-b1-primary-refresh",
         "R9 refresh should use the primary account token"
     );
-    let maintenance = setup_runtime.block_on(async {
-        AsyncSqliteStateStore::open(&database_path)
-            .await
-            .unwrap_or_else(|error| panic!("maintenance state should open: {error}"))
-            .load_credential_maintenance(&primary_account)
-            .await
-            .unwrap_or_else(|error| panic!("maintenance state should load: {error}"))
-            .unwrap_or_else(|| panic!("R9 refusal should persist maintenance state"))
-    });
+    let maintenance_state = AsyncSqliteStateStore::open(&database_path)
+        .await
+        .unwrap_or_else(|error| panic!("maintenance state should open: {error}"));
+    let maintenance = maintenance_state
+        .load_credential_maintenance(&primary_account)
+        .await
+        .unwrap_or_else(|error| panic!("maintenance state should load: {error}"))
+        .unwrap_or_else(|| panic!("R9 refusal should persist maintenance state"));
+    maintenance_state
+        .close()
+        .await
+        .expect("close maintenance state");
     assert_eq!(maintenance.credential_generation, 1);
     assert_eq!(
         maintenance.state,
@@ -343,39 +342,35 @@ fn loopback_b1_credential_maintenance_refusal_excludes_account_on_next_request()
     );
 }
 
-#[test]
-fn loopback_b1_all_reauth_required_accounts_return_r12_three_and_name_accounts() {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn loopback_b1_all_reauth_required_accounts_return_r12_three_and_name_accounts() {
     let database_path = test_database_path("b1-all-reauth-required");
     let secret_root = database_path.with_extension("secrets");
-    let setup_runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap_or_else(|error| panic!("fixture setup runtime should build: {error}"));
-    setup_runtime.block_on(async {
-        let state = AsyncSqliteStateStore::open(&database_path)
-            .await
-            .unwrap_or_else(|error| panic!("fixture state should open: {error}"));
-        for (suffix, label) in [
-            ("b1_login_one", "B1 Login One"),
-            ("b1_login_two", "B1 Login Two"),
-        ] {
-            let account = add_healthy_claude_account(&state, suffix, label).await;
-            assert!(
-                state
-                    .mark_generation_reauth_required(&account, 1)
-                    .await
-                    .unwrap_or_else(|error| panic!("fixture reauth state should persist: {error}")),
-                "active generation should become reauth-required"
-            );
-        }
-    });
+    let state = AsyncSqliteStateStore::open(&database_path)
+        .await
+        .unwrap_or_else(|error| panic!("fixture state should open: {error}"));
+    for (suffix, label) in [
+        ("b1_login_one", "B1 Login One"),
+        ("b1_login_two", "B1 Login Two"),
+    ] {
+        let account = add_healthy_claude_account(&state, suffix, label).await;
+        assert!(
+            state
+                .mark_generation_reauth_required(&account, 1)
+                .await
+                .unwrap_or_else(|error| panic!("fixture reauth state should persist: {error}")),
+            "active generation should become reauth-required"
+        );
+    }
+    state.close().await.expect("close fixture state");
 
     let (endpoint, probe_start, upstream_probe) = fake_claude_upstream_probe();
     let runtime = LoopbackRouterRuntime::start_for_test(
         runtime_config(&database_path, &secret_root).with_debug_claude_upstream_endpoint(endpoint),
     )
+    .await
     .unwrap_or_else(|error| panic!("fixture Router should start: {error}"));
-    let response = serve_one_request(runtime);
+    let response = serve_one_request(runtime).await;
     assert_fake_upstream_received_no_request(probe_start, upstream_probe);
 
     let (headers, body) = response
@@ -395,8 +390,8 @@ fn loopback_b1_all_reauth_required_accounts_return_r12_three_and_name_accounts()
     assert!(message.contains("account login"), "{message}");
 }
 
-#[test]
-fn loopback_b1_reauth_required_pin_releases_and_selects_elsewhere() {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn loopback_b1_reauth_required_pin_releases_and_selects_elsewhere() {
     const SESSION_ID: &str = "b1-reauth-pin-session";
 
     let database_path = test_database_path("b1-reauth-pin-release");
@@ -404,19 +399,14 @@ fn loopback_b1_reauth_required_pin_releases_and_selects_elsewhere() {
     let credentials =
         codex_router_secret_store::test_support::open_encrypted_credential_store(&secret_root)
             .unwrap_or_else(|error| panic!("fixture encrypted store should open: {error}"));
-    let setup_runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap_or_else(|error| panic!("fixture setup runtime should build: {error}"));
-    let (primary_account, secondary_account) = setup_runtime.block_on(async {
-        let state = AsyncSqliteStateStore::open(&database_path)
-            .await
-            .unwrap_or_else(|error| panic!("fixture state should open: {error}"));
-        let primary = add_healthy_claude_account(&state, "b1_pin_primary", "B1 Pin Primary").await;
-        let secondary =
-            add_healthy_claude_account(&state, "b1_pin_secondary", "B1 Pin Secondary").await;
-        (primary, secondary)
-    });
+    let state = AsyncSqliteStateStore::open(&database_path)
+        .await
+        .unwrap_or_else(|error| panic!("fixture state should open: {error}"));
+    let primary_account =
+        add_healthy_claude_account(&state, "b1_pin_primary", "B1 Pin Primary").await;
+    let secondary_account =
+        add_healthy_claude_account(&state, "b1_pin_secondary", "B1 Pin Secondary").await;
+    state.close().await.expect("close fixture state");
     store_claude_fixture_credential(
         &credentials,
         &primary_account,
@@ -438,9 +428,11 @@ fn loopback_b1_reauth_required_pin_releases_and_selects_elsewhere() {
             .with_debug_claude_upstream_endpoint(upstream_endpoint.clone()),
         credentials.clone(),
     )
+    .await
     .unwrap_or_else(|error| panic!("fixture Router should start: {error}"));
     let first_router_address = first_runtime.local_addr();
-    let first_router_thread = thread::spawn(move || first_runtime.serve_http_connections(1));
+    let first_router_thread =
+        tokio::spawn(async move { first_runtime.serve_http_connections(1).await });
 
     let first_response = send_claude_request_for_session(first_router_address, SESSION_ID);
     assert!(
@@ -448,33 +440,35 @@ fn loopback_b1_reauth_required_pin_releases_and_selects_elsewhere() {
         "{first_response}"
     );
     let first_served_connections = first_router_thread
-        .join()
+        .await
         .unwrap_or_else(|_error| panic!("first fixture Router thread should join"))
         .unwrap_or_else(|error| panic!("first fixture Router should drain: {error}"));
     assert_eq!(first_served_connections, 1);
-    let first_pin = setup_runtime.block_on(async {
-        AsyncSqliteStateStore::open(&database_path)
-            .await
-            .unwrap_or_else(|error| panic!("fixture pin state should open: {error}"))
-            .load_session_account_affinity(Provider::Claude, SESSION_ID)
-            .await
-            .unwrap_or_else(|error| panic!("fixture pin should load: {error}"))
-            .unwrap_or_else(|| panic!("successful Claude response should publish a pin"))
-    });
+    let first_pin_state = AsyncSqliteStateStore::open(&database_path)
+        .await
+        .unwrap_or_else(|error| panic!("fixture pin state should open: {error}"));
+    let first_pin = first_pin_state
+        .load_session_account_affinity(Provider::Claude, SESSION_ID)
+        .await
+        .unwrap_or_else(|error| panic!("fixture pin should load: {error}"))
+        .unwrap_or_else(|| panic!("successful Claude response should publish a pin"));
+    first_pin_state
+        .close()
+        .await
+        .expect("close first pin state");
     assert_eq!(first_pin.account_id(), Some(&primary_account));
 
-    setup_runtime.block_on(async {
-        let state = AsyncSqliteStateStore::open(&database_path)
+    let state = AsyncSqliteStateStore::open(&database_path)
+        .await
+        .unwrap_or_else(|error| panic!("fixture state should reopen: {error}"));
+    assert!(
+        state
+            .mark_generation_reauth_required(&primary_account, 1)
             .await
-            .unwrap_or_else(|error| panic!("fixture state should reopen: {error}"));
-        assert!(
-            state
-                .mark_generation_reauth_required(&primary_account, 1)
-                .await
-                .unwrap_or_else(|error| panic!("fixture reauth state should persist: {error}")),
-            "pinned active generation should become reauth-required"
-        );
-    });
+            .unwrap_or_else(|error| panic!("fixture reauth state should persist: {error}")),
+        "pinned active generation should become reauth-required"
+    );
+    state.close().await.expect("close reauth state");
 
     let second_runtime = LoopbackRouterRuntime::start(
         runtime_config(&database_path, &secret_root)
@@ -482,12 +476,14 @@ fn loopback_b1_reauth_required_pin_releases_and_selects_elsewhere() {
             .with_debug_claude_upstream_endpoint(upstream_endpoint),
         credentials,
     )
+    .await
     .unwrap_or_else(|error| panic!("replacement fixture Router should start: {error}"));
     let second_router_address = second_runtime.local_addr();
-    let second_router_thread = thread::spawn(move || second_runtime.serve_http_connections(1));
+    let second_router_thread =
+        tokio::spawn(async move { second_runtime.serve_http_connections(1).await });
     let next_response = send_claude_request_for_session(second_router_address, SESSION_ID);
     let second_served_connections = second_router_thread
-        .join()
+        .await
         .unwrap_or_else(|_error| panic!("replacement fixture Router thread should join"))
         .unwrap_or_else(|error| panic!("replacement fixture Router should drain: {error}"));
     assert_eq!(second_served_connections, 1);
@@ -510,15 +506,18 @@ fn loopback_b1_reauth_required_pin_releases_and_selects_elsewhere() {
         Some("Bearer claude-b1-pin-secondary-access"),
         "a reauth-required pin should release and route to the secondary account"
     );
-    let second_pin = setup_runtime.block_on(async {
-        AsyncSqliteStateStore::open(&database_path)
-            .await
-            .unwrap_or_else(|error| panic!("fixture pin state should reopen: {error}"))
-            .load_session_account_affinity(Provider::Claude, SESSION_ID)
-            .await
-            .unwrap_or_else(|error| panic!("fixture replacement pin should load: {error}"))
-            .unwrap_or_else(|| panic!("successful replacement response should publish a pin"))
-    });
+    let second_pin_state = AsyncSqliteStateStore::open(&database_path)
+        .await
+        .unwrap_or_else(|error| panic!("fixture pin state should reopen: {error}"));
+    let second_pin = second_pin_state
+        .load_session_account_affinity(Provider::Claude, SESSION_ID)
+        .await
+        .unwrap_or_else(|error| panic!("fixture replacement pin should load: {error}"))
+        .unwrap_or_else(|| panic!("successful replacement response should publish a pin"));
+    second_pin_state
+        .close()
+        .await
+        .expect("close second pin state");
     assert_eq!(second_pin.account_id(), Some(&secondary_account));
     assert_eq!(
         second_pin.pin_version(),

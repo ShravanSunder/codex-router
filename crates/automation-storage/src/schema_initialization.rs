@@ -3,7 +3,7 @@ use crate::{StorageError, schema_validation};
 use sqlx::{Connection, SqliteConnection, migrate::MigrateError};
 
 const BASELINE_VERSION: i64 = 20_260_910_000_000;
-static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
+pub(crate) static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
 pub(crate) async fn initialize(connection: &mut SqliteConnection) -> Result<(), StorageError> {
     let mut transaction = connection.begin_with("BEGIN IMMEDIATE").await?;

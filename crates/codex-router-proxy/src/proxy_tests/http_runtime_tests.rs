@@ -1,7 +1,7 @@
 use super::*;
 
-#[test]
-fn assembled_loopback_router_runtime_forwards_with_repository_state_and_secrets() {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn assembled_loopback_router_runtime_forwards_with_repository_state_and_secrets() {
     let temp_dir = ProxyTestTempDir::new("assembled_runtime");
     let database_path = temp_dir.path().join("state.sqlite");
     let secret_path = temp_dir.path().join("secrets");
@@ -78,7 +78,7 @@ fn assembled_loopback_router_runtime_forwards_with_repository_state_and_secrets(
         LocalRouterTokenRecord::new(SecretString::new("current-token"), TokenGeneration::new(1)),
     )
     .with_quota_clock(1_030, 60);
-    let runtime = match LoopbackRouterRuntime::start_for_test(config) {
+    let runtime = match LoopbackRouterRuntime::start_for_test(config).await {
         Ok(runtime) => runtime,
         Err(error) => panic!("router runtime should start: {error}"),
     };
@@ -91,11 +91,13 @@ fn assembled_loopback_router_runtime_forwards_with_repository_state_and_secrets(
         )
     });
 
-    let handled = match runtime.serve_http_connections(1) {
+    let handled = match runtime.serve_http_connections(1).await {
         Ok(handled) => handled,
         Err(error) => panic!("router runtime should serve one connection: {error}"),
     };
     assert_eq!(handled, 1);
+    tokio::task::yield_now().await;
+    assert!(tokio::runtime::Handle::try_current().is_ok());
 
     let response = match client_thread.join() {
         Ok(response) => response,
@@ -131,8 +133,8 @@ fn assembled_loopback_router_runtime_forwards_with_repository_state_and_secrets(
     assert_eq!(owner.credential_generation(), 1);
 }
 
-#[test]
-fn served_http_weekly_floor_at_threshold_routes_only_to_eligible_peer() {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn served_http_weekly_floor_at_threshold_routes_only_to_eligible_peer() {
     const NOW: u64 = 1_030;
     let temp_dir = ProxyTestTempDir::new("served_http_weekly_floor");
     let database_path = temp_dir.path().join("state.sqlite");
@@ -174,7 +176,7 @@ fn served_http_weekly_floor_at_threshold_routes_only_to_eligible_peer() {
         "served floor fixture must have fresh eligible quota windows"
     );
     drop(state);
-    set_weekly_floor_for_test(&database_path, protected.label(), 500);
+    set_weekly_floor_for_test(&database_path, protected.label(), 500).await;
 
     let upstream_listener = TcpListener::bind("127.0.0.1:0").expect("upstream should bind");
     let upstream_address = upstream_listener.local_addr().expect("address should read");
@@ -197,7 +199,9 @@ fn served_http_weekly_floor_at_threshold_routes_only_to_eligible_peer() {
         secret_path,
     )
     .with_quota_clock(NOW, 60);
-    let runtime = LoopbackRouterRuntime::start_for_test(config).expect("runtime should start");
+    let runtime = LoopbackRouterRuntime::start_for_test(config)
+        .await
+        .expect("runtime should start");
     let router_address = runtime.local_addr();
     let client_thread = thread::spawn(move || {
         send_loopback_request(
@@ -209,6 +213,7 @@ fn served_http_weekly_floor_at_threshold_routes_only_to_eligible_peer() {
     assert_eq!(
         runtime
             .serve_http_connections(1)
+            .await
             .expect("runtime should serve HTTP"),
         1
     );
@@ -220,8 +225,8 @@ fn served_http_weekly_floor_at_threshold_routes_only_to_eligible_peer() {
     upstream_thread.join().expect("upstream should join");
 }
 
-#[test]
-fn served_http_weekly_floor_ignores_bad_forecast_above_current_threshold() {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn served_http_weekly_floor_ignores_bad_forecast_above_current_threshold() {
     const NOW: u64 = 1_030;
     let temp_dir = ProxyTestTempDir::new("served_http_weekly_floor_bad_forecast");
     let database_path = temp_dir.path().join("state.sqlite");
@@ -252,14 +257,16 @@ fn served_http_weekly_floor_ignores_bad_forecast_above_current_threshold() {
         100,
         48,
         5 * 86_400,
-    );
-    set_weekly_floor_for_test(&database_path, protected.label(), 1_000);
+    )
+    .await;
+    set_weekly_floor_for_test(&database_path, protected.label(), 1_000).await;
     assert_bad_projected_margin_does_not_floor_block_for_test(
         &database_path,
         protected.account_id(),
         NOW,
         1_000,
-    );
+    )
+    .await;
 
     let upstream_listener = TcpListener::bind("127.0.0.1:0").expect("upstream should bind");
     let upstream_address = upstream_listener.local_addr().expect("address should read");
@@ -282,7 +289,9 @@ fn served_http_weekly_floor_ignores_bad_forecast_above_current_threshold() {
         secret_path,
     )
     .with_quota_clock(NOW, 60);
-    let runtime = LoopbackRouterRuntime::start_for_test(config).expect("runtime should start");
+    let runtime = LoopbackRouterRuntime::start_for_test(config)
+        .await
+        .expect("runtime should start");
     let router_address = runtime.local_addr();
     let client_thread = thread::spawn(move || {
         send_loopback_request(
@@ -294,6 +303,7 @@ fn served_http_weekly_floor_ignores_bad_forecast_above_current_threshold() {
     assert_eq!(
         runtime
             .serve_http_connections(1)
+            .await
             .expect("runtime should serve HTTP"),
         1
     );
@@ -309,8 +319,8 @@ fn served_http_weekly_floor_ignores_bad_forecast_above_current_threshold() {
     upstream_thread.join().expect("upstream should join");
 }
 
-#[test]
-fn served_http_all_weekly_floor_blocked_is_scrubbed_and_sends_zero_upstream_requests() {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn served_http_all_weekly_floor_blocked_is_scrubbed_and_sends_zero_upstream_requests() {
     let temp_dir = ProxyTestTempDir::new("served_http_all_weekly_floor_blocked");
     let database_path = temp_dir.path().join("state.sqlite");
     let secret_path = temp_dir.path().join("secrets");
@@ -345,8 +355,8 @@ fn served_http_all_weekly_floor_blocked_is_scrubbed_and_sends_zero_upstream_requ
         &[(18_000, 4, true), (604_800, 4, false)],
     );
     drop(state);
-    set_weekly_floor_for_test(&database_path, first.label(), 500);
-    set_weekly_floor_for_test(&database_path, second.label(), 500);
+    set_weekly_floor_for_test(&database_path, first.label(), 500).await;
+    set_weekly_floor_for_test(&database_path, second.label(), 500).await;
 
     let upstream_listener = TcpListener::bind("127.0.0.1:0").expect("upstream should bind");
     upstream_listener
@@ -361,7 +371,9 @@ fn served_http_all_weekly_floor_blocked_is_scrubbed_and_sends_zero_upstream_requ
         secret_path,
     )
     .with_quota_clock(1_030, 60);
-    let runtime = LoopbackRouterRuntime::start_for_test(config).expect("runtime should start");
+    let runtime = LoopbackRouterRuntime::start_for_test(config)
+        .await
+        .expect("runtime should start");
     let router_address = runtime.local_addr();
     let client_thread = thread::spawn(move || {
         send_loopback_request(
@@ -373,6 +385,7 @@ fn served_http_all_weekly_floor_blocked_is_scrubbed_and_sends_zero_upstream_requ
     assert_eq!(
         runtime
             .serve_http_connections(1)
+            .await
             .expect("runtime should serve HTTP"),
         1
     );

@@ -27,6 +27,7 @@ use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
 use bytes::Bytes;
+use codex_router_auth::resolver::CredentialRefreshTaskSupervisor;
 use futures_util::future::BoxFuture;
 use futures_util::stream;
 use http::HeaderMap;
@@ -176,10 +177,20 @@ mod loopback_bind;
 mod protocol_handler;
 #[path = "server/response_body.rs"]
 mod response_body;
+#[path = "server/runtime_cleanup.rs"]
+mod runtime_cleanup;
 #[path = "server/runtime_config.rs"]
 mod runtime_config;
 #[path = "server/runtime_lifecycle.rs"]
 mod runtime_lifecycle;
+#[path = "server/runtime_maintenance.rs"]
+mod runtime_maintenance;
+#[path = "server/runtime_serving.rs"]
+mod runtime_serving;
+#[path = "server/runtime_startup.rs"]
+mod runtime_startup;
+#[path = "server/runtime_state.rs"]
+mod runtime_state;
 
 pub use auth_reloader::*;
 use connection_diagnostics::*;
@@ -191,6 +202,10 @@ use protocol_handler::*;
 pub(crate) use response_body::*;
 pub use runtime_config::*;
 use runtime_lifecycle::*;
+pub use runtime_serving::*;
+#[cfg(test)]
+use runtime_startup::open_runtime_writable_state_stores;
+pub use runtime_state::*;
 
 #[cfg(test)]
 #[path = "server/tests.rs"]

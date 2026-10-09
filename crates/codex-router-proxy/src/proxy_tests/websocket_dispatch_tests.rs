@@ -1,8 +1,8 @@
 use super::*;
 
-#[test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[allow(clippy::result_large_err)]
-fn loopback_router_runtime_passes_large_malformed_websocket_first_frame_unchanged() {
+async fn loopback_router_runtime_passes_large_malformed_websocket_first_frame_unchanged() {
     let temp_dir = ProxyTestTempDir::new("runtime_websocket_large_first_frame");
     let database_path = temp_dir.path().join("state.sqlite");
     let secret_path = temp_dir.path().join("secrets");
@@ -91,7 +91,7 @@ fn loopback_router_runtime_passes_large_malformed_websocket_first_frame_unchange
         LocalRouterTokenRecord::new(SecretString::new("current-token"), TokenGeneration::new(1)),
     )
     .with_quota_clock(1_030, 60);
-    let runtime = match LoopbackRouterRuntime::start_for_test(config) {
+    let runtime = match LoopbackRouterRuntime::start_for_test(config).await {
         Ok(runtime) => runtime,
         Err(error) => panic!("router runtime should start: {error}"),
     };
@@ -130,7 +130,7 @@ fn loopback_router_runtime_passes_large_malformed_websocket_first_frame_unchange
         response
     });
 
-    let handled = match runtime.serve_protocol_connections(1) {
+    let handled = match runtime.serve_protocol_connections(1).await {
         Ok(handled) => handled,
         Err(error) => panic!("router runtime should serve websocket connection: {error}"),
     };
@@ -157,9 +157,9 @@ fn loopback_router_runtime_passes_large_malformed_websocket_first_frame_unchange
     }
 }
 
-#[test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[allow(clippy::result_large_err)]
-fn loopback_router_runtime_reloads_local_auth_and_closes_old_token_websocket() {
+async fn loopback_router_runtime_reloads_local_auth_and_closes_old_token_websocket() {
     let temp_dir = ProxyTestTempDir::new("runtime_websocket_token_rotation");
     let database_path = temp_dir.path().join("state.sqlite");
     let secret_path = temp_dir.path().join("secrets");
@@ -236,15 +236,17 @@ fn loopback_router_runtime_reloads_local_auth_and_closes_old_token_websocket() {
         LocalRouterTokenRecord::new(SecretString::new("token-a"), TokenGeneration::new(1)),
     )
     .with_quota_clock(1_030, 60);
-    let runtime = match LoopbackRouterRuntime::start_for_test(config) {
+    let runtime = match LoopbackRouterRuntime::start_for_test(config).await {
         Ok(runtime) => runtime,
         Err(error) => panic!("router runtime should start: {error}"),
     };
     let router_address = runtime.local_addr();
     let reloader = runtime.local_auth_reloader();
-    let server_thread = thread::spawn(move || match runtime.serve_protocol_connections(1) {
-        Ok(handled) => handled,
-        Err(error) => panic!("router runtime should serve websocket connection: {error}"),
+    let server_thread = tokio::spawn(async move {
+        match runtime.serve_protocol_connections(1).await {
+            Ok(handled) => handled,
+            Err(error) => panic!("router runtime should serve websocket connection: {error}"),
+        }
     });
 
     let mut request = match format!("ws://{router_address}/v1/responses").into_client_request() {
@@ -283,7 +285,7 @@ fn loopback_router_runtime_reloads_local_auth_and_closes_old_token_websocket() {
         panic!("upstream release should send: {error}");
     }
 
-    match server_thread.join() {
+    match server_thread.await {
         Ok(handled) => assert_eq!(handled, 1),
         Err(error) => panic!("server thread panicked: {error:?}"),
     }

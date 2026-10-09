@@ -34,7 +34,13 @@ pub fn new_service_uuid() -> io::Result<UuidIdentity> {
     UuidIdentity::try_from(encoded).map_err(io::Error::other)
 }
 
-pub fn load_service_identity(directory: &Path) -> io::Result<UuidIdentity> {
+/// Replacement preparation reads the stable identity without minting or publishing one.
+pub fn read_existing_service_identity(directory: &Path) -> io::Result<UuidIdentity> {
+    validate_identity_directory(directory)?;
+    read_identity(&directory.join("service-identity.json"))
+}
+
+fn validate_identity_directory(directory: &Path) -> io::Result<()> {
     let metadata = std::fs::symlink_metadata(directory)?;
     if !directory.is_absolute() || !metadata.is_dir() || metadata.permissions().mode() & 0o077 != 0
     {
@@ -42,6 +48,11 @@ pub fn load_service_identity(directory: &Path) -> io::Result<UuidIdentity> {
             "identity directory must be private and absolute",
         ));
     }
+    Ok(())
+}
+
+pub fn load_service_identity(directory: &Path) -> io::Result<UuidIdentity> {
+    validate_identity_directory(directory)?;
     let path = directory.join("service-identity.json");
     match read_identity(&path) {
         Ok(identity) => return Ok(identity),

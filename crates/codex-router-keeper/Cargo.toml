@@ -9,14 +9,20 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+codex-native-integration = { path = "../codex-native-integration", version = "0.1.63" }
+sha2.workspace = true
+serde_json.workspace = true
+rustix.workspace = true
 codex-router-keeper-protocol = { path = "../codex-router-keeper-protocol", version = "0.1.63" }
 codex-router-descriptor-boundary = { path = "../codex-router-descriptor-boundary", version = "0.1.63" }
 thiserror.workspace = true
 tokio.workspace = true
+tokio-util.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+futures-util.workspace = true
+tokio-tungstenite.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-rustix.workspace = true
 tempfile = "3.27.0"

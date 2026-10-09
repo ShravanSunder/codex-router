@@ -5,6 +5,8 @@ use sqlx::{
 };
 use std::{path::Path, time::Duration};
 
+use crate::{AutomationSchemaPreparation, AutomationSchemaPreparationError};
+
 #[derive(Debug, thiserror::Error)]
 pub enum StorageError {
     #[error("automation storage unavailable")]
@@ -98,6 +100,12 @@ pub struct AutomationStore {
     pub(crate) connection: SqliteConnection,
 }
 impl AutomationStore {
+    pub async fn prepare_schema(
+        database_path: &Path,
+    ) -> Result<AutomationSchemaPreparation, AutomationSchemaPreparationError> {
+        crate::schema_preparation::prepare_schema(database_path).await
+    }
+
     pub async fn open(path: &Path) -> Result<Self, StorageError> {
         let options = SqliteConnectOptions::new()
             .filename(path)

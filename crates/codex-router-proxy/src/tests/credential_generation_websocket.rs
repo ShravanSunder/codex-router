@@ -5,9 +5,10 @@ const ROUTE_BAND: &str = "responses";
 const SHORT_WINDOW_SECONDS: u64 = 18_000;
 const WEEKLY_WINDOW_SECONDS: u64 = 604_800;
 
-#[test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[allow(clippy::result_large_err)]
-fn assembled_loopback_websocket_preserves_ordinary_socket_across_credential_generation_renewal() {
+async fn assembled_loopback_websocket_preserves_ordinary_socket_across_credential_generation_renewal()
+ {
     let temp_dir = ProxyTestTempDir::new("ordinary_websocket_credential_renewal");
     let database_path = temp_dir.path().join("state.sqlite");
     let secret_path = temp_dir.path().join("secrets");
@@ -28,7 +29,7 @@ fn assembled_loopback_websocket_preserves_ordinary_socket_across_credential_gene
         .unwrap_or_else(|error| panic!("ordinary socket account should persist: {error}"));
     save_generation_credential(&secrets, &account_id, 1, "generation-one-token");
     save_included_quota_snapshot(&state, &account_id, FIXED_QUOTA_TIME);
-    persist_disallow_credit_policy(&database_path, &account_id);
+    persist_disallow_credit_policy(&database_path, &account_id).await;
 
     let initial_input = SelectorQuotaRepository::selector_inputs_for_route_band(
         &state,
@@ -124,9 +125,10 @@ fn assembled_loopback_websocket_preserves_ordinary_socket_across_credential_gene
     )
     .with_quota_clock(FIXED_QUOTA_TIME, 300);
     let runtime = LoopbackRouterRuntime::start(config, secrets.clone())
+        .await
         .unwrap_or_else(|error| panic!("assembled ordinary runtime should start: {error}"));
     let router_address = runtime.local_addr();
-    let runtime_thread = thread::spawn(move || runtime.serve_protocol_connections(1));
+    let runtime_thread = tokio::spawn(async move { runtime.serve_protocol_connections(1).await });
     let (client_ready_sender, client_ready_receiver) = mpsc::channel();
     let (continue_sender, continue_receiver) = mpsc::channel();
     let (client_turn_sender, client_turn_receiver) = mpsc::channel();
@@ -232,7 +234,7 @@ fn assembled_loopback_websocket_preserves_ordinary_socket_across_credential_gene
     });
     assert_forwarded_ordinary_turn(&client_turn_receiver, &upstream_receiver, 1);
 
-    activate_generation_two_with_invalidated_quota(&database_path, &secrets, &account_id);
+    activate_generation_two_with_invalidated_quota(&database_path, &secrets, &account_id).await;
     let invalidated_input = SelectorQuotaRepository::selector_inputs_for_route_band(
         &state,
         ROUTE_BAND,
@@ -296,7 +298,7 @@ fn assembled_loopback_websocket_preserves_ordinary_socket_across_credential_gene
     );
     assert_eq!(
         runtime_thread
-            .join()
+            .await
             .unwrap_or_else(|error| panic!("assembled runtime thread should finish: {error:?}"))
             .unwrap_or_else(|error| panic!("assembled runtime should serve the socket: {error}")),
         1
@@ -306,33 +308,27 @@ fn assembled_loopback_websocket_preserves_ordinary_socket_across_credential_gene
         .unwrap_or_else(|error| panic!("ordinary upstream thread should finish: {error:?}"));
 }
 
-fn activate_generation_two_with_invalidated_quota(
+async fn activate_generation_two_with_invalidated_quota(
     database_path: &Path,
     secrets: &EncryptedCredentialStore,
     account_id: &AccountId,
 ) {
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap_or_else(|error| panic!("credential activation runtime should build: {error}"));
-    runtime.block_on(async {
-        let async_state = AsyncSqliteStateStore::open(database_path)
-            .await
-            .unwrap_or_else(|error| panic!("credential activation state should open: {error}"));
-        async_state
-            .activate_account_credential_generation_if_current_and_invalidate_quota(
-                account_id,
-                1,
-                2,
-                AccountStatus::Enabled,
-            )
-            .await
-            .unwrap_or_else(|error| panic!("generation two should activate: {error}"));
-        async_state
-            .close()
-            .await
-            .unwrap_or_else(|error| panic!("credential activation state should close: {error}"));
-    });
+    let async_state = AsyncSqliteStateStore::open(database_path)
+        .await
+        .unwrap_or_else(|error| panic!("credential activation state should open: {error}"));
+    async_state
+        .activate_account_credential_generation_if_current_and_invalidate_quota(
+            account_id,
+            1,
+            2,
+            AccountStatus::Enabled,
+        )
+        .await
+        .unwrap_or_else(|error| panic!("generation two should activate: {error}"));
+    async_state
+        .close()
+        .await
+        .unwrap_or_else(|error| panic!("credential activation state should close: {error}"));
 
     save_generation_credential(secrets, account_id, 2, "generation-two-token");
 }
@@ -367,27 +363,21 @@ fn assert_forwarded_ordinary_turn(
     );
 }
 
-fn persist_disallow_credit_policy(database_path: &Path, account_id: &AccountId) {
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap_or_else(|error| panic!("credit policy runtime should build: {error}"));
-    runtime.block_on(async {
-        let async_state = AsyncSqliteStateStore::open(database_path)
-            .await
-            .unwrap_or_else(|error| panic!("credit policy state should open: {error}"));
-        async_state
-            .save_account_credit_usage_policy(
-                account_id,
-                codex_router_core::credit_usage::CreditUsagePolicy::Disallow,
-            )
-            .await
-            .unwrap_or_else(|error| panic!("Disallow credit policy should persist: {error}"));
-        async_state
-            .close()
-            .await
-            .unwrap_or_else(|error| panic!("credit policy state should close: {error}"));
-    });
+async fn persist_disallow_credit_policy(database_path: &Path, account_id: &AccountId) {
+    let async_state = AsyncSqliteStateStore::open(database_path)
+        .await
+        .unwrap_or_else(|error| panic!("credit policy state should open: {error}"));
+    async_state
+        .save_account_credit_usage_policy(
+            account_id,
+            codex_router_core::credit_usage::CreditUsagePolicy::Disallow,
+        )
+        .await
+        .unwrap_or_else(|error| panic!("Disallow credit policy should persist: {error}"));
+    async_state
+        .close()
+        .await
+        .unwrap_or_else(|error| panic!("credit policy state should close: {error}"));
 }
 
 fn save_generation_credential(

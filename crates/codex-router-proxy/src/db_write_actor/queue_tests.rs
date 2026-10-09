@@ -1,6 +1,9 @@
 use super::test_support::*;
 
+use std::future::Future;
 use std::sync::Arc;
+use std::task::Poll;
+use std::time::Duration;
 
 use codex_router_core::ids::ReservationId;
 use codex_router_core::routes::RouteBand;
@@ -321,7 +324,7 @@ async fn closed_session_affinity_queue_does_not_close_critical_affinity_queue() 
     let session_task = actor
         .session_affinity_task
         .lock()
-        .unwrap_or_else(|error| panic!("session task lock should hold: {error}"))
+        .await
         .take()
         .unwrap_or_else(|| panic!("session scheduler task should exist"));
     session_task.abort();
@@ -394,6 +397,136 @@ async fn enqueue_after_shutdown_returns_closed_degraded() {
     ));
 
     assert_eq!(enqueue_result, DbWriteEnqueueResult::ClosedDegraded);
+}
+
+#[tokio::test]
+async fn request_shutdown_closes_admission_before_joining_actor_tasks() {
+    let repository = Arc::new(BlockingDbWriteRepository::default());
+    let actor = DbWriteActor::start(repository, 1);
+
+    actor.request_shutdown();
+
+    assert_eq!(
+        actor.try_enqueue(DbWriteCommand::provider_quota_exhausted(
+            account_id("acct_request_shutdown"),
+            RouteBand::Responses,
+            ProviderErrorClassification::AccountQuotaExhausted,
+            1_000,
+        )),
+        DbWriteEnqueueResult::ClosedDegraded
+    );
+    actor.shutdown().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn cancelled_shutdown_retains_both_db_write_handles_for_concurrent_retry() {
+    let repository = Arc::new(ShutdownBlockedDbWriteRepository::default());
+    let actor = DbWriteActor::start(repository.clone(), 4);
+    let initial_account_id = account_id("acct_retained_db_write_shutdown");
+    assert_eq!(
+        actor.try_enqueue(DbWriteCommand::provider_quota_exhausted(
+            initial_account_id.clone(),
+            RouteBand::Responses,
+            ProviderErrorClassification::AccountQuotaExhausted,
+            1_000,
+        )),
+        DbWriteEnqueueResult::Enqueued
+    );
+    assert_eq!(
+        actor.try_enqueue(DbWriteCommand::session_account_affinity(
+            RouteBand::Responses,
+            SessionAccountAffinity::new(
+                codex_router_core::provider::Provider::Openai,
+                "session_retained_db_write_shutdown",
+                initial_account_id,
+                1_000,
+            ),
+        )),
+        DbWriteEnqueueResult::Enqueued
+    );
+    tokio::time::timeout(
+        Duration::from_secs(1),
+        repository.provider_entered.notified(),
+    )
+    .await
+    .unwrap_or_else(|_elapsed| panic!("provider write task should enter its repository"));
+
+    let mut interrupted_shutdown = Box::pin(actor.shutdown());
+    let interrupted_poll = futures_util::future::poll_fn(|context| {
+        Poll::Ready(interrupted_shutdown.as_mut().poll(context))
+    })
+    .await;
+    assert!(
+        matches!(interrupted_poll, Poll::Pending),
+        "shutdown should wait for the active DB-write and session-affinity tasks"
+    );
+    drop(interrupted_shutdown);
+
+    assert_eq!(
+        actor.try_enqueue(DbWriteCommand::provider_quota_exhausted(
+            account_id("acct_after_cancelled_db_write_shutdown"),
+            RouteBand::Responses,
+            ProviderErrorClassification::AccountQuotaExhausted,
+            1_001,
+        )),
+        DbWriteEnqueueResult::ClosedDegraded
+    );
+    assert_eq!(
+        actor.try_enqueue(DbWriteCommand::session_account_affinity(
+            RouteBand::Responses,
+            SessionAccountAffinity::new(
+                codex_router_core::provider::Provider::Openai,
+                "session_after_cancelled_db_write_shutdown",
+                account_id("acct_after_cancelled_db_write_shutdown"),
+                1_001,
+            ),
+        )),
+        DbWriteEnqueueResult::ClosedDegraded
+    );
+    tokio::time::timeout(
+        Duration::from_secs(1),
+        repository.affinity_entered.notified(),
+    )
+    .await
+    .unwrap_or_else(|_elapsed| panic!("session-affinity task should enter its repository"));
+
+    let mut repeated_shutdown = Box::pin(actor.shutdown());
+    let repeated_poll = futures_util::future::poll_fn(|context| {
+        Poll::Ready(repeated_shutdown.as_mut().poll(context))
+    })
+    .await;
+    assert!(
+        matches!(repeated_poll, Poll::Pending),
+        "a repeated shutdown must retain and join both still-running actor tasks"
+    );
+    let mut concurrent_shutdown = Box::pin(actor.shutdown());
+    let concurrent_poll = futures_util::future::poll_fn(|context| {
+        Poll::Ready(concurrent_shutdown.as_mut().poll(context))
+    })
+    .await;
+    assert!(
+        matches!(concurrent_poll, Poll::Pending),
+        "concurrent shutdown must wait behind the stored task joins"
+    );
+
+    repository.provider_release.notify_one();
+    repository.affinity_release.notify_one();
+    tokio::time::timeout(Duration::from_secs(1), async {
+        tokio::join!(repeated_shutdown, concurrent_shutdown);
+        actor.shutdown().await;
+    })
+    .await
+    .unwrap_or_else(|_elapsed| panic!("all repeated DB-write shutdown joins should complete"));
+
+    assert_eq!(
+        actor.try_enqueue(DbWriteCommand::provider_quota_exhausted(
+            account_id("acct_after_db_write_shutdown_completion"),
+            RouteBand::Responses,
+            ProviderErrorClassification::AccountQuotaExhausted,
+            1_002,
+        )),
+        DbWriteEnqueueResult::ClosedDegraded
+    );
 }
 
 #[tokio::test]

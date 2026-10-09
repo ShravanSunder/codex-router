@@ -101,6 +101,113 @@ async fn native_probe_initializes_experimental_api_and_waits_for_remote_connecti
         .unwrap_or_else(|error| panic!("native fixture task should join: {error}"));
 }
 
+#[tokio::test]
+async fn native_protocol_preserves_empty_remote_control_names_and_present_empty_environment_ids() {
+    let observation = observe_direct_remote_status(
+        remote_status_with_claims("connected", "", Some("")),
+        "empty-remote-name",
+    )
+    .await
+    .expect("native codec should preserve empty raw claims");
+
+    assert_eq!(
+        observation.remote_control(),
+        &RemoteControlObservation::Connected {
+            server_name: String::new(),
+            environment_id: Some(String::new()),
+        }
+    );
+}
+
+#[tokio::test]
+async fn native_protocol_preserves_unusual_remote_control_names_and_missing_environment_ids() {
+    let observation = observe_direct_remote_status(
+        remote_status_with_claims("errored", "Remote\n\"Name\"", None),
+        "unusual-remote-name",
+    )
+    .await
+    .expect("native codec should preserve unusual raw claims");
+
+    assert_eq!(
+        observation.remote_control(),
+        &RemoteControlObservation::Errored {
+            server_name: "Remote\n\"Name\"".to_owned(),
+            environment_id: None,
+        }
+    );
+}
+
+async fn observe_direct_remote_status(
+    remote_status: Value,
+    socket_name: &str,
+) -> Result<codex_native_integration::AppServerObservation, String> {
+    let socket = TestSocket::new(socket_name)
+        .map_err(|error| format!("native fixture directory should create: {error}"))?;
+    let listener = UnixListener::bind(socket.path())
+        .map_err(|error| format!("native fixture socket should bind: {error}"))?;
+    let server = tokio::spawn(async move {
+        let (stream, _address) = listener
+            .accept()
+            .await
+            .map_err(|error| format!("native fixture should accept: {error}"))?;
+        let mut websocket = tokio_tungstenite::accept_async(stream)
+            .await
+            .map_err(|error| format!("native fixture should upgrade: {error}"))?;
+
+        let initialize = next_json(&mut websocket).await?;
+        let initialize_id = initialize
+            .get("id")
+            .cloned()
+            .ok_or_else(|| "initialize request omitted its id".to_owned())?;
+        websocket
+            .send(Message::Text(
+                serde_json::json!({
+                    "id": initialize_id,
+                    "result": {
+                        "userAgent": "codex_app_server_daemon/1.2.3 (macOS; arm64)"
+                    }
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .map_err(|error| format!("initialize response should send: {error}"))?;
+
+        let initialized = next_json(&mut websocket).await?;
+        if initialized.get("method").and_then(Value::as_str) != Some("initialized") {
+            return Err("native fixture expected the initialized notification".to_owned());
+        }
+        let status_read = next_json(&mut websocket).await?;
+        if status_read.get("method").and_then(Value::as_str) != Some("remoteControl/status/read") {
+            return Err("native fixture expected the Remote Control status request".to_owned());
+        }
+        let status_read_id = status_read
+            .get("id")
+            .ok_or_else(|| "status request omitted its id".to_owned())?;
+        websocket
+            .send(Message::Text(
+                remote_status_response_with_claims(status_read_id, remote_status)
+                    .to_string()
+                    .into(),
+            ))
+            .await
+            .map_err(|error| format!("status response should send: {error}"))?;
+        Ok::<(), String>(())
+    });
+
+    let observation = observe_app_server(
+        socket.path(),
+        Duration::from_secs(1),
+        Duration::from_secs(1),
+    )
+    .await
+    .map_err(|error| format!("native app-server should be observed: {error}"))?;
+    server
+        .await
+        .map_err(|error| format!("native fixture task should join: {error}"))??;
+    Ok(observation)
+}
+
 async fn next_json<S>(
     websocket: &mut tokio_tungstenite::WebSocketStream<S>,
 ) -> Result<Value, String>
@@ -131,6 +238,30 @@ fn remote_status(status: &str) -> Value {
         "serverName": "owner-mac",
         "installationId": "install_123",
         "environmentId": "env_123",
+    })
+}
+
+fn remote_status_with_claims(
+    status: &str,
+    server_name: &str,
+    environment_id: Option<&str>,
+) -> Value {
+    let mut remote_status = serde_json::Map::new();
+    remote_status.insert("status".to_owned(), serde_json::json!(status));
+    remote_status.insert("serverName".to_owned(), serde_json::json!(server_name));
+    if let Some(environment_id) = environment_id {
+        remote_status.insert(
+            "environmentId".to_owned(),
+            serde_json::json!(environment_id),
+        );
+    }
+    Value::Object(remote_status)
+}
+
+fn remote_status_response_with_claims(request_id: &Value, remote_status: Value) -> Value {
+    serde_json::json!({
+        "id": request_id,
+        "result": remote_status,
     })
 }
 

@@ -1,5 +1,6 @@
 //! Native bundle identity uses one validated canonical encoding across process boundaries.
 
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::{fmt, str::FromStr};
 
 use crate::NativeSchemaBundle;
@@ -53,6 +54,26 @@ impl fmt::Display for NativeSchemaDigest {
             write!(formatter, "{byte:02x}")?;
         }
         Ok(())
+    }
+}
+
+impl Serialize for NativeSchemaDigest {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&self.to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for NativeSchemaDigest {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        String::deserialize(deserializer)?
+            .parse()
+            .map_err(serde::de::Error::custom)
     }
 }
 

@@ -3,6 +3,7 @@ mod control_view_proofs;
 mod direct_message_proofs;
 mod f6_held_record_proofs;
 mod flight_proofs;
+mod held_barrier_proofs;
 mod lifecycle_proofs;
 mod owner_fixture;
 mod push_store_proofs;

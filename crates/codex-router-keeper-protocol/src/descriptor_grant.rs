@@ -1,21 +1,17 @@
-//! Separate grant carriers validate transport phase, order, direction and listener address.
-use crate::{JsonMessage, MAX_FRAME_BYTES};
+//! Separate grant carriers validate typed frame association and physical descriptors.
+use crate::{ChildGrantFrame, JsonMessage, ListenerKind, MAX_FRAME_BYTES};
 use codex_router_descriptor_boundary::{
     BoundaryError, DescriptorGate, MAX_RIGHTS, OwnedSocket, UnixReceipt, fatal_receipt,
     validate_pipe,
 };
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde::{Deserialize, Serialize};
 use std::{
     net::SocketAddr,
     os::fd::{AsFd, OwnedFd},
     path::PathBuf,
 };
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum GrantPhase {
-    Bootstrap,
-    ListenerGrant,
-}
+
+/// Receiver-local expected descriptor kind and address; never a child-grant frame field.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
 pub enum DescriptorSpec {
@@ -24,49 +20,119 @@ pub enum DescriptorSpec {
     UnixListener { path: PathBuf },
     TcpListener { address: SocketAddr },
 }
-#[derive(Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct GrantEnvelope<TContext> {
-    pub phase: GrantPhase,
-    pub descriptors: Vec<DescriptorSpec>,
-    pub context: TContext,
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ChildGrantExpectationKind {
+    Bootstrap,
+    ListenerGrant,
 }
-/// Only carrier association is validated here. The context still needs its domain-owned TryFrom before effects.
-pub struct ValidatedGrant<TContext> {
-    pub context: TContext,
-    pub descriptors: Vec<OwnedFd>,
+
+impl ChildGrantExpectationKind {
+    fn is_bootstrap(self) -> bool {
+        matches!(self, Self::Bootstrap)
+    }
 }
+
+/// Receiver-local descriptor and logical-listener association for one expected frame.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ChildGrantExpectation {
+    kind: ChildGrantExpectationKind,
+    listeners: Vec<ListenerKind>,
+    descriptors: Vec<DescriptorSpec>,
+}
+
+impl ChildGrantExpectation {
+    pub fn bootstrap(
+        listeners: Vec<ListenerKind>,
+        descriptors: Vec<DescriptorSpec>,
+    ) -> Result<Self, BoundaryError> {
+        Self::new(ChildGrantExpectationKind::Bootstrap, listeners, descriptors)
+    }
+
+    pub fn listener_grant(
+        listeners: Vec<ListenerKind>,
+        descriptors: Vec<DescriptorSpec>,
+    ) -> Result<Self, BoundaryError> {
+        Self::new(
+            ChildGrantExpectationKind::ListenerGrant,
+            listeners,
+            descriptors,
+        )
+    }
+
+    fn new(
+        kind: ChildGrantExpectationKind,
+        listeners: Vec<ListenerKind>,
+        descriptors: Vec<DescriptorSpec>,
+    ) -> Result<Self, BoundaryError> {
+        validate_descriptor_shape(kind.is_bootstrap(), &descriptors, listeners.len())?;
+        Ok(Self {
+            kind,
+            listeners,
+            descriptors,
+        })
+    }
+
+    fn validate_frame(&self, frame: &ChildGrantFrame) -> Result<(), BoundaryError> {
+        if self.kind.is_bootstrap() != frame.is_bootstrap()
+            || self.listeners.as_slice() != frame.listener_kinds()
+        {
+            return Err(BoundaryError::DescriptorKind);
+        }
+        Ok(())
+    }
+}
+
+pub struct ReceivedChildGrant {
+    frame: ChildGrantFrame,
+    descriptors: Vec<OwnedFd>,
+}
+
+impl ReceivedChildGrant {
+    pub fn into_parts(self) -> (ChildGrantFrame, Vec<OwnedFd>) {
+        (self.frame, self.descriptors)
+    }
+}
+
 pub struct GrantSender {
     socket: Option<OwnedSocket>,
 }
+
 pub struct GrantReceiver {
     receipt: Option<UnixReceipt>,
 }
-fn shape(phase: GrantPhase, descriptors: &[DescriptorSpec]) -> Result<(), BoundaryError> {
+
+fn validate_descriptor_shape(
+    bootstrap: bool,
+    descriptors: &[DescriptorSpec],
+    listener_count: usize,
+) -> Result<(), BoundaryError> {
     if descriptors.len() > MAX_RIGHTS {
         return Err(BoundaryError::TooLarge);
     }
-    let listeners = match phase {
-        GrantPhase::Bootstrap => {
-            if !matches!(descriptors.first(), Some(DescriptorSpec::PipeRead))
-                || !matches!(descriptors.get(1), Some(DescriptorSpec::PipeWrite))
-            {
-                return Err(BoundaryError::DescriptorKind);
-            }
-            descriptors.get(2..).ok_or(BoundaryError::DescriptorKind)?
+    let listeners = if bootstrap {
+        if !matches!(descriptors.first(), Some(DescriptorSpec::PipeRead))
+            || !matches!(descriptors.get(1), Some(DescriptorSpec::PipeWrite))
+        {
+            return Err(BoundaryError::DescriptorKind);
         }
-        GrantPhase::ListenerGrant => descriptors,
+        descriptors.get(2..).ok_or(BoundaryError::DescriptorKind)?
+    } else {
+        descriptors
     };
-    if listeners.iter().any(|kind| {
-        !matches!(
-            kind,
-            DescriptorSpec::UnixListener { .. } | DescriptorSpec::TcpListener { .. }
-        )
-    }) {
+    if listeners.len() != listener_count
+        || listeners.iter().any(|kind| {
+            !matches!(
+                kind,
+                DescriptorSpec::UnixListener { .. } | DescriptorSpec::TcpListener { .. }
+            )
+        })
+    {
         return Err(BoundaryError::DescriptorKind);
     }
     Ok(())
 }
+
 fn validate_descriptor(fd: &OwnedFd, spec: &DescriptorSpec) -> Result<(), BoundaryError> {
     match spec {
         DescriptorSpec::PipeRead => validate_pipe(fd.as_fd(), false),
@@ -86,16 +152,26 @@ impl GrantSender {
             socket: Some(socket),
         }
     }
-    pub async fn send<TContext: Serialize>(
+
+    pub async fn send(
         &mut self,
-        envelope: &GrantEnvelope<TContext>,
+        frame: &ChildGrantFrame,
+        expected_descriptors: &[DescriptorSpec],
         rights: &[OwnedFd],
     ) -> Result<(), BoundaryError> {
-        shape(envelope.phase, &envelope.descriptors)?;
-        if rights.len() != envelope.descriptors.len() {
+        frame.validate().map_err(|_| BoundaryError::TooLarge)?;
+        validate_descriptor_shape(
+            frame.is_bootstrap(),
+            expected_descriptors,
+            frame.listener_kinds().len(),
+        )?;
+        if rights.len() != expected_descriptors.len() {
             return Err(BoundaryError::DescriptorKind);
         }
-        let message = JsonMessage::encode(envelope)?;
+        for (descriptor, spec) in rights.iter().zip(expected_descriptors) {
+            validate_descriptor(descriptor, spec)?;
+        }
+        let message = JsonMessage::encode(frame)?;
         let mut bytes = u32::try_from(message.bytes().len())
             .map_err(|_| BoundaryError::TooLarge)?
             .to_be_bytes()
@@ -117,6 +193,7 @@ impl GrantSender {
         Ok(())
     }
 }
+
 impl GrantReceiver {
     /// Run only in a receiving process allowed to exit on malformed grant or ancillary input.
     pub fn new(socket: OwnedSocket) -> Self {
@@ -124,13 +201,14 @@ impl GrantReceiver {
             receipt: Some(UnixReceipt::new(socket)),
         }
     }
-    pub async fn receive<TContext: DeserializeOwned>(
+
+    pub async fn receive(
         &mut self,
-        phase: GrantPhase,
-        expected: &[DescriptorSpec],
+        expected: &ChildGrantExpectation,
         gate: &DescriptorGate,
-    ) -> Result<ValidatedGrant<TContext>, BoundaryError> {
+    ) -> Result<ReceivedChildGrant, BoundaryError> {
         let receipt = self.receipt.take().ok_or(BoundaryError::Closed)?;
+        let expected_descriptors = expected.descriptors.as_slice();
         let mut prefix = [0; 4];
         let chunk = receipt
             .read_validated(
@@ -138,10 +216,10 @@ impl GrantReceiver {
                 true,
                 gate,
                 |rights| {
-                    if rights.len() != expected.len() {
+                    if rights.len() != expected_descriptors.len() {
                         return Err(BoundaryError::DescriptorKind);
                     }
-                    for (descriptor, spec) in rights.iter().zip(expected) {
+                    for (descriptor, spec) in rights.iter().zip(expected_descriptors) {
                         validate_descriptor(descriptor, spec)?;
                     }
                     Ok(())
@@ -165,19 +243,17 @@ impl GrantReceiver {
         Self::remaining(&receipt, &mut bytes, gate).await?;
         let grant = receipt
             .validate_or_exit(gate, move || {
-                let envelope: GrantEnvelope<TContext> = serde_json::from_slice(&bytes)?;
-                shape(envelope.phase, &envelope.descriptors)?;
-                if envelope.phase != phase
-                    || envelope.descriptors != expected
-                    || chunk.descriptors.len() != expected.len()
-                {
+                let frame: ChildGrantFrame = serde_json::from_slice(&bytes)?;
+                frame.validate().map_err(|_| BoundaryError::TooLarge)?;
+                expected.validate_frame(&frame)?;
+                if chunk.descriptors.len() != expected_descriptors.len() {
                     return Err(BoundaryError::DescriptorKind);
                 }
-                for (descriptor, spec) in chunk.descriptors.iter().zip(expected) {
+                for (descriptor, spec) in chunk.descriptors.iter().zip(expected_descriptors) {
                     validate_descriptor(descriptor, spec)?;
                 }
-                Ok(ValidatedGrant {
-                    context: envelope.context,
+                Ok(ReceivedChildGrant {
+                    frame,
                     descriptors: chunk.descriptors,
                 })
             })
@@ -185,6 +261,7 @@ impl GrantReceiver {
         self.receipt = Some(receipt);
         Ok(grant)
     }
+
     async fn remaining(
         receipt: &UnixReceipt,
         bytes: &mut [u8],

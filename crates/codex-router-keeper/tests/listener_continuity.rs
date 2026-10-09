@@ -1,16 +1,21 @@
 use codex_router_descriptor_boundary::{
     DescriptorGate, OwnedListener, OwnedPipe, OwnedSocket, PipeReader, PipeWriter, UnixReceipt,
-    fatal_receipt,
 };
 use codex_router_keeper::{ListenerAddress, ListenerRegistry, SingletonAuthority};
 use codex_router_keeper_protocol::{
-    DescriptorSpec, GrantEnvelope, GrantPhase, GrantReceiver, GrantSender, ListenerKind,
+    ChildGrantExpectation, ChildGrantFrame, ChildLaunchContext, DescriptorSpec, GrantReceiver,
+    GrantSender, ListenerKind,
 };
 use std::{os::unix::fs::PermissionsExt, process::Stdio};
 use tokio::time::{Duration, timeout};
 type TestResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
 const REQUEST: &[u8] = b"keeper request";
 const REPLY: &[u8] = b"keeper reply";
+const CHILD_LAUNCH_LITERAL: &str = r#"{"role":"agentProxyServices","image":{"retainedPath":"/fixture/codex-router","fileSha256":[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31],"device":1,"inode":2},"fingerprint":"0000000000000000000000000000000000000000000000000000000000000000"}"#;
+const BOOTSTRAP_PROXY_HTTP_LITERAL: &str = r#"{"type":"bootstrap","launch":{"role":"agentProxyServices","image":{"retainedPath":"/fixture/codex-router","fileSha256":[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31],"device":1,"inode":2},"fingerprint":"0000000000000000000000000000000000000000000000000000000000000000"},"listeners":[{"kind":"proxyHttp"}]}"#;
+const BOOTSTRAP_NATIVE_RELAY_LITERAL: &str = r#"{"type":"bootstrap","launch":{"role":"agentProxyServices","image":{"retainedPath":"/fixture/codex-router","fileSha256":[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31],"device":1,"inode":2},"fingerprint":"0000000000000000000000000000000000000000000000000000000000000000"},"listeners":[{"kind":"nativeRelay"}]}"#;
+const LISTENER_GRANT_PROXY_HTTP_LITERAL: &str =
+    r#"{"type":"listenerGrant","listeners":[{"kind":"proxyHttp"}]}"#;
 async fn receive_exact(socket: OwnedSocket, expected: &[u8]) -> TestResult {
     let receipt = UnixReceipt::new(socket);
     let mut bytes = vec![0; expected.len()];
@@ -39,39 +44,32 @@ async fn keeper_listener_fixture() -> TestResult {
     let (spec, expected_kind, later): (DescriptorSpec, ListenerKind, bool) =
         serde_json::from_str(&std::env::var("KEEPER_EXPECTED")?)?;
     let mut receiver = GrantReceiver::new(OwnedSocket::inherit_stdin(gate).await?);
-    let mut expected = vec![DescriptorSpec::PipeRead, DescriptorSpec::PipeWrite];
-    if !later {
-        expected.push(spec.clone());
-    }
-    let grant = receiver
-        .receive::<Vec<ListenerKind>>(GrantPhase::Bootstrap, &expected, gate)
-        .await?;
-    let expected_kinds = if later {
+    let mut expected_descriptors = vec![DescriptorSpec::PipeRead, DescriptorSpec::PipeWrite];
+    let expected_bootstrap_listeners = if later {
         Vec::new()
     } else {
         vec![expected_kind.clone()]
     };
-    if grant.context != expected_kinds {
-        fatal_receipt();
+    if !later {
+        expected_descriptors.push(spec.clone());
     }
-    let mut rights = grant.descriptors.into_iter();
+    let expected_bootstrap =
+        ChildGrantExpectation::bootstrap(expected_bootstrap_listeners, expected_descriptors)?;
+    let bootstrap = receiver.receive(&expected_bootstrap, gate).await?;
+    let (_, descriptors) = bootstrap.into_parts();
+    let mut rights = descriptors.into_iter();
     let commands =
         PipeReader::from_owned(rights.next().ok_or("command-read absent")?, gate).await?;
     let events = PipeWriter::from_owned(rights.next().ok_or("event-write absent")?, gate).await?;
     events.write_all(b"boot").await?;
     let descriptor = if later {
-        let grant = receiver
-            .receive::<Vec<ListenerKind>>(
-                GrantPhase::ListenerGrant,
-                std::slice::from_ref(&spec),
-                gate,
-            )
-            .await?;
-        if grant.context != [expected_kind] {
-            fatal_receipt();
-        }
-        grant
-            .descriptors
+        let expected_later =
+            ChildGrantExpectation::listener_grant(vec![expected_kind], vec![spec.clone()])?;
+        receiver
+            .receive(&expected_later, gate)
+            .await?
+            .into_parts()
+            .1
             .into_iter()
             .next()
             .ok_or("later listener absent")?
@@ -154,16 +152,9 @@ async fn child_accept(
         specs.push(spec.clone());
         kinds.push(kind.clone());
     }
-    sender
-        .send(
-            &GrantEnvelope {
-                phase: GrantPhase::Bootstrap,
-                descriptors: specs,
-                context: kinds,
-            },
-            &rights,
-        )
-        .await?;
+    let launch = serde_json::from_str::<ChildLaunchContext>(CHILD_LAUNCH_LITERAL)?;
+    let frame = ChildGrantFrame::bootstrap(launch, kinds.clone())?;
+    sender.send(&frame, &specs, &rights).await?;
     drop(rights);
     let mut boot = [0; 4];
     timeout(Duration::from_secs(3), events.read_exact(&mut boot)).await??;
@@ -171,13 +162,12 @@ async fn child_accept(
         return Err("bootstrap was not validated before later grant".into());
     }
     if later {
+        let frame = ChildGrantFrame::listener_grant(vec![kind])?;
+        let listener_specs = vec![spec.clone()];
         sender
             .send(
-                &GrantEnvelope {
-                    phase: GrantPhase::ListenerGrant,
-                    descriptors: vec![spec.clone()],
-                    context: vec![kind],
-                },
+                &frame,
+                &listener_specs,
                 &[later_right.take().ok_or("later listener absent")?],
             )
             .await?;
@@ -310,13 +300,7 @@ async fn registry_consumer_refuses_malformed_associations_before_accept_effect()
             event_write.into_owned(),
             listener,
         ];
-        let mut specs = vec![
-            DescriptorSpec::PipeRead,
-            DescriptorSpec::PipeWrite,
-            spec.clone(),
-        ];
-        let mut phase = GrantPhase::Bootstrap;
-        let mut kinds = vec![ListenerKind::ProxyHttp];
+        let mut frame_literal = BOOTSTRAP_PROXY_HTTP_LITERAL;
         let mut held_socket = None;
         let mut held_listener = None;
         match case {
@@ -372,23 +356,17 @@ async fn registry_consumer_refuses_malformed_associations_before_accept_effect()
                 rights.pop();
             }
             7 => {
-                phase = GrantPhase::ListenerGrant;
-                specs = vec![spec.clone()];
+                frame_literal = LISTENER_GRANT_PROXY_HTTP_LITERAL;
             }
             8 => {
                 rights.swap(0, 1);
             }
             _ => {
-                kinds = vec![ListenerKind::NativeRelay];
+                frame_literal = BOOTSTRAP_NATIVE_RELAY_LITERAL;
             }
         }
-        let message = codex_router_keeper_protocol::JsonMessage::encode(&GrantEnvelope {
-            phase,
-            descriptors: specs,
-            context: kinds,
-        })?;
-        let mut bytes = u32::try_from(message.bytes().len())?.to_be_bytes().to_vec();
-        bytes.extend(message.bytes());
+        let mut bytes = u32::try_from(frame_literal.len())?.to_be_bytes().to_vec();
+        bytes.extend_from_slice(frame_literal.as_bytes());
         let borrowed: Vec<_> = rights.iter().map(AsFd::as_fd).collect();
         if send.send(&bytes, &borrowed).await? != bytes.len() {
             return Err("bounded malicious fixture shortsend".into());

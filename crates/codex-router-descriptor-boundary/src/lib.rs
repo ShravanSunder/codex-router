@@ -5,6 +5,7 @@ mod owned_pipe;
 mod owned_socket;
 mod pipe_records;
 mod reader_lifetime;
+mod receipt_byte_stream;
 mod unix_receipt;
 pub use boundary_error::BoundaryError;
 pub use descriptor_gate::DescriptorGate;
@@ -15,6 +16,7 @@ pub use pipe_records::{
     MAX_DATA_BYTES, MAX_RECORD_BYTES, RecordWriter, SocketReadRecord, SocketReadStream,
 };
 pub use reader_lifetime::{ReaderLease, supervise_reader};
+pub use receipt_byte_stream::ReceiptByteStream;
 pub use unix_receipt::{MAX_RIGHTS, ReceivedBytes, UnixReceipt, fatal_receipt};
 
 mod listener_validation;

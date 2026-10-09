@@ -23,6 +23,8 @@ use crate::model::SecretKey;
 use crate::model::SecretStoreError;
 use crate::model::StoreUnavailable;
 
+mod existing;
+
 const ENCRYPTED_CREDENTIAL_FORMAT: u8 = 2;
 const AES_GCM_NONCE_LENGTH: usize = 12;
 

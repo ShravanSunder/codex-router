@@ -7,7 +7,7 @@ use codex_router_secret_store::credential_bundle::CredentialBundle;
 #[derive(Clone)]
 struct RecordingUpkeepRefreshClient {
     calls: Arc<AtomicUsize>,
-    observed_calls: mpsc::Sender<usize>,
+    observed_calls: tokio::sync::mpsc::UnboundedSender<usize>,
 }
 
 impl CredentialRefreshClient for RecordingUpkeepRefreshClient {
@@ -38,8 +38,8 @@ impl CredentialRefreshClient for RecordingUpkeepRefreshClient {
     }
 }
 
-#[test]
-fn enabled_exhausted_idle_account_renews_across_simulated_days_without_quota_probe() {
+#[tokio::test]
+async fn enabled_exhausted_idle_account_renews_across_simulated_days_without_quota_probe() {
     let test_root = TestRoot::new("credential-upkeep-idle");
     must_ok(fs::create_dir(test_root.path()));
     let state_path = test_root.path().join("state.sqlite");
@@ -88,7 +88,7 @@ fn enabled_exhausted_idle_account_renews_across_simulated_days_without_quota_pro
     drop(state);
 
     let now = Arc::new(AtomicU64::new(1_000));
-    let (call_sender, call_receiver) = mpsc::channel();
+    let (call_sender, mut call_receiver) = tokio::sync::mpsc::unbounded_channel();
     let calls = Arc::new(AtomicUsize::new(0));
     let client = RecordingUpkeepRefreshClient {
         calls: Arc::clone(&calls),
@@ -97,42 +97,46 @@ fn enabled_exhausted_idle_account_renews_across_simulated_days_without_quota_pro
     let clock = Arc::clone(&now);
     let worker = must_ok(
         start_background_credential_upkeep_worker_with_client_and_clock(
-            &state_path,
+            state_path.clone(),
             secrets,
+            CredentialRefreshTaskSupervisor::new(),
             client,
             move || clock.load(Ordering::SeqCst),
-        ),
+        )
+        .await,
     );
     assert_eq!(
-        must_ok(call_receiver.recv_timeout(Duration::from_secs(2))),
+        tokio::time::timeout(Duration::from_secs(2), call_receiver.recv())
+            .await
+            .unwrap_or_else(|error| panic!("first upkeep provider call should arrive: {error}"))
+            .expect("first upkeep provider call should send"),
         1
     );
-    wait_for_upkeep_generation(&state_path, &enabled_id, 2);
+    wait_for_upkeep_generation(&state_path, &enabled_id, 2).await;
     now.store(1_000 + 2 * 86_400, Ordering::SeqCst);
     worker.wake_for_test();
     assert_eq!(
-        must_ok(call_receiver.recv_timeout(Duration::from_secs(2))),
+        tokio::time::timeout(Duration::from_secs(2), call_receiver.recv())
+            .await
+            .unwrap_or_else(|error| panic!("second upkeep provider call should arrive: {error}"))
+            .expect("second upkeep provider call should send"),
         2
     );
-    wait_for_upkeep_generation(&state_path, &enabled_id, 3);
-    drop(worker);
+    wait_for_upkeep_generation(&state_path, &enabled_id, 3).await;
+    let mut worker = worker;
+    worker.shutdown().await;
     assert_eq!(calls.load(Ordering::SeqCst), 2);
-    let read_runtime = must_ok(
-        tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build(),
-    );
-    let read_state =
-        must_ok(read_runtime.block_on(AsyncSqliteStateStore::open_read_only(&state_path)));
-    let disabled = must_ok(read_runtime.block_on(read_state.load_account(&disabled_id)))
+    let read_state = must_ok(AsyncSqliteStateStore::open_read_only(&state_path).await);
+    let disabled = must_ok(read_state.load_account(&disabled_id).await)
         .expect("disabled account should remain");
     assert_eq!(disabled.status(), AccountStatus::Disabled);
     assert_eq!(disabled.active_credential_generation(), Some(1));
+    must_ok(read_state.close().await);
 }
 
 #[derive(Clone)]
 struct RecordingClaudeUpkeepRefreshClient {
-    observed_account_ids: mpsc::Sender<AccountId>,
+    observed_account_ids: tokio::sync::mpsc::UnboundedSender<AccountId>,
 }
 
 impl CredentialRefreshClient for RecordingClaudeUpkeepRefreshClient {
@@ -174,14 +178,15 @@ impl CredentialRefreshClient for RecordingClaudeUpkeepRefreshClient {
     }
 }
 
-#[test]
-fn credential_upkeep_refreshes_exhausted_and_idle_claude_accounts() {
+#[tokio::test]
+async fn credential_upkeep_refreshes_exhausted_and_idle_claude_accounts() {
     let test_root = TestRoot::new("credential-upkeep-exhausted-idle-claude");
     must_ok(fs::create_dir(test_root.path()));
     let router_root = test_root.path().join("router");
     must_ok(fs::create_dir(&router_root));
-    ensure_async_state_schema(&router_root);
     let state_path = router_root.join("state.sqlite");
+    let schema_state = must_ok(AsyncSqliteStateStore::open(&state_path).await);
+    must_ok(schema_state.close().await);
     let secret_root = router_root.join("secrets");
     let state = must_ok(SqliteStateStore::open(&state_path));
     let secrets = must_ok(
@@ -226,22 +231,30 @@ fn credential_upkeep_refreshes_exhausted_and_idle_claude_accounts() {
     ));
     drop(state);
 
-    let (observed_sender, observed_receiver) = mpsc::channel();
+    let (observed_sender, mut observed_receiver) = tokio::sync::mpsc::unbounded_channel();
     let worker = must_ok(
         start_background_credential_upkeep_worker_with_client_and_clock(
-            &state_path,
+            state_path.clone(),
             secrets.clone(),
+            CredentialRefreshTaskSupervisor::new(),
             RecordingClaudeUpkeepRefreshClient {
                 observed_account_ids: observed_sender,
             },
             || 1_000,
-        ),
+        )
+        .await,
     );
     let mut observed_accounts = [
-        must_ok(observed_receiver.recv_timeout(Duration::from_secs(2)))
+        tokio::time::timeout(Duration::from_secs(2), observed_receiver.recv())
+            .await
+            .unwrap_or_else(|error| panic!("first Claude upkeep call should arrive: {error}"))
+            .expect("first Claude upkeep call should send")
             .as_str()
             .to_owned(),
-        must_ok(observed_receiver.recv_timeout(Duration::from_secs(2)))
+        tokio::time::timeout(Duration::from_secs(2), observed_receiver.recv())
+            .await
+            .unwrap_or_else(|error| panic!("second Claude upkeep call should arrive: {error}"))
+            .expect("second Claude upkeep call should send")
             .as_str()
             .to_owned(),
     ];
@@ -252,9 +265,10 @@ fn credential_upkeep_refreshes_exhausted_and_idle_claude_accounts() {
     ];
     expected_accounts.sort();
     assert_eq!(observed_accounts, expected_accounts);
-    wait_for_upkeep_generation(&state_path, &exhausted_id, 2);
-    wait_for_upkeep_generation(&state_path, &idle_id, 2);
-    drop(worker);
+    wait_for_upkeep_generation(&state_path, &exhausted_id, 2).await;
+    wait_for_upkeep_generation(&state_path, &idle_id, 2).await;
+    let mut worker = worker;
+    worker.shutdown().await;
 
     for account_id in [&exhausted_id, &idle_id] {
         let credential_key = must_ok(
@@ -282,7 +296,7 @@ fn credential_upkeep_refreshes_exhausted_and_idle_claude_accounts() {
 
 #[derive(Clone)]
 struct HeldUpkeepRefreshClient {
-    entered_sender: mpsc::Sender<()>,
+    entered_sender: tokio::sync::mpsc::UnboundedSender<()>,
     release_receiver: Arc<Mutex<mpsc::Receiver<()>>>,
 }
 
@@ -309,8 +323,8 @@ impl CredentialRefreshClient for HeldUpkeepRefreshClient {
     }
 }
 
-#[test]
-fn upkeep_shutdown_drains_in_flight_rotation_before_returning() {
+#[tokio::test]
+async fn upkeep_shutdown_drains_in_flight_rotation_before_returning() {
     let test_root = TestRoot::new("credential-upkeep-shutdown");
     must_ok(fs::create_dir(test_root.path()));
     let state_path = test_root.path().join("state.sqlite");
@@ -345,38 +359,41 @@ fn upkeep_shutdown_drains_in_flight_rotation_before_returning() {
         ),
     );
     drop(state);
-    let (entered_sender, entered_receiver) = mpsc::channel();
+    let (entered_sender, mut entered_receiver) = tokio::sync::mpsc::unbounded_channel();
     let (release_sender, release_receiver) = mpsc::channel();
     let worker = must_ok(
         start_background_credential_upkeep_worker_with_client_and_clock(
-            &state_path,
+            state_path.clone(),
             secrets,
+            CredentialRefreshTaskSupervisor::new(),
             HeldUpkeepRefreshClient {
                 entered_sender,
                 release_receiver: Arc::new(Mutex::new(release_receiver)),
             },
             || 1_000,
-        ),
+        )
+        .await,
     );
-    must_ok(entered_receiver.recv_timeout(Duration::from_secs(2)));
-    let (stopped_sender, stopped_receiver) = mpsc::channel();
-    let shutdown = thread::spawn(move || {
-        drop(worker);
-        stopped_sender.send(()).expect("shutdown should report");
-    });
-    assert!(matches!(
-        stopped_receiver.recv_timeout(Duration::from_millis(100)),
-        Err(mpsc::RecvTimeoutError::Timeout)
-    ));
+    tokio::time::timeout(Duration::from_secs(2), entered_receiver.recv())
+        .await
+        .unwrap_or_else(|error| panic!("provider entry should arrive: {error}"))
+        .expect("provider entry should send");
+    let mut worker = worker;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), worker.shutdown())
+            .await
+            .is_err()
+    );
     must_ok(release_sender.send(()));
-    must_ok(stopped_receiver.recv_timeout(Duration::from_secs(2)));
-    must_ok(shutdown.join().map_err(|_| "shutdown thread failed"));
-    wait_for_upkeep_generation(&state_path, &account_id, 2);
+    tokio::time::timeout(Duration::from_secs(2), worker.shutdown())
+        .await
+        .expect("released upkeep rotation should drain within the original 2s bound");
+    wait_for_upkeep_generation(&state_path, &account_id, 2).await;
 }
 
 #[derive(Clone)]
 struct HeldQueuedUpkeepRefreshClient {
-    entered_sender: mpsc::Sender<AccountId>,
+    entered_sender: tokio::sync::mpsc::UnboundedSender<AccountId>,
     release_receiver: Arc<Mutex<mpsc::Receiver<()>>>,
 }
 
@@ -403,8 +420,8 @@ impl CredentialRefreshClient for HeldQueuedUpkeepRefreshClient {
     }
 }
 
-#[test]
-fn upkeep_shutdown_does_not_admit_a_queued_account_after_stop() {
+#[tokio::test]
+async fn upkeep_shutdown_does_not_admit_a_queued_account_after_stop() {
     let test_root = TestRoot::new("credential-upkeep-queued-stop");
     must_ok(fs::create_dir(test_root.path()));
     let state_path = test_root.path().join("state.sqlite");
@@ -446,46 +463,54 @@ fn upkeep_shutdown_does_not_admit_a_queued_account_after_stop() {
     let credential_store = secrets.clone();
     drop(secrets);
 
-    let (entered_sender, entered_receiver) = mpsc::channel();
+    let (entered_sender, mut entered_receiver) = tokio::sync::mpsc::unbounded_channel();
     let (release_sender, release_receiver) = mpsc::channel();
     let worker = must_ok(
         start_background_credential_upkeep_worker_with_client_and_clock(
-            &state_path,
+            state_path.clone(),
             credential_store,
+            CredentialRefreshTaskSupervisor::new(),
             HeldQueuedUpkeepRefreshClient {
                 entered_sender,
                 release_receiver: Arc::new(Mutex::new(release_receiver)),
             },
             || 1_000,
-        ),
+        )
+        .await,
     );
-    let admitted = (0..4)
-        .map(|_| must_ok(entered_receiver.recv_timeout(Duration::from_secs(3))))
-        .collect::<Vec<_>>();
-    let (stopped_sender, stopped_receiver) = mpsc::channel();
-    let shutdown = thread::spawn(move || {
-        drop(worker);
-        stopped_sender.send(()).expect("shutdown should report");
-    });
-    assert!(matches!(
-        stopped_receiver.recv_timeout(Duration::from_millis(100)),
-        Err(mpsc::RecvTimeoutError::Timeout)
-    ));
+    let mut admitted = Vec::with_capacity(4);
+    for _ in 0..4 {
+        admitted.push(
+            tokio::time::timeout(Duration::from_secs(3), entered_receiver.recv())
+                .await
+                .unwrap_or_else(|error| panic!("active upkeep provider should enter: {error}"))
+                .expect("active upkeep provider should send account"),
+        );
+    }
+    let mut worker = worker;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), worker.shutdown())
+            .await
+            .is_err()
+    );
     for _ in 0..4 {
         must_ok(release_sender.send(()));
     }
-    let post_stop_entry = entered_receiver.recv_timeout(Duration::from_secs(2)).ok();
+    let post_stop_entry = tokio::time::timeout(Duration::from_secs(2), entered_receiver.recv())
+        .await
+        .unwrap_or_default();
     if post_stop_entry.is_some() {
         must_ok(release_sender.send(()));
     }
-    must_ok(stopped_receiver.recv_timeout(Duration::from_secs(3)));
-    must_ok(shutdown.join().map_err(|_| "shutdown thread failed"));
+    tokio::time::timeout(Duration::from_secs(3), worker.shutdown())
+        .await
+        .expect("released upkeep work should drain within the original 3s bound");
     assert!(
         post_stop_entry.is_none(),
         "queued account reached provider after Stop: {post_stop_entry:?}"
     );
     for account_id in &admitted {
-        wait_for_upkeep_generation(&state_path, account_id, 2);
+        wait_for_upkeep_generation(&state_path, account_id, 2).await;
     }
     let queued_id = account_ids
         .iter()
@@ -497,33 +522,38 @@ fn upkeep_shutdown_does_not_admit_a_queued_account_after_stop() {
     assert_eq!(queued.active_credential_generation(), Some(1));
 }
 
-pub(super) fn wait_for_upkeep_generation(state_path: &Path, account_id: &AccountId, expected: u64) {
-    let runtime = must_ok(
-        tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build(),
-    );
-    let deadline = Instant::now() + Duration::from_secs(2);
+pub(super) async fn wait_for_upkeep_generation(
+    state_path: &Path,
+    account_id: &AccountId,
+    expected: u64,
+) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
     let state = loop {
-        match runtime.block_on(AsyncSqliteStateStore::open_read_only(state_path)) {
+        match AsyncSqliteStateStore::open_read_only(state_path).await {
             Ok(state) => break state,
-            Err(error) if format!("{error}").contains("locked") && Instant::now() < deadline => {
-                thread::yield_now();
+            Err(error)
+                if format!("{error}").contains("locked")
+                    && tokio::time::Instant::now() < deadline =>
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
             }
             Err(error) => panic!("read-only upkeep observation failed: {error}"),
         }
     };
     loop {
-        match runtime.block_on(state.load_account(account_id)) {
+        match state.load_account(account_id).await {
             Ok(Some(account)) if account.active_credential_generation() == Some(expected) => {
-                must_ok(runtime.block_on(state.close()));
+                must_ok(state.close().await);
                 return;
             }
             Ok(_) => {}
             Err(error) if format!("{error}").contains("locked") => {}
             Err(error) => panic!("upkeep account observation failed: {error}"),
         }
-        assert!(Instant::now() < deadline, "credential activation timed out");
-        thread::yield_now();
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "credential activation timed out"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
     }
 }

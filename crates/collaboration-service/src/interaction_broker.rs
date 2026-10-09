@@ -16,23 +16,25 @@ use serde_json::Value;
 use serde_json::json;
 use std::{
     collections::BTreeMap,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{Arc, OnceLock},
     time::Duration,
 };
 use tokio::sync::{Mutex, oneshot};
 
+mod broker_storage_parse;
 mod interaction_history;
 mod legacy_provider_projection;
 mod native_approval;
 mod typed_interaction_notice;
 mod typed_interactions;
-use interaction_history::InteractionHistoryStore;
+use broker_storage_parse::{read_approval_history, read_approval_routes};
 pub use interaction_history::{
     InteractionHistoryError, InteractionHistoryRecord, InteractionHistoryState,
     LegacyApprovalMetadata, QuestionHistoryState, QuestionResponse, RefusedApprovalOption,
     RefusedTypedApproval,
 };
+use interaction_history::{InteractionHistoryStore, parse_interaction_history_file};
 #[cfg(test)]
 use legacy_provider_projection::legacy_presentation_from_typed;
 use legacy_provider_projection::{
@@ -249,6 +251,18 @@ pub enum TypedInteractionDecisionOutcome {
 }
 
 impl ServiceInteractionBroker {
+    pub async fn validate_storage_for_preparation(
+        routes_path: &Path,
+    ) -> Result<(), ApprovalBrokerError> {
+        let _routes = read_approval_routes(routes_path).await?;
+        let history_path = routes_path.with_file_name("approval-history.json");
+        let _history = read_approval_history(&history_path).await?;
+        parse_interaction_history_file(&routes_path.with_file_name("interaction-history.json"))
+            .await
+            .map_err(|_| ApprovalBrokerError::Unavailable)?;
+        Ok(())
+    }
+
     pub(crate) async fn prune_interaction_history(
         &self,
         now: chrono::DateTime<chrono::Utc>,
@@ -279,24 +293,9 @@ impl ServiceInteractionBroker {
         backend: NativeControlBackend,
         routes_path: PathBuf,
     ) -> Result<Arc<Self>, ApprovalBrokerError> {
-        let routes = match tokio::fs::read(&routes_path).await {
-            Ok(bytes) => serde_json::from_slice::<Vec<ApprovalRoute>>(&bytes)
-                .map_err(|_| ApprovalBrokerError::Unavailable)?
-                .into_iter()
-                .map(|route| (route.thread_id.clone(), route))
-                .collect(),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => BTreeMap::new(),
-            Err(_) => return Err(ApprovalBrokerError::Unavailable),
-        };
+        let routes = read_approval_routes(&routes_path).await?;
         let history_path = routes_path.with_file_name("approval-history.json");
-        // Corrupt history is a lost decision record, not an empty one: fail closed
-        // exactly as the routes file does. Only an absent file starts empty.
-        let history = match tokio::fs::read(&history_path).await {
-            Ok(bytes) => serde_json::from_slice::<Vec<ApprovalRequestRecord>>(&bytes)
-                .map_err(|_| ApprovalBrokerError::Unavailable)?,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
-            Err(_) => return Err(ApprovalBrokerError::Unavailable),
-        };
+        let history = read_approval_history(&history_path).await?;
         let interaction_history =
             InteractionHistoryStore::load(routes_path.with_file_name("interaction-history.json"))
                 .await
@@ -866,3 +865,7 @@ mod tests;
 #[cfg(test)]
 #[path = "interaction_broker/turn_cancellation_tests.rs"]
 mod turn_cancellation_tests;
+
+#[cfg(test)]
+#[path = "interaction_broker/storage_preparation_tests.rs"]
+mod storage_preparation_tests;

@@ -1,7 +1,7 @@
 use super::*;
 
-#[test]
-fn loopback_router_runtime_cancels_unbounded_websocket_before_first_frame_timeout() {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn loopback_router_runtime_cancels_unbounded_websocket_before_first_frame_timeout() {
     let temp_dir = ProxyTestTempDir::new("runtime_websocket_unbounded_error_report");
     let database_path = temp_dir.path().join("state.sqlite");
     let secret_path = temp_dir.path().join("secrets");
@@ -20,15 +20,17 @@ fn loopback_router_runtime_cancels_unbounded_websocket_before_first_frame_timeou
         secret_path,
         LocalRouterTokenRecord::new(SecretString::new("current-token"), TokenGeneration::new(1)),
     );
-    let runtime = match LoopbackRouterRuntime::start_for_test(config) {
+    let runtime = match LoopbackRouterRuntime::start_for_test(config).await {
         Ok(runtime) => runtime,
         Err(error) => panic!("router runtime should start: {error}"),
     };
     let router_address = runtime.local_addr();
     let shutdown = tokio_util::sync::CancellationToken::new();
     let shutdown_for_thread = shutdown.clone();
-    let server_thread = thread::spawn(move || {
-        runtime.serve_protocol_connections_until_cancelled(usize::MAX, shutdown_for_thread)
+    let server_thread = tokio::spawn(async move {
+        runtime
+            .serve_protocol_connections_until_cancelled(usize::MAX, shutdown_for_thread)
+            .await
     });
 
     let mut request = match format!("ws://{router_address}/v1/responses").into_client_request() {
@@ -47,16 +49,16 @@ fn loopback_router_runtime_cancels_unbounded_websocket_before_first_frame_timeou
     thread::sleep(Duration::from_millis(100));
     shutdown.cancel();
     drop(client);
-    match server_thread.join() {
+    match server_thread.await {
         Ok(Ok(handled)) => assert!(handled >= 1, "server should accept websocket"),
         Ok(Err(error)) => panic!("shutdown should cancel first-frame wait cleanly: {error}"),
         Err(error) => panic!("server thread panicked: {error:?}"),
     }
 }
 
-#[test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[allow(clippy::result_large_err)]
-fn loopback_router_runtime_shutdown_drains_active_websocket_sessions() {
+async fn loopback_router_runtime_shutdown_drains_active_websocket_sessions() {
     let temp_dir = ProxyTestTempDir::new("runtime_shutdown_drains_websocket");
     let database_path = temp_dir.path().join("state.sqlite");
     let secret_path = temp_dir.path().join("secrets");
@@ -130,7 +132,7 @@ fn loopback_router_runtime_shutdown_drains_active_websocket_sessions() {
         LocalRouterTokenRecord::new(SecretString::new("current-token"), TokenGeneration::new(1)),
     )
     .with_quota_clock(1_030, 60);
-    let runtime = match LoopbackRouterRuntime::start_for_test(config) {
+    let runtime = match LoopbackRouterRuntime::start_for_test(config).await {
         Ok(runtime) => Arc::new(runtime),
         Err(error) => panic!("router runtime should start: {error}"),
     };
@@ -138,9 +140,10 @@ fn loopback_router_runtime_shutdown_drains_active_websocket_sessions() {
     let shutdown = tokio_util::sync::CancellationToken::new();
     let shutdown_for_thread = shutdown.clone();
     let runtime_for_thread = Arc::clone(&runtime);
-    let server_thread = thread::spawn(move || {
+    let server_thread = tokio::spawn(async move {
         runtime_for_thread
             .serve_protocol_connections_until_cancelled(usize::MAX, shutdown_for_thread)
+            .await
     });
     let mut request = match format!("ws://{router_address}/v1/responses").into_client_request() {
         Ok(request) => request,
@@ -165,7 +168,7 @@ fn loopback_router_runtime_shutdown_drains_active_websocket_sessions() {
 
     shutdown.cancel();
     drop(client);
-    match server_thread.join() {
+    match server_thread.await {
         Ok(Ok(handled)) => assert!(handled >= 1, "server should accept websocket"),
         Ok(Err(error)) => panic!("shutdown should drain active websocket cleanly: {error}"),
         Err(error) => panic!("server thread panicked: {error:?}"),
@@ -180,9 +183,9 @@ fn loopback_router_runtime_shutdown_drains_active_websocket_sessions() {
     assert_eq!(snapshot.closed_sessions, 1);
 }
 
-#[test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[allow(clippy::result_large_err)]
-fn loopback_router_runtime_continues_after_rejected_connection() {
+async fn loopback_router_runtime_continues_after_rejected_connection() {
     let temp_dir = ProxyTestTempDir::new("runtime_rejected_then_websocket");
     let database_path = temp_dir.path().join("state.sqlite");
     let secret_path = temp_dir.path().join("secrets");
@@ -267,7 +270,7 @@ fn loopback_router_runtime_continues_after_rejected_connection() {
         LocalRouterTokenRecord::new(SecretString::new("current-token"), TokenGeneration::new(1)),
     )
     .with_quota_clock(1_030, 60);
-    let runtime = match LoopbackRouterRuntime::start_for_test(config) {
+    let runtime = match LoopbackRouterRuntime::start_for_test(config).await {
         Ok(runtime) => runtime,
         Err(error) => panic!("router runtime should start: {error}"),
     };
@@ -317,7 +320,7 @@ fn loopback_router_runtime_continues_after_rejected_connection() {
         }
     });
 
-    let handled = match runtime.serve_protocol_connections(2) {
+    let handled = match runtime.serve_protocol_connections(2).await {
         Ok(handled) => handled,
         Err(error) => {
             panic!("router runtime should continue after rejected connection: {error}")

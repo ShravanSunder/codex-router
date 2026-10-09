@@ -5,6 +5,8 @@ use sqlx::{
 };
 use std::{path::Path, time::Duration};
 
+use crate::{BoardSchemaPreparation, BoardSchemaPreparationError};
+
 #[derive(Debug, thiserror::Error)]
 pub enum BoardStorageError {
     #[error("Board storage is unavailable: {0}")]
@@ -21,6 +23,12 @@ pub struct BoardStore {
     pub(crate) activity_sender: tokio::sync::broadcast::Sender<()>,
 }
 impl BoardStore {
+    pub async fn prepare_schema(
+        database_path: &Path,
+    ) -> Result<BoardSchemaPreparation, BoardSchemaPreparationError> {
+        crate::board_schema_preparation::prepare_schema(database_path).await
+    }
+
     pub async fn open(path: &Path) -> Result<Self, BoardStorageError> {
         let options = SqliteConnectOptions::new()
             .filename(path)

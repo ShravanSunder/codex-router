@@ -88,6 +88,16 @@ impl GenerationAliasPath {
         }
         Ok(())
     }
+    pub(crate) fn validate_for_generation(
+        &self,
+        generation: &GenerationId,
+    ) -> Result<(), EndpointPathError> {
+        let expected_name = alias_name(generation);
+        if self.0.file_name().and_then(|name| name.to_str()) != Some(expected_name.as_str()) {
+            return Err(EndpointPathError::AliasRelationship);
+        }
+        Ok(())
+    }
 }
 impl TryFrom<PathBuf> for GenerationAliasPath {
     type Error = EndpointPathError;

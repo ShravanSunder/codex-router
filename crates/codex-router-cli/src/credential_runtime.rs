@@ -1,13 +1,17 @@
 //! CLI credential resolver runtime wiring.
 
+use std::future::Future;
 use std::path::Path;
+#[cfg(test)]
 use std::path::PathBuf;
 
 use codex_router_auth::resolver::AsyncRefreshLeaseRegistry;
 use codex_router_auth::resolver::AsyncRouterCredentialResolver;
 use codex_router_auth::resolver::CredentialRefreshClient;
+use codex_router_auth::resolver::CredentialRefreshTaskSupervisor;
 use codex_router_auth::resolver::CredentialResolverError;
 use codex_router_auth::resolver::ProviderCredentialRefreshClients;
+#[cfg(test)]
 use codex_router_auth::resolver::ProviderCredentialResolver;
 use codex_router_auth::resolver::ResolvedProviderCredential;
 use codex_router_core::ids::AccountId;
@@ -28,7 +32,8 @@ pub enum CliCredentialResolverOpenError {
     /// Secret store failed to open.
     #[error(transparent)]
     SecretStore(#[from] SecretStoreError),
-    /// Tokio runtime failed to initialize.
+    /// Tokio runtime failed to initialize for the test-only synchronous adapter.
+    #[cfg(test)]
     #[error(transparent)]
     Runtime(#[from] std::io::Error),
     /// Async secret-store construction task failed.
@@ -37,6 +42,7 @@ pub enum CliCredentialResolverOpenError {
 }
 
 /// CLI-owned credential resolver adapter.
+#[cfg(test)]
 #[derive(Debug)]
 pub struct CliCredentialResolver<C = ProviderCredentialRefreshClients>
 where
@@ -52,40 +58,20 @@ where
 
 /// Async credential resolution used by native-async quota commands.
 pub(crate) trait AsyncProviderCredentialResolver {
-    async fn resolve_provider_credentials_async(
+    fn resolve_provider_credentials_async(
         &self,
         account_id: &AccountId,
         expected_provider: codex_router_core::provider::Provider,
-    ) -> Result<ResolvedProviderCredential, CredentialResolverError>;
+    ) -> impl Future<Output = Result<ResolvedProviderCredential, CredentialResolverError>> + Send;
 
-    async fn recover_unauthorized_credentials_async(
+    fn recover_unauthorized_credentials_async(
         &self,
         _account_id: &AccountId,
         _expected_provider: codex_router_core::provider::Provider,
         _rejected_generation: u64,
-    ) -> Result<(ResolvedProviderCredential, bool), CredentialResolverError> {
-        Err(CredentialResolverError::RefreshUnavailable)
-    }
-}
-
-impl CliCredentialResolver<ProviderCredentialRefreshClients> {
-    /// Opens resolver state while reusing the serving process's encrypted-store handle.
-    pub(crate) fn open_with_secret_store(
-        state_db_path: &Path,
-        secret_store: CliRuntimeSecretStore,
-    ) -> Result<Self, CliCredentialResolverOpenError> {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()?;
-        let state_store = runtime.block_on(AsyncSqliteStateStore::open(state_db_path))?;
-        Ok(Self {
-            runtime,
-            state_db_path: state_db_path.to_path_buf(),
-            state_store,
-            secret_store,
-            refresh_client: ProviderCredentialRefreshClients::new(),
-            refresh_leases: AsyncRefreshLeaseRegistry::new(),
-        })
+    ) -> impl Future<Output = Result<(ResolvedProviderCredential, bool), CredentialResolverError>> + Send
+    {
+        async { Err(CredentialResolverError::RefreshUnavailable) }
     }
 }
 
@@ -116,6 +102,7 @@ where
     }
 }
 
+#[cfg(test)]
 impl<C> ProviderCredentialResolver for CliCredentialResolver<C>
 where
     C: CredentialRefreshClient + Clone + Send + Sync + 'static,
@@ -147,6 +134,7 @@ where
     secret_store: CliRuntimeSecretStore,
     refresh_client: C,
     refresh_leases: AsyncRefreshLeaseRegistry,
+    refresh_tasks: CredentialRefreshTaskSupervisor,
 }
 
 impl AsyncCliCredentialResolver<ProviderCredentialRefreshClients> {
@@ -164,6 +152,45 @@ impl AsyncCliCredentialResolver<ProviderCredentialRefreshClients> {
             secret_store,
             refresh_client: ProviderCredentialRefreshClients::new(),
             refresh_leases: AsyncRefreshLeaseRegistry::new(),
+            refresh_tasks: CredentialRefreshTaskSupervisor::new(),
+        })
+    }
+
+    /// Opens resolver state while retaining the already-open secret-store handle.
+    pub(crate) async fn open_with_secret_store(
+        state_db_path: &Path,
+        secret_store: CliRuntimeSecretStore,
+        refresh_tasks: CredentialRefreshTaskSupervisor,
+    ) -> Result<Self, CliCredentialResolverOpenError> {
+        let state_store = AsyncSqliteStateStore::open(state_db_path).await?;
+        Ok(Self {
+            state_store,
+            secret_store,
+            refresh_client: ProviderCredentialRefreshClients::new(),
+            refresh_leases: AsyncRefreshLeaseRegistry::new(),
+            refresh_tasks,
+        })
+    }
+}
+
+#[cfg(test)]
+impl<C> AsyncCliCredentialResolver<C>
+where
+    C: CredentialRefreshClient + Clone,
+{
+    pub(crate) async fn open_with_refresh_client(
+        state_db_path: &Path,
+        secret_store: CliRuntimeSecretStore,
+        refresh_client: C,
+        refresh_tasks: CredentialRefreshTaskSupervisor,
+    ) -> Result<Self, CliCredentialResolverOpenError> {
+        let state_store = AsyncSqliteStateStore::open(state_db_path).await?;
+        Ok(Self {
+            state_store,
+            secret_store,
+            refresh_client,
+            refresh_leases: AsyncRefreshLeaseRegistry::new(),
+            refresh_tasks,
         })
     }
 }
@@ -185,6 +212,7 @@ where
             self.refresh_leases.clone(),
         );
         resolver
+            .with_refresh_task_supervisor(self.refresh_tasks.clone())
             .resolve_provider_credentials(account_id, expected_provider)
             .await
     }
@@ -203,11 +231,13 @@ where
             self.refresh_leases.clone(),
         );
         resolver
+            .with_refresh_task_supervisor(self.refresh_tasks.clone())
             .recover_unauthorized_credentials(account_id, expected_provider, rejected_generation)
             .await
     }
 }
 
+#[cfg(test)]
 impl<C> AsyncProviderCredentialResolver for CliCredentialResolver<C>
 where
     C: CredentialRefreshClient + Clone + Send + Sync + 'static,

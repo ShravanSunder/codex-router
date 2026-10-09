@@ -11,6 +11,7 @@ use std::{
     net::SocketAddr,
     os::fd::{AsFd, BorrowedFd, OwnedFd},
     path::Path,
+    task::{Context, Poll},
 };
 use tokio::io::unix::AsyncFd;
 pub struct OwnedSocket {
@@ -27,6 +28,25 @@ fn configure_socket(fd: &OwnedFd) -> Result<(), BoundaryError> {
     #[cfg(target_vendor = "apple")]
     rustix::net::sockopt::set_socket_nosigpipe(fd, true).map_err(io_error)?;
     Ok(())
+}
+fn send_bytes(
+    descriptor: &OwnedFd,
+    bytes: &[u8],
+    rights: &[BorrowedFd<'_>],
+) -> std::io::Result<usize> {
+    let mut space = [MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(MAX_RIGHTS))];
+    let mut control = SendAncillaryBuffer::new(&mut space);
+    if !rights.is_empty() && !control.push(SendAncillaryMessage::ScmRights(rights)) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "rights capacity",
+        ));
+    }
+    let flags = SendFlags::DONTWAIT;
+    #[cfg(not(target_vendor = "apple"))]
+    let flags = flags | SendFlags::NOSIGNAL;
+    rustix::net::sendmsg(descriptor, &[IoSlice::new(bytes)], &mut control, flags)
+        .map_err(std::io::Error::from)
 }
 impl OwnedSocket {
     pub async fn pair(gate: &DescriptorGate) -> Result<(Self, Self), BoundaryError> {
@@ -156,26 +176,33 @@ impl OwnedSocket {
         }
         loop {
             let mut ready = self.descriptor.writable().await?;
-            match ready.try_io(|fd| {
-                let mut space = [MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(MAX_RIGHTS))];
-                let mut control = SendAncillaryBuffer::new(&mut space);
-                if !rights.is_empty() && !control.push(SendAncillaryMessage::ScmRights(rights)) {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::InvalidInput,
-                        "rights capacity",
-                    ));
-                }
-                let flags = SendFlags::DONTWAIT;
-                #[cfg(not(target_vendor = "apple"))]
-                let flags = flags | SendFlags::NOSIGNAL;
-                rustix::net::sendmsg(fd.get_ref(), &[IoSlice::new(bytes)], &mut control, flags)
-                    .map_err(std::io::Error::from)
-            }) {
+            match ready.try_io(|fd| send_bytes(fd.get_ref(), bytes, rights)) {
                 Err(_) => continue,
                 Ok(Err(error)) if error.kind() == std::io::ErrorKind::Interrupted => continue,
                 Ok(result) => return result.map_err(Into::into),
             }
         }
+    }
+    pub(crate) fn poll_send_without_rights(
+        &self,
+        context: &mut Context<'_>,
+        bytes: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        loop {
+            let mut ready = match self.descriptor.poll_write_ready(context) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+                Poll::Ready(Ok(ready)) => ready,
+            };
+            match ready.try_io(|fd| send_bytes(fd.get_ref(), bytes, &[])) {
+                Err(_) => continue,
+                Ok(Err(error)) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Ok(result) => return Poll::Ready(result),
+            }
+        }
+    }
+    pub(crate) fn shutdown_write(&self) -> Result<(), BoundaryError> {
+        rustix::net::shutdown(self.as_fd(), rustix::net::Shutdown::Write).map_err(io_error)
     }
 }
 impl SocketWriter {
@@ -191,7 +218,7 @@ impl SocketWriter {
         Ok(())
     }
     pub fn shutdown_write(&self) -> Result<(), BoundaryError> {
-        rustix::net::shutdown(self.socket.as_fd(), rustix::net::Shutdown::Write).map_err(io_error)
+        self.socket.shutdown_write()
     }
 }
 impl OwnedListener {
