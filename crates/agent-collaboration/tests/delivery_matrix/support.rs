@@ -174,27 +174,9 @@ pub(super) async fn mcp_send(
         return Err("MCP proof URL was not isolated loopback".into());
     }
     let client = reqwest::Client::new();
-    let initialize = client.post(url).header("accept", "application/json, text/event-stream")
-        .json(&json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"delivery-matrix","version":"1"}}}))
-        .send().await?;
-    let session = initialize
-        .headers()
-        .get("mcp-session-id")
-        .ok_or("MCP session ID missing")?
-        .to_str()?
-        .to_owned();
-    let _initialized = client
-        .post(url)
-        .header("accept", "application/json, text/event-stream")
-        .header("mcp-session-id", &session)
-        .header("mcp-protocol-version", "2025-11-25")
-        .json(&json!({"jsonrpc":"2.0","method":"notifications/initialized","params":{}}))
-        .send()
-        .await?;
     let catalog = client
         .post(url)
         .header("accept", "application/json, text/event-stream")
-        .header("mcp-session-id", &session)
         .header("mcp-protocol-version", "2025-11-25")
         .json(&json!({"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}))
         .send()
@@ -208,7 +190,7 @@ pub(super) async fn mcp_send(
         .and_then(|tool| tool.get("outputSchema"))
         .ok_or("message_send schema missing")?;
     let response = client.post(url).header("accept", "application/json, text/event-stream")
-        .header("mcp-session-id", &session).header("mcp-protocol-version", "2025-11-25")
+        .header("mcp-protocol-version", "2025-11-25")
         .json(&json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"message_send","arguments":{"target":target,"message":{"kind":"agent","sender":sender,"text":text},"delivery":"auto"}}}))
         .send().await?;
     let response = mcp_json(response).await?;

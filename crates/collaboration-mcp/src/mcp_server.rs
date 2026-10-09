@@ -3,7 +3,7 @@
 //! Tools call `CollaborationApplication` in process. The conversation tools that open carrier
 //! sessions (create, load, prompt, cancel, create-and-prompt and bounded observation) run the
 //! carrier clients in the Host over the same application.
-use crate::collaboration_api_router::CollaborationApiConfig;
+use crate::collaboration_api_router::{CallAdmission, CollaborationApiConfig};
 use crate::native_schema_definitions::NativeSchemaDefinitions;
 use crate::tool_call_registry::CallEndedEarly;
 use collaboration_client::{
@@ -312,10 +312,20 @@ impl ServerHandler for CollaborationMcpServer {
         context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
     ) -> Result<CallToolResponse, rmcp::ErrorData> {
         let caller = context.ct.clone();
+        let admission = context
+            .extensions
+            .get::<http::request::Parts>()
+            .and_then(|parts| parts.extensions.get::<CallAdmission>())
+            .cloned();
         let routed = self
             .surface
             .router
             .call(ToolCallContext::new(self, request, context));
+        let routed = async move {
+            // The listener's request slot belongs to the call until the call ends.
+            let _admitted = admission;
+            routed.await
+        };
         self.tool_calls
             .run(routed, caller, |ended| {
                 Ok(CallToolResponse::Complete(match ended {

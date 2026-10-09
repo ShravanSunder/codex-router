@@ -12,7 +12,7 @@ chrono.workspace = true
 hmac.workspace = true
 sha2.workspace = true
 message-board = { path = "../message-board", version = "0.1.20" }
-sqlx = { workspace = true, features = ["macros", "migrate"] }
+sqlx = { workspace = true, features = ["macros", "migrate", "sqlite"] }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
