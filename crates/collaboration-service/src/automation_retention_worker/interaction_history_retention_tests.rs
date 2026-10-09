@@ -1,4 +1,4 @@
-//! Retention across real SQLite payload rows and the broker's file-backed history.
+//! Retention across real SQLite payload rows and the broker's SQLite history.
 use super::AutomationRetentionWorker;
 use crate::{
     InteractionHistoryRecord, NativeControlBackend, NativeGenerationGate, RefusedApprovalOption,
@@ -21,7 +21,7 @@ use tokio::sync::Mutex;
 type TestResult<TValue = ()> = Result<TValue, Box<dyn std::error::Error + Send + Sync>>;
 const SERVICE_ID: &str = "018f47d2-24d5-7a68-b9ec-6f759c39458f";
 const RETENTION_MILLIS: i64 = 30 * 24 * 60 * 60 * 1000;
-const LEGACY_REQUEST: &str = "legacy-interaction";
+const INITIAL_REQUEST: &str = "initial-interaction";
 
 fn ensure(condition: bool, detail: &'static str) -> TestResult {
     if condition {
@@ -78,15 +78,29 @@ fn history_value(
 }
 
 async fn read_history(path: &Path) -> TestResult<BTreeMap<String, Value>> {
-    Ok(serde_json::from_slice(&tokio::fs::read(path).await?)?)
+    let mut connection =
+        SqliteConnection::connect_with(&SqliteConnectOptions::new().filename(path).read_only(true))
+            .await?;
+    let rows: Vec<(String, String, String)> = sqlx::query_as("SELECT request_id, record_json, created_at FROM typed_interaction_history ORDER BY request_id")
+        .fetch_all(&mut connection).await?;
+    let mut records = BTreeMap::new();
+    for (request_id, record_json, created_at) in rows {
+        let mut record: Value = serde_json::from_str(&record_json)?;
+        record
+            .as_object_mut()
+            .ok_or("stored record must be an object")?
+            .insert("createdAt".into(), Value::String(created_at));
+        records.insert(request_id, record);
+    }
+    Ok(records)
 }
 
-fn legacy_stamp(history: &BTreeMap<String, Value>) -> TestResult<String> {
+fn creation_stamp(history: &BTreeMap<String, Value>) -> TestResult<String> {
     Ok(history
-        .get(LEGACY_REQUEST)
+        .get(INITIAL_REQUEST)
         .and_then(|record| record.get("createdAt"))
         .and_then(Value::as_str)
-        .ok_or("legacy history must contain its persisted first-load stamp")?
+        .ok_or("initial history must contain its persisted creation stamp")?
         .to_owned())
 }
 
@@ -255,28 +269,47 @@ async fn ensure_history_contents(
     )?;
     ensure(
         disk_ids == expected_ids,
-        "worker must remove expired history records and bodies from real JSON",
+        "worker must remove expired history records and bodies from real SQLite",
     )
 }
 
 #[tokio::test]
-async fn retention_worker_prunes_real_broker_history_and_sqlite_payloads_with_one_persisted_legacy_stamp()
+async fn retention_worker_prunes_real_broker_history_and_sqlite_payloads_with_one_persisted_creation_stamp()
 -> TestResult {
     let directory = tempfile::tempdir()?;
-    let history_path = directory.path().join("interaction-history.json");
-    let legacy = BTreeMap::from([(
-        LEGACY_REQUEST.to_owned(),
-        history_value(LEGACY_REQUEST, "legacy-history-body", None)?,
-    )]);
+    let history_path = directory.path().join("interaction.sqlite");
+    let json_path = directory.path().join("interaction-history.json");
+    let original_source = b"ignored old typed JSON";
+    tokio::fs::write(&json_path, original_source).await?;
     tokio::fs::write(directory.path().join("approval-routes.json"), b"[]").await?;
     tokio::fs::write(directory.path().join("approval-history.json"), b"[]").await?;
-    tokio::fs::write(&history_path, serde_json::to_vec_pretty(&legacy)?).await?;
     let gate = NativeGenerationGate::default();
     let first_broker = load_broker(directory.path(), &gate).await?;
+    drop(first_broker);
+    let mut seed =
+        SqliteConnection::connect_with(&SqliteConnectOptions::new().filename(&history_path))
+            .await?;
+    let initial_record = history_value(INITIAL_REQUEST, "initial-history-body", None)?;
+    let initial_stamp = Utc::now().to_rfc3339_opts(SecondsFormat::Nanos, true);
+    let mut transaction = seed.begin().await?;
+    sqlx::query(
+        "INSERT INTO typed_interaction_history (request_id,record_json,created_at) VALUES (?,?,?)",
+    )
+    .bind(INITIAL_REQUEST)
+    .bind(serde_json::to_string(&initial_record)?)
+    .bind(initial_stamp)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query("UPDATE interaction_history_revision SET revision=revision+1")
+        .execute(&mut *transaction)
+        .await?;
+    transaction.commit().await?;
+    seed.close().await?;
+    let first_broker = load_broker(directory.path(), &gate).await?;
     let mut persisted = read_history(&history_path).await?;
-    let persisted_stamp = legacy_stamp(&persisted)?;
+    let persisted_stamp = creation_stamp(&persisted)?;
     let stamped_at = DateTime::parse_from_rfc3339(&persisted_stamp)?.with_timezone(&Utc);
-    ensure_history_contents(&first_broker, &history_path, &[LEGACY_REQUEST]).await?;
+    ensure_history_contents(&first_broker, &history_path, &[INITIAL_REQUEST]).await?;
     drop(first_broker);
 
     // The worker accepts milliseconds; the observed nanosecond stamp remains
@@ -294,11 +327,36 @@ async fn retention_worker_prunes_real_broker_history_and_sqlite_payloads_with_on
     ] {
         persisted.insert(id.to_owned(), history_value(id, body, Some(created_at))?);
     }
-    tokio::fs::write(&history_path, serde_json::to_vec_pretty(&persisted)?).await?;
+    let mut history_seed =
+        SqliteConnection::connect_with(&SqliteConnectOptions::new().filename(&history_path))
+            .await?;
+    let mut transaction = history_seed.begin().await?;
+    for (request_id, mut value) in persisted.clone() {
+        if request_id == INITIAL_REQUEST {
+            continue;
+        }
+        let created_at = value
+            .as_object_mut()
+            .ok_or("fixture record")?
+            .remove("createdAt")
+            .ok_or("fixture timestamp")?
+            .as_str()
+            .ok_or("timestamp text")?
+            .to_owned();
+        sqlx::query("INSERT INTO typed_interaction_history (request_id,record_json,created_at) VALUES (?,?,?)")
+            .bind(request_id).bind(serde_json::to_string(&value)?).bind(created_at)
+            .execute(&mut *transaction).await?;
+    }
+    sqlx::query("UPDATE interaction_history_revision SET revision=revision+1")
+        .execute(&mut *transaction)
+        .await?;
+    transaction.commit().await?;
+    history_seed.close().await?;
+
     let broker = load_broker(directory.path(), &gate).await?;
     ensure(
-        legacy_stamp(&read_history(&history_path).await?)? == persisted_stamp,
-        "broker reload must preserve the original legacy stamp",
+        creation_stamp(&read_history(&history_path).await?)? == persisted_stamp,
+        "broker reload must preserve the original creation stamp",
     )?;
 
     let database_path = directory.path().join("automation.sqlite");
@@ -331,31 +389,37 @@ async fn retention_worker_prunes_real_broker_history_and_sqlite_payloads_with_on
     ensure_history_contents(
         &broker,
         &history_path,
-        &["cutoff-interaction", LEGACY_REQUEST, "recent-interaction"],
+        &["cutoff-interaction", INITIAL_REQUEST, "recent-interaction"],
     )
     .await?;
     ensure(
-        legacy_stamp(&read_history(&history_path).await?)? == persisted_stamp,
-        "retention must preserve the retained legacy stamp",
+        creation_stamp(&read_history(&history_path).await?)? == persisted_stamp,
+        "retention must preserve the retained creation stamp",
     )?;
     ensure(
-        !String::from_utf8(tokio::fs::read(&history_path).await?)?.contains("expired-history-body"),
-        "expired interaction body must be physically absent",
+        !serde_json::to_string(&read_history(&history_path).await?)?
+            .contains("expired-history-body"),
+        "expired interaction body must be absent from durable active rows",
     )?;
 
     ensure(
         worker.prune_batch(first_maintenance_ms + 1).await? == 4,
-        "legacy stamp must age normally after thirty days, without reload restamping",
+        "creation stamp must age normally after thirty days, without reload restamping",
     )?;
     ensure_physical_contents(&mut observer, &[&recent_content]).await?;
     ensure_history_contents(&broker, &history_path, &["recent-interaction"]).await?;
     ensure(
-        !String::from_utf8(tokio::fs::read(&history_path).await?)?.contains("legacy-history-body"),
-        "aged legacy interaction body must be physically absent",
+        !serde_json::to_string(&read_history(&history_path).await?)?
+            .contains("initial-history-body"),
+        "aged initial interaction body must be absent from durable active rows",
     )?;
     ensure(
         gate.acquire().is_err(),
         "retention must not activate a native generation",
+    )?;
+    ensure(
+        tokio::fs::read(&json_path).await? == original_source,
+        "retention must preserve the ignored old JSON bytes",
     )?;
     let retained_definitions: i64 = sqlx::query_scalar("SELECT count(*) FROM wakeup_definitions")
         .fetch_one(&mut observer)

@@ -1,0 +1,50 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT name AS \"name!\", type AS \"object_type!\", sql FROM sqlite_schema WHERE name NOT GLOB 'sqlite_*' ORDER BY name",
+  "describe": {
+    "columns": [
+      {
+        "name": "name!",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "sqlite_master",
+            "name": "name"
+          }
+        }
+      },
+      {
+        "name": "object_type!",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "sqlite_master",
+            "name": "type"
+          }
+        }
+      },
+      {
+        "name": "sql",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "sqlite_master",
+            "name": "sql"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "78df85618c1e9819b3b2cc477ad668b710de3e80c2ff15c6de27abae72107172"
+}

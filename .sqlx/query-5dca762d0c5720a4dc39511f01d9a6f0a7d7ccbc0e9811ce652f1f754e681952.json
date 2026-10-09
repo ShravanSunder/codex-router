@@ -1,0 +1,52 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT metadata_id, revision, typeof(metadata_id) AS \"metadata_storage!: String\", typeof(revision) AS \"revision_storage!: String\" FROM interaction_history_revision",
+  "describe": {
+    "columns": [
+      {
+        "name": "metadata_id",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "interaction_history_revision",
+            "name": "metadata_id"
+          }
+        }
+      },
+      {
+        "name": "revision",
+        "ordinal": 1,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "interaction_history_revision",
+            "name": "revision"
+          }
+        }
+      },
+      {
+        "name": "metadata_storage!: String",
+        "ordinal": 2,
+        "type_info": "Null",
+        "origin": "Expression"
+      },
+      {
+        "name": "revision_storage!: String",
+        "ordinal": 3,
+        "type_info": "Null",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false,
+      null,
+      null
+    ]
+  },
+  "hash": "5dca762d0c5720a4dc39511f01d9a6f0a7d7ccbc0e9811ce652f1f754e681952"
+}

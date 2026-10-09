@@ -35,7 +35,7 @@ async fn client_error_does_not_retry_or_settle_question() -> Result<(), Box<dyn 
             gate: NativeGenerationGate::default(),
             codex_home: directory.path().to_path_buf(),
         },
-        directory.path().join("interaction-history.json"),
+        directory.path().join("approval-routes.json"),
     )
     .await?;
     let socket = directory.path().join("provider.sock");
@@ -163,7 +163,7 @@ async fn stale_question_answer_does_not_emit_nonretry_error()
             gate: NativeGenerationGate::default(),
             codex_home: directory.path().to_path_buf(),
         },
-        directory.path().join("interaction-history.json"),
+        directory.path().join("approval-routes.json"),
     )
     .await?;
     let socket = directory.path().join("provider.sock");

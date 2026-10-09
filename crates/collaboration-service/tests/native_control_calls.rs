@@ -602,6 +602,8 @@ async fn sdk_inspection_and_exact_interrupt_use_native_backend_with_generation_g
         .unwrap_or_else(|error| panic!("automation database cleanup: {error}"));
     std::fs::remove_file(backend_path).unwrap_or_else(|error| panic!("socket cleanup: {error}"));
     std::fs::remove_file(routes_path).unwrap_or_else(|error| panic!("routes cleanup: {error}"));
+    std::fs::remove_file(root.join("interaction.sqlite"))
+        .unwrap_or_else(|error| panic!("interaction database cleanup: {error}"));
     std::fs::remove_dir(root).unwrap_or_else(|error| panic!("directory cleanup: {error}"));
     // Assert.
     assert_eq!(inspection.target, target);
