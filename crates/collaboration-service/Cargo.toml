@@ -14,7 +14,7 @@ automation-storage = { path = "../automation-storage", version = "0.1.16" }
 agent-automation = { path = "../agent-automation", version = "0.1.16" }
 base64.workspace = true
 sha2.workspace = true
-sqlx.workspace = true
+sqlx = { workspace = true, features = ["sqlite"] }
 codex-acp-adapter = { path = "../codex-acp-adapter", version = "0.1.14" }
 codex-native-integration.workspace = true
 chrono.workspace = true

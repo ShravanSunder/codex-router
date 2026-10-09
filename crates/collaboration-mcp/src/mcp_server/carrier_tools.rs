@@ -199,6 +199,7 @@ impl CollaborationMcpServer {
         Parameters(request): Parameters<BoundedObservationRequest>,
         context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
     ) -> CallToolResult {
+        let deadline = observation_deadline(request.timeout_seconds);
         let (observed, mut streamed) = tokio::sync::mpsc::unbounded_channel();
         let observation = collaboration_client::SessionObservation::observe_bounded(
             &self.carrier_access,
@@ -206,7 +207,9 @@ impl CollaborationMcpServer {
             context.ct.clone(),
             Some(observed),
         );
-        match stream_observed_events(&context.peer, &mut streamed, observation).await {
+        let peer = &context.peer;
+        let notify = |event| notify_observed_event(peer, event);
+        match stream_observed_events(deadline, &mut streamed, observation, notify).await {
             Ok(value) => structured_result(Ok(value), OperationEffect::None),
             Err(error) => {
                 let (failure, target, turn_id) = error.into_parts();
@@ -216,27 +219,47 @@ impl CollaborationMcpServer {
     }
 }
 
+/// When an observation of `timeout_seconds` must have ended. A bound too large to represent
+/// fails the observation's own validation, so no event is ever delivered against it.
+fn observation_deadline(timeout_seconds: u64) -> tokio::time::Instant {
+    let now = tokio::time::Instant::now();
+    now.checked_add(Duration::from_secs(timeout_seconds))
+        .unwrap_or(now)
+}
+
 /// Runs one observation, sending each event it observes to the caller as an
 /// `observationEvent` notification while the call is open, then answers its result. rmcp
 /// answers the call as an SSE stream once a notification precedes the result.
-async fn stream_observed_events<TResult>(
-    peer: &rmcp::service::Peer<rmcp::service::RoleServer>,
+///
+/// Delivery never holds the observation back and never outlives the call's bound. It runs
+/// beside the observation, one notification in flight at a time so they arrive in order, and
+/// once the observation has ended it continues only until `deadline`. A reader too slow for
+/// its notifications loses only their early arrival: the result lists every event.
+async fn stream_observed_events<TResult, TSent>(
+    deadline: tokio::time::Instant,
     streamed: &mut tokio::sync::mpsc::UnboundedReceiver<
         collaboration_protocol::ObservationEventNotification,
     >,
     observation: impl std::future::Future<Output = TResult>,
-) -> TResult {
+    notify: impl Fn(collaboration_protocol::ObservationEventNotification) -> TSent,
+) -> TResult
+where
+    TSent: std::future::Future<Output = ()>,
+{
     let mut observation = std::pin::pin!(observation);
-    let result = loop {
-        tokio::select! {
-            biased;
-            Some(event) = streamed.recv() => notify_observed_event(peer, event).await,
-            result = &mut observation => break result,
+    let mut delivery = std::pin::pin!(async {
+        while let Some(event) = streamed.recv().await {
+            notify(event).await;
         }
+    });
+    let (result, delivered) = tokio::select! {
+        biased;
+        result = &mut observation => (result, false),
+        // Delivery ends only once the observation has dropped its sender.
+        () = &mut delivery => (observation.await, true),
     };
-    // The finished observation dropped its sender; send what it observed last.
-    while let Ok(event) = streamed.try_recv() {
-        notify_observed_event(peer, event).await;
+    if !delivered {
+        let _unsent_after_the_bound = tokio::time::timeout_at(deadline, delivery).await;
     }
     result
 }
@@ -257,4 +280,109 @@ async fn notify_observed_event(
             ),
         ))
         .await;
+}
+
+#[cfg(test)]
+mod notification_delivery_tests {
+    use super::stream_observed_events;
+    use collaboration_protocol::ObservationEventNotification;
+    use serde_json::{Value, json};
+    use std::{
+        cell::{Cell, RefCell},
+        time::Duration,
+    };
+    use tokio::{sync::mpsc, time::Instant};
+
+    const BOUND: Duration = Duration::from_secs(30);
+
+    fn event(index: u64) -> ObservationEventNotification {
+        ObservationEventNotification::native_event(json!({ "index": index }))
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_blocked_notification_does_not_hold_the_observation_past_its_bound() {
+        // Arrange: a transport that never accepts a notification, and an observation that
+        // streams two events and then waits out its bound.
+        let started = Instant::now();
+        let deadline = started + BOUND;
+        let (observed, mut streamed) = mpsc::unbounded_channel();
+        let observation = async move {
+            for index in 1..=2 {
+                let _sent = observed.send(event(index));
+            }
+            tokio::time::sleep_until(deadline).await;
+            "deadlineReached"
+        };
+        let attempted = Cell::new(0);
+        let blocked = |_event| {
+            attempted.set(attempted.get() + 1);
+            std::future::pending::<()>()
+        };
+
+        // Act
+        let result = tokio::time::timeout(
+            BOUND * 2,
+            stream_observed_events(deadline, &mut streamed, observation, blocked),
+        )
+        .await;
+
+        // Assert: the call ends at its bound, with one notification ever in flight.
+        assert_eq!(result, Ok("deadlineReached"));
+        assert_eq!(started.elapsed(), BOUND);
+        assert_eq!(attempted.get(), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_observation_that_ends_early_delivers_only_until_its_bound() {
+        // Arrange: the observation fills its event bound at once; the transport never accepts.
+        let started = Instant::now();
+        let deadline = started + BOUND;
+        let (observed, mut streamed) = mpsc::unbounded_channel();
+        let observation = async move {
+            for index in 1..=3 {
+                let _sent = observed.send(event(index));
+            }
+            "resultLimitReached"
+        };
+
+        // Act
+        let result = tokio::time::timeout(
+            BOUND * 2,
+            stream_observed_events(deadline, &mut streamed, observation, |_event| {
+                std::future::pending::<()>()
+            }),
+        )
+        .await;
+
+        // Assert: the unsent notifications are given until the bound and no longer.
+        assert_eq!(result, Ok("resultLimitReached"));
+        assert_eq!(started.elapsed(), BOUND);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_reader_that_keeps_up_gets_every_notification_in_order_at_once() {
+        // Arrange
+        let started = Instant::now();
+        let (observed, mut streamed) = mpsc::unbounded_channel();
+        let observation = async move {
+            for index in 1..=3 {
+                let _sent = observed.send(event(index));
+                tokio::task::yield_now().await;
+            }
+            "resultLimitReached"
+        };
+        let delivered = RefCell::new(Vec::<Value>::new());
+
+        // Act
+        let result = stream_observed_events(started + BOUND, &mut streamed, observation, |sent| {
+            delivered.borrow_mut().push(sent.event["index"].clone());
+            async {}
+        })
+        .await;
+
+        // Assert
+        assert_eq!(result, "resultLimitReached");
+        assert_eq!(delivered.into_inner(), vec![json!(1), json!(2), json!(3)]);
+        assert_eq!(started.elapsed(), Duration::ZERO);
+    }
 }

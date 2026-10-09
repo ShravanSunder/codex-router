@@ -108,6 +108,16 @@ impl ObservationEventNotification {
             cursor: None,
         }
     }
+
+    /// A resync marker: the history it ends must be attached again, so nothing continues
+    /// after it and it has no cursor, even when the hub numbered it.
+    #[must_use]
+    pub const fn resync_marker(event: Value) -> Self {
+        Self {
+            event,
+            cursor: None,
+        }
+    }
 }
 
 #[cfg(test)]

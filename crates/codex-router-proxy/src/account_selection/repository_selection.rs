@@ -227,29 +227,36 @@ where
                 .with_claude_five_hour_reserve_percent(self.claude_five_hour_reserve_percent);
             let _selection_reservation_guard = self.selection_reservation_lock.lock().await;
             let now_unix_seconds = (self.clock)();
-            route_band_queue_health_allows_selection(&self.route_band_queue_health, route_band)
-                .map_err(|_error| HttpProxyError::Selection {
-                    reason: QuotaAwareAccountSelectorError::StateUnavailable,
-                })?;
-            let active_reservation_book = active_reservation_book_for_route_band(
-                &self.active_reservations,
-                route_band.as_str(),
-                now_unix_seconds,
+            state_store_result_on_failure(
+                route_band_queue_health_allows_selection(&self.route_band_queue_health, route_band),
+                SelectionDiagnosticStage::QueueHealth,
+                route_band,
+            )?;
+            let active_reservation_book = record_selection_error_with_class_on_failure(
+                active_reservation_book_for_route_band(
+                    &self.active_reservations,
+                    route_band.as_str(),
+                    now_unix_seconds,
+                ),
+                SelectionDiagnosticStage::ActiveReservations,
+                "lock_poisoned",
+                route_band,
             )?;
             let active_session_overrides = active_reservation_book
                 .as_ref()
                 .map(active_session_counts_by_account);
-            let projection = project_route_band_selection_inputs_with_active_counts_read_only(
-                self.state_repository,
-                route_band.as_str(),
-                now_unix_seconds,
-                ACTIVE_RESERVATION_MAX_AGE_SECONDS,
-                active_session_overrides.as_ref(),
-            )
-            .await
-            .map_err(|_error| HttpProxyError::Selection {
-                reason: QuotaAwareAccountSelectorError::StateUnavailable,
-            })?;
+            let projection = state_store_result_on_failure(
+                project_route_band_selection_inputs_with_active_counts_read_only(
+                    self.state_repository,
+                    route_band.as_str(),
+                    now_unix_seconds,
+                    ACTIVE_RESERVATION_MAX_AGE_SECONDS,
+                    active_session_overrides.as_ref(),
+                )
+                .await,
+                SelectionDiagnosticStage::PersistedProjection,
+                route_band,
+            )?;
             let selector_accounts =
                 projected_accounts_excluding_attempted(projection.accounts(), request);
             let selector_accounts = projected_accounts_excluding_runtime_exhaustions(
@@ -258,9 +265,7 @@ where
                 route_band.as_str(),
                 now_unix_seconds,
             )
-            .map_err(|_error| HttpProxyError::Selection {
-                reason: QuotaAwareAccountSelectorError::SelectorStateUnavailable,
-            })?;
+            .map_err(|error| runtime_quarantine_selection_error(error, route_band))?;
             let selector_accounts =
                 filter_selector_accounts_for_provider(selector_accounts, route_profile.provider);
             let short_quota_wait_delay_seconds =
@@ -273,26 +278,46 @@ where
             );
             let assessment = assess_route_band(assessment_input);
             let affinity_owner_account_id = if route_kind.previous_response_affinity_capable() {
-                match previous_response_id(request)? {
+                let previous_response_id = record_selection_error_on_failure(
+                    previous_response_id(request),
+                    SelectionDiagnosticStage::PreviousResponseAffinity,
+                    route_band,
+                )?;
+                match previous_response_id {
                     Some(previous_response_id) => {
-                        let affinity_secret = affinity_secret.ok_or(HttpProxyError::Selection {
-                            reason: QuotaAwareAccountSelectorError::SecretUnavailable,
+                        let affinity_secret = affinity_secret.ok_or_else(|| {
+                            selection_error(
+                                SelectionDiagnosticStage::PreviousResponseAffinity,
+                                "affinity_secret_unavailable",
+                                QuotaAwareAccountSelectorError::SecretUnavailable,
+                                route_band,
+                            )
                         })?;
                         let affinity_key_hash =
                             hash_previous_response_id(affinity_secret, &previous_response_id)
-                                .map_err(|_error| HttpProxyError::Selection {
-                                    reason: QuotaAwareAccountSelectorError::MalformedAffinityKey,
+                                .map_err(|_error| {
+                                    selection_error(
+                                        SelectionDiagnosticStage::PreviousResponseAffinity,
+                                        "malformed_affinity_key",
+                                        QuotaAwareAccountSelectorError::MalformedAffinityKey,
+                                        route_band,
+                                    )
                                 })?;
-                        let owner_lookup = AsyncAffinityRepository::load_previous_response_owner(
-                            self.state_repository,
-                            &affinity_key_hash,
-                            route_band.as_str(),
-                        )
-                        .await
-                        .map_err(|_error| HttpProxyError::Selection {
-                            reason: QuotaAwareAccountSelectorError::StateUnavailable,
-                        })?;
-                        Some(account_id_from_affinity_owner_lookup(owner_lookup)?)
+                        let owner_lookup = state_store_result_on_failure(
+                            AsyncAffinityRepository::load_previous_response_owner(
+                                self.state_repository,
+                                &affinity_key_hash,
+                                route_band.as_str(),
+                            )
+                            .await,
+                            SelectionDiagnosticStage::PreviousResponseAffinity,
+                            route_band,
+                        )?;
+                        Some(record_selection_error_on_failure(
+                            account_id_from_affinity_owner_lookup(owner_lookup),
+                            SelectionDiagnosticStage::PreviousResponseAffinity,
+                            route_band,
+                        )?)
                     }
                     None => None,
                 }
@@ -302,18 +327,16 @@ where
             let session_id = session_id_for_route(request, route_kind);
             let mut pin_observation =
                 match session_id.filter(|_| route_profile.provider == Provider::Claude) {
-                    Some(session_id) => Some(
+                    Some(session_id) => Some(session_affinity_publication_result_on_failure(
                         observe_claude_session_account_affinity(
                             &self.session_affinity_cache,
                             session_id,
                             self.state_repository,
                             (self.clock)(),
                         )
-                        .await
-                        .map_err(|_error| HttpProxyError::Selection {
-                            reason: QuotaAwareAccountSelectorError::StateUnavailable,
-                        })?,
-                    ),
+                        .await,
+                        route_band,
+                    )?),
                     None => None,
                 };
             let reserve_release_required = pin_observation
@@ -339,18 +362,18 @@ where
                 }) {
                     break;
                 }
-                let release = release_claude_session_account_affinity(
-                    &self.session_affinity_cache,
-                    session_id,
-                    observation,
-                    self.state_repository,
-                    self.claude_affinity_writer,
-                    (self.clock)(),
-                )
-                .await
-                .map_err(|_error| HttpProxyError::Selection {
-                    reason: QuotaAwareAccountSelectorError::StateUnavailable,
-                })?;
+                let release = session_affinity_publication_result_on_failure(
+                    release_claude_session_account_affinity(
+                        &self.session_affinity_cache,
+                        session_id,
+                        observation,
+                        self.state_repository,
+                        self.claude_affinity_writer,
+                        (self.clock)(),
+                    )
+                    .await,
+                    route_band,
+                )?;
                 select_afresh_after_pin_release_contention = reserve_release_required
                     && release_attempt + 1 == release_attempt_limit
                     && !release.released;
@@ -366,81 +389,92 @@ where
                             && account.routing_exclusion() == RoutingExclusion::WeeklyQuotaFloor
                     })
                 }) {
-                    return Err(HttpProxyError::Selection {
-                        reason: QuotaAwareAccountSelectorError::AffinityOwnerUnavailable,
-                    });
+                    return Err(selection_error(
+                        SelectionDiagnosticStage::PreviousResponseAffinity,
+                        "affinity_owner_unavailable",
+                        QuotaAwareAccountSelectorError::AffinityOwnerUnavailable,
+                        route_band,
+                    ));
                 }
                 if let Some(retry_after_seconds) = short_quota_wait_delay_seconds {
-                    return Err(HttpProxyError::Selection {
-                        reason: QuotaAwareAccountSelectorError::ShortQuotaExhausted {
+                    return Err(selection_error(
+                        SelectionDiagnosticStage::Assessment,
+                        "short_quota_exhausted",
+                        QuotaAwareAccountSelectorError::ShortQuotaExhausted {
                             retry_after_seconds,
                         },
-                    });
+                        route_band,
+                    ));
                 }
-                return Err(empty_assessment_selection_error(&assessment));
+                let error = record_selection_error(
+                    empty_assessment_selection_error(&assessment),
+                    SelectionDiagnosticStage::Assessment,
+                    route_band,
+                );
+                return Err(error);
             }
             let session_affinity = match session_affinity_lookup_session_id(
                 session_id.filter(|_| route_profile.provider != Provider::Claude),
                 affinity_owner_account_id.is_some(),
             ) {
                 Some(session_id) => {
-                    if let Some(cached) = lookup_session_account_affinity(
-                        &self.session_affinity_cache,
-                        route_profile.provider,
-                        session_id,
+                    if let Some(cached) = session_cache_result_on_failure(
+                        lookup_session_account_affinity(
+                            &self.session_affinity_cache,
+                            route_profile.provider,
+                            session_id,
+                            route_band,
+                            self.session_affinity_writer.as_ref(),
+                            now_unix_seconds,
+                        ),
                         route_band,
-                        self.session_affinity_writer.as_ref(),
-                        now_unix_seconds,
-                    )
-                    .map_err(|_error| HttpProxyError::Selection {
-                        reason: QuotaAwareAccountSelectorError::StateUnavailable,
-                    })? {
+                    )? {
                         Some(cached)
                     } else {
-                        let persisted =
+                        let persisted = state_store_result_on_failure(
                             AsyncSessionAccountAffinityRepository::load_session_account_affinity(
                                 self.state_repository,
                                 route_profile.provider,
                                 session_id,
                             )
-                            .await
-                            .map_err(|_error| {
-                                HttpProxyError::Selection {
-                                    reason: QuotaAwareAccountSelectorError::StateUnavailable,
-                                }
-                            })?;
-                        reconcile_persisted_session_account_affinity(
-                            &self.session_affinity_cache,
-                            route_profile.provider,
-                            session_id,
-                            persisted.as_ref(),
+                            .await,
+                            SelectionDiagnosticStage::SessionAffinity,
                             route_band,
-                            self.session_affinity_writer.as_ref(),
-                            (self.clock)(),
-                        )
-                        .map_err(|_error| HttpProxyError::Selection {
-                            reason: QuotaAwareAccountSelectorError::StateUnavailable,
-                        })?
+                        )?;
+                        session_cache_result_on_failure(
+                            reconcile_persisted_session_account_affinity(
+                                &self.session_affinity_cache,
+                                route_profile.provider,
+                                session_id,
+                                persisted.as_ref(),
+                                route_band,
+                                self.session_affinity_writer.as_ref(),
+                                (self.clock)(),
+                            ),
+                            route_band,
+                        )?
                     }
                 }
                 None => None,
             };
 
-            let mut weighted_selectors =
-                self.weighted_selectors
-                    .lock()
-                    .map_err(|_error| HttpProxyError::Selection {
-                        reason: QuotaAwareAccountSelectorError::SelectorStateUnavailable,
-                    })?;
+            let mut weighted_selectors = self.weighted_selectors.lock().map_err(|error| {
+                selector_mutex_selection_error(
+                    error,
+                    SelectionDiagnosticStage::WeightedSelector,
+                    route_band,
+                )
+            })?;
             let weighted_selector = weighted_selectors
                 .entry(route_band.as_str().to_owned())
                 .or_insert_with(WeightedDeficitSelector::default);
-            let mut account_holds =
-                self.account_holds
-                    .lock()
-                    .map_err(|_error| HttpProxyError::Selection {
-                        reason: QuotaAwareAccountSelectorError::SelectorStateUnavailable,
-                    })?;
+            let mut account_holds = self.account_holds.lock().map_err(|error| {
+                selector_mutex_selection_error(
+                    error,
+                    SelectionDiagnosticStage::AccountHold,
+                    route_band,
+                )
+            })?;
 
             if let Some(owner_account_id) = affinity_owner_account_id {
                 if request
@@ -448,35 +482,50 @@ where
                     .iter()
                     .any(|account_id| account_id == &owner_account_id)
                 {
-                    return Err(HttpProxyError::Selection {
-                        reason: QuotaAwareAccountSelectorError::AffinityOwnerUnavailable,
-                    });
+                    return Err(selection_error(
+                        SelectionDiagnosticStage::PreviousResponseAffinity,
+                        "affinity_owner_unavailable",
+                        QuotaAwareAccountSelectorError::AffinityOwnerUnavailable,
+                        route_band,
+                    ));
                 }
-                let selected = select_affinity_owner(
+                let selected = record_selection_error_on_failure(
+                    select_affinity_owner(
+                        route_band,
+                        route_profile.provider,
+                        &owner_account_id,
+                        &assessment,
+                        &mut account_holds,
+                        now_unix_seconds,
+                        "previous_response_affinity",
+                    ),
+                    SelectionDiagnosticStage::PreviousResponseAffinity,
                     route_band,
-                    route_profile.provider,
-                    &owner_account_id,
-                    &assessment,
-                    &mut account_holds,
-                    now_unix_seconds,
-                    "previous_response_affinity",
                 )?;
-                let selected = reserve_selected_account(
-                    selected,
-                    &self.active_reservations,
-                    self.active_client_leases.as_ref(),
-                    route_band.as_str(),
-                    transport_label_for_request(request),
-                    now_unix_seconds,
-                )?;
-                return publish_selected_session_affinity(
-                    selected,
-                    route_profile.provider,
-                    &self.session_affinity_cache,
-                    self.session_affinity_writer.as_ref(),
-                    session_id,
+                let selected = record_selection_error_on_failure(
+                    reserve_selected_account(
+                        selected,
+                        &self.active_reservations,
+                        self.active_client_leases.as_ref(),
+                        route_band.as_str(),
+                        transport_label_for_request(request),
+                        now_unix_seconds,
+                    ),
+                    SelectionDiagnosticStage::Reservation,
                     route_band,
-                    now_unix_seconds,
+                )?;
+                return record_selection_error_on_failure(
+                    publish_selected_session_affinity(
+                        selected,
+                        route_profile.provider,
+                        &self.session_affinity_cache,
+                        self.session_affinity_writer.as_ref(),
+                        session_id,
+                        route_band,
+                        now_unix_seconds,
+                    ),
+                    SelectionDiagnosticStage::Publication,
+                    route_band,
                 );
             }
 
@@ -493,24 +542,73 @@ where
                 && assessment_account_is_available(&assessment, pinned_account_id)
                 && !assessment_account_must_yield(&assessment, pinned_account_id, &route_profile)
             {
-                let selected = select_affinity_owner(
+                let selected = record_selection_error_on_failure(
+                    select_affinity_owner(
+                        route_band,
+                        route_profile.provider,
+                        pinned_account_id,
+                        &assessment,
+                        &mut account_holds,
+                        now_unix_seconds,
+                        "prompt_cache_account_affinity",
+                    ),
+                    SelectionDiagnosticStage::SessionAffinity,
                     route_band,
-                    route_profile.provider,
-                    pinned_account_id,
-                    &assessment,
-                    &mut account_holds,
-                    now_unix_seconds,
-                    "prompt_cache_account_affinity",
                 )?;
-                let selected = reserve_selected_account(
+                let selected = record_selection_error_on_failure(
+                    reserve_selected_account(
+                        selected,
+                        &self.active_reservations,
+                        self.active_client_leases.as_ref(),
+                        route_band.as_str(),
+                        transport_label_for_request(request),
+                        now_unix_seconds,
+                    ),
+                    SelectionDiagnosticStage::Reservation,
+                    route_band,
+                )?;
+                return record_selection_error_on_failure(
+                    publish_selected_session_affinity(
+                        selected.with_pin_observation(pin_observation),
+                        route_profile.provider,
+                        &self.session_affinity_cache,
+                        self.session_affinity_writer.as_ref(),
+                        session_id,
+                        route_band,
+                        now_unix_seconds,
+                    ),
+                    SelectionDiagnosticStage::Publication,
+                    route_band,
+                );
+            }
+
+            let selected = record_selection_error_on_failure(
+                select_from_burn_down_assessment(
+                    route_band.as_str(),
+                    route_profile.provider,
+                    &assessment,
+                    weighted_selector,
+                    &mut account_holds,
+                    self.minimum_account_hold_cooldown_seconds,
+                    now_unix_seconds,
+                ),
+                SelectionDiagnosticStage::Selection,
+                route_band,
+            )?;
+            let selected = record_selection_error_on_failure(
+                reserve_selected_account(
                     selected,
                     &self.active_reservations,
                     self.active_client_leases.as_ref(),
                     route_band.as_str(),
                     transport_label_for_request(request),
                     now_unix_seconds,
-                )?;
-                return publish_selected_session_affinity(
+                ),
+                SelectionDiagnosticStage::Reservation,
+                route_band,
+            )?;
+            record_selection_error_on_failure(
+                publish_selected_session_affinity(
                     selected.with_pin_observation(pin_observation),
                     route_profile.provider,
                     &self.session_affinity_cache,
@@ -518,34 +616,9 @@ where
                     session_id,
                     route_band,
                     now_unix_seconds,
-                );
-            }
-
-            let selected = select_from_burn_down_assessment(
-                route_band.as_str(),
-                route_profile.provider,
-                &assessment,
-                weighted_selector,
-                &mut account_holds,
-                self.minimum_account_hold_cooldown_seconds,
-                now_unix_seconds,
-            )?;
-            let selected = reserve_selected_account(
-                selected,
-                &self.active_reservations,
-                self.active_client_leases.as_ref(),
-                route_band.as_str(),
-                transport_label_for_request(request),
-                now_unix_seconds,
-            )?;
-            publish_selected_session_affinity(
-                selected.with_pin_observation(pin_observation),
-                route_profile.provider,
-                &self.session_affinity_cache,
-                self.session_affinity_writer.as_ref(),
-                session_id,
+                ),
+                SelectionDiagnosticStage::Publication,
                 route_band,
-                now_unix_seconds,
             )
         })
     }
