@@ -6,9 +6,26 @@ async fn provider_process_transport_failure_remains_retryable() {
     let exit_marker = root.path().join("provider-exit.txt");
     let target = target();
     let binding = provider_binding(&target);
-    let runtime = ExternalProviderRuntime::initialize(exited_provider_fixture(&exit_marker))
+    let release_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
-        .expect("fixture provider");
+        .expect("exit release listener");
+    let release_address = release_listener.local_addr().expect("exit release address");
+    let runtime =
+        ExternalProviderRuntime::initialize(exited_provider_fixture(&exit_marker, release_address))
+            .await
+            .expect("fixture provider");
+    // Only an accepted initialization can release the synthetic process exit.
+    let (mut release_peer, _) =
+        tokio::time::timeout(Duration::from_secs(2), release_listener.accept())
+            .await
+            .expect("provider release connection deadline")
+            .expect("provider release connection");
+    release_peer
+        .write_all(b"X")
+        .await
+        .expect("release initialized provider exit");
+    drop(release_peer);
+    drop(release_listener);
     let store = Arc::new(tokio::sync::Mutex::new(
         ProviderOperationStore::open(&root.path().join("operations.sqlite"))
             .await

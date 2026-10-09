@@ -149,8 +149,13 @@ async fn device_code_poll_interval_defaults_to_five_seconds_and_honors_positive_
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn stalled_device_code_poll_maps_timeout_to_poll_transport_failure() {
+    // Real sockets must reach the intended phase before the test clock advances.
+    let (release_clock, clock_release) = std::sync::mpsc::channel();
+    let clock_guard = tokio::task::spawn_blocking(move || {
+        clock_release.recv_timeout(std::time::Duration::from_secs(5))
+    });
     let (poll_received_sender, poll_received) = oneshot::channel();
     let issuer = FakeDeviceIssuer::spawn(vec![
         FakeResponse::json(
@@ -172,16 +177,31 @@ async fn stalled_device_code_poll_maps_timeout_to_poll_transport_failure() {
         .expect("user-code request should succeed");
     let complete = client.complete_device_code_login(&device_code, &cancellation);
     tokio::pin!(complete);
-    let error = tokio::select! {
+    tokio::select! {
         result = &mut complete => panic!("stalled poll completed before its timeout: {result:?}"),
-        result = poll_received => {
-            result.expect("fake issuer should receive the stalled poll");
-            tokio::time::timeout(std::time::Duration::from_secs(2), &mut complete)
-                .await
-                .expect("the HTTP client should time out a stalled request")
-                .expect_err("a timed-out poll should fail login")
-        }
-    };
+        result = poll_received => result.expect("fake issuer should receive the stalled poll"),
+    }
+    tokio::time::advance(std::time::Duration::from_millis(99)).await;
+    let before_deadline = std::future::poll_fn(|context| {
+        std::task::Poll::Ready(std::future::Future::poll(complete.as_mut(), context))
+    })
+    .await;
+    assert!(
+        before_deadline.is_pending(),
+        "poll must remain pending before 100ms"
+    );
+    tokio::time::advance(std::time::Duration::from_millis(2)).await;
+    let error = tokio::time::timeout(std::time::Duration::from_secs(2), &mut complete)
+        .await
+        .expect("the HTTP client should time out a stalled request")
+        .expect_err("a timed-out poll should fail login");
+    release_clock
+        .send(())
+        .expect("clock guard should remain active through the timeout proof");
+    clock_guard
+        .await
+        .expect("clock guard task should join")
+        .expect("real I/O should finish before the guard expires");
 
     assert!(matches!(
         error,

@@ -79,5 +79,7 @@ mod reservation_lease_tests;
 mod selection_authority_tests;
 #[path = "account_selection_tests/selection_concurrency_tests.rs"]
 mod selection_concurrency_tests;
+#[path = "account_selection_tests/selection_diagnostics_tests.rs"]
+mod selection_diagnostics_tests;
 #[path = "account_selection_tests/short_quota_tests.rs"]
 mod short_quota_tests;

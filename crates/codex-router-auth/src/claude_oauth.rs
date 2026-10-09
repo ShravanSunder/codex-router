@@ -728,11 +728,13 @@ mod tests {
         let (request_sender, request_receiver) = mpsc::channel();
         let server_thread = thread::spawn(move || {
             let (mut stream, _) = listener.accept().expect("accept token request");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(4)))
+                .expect("bounded refresh fixture read");
             let request = read_http_request(&mut stream);
             request_sender
                 .send(request)
                 .expect("test should receive the request");
-            let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
             let mut byte = [0_u8; 1];
             loop {
                 match stream.read(&mut byte) {
@@ -744,7 +746,9 @@ mod tests {
         let client = ClaudeOAuthRefreshClient::new_with_endpoint_and_timeout_for_test(
             endpoint,
             "test-claude-client",
-            Duration::from_millis(100),
+            // This blocking client owns its runtime; allow real HTTP setup, then
+            // prove actual expiry after the peer accepts the complete refresh.
+            Duration::from_secs(2),
         );
         let account_id = AccountId::new("acct_claude_timeout").expect("account id should be valid");
 
@@ -758,7 +762,7 @@ mod tests {
             ))
         );
         let request = request_receiver
-            .recv_timeout(Duration::from_secs(2))
+            .recv_timeout(Duration::from_secs(4))
             .expect("fake server should receive the refresh before timing out");
         assert_eq!(
             request_body_json(&request)

@@ -357,6 +357,11 @@ impl LoopbackProtocolConnectionHandler {
         for attempt_index in 0..max_account_attempts {
             let (attempt_request, attempt_body) = if attempt_index == 0 {
                 let Some(first_attempt_body) = first_attempt_body.take() else {
+                    crate::account_selection::record_selection_rejected(
+                        crate::account_selection::SelectionDiagnosticStage::HttpReplayUnavailable,
+                        "request_body_unavailable",
+                        None,
+                    );
                     return empty_response(StatusCode::SERVICE_UNAVAILABLE);
                 };
                 (request.clone(), first_attempt_body)
@@ -364,6 +369,11 @@ impl LoopbackProtocolConnectionHandler {
                 let retry_body = box_body_from_bytes(replayable_request.body().to_vec());
                 (replayable_request, retry_body)
             } else {
+                crate::account_selection::record_selection_rejected(
+                    crate::account_selection::SelectionDiagnosticStage::HttpReplayUnavailable,
+                    "request_replay_unavailable",
+                    None,
+                );
                 return empty_response(StatusCode::SERVICE_UNAVAILABLE);
             };
 
@@ -375,6 +385,7 @@ impl LoopbackProtocolConnectionHandler {
                 Err(error) => return http_error_response(error),
             };
             let (upstream_request, completion) = prepared.into_parts();
+            let route_band = completion.route_band();
             let response = match self.upstream.send_streaming(upstream_request).await {
                 Ok(response) => response,
                 Err(error) => return http_error_response(error),
@@ -391,6 +402,11 @@ impl LoopbackProtocolConnectionHandler {
                 }
                 Err(PrecommitHttpQuotaResponse::AccountQuotaExhausted) => {
                     if replayable_request.is_none() {
+                        crate::account_selection::record_selection_rejected(
+                            crate::account_selection::SelectionDiagnosticStage::HttpReplayUnavailable,
+                            "quota_replay_unavailable",
+                            Some(route_band),
+                        );
                         return quota_state_unavailable_response();
                     }
                     tracing::info!(
@@ -400,9 +416,19 @@ impl LoopbackProtocolConnectionHandler {
                     );
                 }
                 Err(PrecommitHttpQuotaResponse::ProbeFailed(error)) => {
+                    crate::account_selection::record_selection_rejected(
+                        crate::account_selection::SelectionDiagnosticStage::HttpPrecommitObservation,
+                        crate::account_selection::selection_error_class(&error),
+                        Some(route_band),
+                    );
                     return http_error_response(error);
                 }
                 Err(PrecommitHttpQuotaResponse::ObservationFailed) => {
+                    crate::account_selection::record_selection_rejected(
+                        crate::account_selection::SelectionDiagnosticStage::HttpPrecommitObservation,
+                        "observation_failed",
+                        Some(route_band),
+                    );
                     return empty_response(StatusCode::SERVICE_UNAVAILABLE);
                 }
             }
@@ -485,7 +511,14 @@ pub(super) fn router_compatibility_response(
 pub(super) fn enabled_account_attempt_limit_from_accounts(
     accounts: Result<Vec<AccountRecord>, StateStoreError>,
 ) -> Result<usize, StateStoreError> {
-    Ok(accounts?
+    let accounts = accounts.inspect_err(|error| {
+        crate::account_selection::record_selection_rejected(
+            crate::account_selection::SelectionDiagnosticStage::HttpAccountAttemptLimit,
+            crate::account_selection::state_store_error_class(error),
+            None,
+        );
+    })?;
+    Ok(accounts
         .iter()
         .filter(|account| account.status() == AccountStatus::Enabled)
         .count()
