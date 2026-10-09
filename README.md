@@ -107,8 +107,11 @@ together.
 Waits and observations are single bounded calls that return the cursor to resume
 from. `events_observe` also streams each event while its call is open, as a
 `notifications/codexRouter/observationEvent` notification carrying `{event,
-cursor}` (the call is then answered as SSE); its result still lists every event,
-so a client that ignores the notification loses nothing. `agent-collaboration
+cursor}` (the call is then answered as SSE). Notifications are delivered only
+within the call's bound, so a reader that stops reading cannot keep the call or
+its request slot; the result still lists every event, so a client that ignores
+or misses a notification loses nothing. A resync marker's cursor is null: attach
+again from the result's epoch. `agent-collaboration
 events observe --stream` prints each streamed event as an `observationEvent`
 line before the result.
 

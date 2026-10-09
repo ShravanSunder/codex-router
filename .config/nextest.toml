@@ -21,3 +21,9 @@ process-runtime = { max-threads = 1 }
 filter = "binary(update_reexec) | binary(runtime_restart) | binary(compiled_cli_host_acceptance) | binary(quota_reset_pty_test) | (package(=codex-router-auth) & test(=claude_oauth::tests::refresh_timeout_is_ambiguous_and_never_returns_the_old_token)) | (package(=codex-router-proxy) & test(=tests::tunnel_affinity_tests::async_websocket_tunnel_does_not_gate_forwarding_on_slow_affinity_recorder))"
 test-group = "process-runtime"
 threads-required = "num-test-threads"
+
+# trybuild compiles its cases in a separate target directory; a cold cache needs more than the
+# default budget. The test bounds its own child process as well.
+[[profile.ci.overrides]]
+filter = "binary(checked_query_diagnostics)"
+slow-timeout = { period = "120s", terminate-after = 10 }

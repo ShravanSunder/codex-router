@@ -27,6 +27,9 @@ members = [
     "crates/codex-router-selection",
     "crates/codex-router-state",
     "crates/codex-router-test-support",
+    "crates/sqlx-turso",
+    "crates/sqlx-turso-core",
+    "crates/sqlx-turso-macros",
     "prototypes/ux_prototype",
 ]
 
@@ -56,6 +59,8 @@ chrono = "0.4.45"
 clap = { version = "4.5.53", features = ["derive", "env", "wrap_help"] }
 comfy-table = "7.2.2"
 crossterm = "0.29.0"
+either = "1.16.0"
+futures-core = "0.3.34"
 futures-util = { version = "0.3.34", default-features = false, features = ["sink", "std"] }
 getrandom = "0.4.3"
 hmac = "0.12.1"
@@ -81,11 +86,25 @@ serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
 serde_json_canonicalizer = "0.3.2"
 jsonschema = { version = "0.53.0", default-features = false }
+log = "0.4.33"
+percent-encoding = "2.3.2"
+proc-macro-crate = "3.5.0"
+proc-macro2 = "1.0.106"
+quote = "1.0.46"
 rmcp = { version = "=3.4.0", default-features = false, features = ["macros", "server", "transport-streamable-http-server"] }
 schemars = "1.2.2"
 sha2 = "0.10.9"
 security-framework = "3.7"
-sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "sqlite"] }
+# Engine-agnostic SQLx; each crate enables the engine it uses (`sqlite`, or the sqlx-turso
+# driver). The Turso driver implements sqlx-core internals, so every SQLx crate is pinned exactly
+# and moves in lockstep.
+sqlx = { version = "=0.9.0", default-features = false, features = ["runtime-tokio"] }
+sqlx-core = { version = "=0.9.0", default-features = false }
+sqlx-macros-core = { version = "=0.9.0", default-features = false }
+sqlx-turso = { path = "crates/sqlx-turso", version = "0.1.63" }
+sqlx-turso-core = { path = "crates/sqlx-turso-core", version = "0.1.63", default-features = false }
+sqlx-turso-macros = { path = "crates/sqlx-turso-macros", version = "0.1.63" }
+syn = { version = "2.0.118", features = ["full", "parsing"] }
 thiserror = "2.0.18"
 tokio = { version = "1.48.0", features = ["rt-multi-thread", "macros", "net", "time", "sync", "signal", "process", "io-util"] }
 tokio-tungstenite = { version = "0.29.0", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
@@ -93,7 +112,11 @@ tokio-util = { version = "0.7.17", features = ["codec", "compat", "rt"] }
 tracing = "0.1.44"
 tracing-opentelemetry = "0.32.0"
 tracing-subscriber = { version = "0.3.22", features = ["env-filter", "fmt", "json"] }
+trybuild = "1.0.116"
+# Exact engine pin; default features would add mimalloc and FTS (Tantivy).
+turso = { version = "=0.8.1", default-features = false }
 unicode-width = "0.2.2"
+url = "2.5.8"
 zeroize = "1.9.0"
 
 [workspace.lints.rust]

@@ -101,6 +101,16 @@ jobs:
         run: |
           scripts/tooling/bootstrap-tools.sh sqlx
           python3 scripts/tooling/prepare-sqlx.py --check
+      # The Turso driver's `sync` feature is opt-in (its rustls provider conflicts with
+      # Router's in a combined build), so its Sync paths are linted in their own invocation.
+      - name: Lint the Turso driver with every feature
+        run: cargo clippy --locked -p sqlx-turso -p sqlx-turso-core -p sqlx-turso-macros --all-targets --all-features -- -D warnings
+      - name: Check the reduced Turso driver feature set
+        run: cargo check --locked -p sqlx-turso --lib --no-default-features --features runtime-tokio
+      - name: Check Turso SQLx metadata against native migrations
+        run: |
+          python3 -m unittest scripts.tests.test_prepare_sqlx_turso -v
+          python3 scripts/tooling/prepare-sqlx-turso.py --check
 
   build:
     name: Build codex-router variants and quota-reset harness
@@ -151,10 +161,22 @@ jobs:
         run: |
           scripts/tooling/bootstrap-tools.sh ci
           echo "$GITHUB_WORKSPACE/tmp/rust-tools/bin" >> "$GITHUB_PATH"
-      # Compile every test binary once, then run both suites in parallel from
+      - name: Cache the pinned Turso sync server
+        uses: actions/cache@v4
+        with:
+          path: tmp/rust-tools/bin/tursodb
+          key: ${{ runner.os }}-${{ runner.arch }}-tursodb-${{ hashFiles('scripts/tooling/install-turso-sync-server.py') }}
+      - name: Install the pinned Turso sync server
+        run: |
+          python3 -m unittest scripts.tests.test_install_turso_sync_server -v
+          python3 scripts/tooling/install-turso-sync-server.py
+      # Compile every test binary once, then run the suites in parallel from
       # the built artifacts so they don't contend for cargo's build lock.
       - name: Build test binaries
-        run: cargo nextest run --profile ci --workspace --features codex-router-cli/keychain-test-support --no-run
+        run: |
+          cargo nextest run --profile ci --workspace --features codex-router-cli/keychain-test-support --exclude sqlx-turso --exclude sqlx-turso-core --exclude sqlx-turso-macros --no-run
+          cargo nextest run --profile ci --locked -p sqlx-turso -p sqlx-turso-core -p sqlx-turso-macros --all-features --no-run
+          cargo nextest run --profile ci --locked -p sqlx-turso-core --no-run
       - name: Test quota-reset terminal integration
         id: quota_reset_terminal_integration
         background: true
@@ -162,9 +184,17 @@ jobs:
       - name: Test Rust workspace
         id: workspace_tests
         background: true
-        run: cargo nextest run --profile ci --workspace --features codex-router-cli/keychain-test-support --exclude codex-router-quota-reset-test-harness
+        run: cargo nextest run --profile ci --workspace --features codex-router-cli/keychain-test-support --exclude codex-router-quota-reset-test-harness --exclude sqlx-turso --exclude sqlx-turso-core --exclude sqlx-turso-macros
       - name: Wait for tests
         wait-all:
+      # The Turso driver runs after the timing-sensitive suites above have finished: its
+      # trybuild test compiles a cold dependency graph that would compete with them. Every
+      # feature runs once (Sync against tursodb), then the driver core without Sync, which
+      # covers its `not(feature = "sync")` branches.
+      - name: Test the Turso driver with Sync against tursodb
+        run: cargo nextest run --profile ci --locked -p sqlx-turso -p sqlx-turso-core -p sqlx-turso-macros --all-features
+      - name: Test the Turso driver core without Sync
+        run: cargo nextest run --profile ci --locked -p sqlx-turso-core
 
   validated:
     name: Validate Rust workspace

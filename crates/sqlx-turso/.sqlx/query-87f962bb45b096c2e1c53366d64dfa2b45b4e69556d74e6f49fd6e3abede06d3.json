@@ -1,0 +1,10 @@
+{
+  "db_name": "Turso",
+  "query": "UPDATE records SET body = ? WHERE sequence = ?",
+  "describe": {
+    "columns": [],
+    "parameters": null,
+    "nullable": []
+  },
+  "hash": "87f962bb45b096c2e1c53366d64dfa2b45b4e69556d74e6f49fd6e3abede06d3"
+}
