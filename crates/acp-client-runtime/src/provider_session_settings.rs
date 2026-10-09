@@ -142,9 +142,7 @@ impl ProviderSettingsCatalog {
                 .map(|choice| choice.value.clone())
                 .collect();
         }
-        self.config_options
-            .iter()
-            .find(|option| option.category == Some(kind))
+        self.config_option(kind)
             .map(|option| {
                 option
                     .choices
@@ -157,6 +155,32 @@ impl ProviderSettingsCatalog {
 
     #[must_use]
     pub fn config_option(&self, kind: ProviderSettingKind) -> Option<&ProviderConfigOption> {
+        if kind == ProviderSettingKind::Effort {
+            let eligible = |option: &&ProviderConfigOption| {
+                option.category == Some(kind)
+                    && option.id != "thinking"
+                    && matches!(option.current_value, ProviderConfigValue::Select(_))
+            };
+            let has_unique_config_id = |option: &ProviderConfigOption| {
+                self.config_options
+                    .iter()
+                    .filter(|candidate| candidate.id == option.id)
+                    .count()
+                    == 1
+            };
+            let mut explicit = self
+                .config_options
+                .iter()
+                .filter(eligible)
+                .filter(|option| option.id == "effort");
+            if let Some(option) = explicit.next() {
+                return (explicit.next().is_none() && has_unique_config_id(option))
+                    .then_some(option);
+            }
+            let mut fallback = self.config_options.iter().filter(eligible);
+            let option = fallback.next()?;
+            return (fallback.next().is_none() && has_unique_config_id(option)).then_some(option);
+        }
         self.config_options
             .iter()
             .find(|option| option.category == Some(kind))

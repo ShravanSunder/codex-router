@@ -150,12 +150,14 @@ impl ExternalProviderRuntime {
 
     pub async fn initialize_with_mcp_http(
         launch: ExternalProviderLaunch,
+        model_picker: acp_client_runtime::ProviderModelPicker,
         server_name: impl Into<String>,
         server_url: impl Into<String>,
     ) -> Result<Self, ExternalProviderRuntimeError> {
         let interaction_port = Arc::new(HostInteractionPort::default());
         let client = AgentSessionClient::initialize_with_mcp_http(
             launch,
+            model_picker,
             server_name,
             server_url,
             Arc::clone(&interaction_port),
@@ -171,6 +173,7 @@ impl ExternalProviderRuntime {
 
     pub(crate) async fn initialize_with_mcp_http_and_hub(
         launch: ExternalProviderLaunch,
+        model_picker: acp_client_runtime::ProviderModelPicker,
         server_name: impl Into<String>,
         server_url: impl Into<String>,
         hub: Arc<ProviderSessionEventHub>,
@@ -184,6 +187,7 @@ impl ExternalProviderRuntime {
             .await;
         let result = AgentSessionClient::initialize_with_mcp_http(
             launch,
+            model_picker,
             server_name,
             server_url,
             Arc::clone(&interaction_port),

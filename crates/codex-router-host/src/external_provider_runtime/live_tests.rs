@@ -650,6 +650,7 @@ async fn live_composed_cursor_native_mcp_requires_typed_call_and_router_result()
             arguments,
             environment: Vec::new(),
         },
+        acp_client_runtime::ProviderModelPicker::CursorParameterized,
         "router-collaboration",
         manifest.mcp.url,
     )
