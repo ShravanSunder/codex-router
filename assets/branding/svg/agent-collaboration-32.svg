@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 1254 1254" role="img" aria-labelledby="icon-title icon-description">
+  <title id="icon-title">Agent collaboration</title>
+  <desc id="icon-description">Three AI conversation agents connected as peers. A white agent above copper and blue agents, with matching copper and blue messages on white connections.</desc>
+  <!-- Editable palette: background #191B1F, white #F5F7FA, copper #C9956B, blue #409CFF. -->
+  <defs>
+    <filter id="tile-shadow" x="-15%" y="-15%" width="130%" height="140%">
+      <feDropShadow dx="0" dy="16" stdDeviation="20" flood-color="#000000" flood-opacity="0.35"/>
+    </filter>
+    <path id="agent-bubble" d="M -45 -119 H 45 C 96 -119 126 -88 126 -39 V 39 C 126 90 96 119 45 119 H -27 L -88 157 V 108 C -113 96 -126 72 -126 39 V -39 C -126 -88 -96 -119 -45 -119 Z"/>
+    <path id="agent-spark" d="M 0 -69 C 5 -69 14 -30 27 -20 C 41 -9 69 -5 69 0 C 69 5 41 9 27 20 C 14 30 5 69 0 69 C -5 69 -14 30 -27 20 C -41 9 -69 5 -69 0 C -69 -5 -41 -9 -27 -20 C -14 -30 -5 -69 0 -69 Z"/>
+  </defs>
+  <rect id="tile" x="82" y="82" width="1090" height="1090" rx="218" fill="#191B1F" stroke="#34383F" stroke-width="2" filter="url(#tile-shadow)"/>
+  <g id="white-connections" fill="none" stroke="#F5F7FA" stroke-width="25" stroke-linecap="round">
+    <path id="left-upper" d="M 462 419 Q 437 438 416 460"/>
+    <path id="left-lower" d="M 361 563 Q 350 596 345 630"/>
+    <path id="right-upper" d="M 792 419 Q 817 438 838 460"/>
+    <path id="right-lower" d="M 893 563 Q 904 596 909 630"/>
+    <path id="bottom-connection" d="M 505 868 Q 627 931 750 868"/>
+  </g>
+  <g id="message-dashes" fill="none" stroke-width="28" stroke-linecap="round">
+    <path id="copper-message" d="M 395 487 L 371 529" stroke="#C9956B"/>
+    <path id="blue-message" d="M 859 487 L 883 529" stroke="#409CFF"/>
+  </g>
+  <g id="top-agent" transform="translate(627 363)" color="#F5F7FA">
+    <use href="#agent-bubble" fill="none" stroke="currentColor" stroke-width="24" stroke-linejoin="round"/>
+    <use href="#agent-spark" fill="currentColor"/>
+  </g>
+  <g id="copper-agent" transform="translate(353 789)" color="#C9956B">
+    <use href="#agent-bubble" fill="none" stroke="currentColor" stroke-width="24" stroke-linejoin="round"/>
+    <use href="#agent-spark" fill="currentColor"/>
+  </g>
+  <g id="blue-agent" transform="translate(901 789) scale(-1 1)" color="#409CFF">
+    <use href="#agent-bubble" fill="none" stroke="currentColor" stroke-width="24" stroke-linejoin="round"/>
+    <use href="#agent-spark" fill="currentColor"/>
+  </g>
+</svg>
