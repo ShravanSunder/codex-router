@@ -243,15 +243,22 @@ for line in sys.stdin:
     }
 }
 
-fn exited_provider_fixture(exit_marker: &Path) -> ExternalProviderLaunch {
+fn exited_provider_fixture(
+    exit_marker: &Path,
+    release_address: std::net::SocketAddr,
+) -> ExternalProviderLaunch {
     let script = format!(
         r#"
-import json,sys
+import json,socket,sys
 request=json.loads(sys.stdin.readline())
 print(json.dumps({{'jsonrpc':'2.0','id':request['id'],'result':{{'protocolVersion':1,'agentCapabilities':{{'loadSession':True}},'agentInfo':{{'name':'exited-provider-fixture','version':'1'}}}}}})); sys.stdout.flush()
+with socket.create_connection(({:?}, {}), timeout=2) as release:
+ assert release.recv(1)==b'X', 'initialization release missing'
 with open({:?},'w') as marker: marker.write('provider exited')
 sys.exit(0)
 "#,
+        release_address.ip().to_string(),
+        release_address.port(),
         exit_marker.display().to_string()
     );
     ExternalProviderLaunch {
