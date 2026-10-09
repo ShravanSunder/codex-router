@@ -295,6 +295,25 @@ pub(super) async fn account_attempt_limit_read_failure_maps_to_state_unavailable
     assert!(!rendered.contains("codex_router_all_accounts_exhausted"));
 }
 
+#[test]
+pub(super) fn selection_diagnostics_account_attempt_limit_read_failure_is_scrubbed() {
+    let read_failure = StateStoreError::Sqlite {
+        message: "payload_private_marker".to_owned(),
+    };
+    let mut result = None;
+    let captured_logs = crate::test_log_capture::capture_log_output(|| {
+        result = Some(enabled_account_attempt_limit_from_accounts(Err(
+            read_failure,
+        )));
+    });
+
+    assert!(captured_logs.contains("codex_router.selection_rejected"));
+    assert!(captured_logs.contains("selection.stage=\"http_account_attempt_limit\""));
+    assert!(captured_logs.contains("error.class=\"sqlite\""));
+    assert!(!captured_logs.contains("payload_private_marker"));
+    assert!(matches!(result, Some(Err(StateStoreError::Sqlite { .. }))));
+}
+
 pub(super) async fn hyper_error_from_client_bytes(bytes: &'static [u8]) -> hyper::Error {
     let listener = TokioTcpListener::bind("127.0.0.1:0")
         .await

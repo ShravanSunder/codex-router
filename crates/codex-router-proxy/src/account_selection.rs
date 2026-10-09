@@ -99,7 +99,16 @@ mod post_exhaustion;
 mod repository_selection;
 mod request_metadata;
 mod runtime_quarantine;
+mod selection_diagnostics;
 mod short_quota_wait;
+
+pub(crate) use selection_diagnostics::{
+    SelectionDiagnosticStage, record_selection_error, record_selection_error_on_failure,
+    record_selection_error_with_class_on_failure, record_selection_rejected,
+    runtime_quarantine_selection_error, selection_error, selection_error_class,
+    selector_mutex_selection_error, session_affinity_publication_result_on_failure,
+    session_cache_result_on_failure, state_store_error_class, state_store_result_on_failure,
+};
 
 pub use active_reservations::{
     ActiveClientLeaseReporter, SqliteActiveClientLeaseReporter, release_account_reservation,
