@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "acp-client-runtime"
-version = "0.1.68"
+version = "0.1.81"
 dependencies = [
  "agent-client-protocol",
  "futures-util",
@@ -65,7 +65,7 @@ dependencies = [
 
 [[package]]
 name = "agent-automation"
-version = "0.1.68"
+version = "0.1.81"
 dependencies = [
  "chrono",
  "chrono-tz",
@@ -130,7 +130,7 @@ dependencies = [
 
 [[package]]
 name = "agent-collaboration"
-version = "0.1.68"
+version = "0.1.81"
 dependencies = [
  "agent-automation",
  "automation-storage",
@@ -140,6 +140,7 @@ dependencies = [
  "codex-native-integration",
  "codex-router-host",
  "collaboration-client",
+ "collaboration-mcp",
  "collaboration-protocol",
  "collaboration-service",
  "comfy-table",
@@ -151,7 +152,7 @@ dependencies = [
  "lifecycle-observation",
  "message-board",
  "message-board-storage",
- "reqwest",
+ "reqwest 0.12.28",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -422,7 +423,7 @@ checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 
 [[package]]
 name = "automation-storage"
-version = "0.1.68"
+version = "0.1.81"
 dependencies = [
  "agent-automation",
  "chrono",
@@ -435,6 +436,52 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "axum"
+version = "0.8.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8b52af3cb4058c895d37317bb27508dccc8e5f2d39454016b297bf4a400597b8"
+dependencies = [
+ "axum-core",
+ "bytes",
+ "futures-util",
+ "http",
+ "http-body",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "itoa",
+ "matchit",
+ "memchr",
+ "mime",
+ "percent-encoding",
+ "pin-project-lite",
+ "serde_core",
+ "sync_wrapper",
+ "tokio",
+ "tower",
+ "tower-layer",
+ "tower-service",
+]
+
+[[package]]
+name = "axum-core"
+version = "0.5.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "08c78f31d7b1291f7ee735c1c6780ccde7785daae9a9206026862dab7d8792d1"
+dependencies = [
+ "bytes",
+ "futures-core",
+ "http",
+ "http-body",
+ "http-body-util",
+ "mime",
+ "pin-project-lite",
+ "sync_wrapper",
+ "tower-layer",
+ "tower-service",
 ]
 
 [[package]]
@@ -689,7 +736,7 @@ checksum = "c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9"
 
 [[package]]
 name = "claude-code-peer-messaging"
-version = "0.1.68"
+version = "0.1.81"
 dependencies = [
  "agent-automation",
  "collaboration-protocol",
@@ -710,7 +757,7 @@ checksum = "0c9ea0ac24bc397ab3c98583a3c9ba74fa56b09a4449bbe172b9b1ddb016027a"
 
 [[package]]
 name = "codex-acp-adapter"
-version = "0.1.68"
+version = "0.1.81"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -732,7 +779,7 @@ dependencies = [
 
 [[package]]
 name = "codex-native-integration"
-version = "0.1.68"
+version = "0.1.81"
 dependencies = [
  "futures-util",
  "jsonschema",
@@ -752,14 +799,14 @@ dependencies = [
 
 [[package]]
 name = "codex-router-auth"
-version = "0.1.68"
+version = "0.1.81"
 dependencies = [
  "base64 0.22.1",
  "codex-router-core",
  "codex-router-secret-store",
  "codex-router-state",
  "getrandom 0.4.3",
- "reqwest",
+ "reqwest 0.12.28",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -772,7 +819,7 @@ dependencies = [
 
 [[package]]
 name = "codex-router-cli"
-version = "0.1.68"
+version = "0.1.81"
 dependencies = [
  "agent-collaboration",
  "base64 0.22.1",
@@ -799,7 +846,7 @@ dependencies = [
  "opentelemetry-appender-tracing",
  "opentelemetry-otlp",
  "opentelemetry_sdk",
- "reqwest",
+ "reqwest 0.12.28",
  "rustix",
  "serde",
  "serde_json",
@@ -819,7 +866,7 @@ dependencies = [
 
 [[package]]
 name = "codex-router-core"
-version = "0.1.68"
+version = "0.1.81"
 dependencies = [
  "hmac 0.12.1",
  "serde",
@@ -831,7 +878,7 @@ dependencies = [
 
 [[package]]
 name = "codex-router-host"
-version = "0.1.68"
+version = "0.1.81"
 dependencies = [
  "acp-client-runtime",
  "agent-automation",
@@ -872,7 +919,7 @@ dependencies = [
 
 [[package]]
 name = "codex-router-proxy"
-version = "0.1.68"
+version = "0.1.81"
 dependencies = [
  "async-compression",
  "bytes",
@@ -891,7 +938,7 @@ dependencies = [
  "hyper-tungstenite",
  "hyper-util",
  "opentelemetry",
- "reqwest",
+ "reqwest 0.12.28",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -907,7 +954,7 @@ dependencies = [
 
 [[package]]
 name = "codex-router-quota"
-version = "0.1.68"
+version = "0.1.81"
 dependencies = [
  "codex-router-core",
  "thiserror 2.0.18",
@@ -915,7 +962,7 @@ dependencies = [
 
 [[package]]
 name = "codex-router-quota-reset-test-harness"
-version = "0.1.68"
+version = "0.1.81"
 dependencies = [
  "codex-router-cli",
  "codex-router-core",
@@ -928,7 +975,7 @@ dependencies = [
 
 [[package]]
 name = "codex-router-secret-store"
-version = "0.1.68"
+version = "0.1.81"
 dependencies = [
  "aes-gcm",
  "apple-native-keyring-store",
@@ -951,7 +998,7 @@ dependencies = [
 
 [[package]]
 name = "codex-router-selection"
-version = "0.1.68"
+version = "0.1.81"
 dependencies = [
  "base64 0.22.1",
  "codex-router-core",
@@ -966,7 +1013,7 @@ dependencies = [
 
 [[package]]
 name = "codex-router-state"
-version = "0.1.68"
+version = "0.1.81"
 dependencies = [
  "codex-router-core",
  "codex-router-selection",
@@ -979,7 +1026,7 @@ dependencies = [
 
 [[package]]
 name = "codex-router-test-support"
-version = "0.1.68"
+version = "0.1.81"
 dependencies = [
  "codex-native-integration",
  "codex-router-cli",
@@ -999,21 +1046,26 @@ dependencies = [
 
 [[package]]
 name = "codex-router-ux-prototype"
-version = "0.1.68"
+version = "0.1.81"
 dependencies = [
  "iocraft",
 ]
 
 [[package]]
 name = "collaboration-client"
-version = "0.1.68"
+version = "0.1.81"
 dependencies = [
+ "automation-storage",
  "codex-acp-adapter",
  "codex-native-integration",
+ "collaboration-mcp",
  "collaboration-protocol",
  "collaboration-service",
  "futures-util",
+ "http",
  "message-board",
+ "message-board-storage",
+ "rmcp",
  "schemars 1.2.2",
  "serde",
  "serde_json",
@@ -1028,11 +1080,11 @@ dependencies = [
 
 [[package]]
 name = "collaboration-mcp"
-version = "0.1.68"
+version = "0.1.81"
 dependencies = [
  "agent-collaboration",
  "automation-storage",
- "bytes",
+ "axum",
  "codex-acp-adapter",
  "codex-native-integration",
  "codex-router-host",
@@ -1041,13 +1093,10 @@ dependencies = [
  "collaboration-service",
  "futures-util",
  "http",
- "http-body-util",
- "hyper",
- "hyper-util",
  "jsonschema",
  "message-board",
  "message-board-storage",
- "reqwest",
+ "reqwest 0.12.28",
  "rmcp",
  "schemars 1.2.2",
  "serde",
@@ -1057,14 +1106,13 @@ dependencies = [
  "tokio",
  "tokio-tungstenite",
  "tokio-util",
- "tower-service",
  "tracing",
  "tracing-subscriber",
 ]
 
 [[package]]
 name = "collaboration-protocol"
-version = "0.1.68"
+version = "0.1.81"
 dependencies = [
  "agent-automation",
  "chrono",
@@ -1083,7 +1131,7 @@ dependencies = [
 
 [[package]]
 name = "collaboration-service"
-version = "0.1.68"
+version = "0.1.81"
 dependencies = [
  "agent-automation",
  "automation-storage",
@@ -1093,6 +1141,7 @@ dependencies = [
  "codex-acp-adapter",
  "codex-native-integration",
  "collaboration-client",
+ "collaboration-mcp",
  "collaboration-protocol",
  "futures-util",
  "getrandom 0.3.4",
@@ -2656,7 +2705,7 @@ dependencies = [
 
 [[package]]
 name = "lifecycle-observation"
-version = "0.1.68"
+version = "0.1.81"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -2722,6 +2771,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "matchit"
+version = "0.8.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "47e1ffaa40ddd1f3ed91f717a33c8c0ee23fff369e3aa8772b9605cc1d22f4c3"
+
+[[package]]
 name = "md-5"
 version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2739,7 +2794,7 @@ checksum = "88904434abc2901f197fe8cc55f0445e7ded921dba5911dad2e2b39b48e663c4"
 
 [[package]]
 name = "message-board"
-version = "0.1.68"
+version = "0.1.81"
 dependencies = [
  "chrono",
  "schemars 1.2.2",
@@ -2751,7 +2806,7 @@ dependencies = [
 
 [[package]]
 name = "message-board-storage"
-version = "0.1.68"
+version = "0.1.81"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -2772,6 +2827,12 @@ name = "micromap"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a86d3146ed3995b5913c414f6664344b9617457320782e64f0bb44afd49d74"
+
+[[package]]
+name = "mime"
+version = "0.3.17"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6877bb514081ee2a7ff5ef9de3281f14a4dd4bceac4c09388074a6b5df8a139a"
 
 [[package]]
 name = "miniz_oxide"
@@ -2954,7 +3015,7 @@ dependencies = [
  "bytes",
  "http",
  "opentelemetry",
- "reqwest",
+ "reqwest 0.12.28",
 ]
 
 [[package]]
@@ -2969,7 +3030,7 @@ dependencies = [
  "opentelemetry-proto",
  "opentelemetry_sdk",
  "prost",
- "reqwest",
+ "reqwest 0.12.28",
  "thiserror 2.0.18",
  "tracing",
 ]
@@ -3503,6 +3564,40 @@ dependencies = [
 ]
 
 [[package]]
+name = "reqwest"
+version = "0.13.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "219c5811de6525e5416c7d5d53bb656d3afdbc6c5af816e0802bcfa42dbdc1c3"
+dependencies = [
+ "base64 0.22.1",
+ "bytes",
+ "futures-core",
+ "futures-util",
+ "http",
+ "http-body",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "js-sys",
+ "log",
+ "percent-encoding",
+ "pin-project-lite",
+ "serde",
+ "serde_json",
+ "sync_wrapper",
+ "tokio",
+ "tokio-util",
+ "tower",
+ "tower-http",
+ "tower-service",
+ "url",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "wasm-streams",
+ "web-sys",
+]
+
+[[package]]
 name = "ring"
 version = "0.17.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3530,10 +3625,13 @@ dependencies = [
  "http",
  "http-body",
  "http-body-util",
+ "hyper",
+ "hyper-util",
  "indexmap 2.14.0",
  "pastey",
  "pin-project-lite",
  "rand 0.10.2",
+ "reqwest 0.13.4",
  "rmcp-macros",
  "schemars 1.2.2",
  "serde",
@@ -3895,7 +3993,7 @@ dependencies = [
 
 [[package]]
 name = "session-event-model"
-version = "0.1.68"
+version = "0.1.81"
 dependencies = [
  "base64 0.22.1",
  "message-board",
@@ -5087,6 +5185,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dc1b4cb0cc549fcf58d7dfc081778139b3d283a081644e833e84682ad71cea24"
 dependencies = [
  "unicode-ident",
+]
+
+[[package]]
+name = "wasm-streams"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9d1ec4f6517c9e11ae630e200b2b65d193279042e28edd4a2cda233e46670bbb"
+dependencies = [
+ "futures-util",
+ "js-sys",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
 ]
 
 [[package]]

@@ -2,7 +2,7 @@
 use crate::current_session_identity::{HarnessSessionIdentity, read_harness_session_identity};
 use crate::endpoint_commands::{report_failure, resolve_directory, result_envelope};
 use clap::Parser;
-use collaboration_client::{ClientError, ControlClient, protocol::SessionRef};
+use collaboration_client::{ClientError, CollaborationClient, protocol::SessionRef};
 use serde_json::json;
 use std::{
     ffi::OsString,
@@ -61,7 +61,7 @@ pub fn run_whoami_command(arguments: Vec<OsString>) -> i32 {
             report_failure("identityUnavailable", &message, 2, machine_output)
         }
         Err(ResolveFailure::Client(error)) => {
-            crate::permission_diagnostic_reporting::report_permission_error(
+            crate::permission_diagnostic_reporting::report_actionable_client_error(
                 &error,
                 crate::permission_diagnostic_reporting::PermissionDiagnosticRendering::Command,
                 machine_output,
@@ -87,22 +87,16 @@ async fn resolve_current_session(
     directory: &std::path::Path,
     harness: &HarnessSessionIdentity,
 ) -> Result<ResolvedCurrentSession, ResolveFailure> {
-    let mut client =
-        ControlClient::connect(directory, "agent-collaboration", env!("CARGO_PKG_VERSION"))
+    let client =
+        CollaborationClient::connect(directory, "agent-collaboration", env!("CARGO_PKG_VERSION"))
             .await
             .map_err(ResolveFailure::Client)?;
     let service_id = client.identity().service_id.clone();
-    let machine_label = client
-        .machine_label()
-        .map(|label| label.as_str().to_owned())
-        .ok_or(ResolveFailure::Client(ClientError::Protocol(
-            "machine label unavailable",
-        )))?;
+    let machine_label = client.machine_label().as_str().to_owned();
     let inventory = client
         .list_endpoints()
         .await
         .map_err(ResolveFailure::Client)?;
-    client.close().await.map_err(ResolveFailure::Client)?;
     let session = harness
         .session_ref(&service_id)
         .map_err(ResolveFailure::Invalid)?;

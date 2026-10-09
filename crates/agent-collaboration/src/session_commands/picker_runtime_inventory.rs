@@ -8,7 +8,7 @@ use collaboration_client::protocol::{
     NativeSessionObservation, NativeSessionScope, NativeSessionSource, NativeSessionView,
     ProviderSessionListParams,
 };
-use collaboration_client::{ClientError, ControlClient};
+use collaboration_client::{ClientError, CollaborationClient};
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::Path,
@@ -27,7 +27,7 @@ use native_inventory_binding::{
 };
 
 pub(super) async fn load_runtime_records(
-    client: &mut ControlClient,
+    client: &mut CollaborationClient,
     metadata: &[SessionPickerRecord],
     include_empty_sessions: bool,
 ) -> Result<(EndpointRef, Vec<SessionPickerRecord>), ClientError> {
@@ -93,7 +93,7 @@ pub(super) async fn load_runtime_records(
 }
 
 async fn load_provider_records(
-    client: &mut ControlClient,
+    client: &mut CollaborationClient,
 ) -> Result<(Option<EndpointRef>, Vec<SessionPickerRecord>), ClientError> {
     let inventory = client.list_endpoints().await?;
     let native_endpoint = match bind_native_inventory(
@@ -163,7 +163,7 @@ async fn load_provider_records(
 }
 
 async fn selected_generation(
-    client: &mut ControlClient,
+    client: &mut CollaborationClient,
 ) -> Result<(EndpointRef, CodexGeneration), ClientError> {
     let inventory = client.list_endpoints().await?;
     let endpoint = EndpointRef {
@@ -277,27 +277,23 @@ impl PickerRuntimeInventory {
         let (provider_result, native_result) = if let Some(directory) = directory {
             let metadata = stored.clone();
             let providers = async {
-                let mut client = ControlClient::connect(
+                let mut client = CollaborationClient::connect(
                     directory,
                     "sessions-picker-providers",
                     env!("CARGO_PKG_VERSION"),
                 )
                 .await?;
-                let result = load_provider_records(&mut client).await;
-                let _closed = client.close().await;
-                result
+                load_provider_records(&mut client).await
             };
             let native = async {
-                let mut client = ControlClient::connect(
+                let mut client = CollaborationClient::connect(
                     directory,
                     "sessions-picker-native",
                     env!("CARGO_PKG_VERSION"),
                 )
                 .await?;
-                let result =
-                    load_runtime_records(&mut client, &metadata, include_empty_sessions).await;
-                let _closed = client.close().await;
-                result
+
+                load_runtime_records(&mut client, &metadata, include_empty_sessions).await
             };
             let deadline = std::time::Duration::from_secs(5);
             let (providers, native) = tokio::join!(

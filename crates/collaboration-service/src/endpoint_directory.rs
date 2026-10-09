@@ -1,10 +1,8 @@
-//! Atomic endpoint snapshots and per-subscriber bounded publication ordering.
+//! Atomic endpoint snapshots: the Host publishes endpoints and readers take the inventory.
 use collaboration_protocol::{EndpointDescription, EndpointRef, UuidIdentity};
 use std::collections::BTreeMap;
 use std::io;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use tokio::sync::mpsc;
 
 #[derive(Clone)]
 pub struct EndpointDirectory {
@@ -13,28 +11,12 @@ pub struct EndpointDirectory {
 struct DirectoryState {
     service_id: UuidIdentity,
     endpoints: BTreeMap<EndpointRef, EndpointDescription>,
-    subscribers: BTreeMap<u64, SubscriberState>,
-    next_subscriber: u64,
-}
-struct SubscriberState {
-    sequence: u64,
-    sender: mpsc::Sender<EndpointUpdate>,
-    overflow: Arc<AtomicBool>,
-}
-#[derive(Clone, Debug)]
-pub struct EndpointUpdate {
-    pub sequence: u64,
-    pub endpoint: EndpointDescription,
+    /// Counts every publication across the Host, independent of any subscriber.
+    publications: u64,
 }
 pub struct EndpointSnapshot {
     pub sequence: u64,
     pub endpoints: Vec<EndpointDescription>,
-}
-pub struct EndpointSubscription {
-    directory: EndpointDirectory,
-    id: u64,
-    receiver: mpsc::Receiver<EndpointUpdate>,
-    overflow: Arc<AtomicBool>,
 }
 impl EndpointDirectory {
     pub fn read_endpoint(&self, endpoint: &EndpointRef) -> io::Result<Option<EndpointDescription>> {
@@ -51,8 +33,7 @@ impl EndpointDirectory {
             state: Arc::new(Mutex::new(DirectoryState {
                 service_id,
                 endpoints: BTreeMap::new(),
-                subscribers: BTreeMap::new(),
-                next_subscriber: 0,
+                publications: 0,
             })),
         }
     }
@@ -74,96 +55,38 @@ impl EndpointDirectory {
         if state.endpoints.len() >= 64 && !state.endpoints.contains_key(&endpoint.endpoint) {
             return Err(io::Error::other("endpoint capacity exceeded"));
         }
-        state
-            .endpoints
-            .insert(endpoint.endpoint.clone(), endpoint.clone());
-        state.subscribers.retain(|_, subscriber| {
-            if subscriber.sequence >= 9_007_199_254_740_991 {
-                subscriber.overflow.store(true, Ordering::Release);
-                return false;
-            }
-            let sequence = subscriber.sequence + 1;
-            match subscriber.sender.try_send(EndpointUpdate {
-                sequence,
-                endpoint: endpoint.clone(),
-            }) {
-                Ok(()) => {
-                    subscriber.sequence = sequence;
-                    true
-                }
-                Err(_) => {
-                    subscriber.overflow.store(true, Ordering::Release);
-                    false
-                }
-            }
-        });
+        state.endpoints.insert(endpoint.endpoint.clone(), endpoint);
+        state.publications = state.publications.saturating_add(1);
         Ok(())
     }
-    pub fn subscribe(&self) -> io::Result<EndpointSubscription> {
-        let mut state = self
-            .state
-            .lock()
-            .map_err(|_| io::Error::other("endpoint directory unavailable"))?;
-        if state.subscribers.len() >= 32 {
-            return Err(io::Error::other("connection capacity exceeded"));
-        }
-        let id = state.next_subscriber;
-        state.next_subscriber = id
-            .checked_add(1)
-            .ok_or_else(|| io::Error::other("subscriber identity exhausted"))?;
-        let (sender, receiver) = mpsc::channel(1024);
-        let overflow = Arc::new(AtomicBool::new(false));
-        state.subscribers.insert(
-            id,
-            SubscriberState {
-                sequence: 0,
-                sender,
-                overflow: Arc::clone(&overflow),
-            },
-        );
-        Ok(EndpointSubscription {
-            directory: self.clone(),
-            id,
-            receiver,
-            overflow,
-        })
-    }
-}
-impl EndpointSubscription {
-    pub fn snapshot(&self) -> io::Result<EndpointSnapshot> {
+    /// Every published endpoint, with the Host-wide count of publications they reflect.
+    pub fn inventory(&self) -> io::Result<EndpointSnapshot> {
         let state = self
-            .directory
             .state
             .lock()
             .map_err(|_| io::Error::other("endpoint directory unavailable"))?;
-        let subscriber = state
-            .subscribers
-            .get(&self.id)
-            .ok_or_else(|| io::Error::other("subscription closed"))?;
         Ok(EndpointSnapshot {
-            sequence: subscriber.sequence,
+            sequence: state.publications,
             endpoints: state.endpoints.values().cloned().collect(),
         })
     }
-    pub async fn next(&mut self) -> io::Result<EndpointUpdate> {
-        if self.overflow.load(Ordering::Acquire) {
-            return Err(io::Error::other("subscription overflow"));
-        }
-        let next = self
-            .receiver
-            .recv()
-            .await
-            .ok_or_else(|| io::Error::other("subscription closed"))?;
-        if self.overflow.load(Ordering::Acquire) {
-            return Err(io::Error::other("subscription overflow"));
-        }
-        Ok(next)
+    /// A reader of the current inventory, with no change notifications. The Codex
+    /// app-server delivery route (a harness file that stays byte-identical) reads the
+    /// inventory through it; new readers call [`Self::inventory`].
+    pub fn subscribe(&self) -> io::Result<EndpointInventoryReader> {
+        Ok(EndpointInventoryReader {
+            directory: self.clone(),
+        })
     }
 }
-impl Drop for EndpointSubscription {
-    fn drop(&mut self) {
-        if let Ok(mut state) = self.directory.state.lock() {
-            state.subscribers.remove(&self.id);
-        }
+
+/// Reads the endpoint inventory on demand; see [`EndpointDirectory::subscribe`].
+pub struct EndpointInventoryReader {
+    directory: EndpointDirectory,
+}
+
+impl EndpointInventoryReader {
+    pub fn snapshot(&self) -> io::Result<EndpointSnapshot> {
+        self.directory.inventory()
     }
 }

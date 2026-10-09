@@ -1,85 +1,152 @@
-//! Select the provider hub or native attachment from endpoint capabilities.
+//! Select provider observation or native attachment from endpoint capabilities.
+//!
+//! A provider Session is observed through bounded calls that resume from the last event's
+//! sequence within the hub's epoch, so following one is a loop of those calls. A Codex
+//! Session is observed on its native carrier.
 
-use std::{path::Path, time::Duration};
+use std::{collections::VecDeque, time::Duration};
 
 use collaboration_protocol::{
     BoundedObservationRequest, BoundedObservationResult, ChannelDescription, CodexGeneration,
-    EndpointId, EndpointRef, ProviderSessionListenReady, ProviderSessionListenRequest, SessionId,
-    SessionRef,
+    EndpointId, EndpointRef, ObservationEndReason, SessionId, SessionRef,
 };
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
-use crate::{ClientError, ControlClient, NativeObservation, OperationError};
+use crate::collaboration_access::EndpointDirectoryReader;
+use crate::{
+    ClientError, CollaborationAccess, CollaborationClient, NativeObservation, ObservationEventSink,
+    OperationError,
+};
+
+/// How long one provider observation call waits for new events while following.
+const FOLLOW_CALL_SECONDS: u64 = 30;
+/// The first call collects the retained snapshot in one batch.
+const SNAPSHOT_MAX_EVENTS: usize = 4096;
+/// A bounded observation returns at its deadline unless it fills, so each following call
+/// asks for one event: it returns as soon as the next event exists, retained or live.
+const FOLLOW_EVENTS_PER_CALL: usize = 1;
+const FOLLOW_MAX_BYTES: usize = 1_048_576;
 
 pub enum SessionObservation {
     Native(NativeObservation),
-    Provider {
-        control: ControlClient,
-        ready: ProviderSessionListenReady,
-    },
+    Provider(ProviderSessionFollow),
+}
+
+/// Follows one provider Session through bounded observation calls.
+pub struct ProviderSessionFollow {
+    access: ProviderObservationAccess,
+    target: SessionRef,
+    generation: CodexGeneration,
+    epoch: Option<u64>,
+    after_sequence: Option<u64>,
+    pending: VecDeque<Value>,
+    ended: bool,
+}
+
+enum ProviderObservationAccess {
+    Api(CollaborationClient),
+    Local(std::sync::Arc<dyn crate::LocalCollaboration>),
+}
+
+impl ProviderObservationAccess {
+    async fn observe(
+        &self,
+        request: BoundedObservationRequest,
+        observed: Option<ObservationEventSink>,
+    ) -> Result<BoundedObservationResult, ClientError> {
+        match self {
+            Self::Api(client) => {
+                client
+                    .observe_provider_session_streaming(request, observed)
+                    .await
+            }
+            Self::Local(router) => router.observe_provider_session(request, observed).await,
+        }
+    }
 }
 
 impl SessionObservation {
     pub async fn attach_by_ids_with_context(
-        directory: &Path,
+        access: &CollaborationAccess,
         endpoint_id: EndpointId,
         session_id: SessionId,
     ) -> Result<Self, OperationError> {
-        let mut control = ControlClient::connect(
-            directory,
-            "agent-collaboration-observer",
-            env!("CARGO_PKG_VERSION"),
-        )
-        .await
-        .map_err(|error| OperationError::before_dispatch("observation-connect", None, error))?;
+        let endpoints = access
+            .endpoint_directory("agent-collaboration-observer")
+            .await
+            .map_err(|error| OperationError::before_dispatch("observation-connect", None, error))?;
         let target = SessionRef {
             endpoint: EndpointRef {
-                service_id: control.identity().service_id.clone(),
+                service_id: endpoints.service_id(),
                 endpoint_id,
             },
             session_id,
         };
-        if endpoint_is_provider(&mut control, &target).await? {
-            let ready = control
-                .listen_provider_session(ProviderSessionListenRequest {
-                    target: target.clone(),
-                })
+        if endpoint_is_provider(&endpoints, &target).await? {
+            let provider = provider_access(access, endpoints);
+            let first = provider
+                .observe(
+                    BoundedObservationRequest {
+                        target: target.clone(),
+                        timeout_seconds: 1,
+                        max_events: SNAPSHOT_MAX_EVENTS,
+                        max_bytes: FOLLOW_MAX_BYTES,
+                        after_sequence: None,
+                        epoch: None,
+                    },
+                    None,
+                )
                 .await
                 .map_err(|error| {
-                    OperationError::before_dispatch("observation-attach", Some(target), error)
+                    OperationError::before_dispatch(
+                        "observation-attach",
+                        Some(target.clone()),
+                        error,
+                    )
                 })?;
-            Ok(Self::Provider { control, ready })
+            let mut follow = ProviderSessionFollow {
+                access: provider,
+                generation: first.generation.clone(),
+                target,
+                epoch: None,
+                after_sequence: None,
+                pending: VecDeque::new(),
+                ended: false,
+            };
+            follow.accept(first);
+            Ok(Self::Provider(follow))
         } else {
-            NativeObservation::attach_with_control_context(directory, control, target)
+            NativeObservation::attach_with_endpoints(access, endpoints, target)
                 .await
                 .map(Self::Native)
         }
     }
 
+    /// One bounded observation of a provider or Codex session, handing each event to
+    /// `observed` as it is observed; the result still lists every event.
     pub async fn observe_bounded(
-        directory: &Path,
+        access: &CollaborationAccess,
         request: BoundedObservationRequest,
         cancel: CancellationToken,
+        observed: Option<ObservationEventSink>,
     ) -> Result<BoundedObservationResult, OperationError> {
         let target = request.target.clone();
         crate::observation_session::validate_observation_bounds(&request).map_err(|error| {
             OperationError::before_dispatch("observation-validation", Some(target.clone()), error)
         })?;
-        let mut control = ControlClient::connect(
-            directory,
-            "agent-collaboration-observer",
-            env!("CARGO_PKG_VERSION"),
-        )
-        .await
-        .map_err(|error| {
-            OperationError::before_dispatch("observation-connect", Some(target.clone()), error)
-        })?;
-        if endpoint_is_provider(&mut control, &target).await? {
+        let endpoints = access
+            .endpoint_directory("agent-collaboration-observer")
+            .await
+            .map_err(|error| {
+                OperationError::before_dispatch("observation-connect", Some(target.clone()), error)
+            })?;
+        if endpoint_is_provider(&endpoints, &target).await? {
+            let provider = provider_access(access, endpoints);
             tokio::select! {
                 () = cancel.cancelled() => Err(OperationError::before_dispatch(
                     "observation-collect", Some(target), ClientError::InvalidRequest("observation cancelled"))),
-                result = control.observe_provider_session(request) => result.map_err(|error|
+                result = provider.observe(request, observed) => result.map_err(|error|
                     OperationError::before_dispatch("observation-collect", Some(target), error)),
             }
         } else {
@@ -100,10 +167,15 @@ impl SessionObservation {
                     )
                 })?;
             let native =
-                NativeObservation::attach_with_control_context(directory, control, target.clone())
-                    .await?;
+                NativeObservation::attach_with_endpoints(access, endpoints, target.clone()).await?;
             native
-                .collect_until(deadline, request.max_events, request.max_bytes, cancel)
+                .collect_until(
+                    deadline,
+                    request.max_events,
+                    request.max_bytes,
+                    cancel,
+                    observed,
+                )
                 .await
                 .map_err(|error| {
                     OperationError::after_dispatch("observation-collect", Some(target), None, error)
@@ -115,7 +187,7 @@ impl SessionObservation {
     pub fn target(&self) -> &SessionRef {
         match self {
             Self::Native(native) => native.target(),
-            Self::Provider { ready, .. } => &ready.target,
+            Self::Provider(follow) => &follow.target,
         }
     }
 
@@ -123,28 +195,95 @@ impl SessionObservation {
     pub fn generation(&self) -> &CodexGeneration {
         match self {
             Self::Native(native) => native.generation(),
-            Self::Provider { ready, .. } => &ready.generation,
+            Self::Provider(follow) => &follow.generation,
         }
     }
 
     pub async fn next_message(&mut self) -> Result<Value, ClientError> {
         match self {
             Self::Native(native) => native.next_message().await,
-            Self::Provider { control, .. } => control.next_provider_session_notification().await,
+            Self::Provider(follow) => follow.next_event().await,
         }
     }
 
     #[must_use]
     pub const fn is_provider(&self) -> bool {
-        matches!(self, Self::Provider { .. })
+        matches!(self, Self::Provider(_))
+    }
+}
+
+impl ProviderSessionFollow {
+    /// The next event, resuming observation after the last one delivered.
+    pub async fn next_event(&mut self) -> Result<Value, ClientError> {
+        loop {
+            if let Some(event) = self.pending.pop_front() {
+                return Ok(event);
+            }
+            if self.ended {
+                return Err(ClientError::Protocol("provider Session observation ended"));
+            }
+            let observed = self
+                .access
+                .observe(
+                    BoundedObservationRequest {
+                        target: self.target.clone(),
+                        timeout_seconds: FOLLOW_CALL_SECONDS,
+                        max_events: FOLLOW_EVENTS_PER_CALL,
+                        max_bytes: FOLLOW_MAX_BYTES,
+                        after_sequence: self.after_sequence,
+                        epoch: self.epoch,
+                    },
+                    None,
+                )
+                .await?;
+            self.accept(observed);
+        }
+    }
+
+    fn accept(&mut self, observed: BoundedObservationResult) {
+        if observed.epoch.is_some() {
+            self.epoch = observed.epoch;
+        }
+        for event in &observed.events {
+            if let Some(sequence) = event.get("sequence").and_then(Value::as_u64) {
+                self.after_sequence = Some(
+                    self.after_sequence
+                        .map_or(sequence, |after| after.max(sequence)),
+                );
+            }
+        }
+        self.pending.extend(observed.events);
+        if matches!(
+            observed.end_reason,
+            ObservationEndReason::ResyncRequired | ObservationEndReason::BackendDisconnected
+        ) {
+            self.ended = true;
+        }
+    }
+}
+
+fn provider_access(
+    access: &CollaborationAccess,
+    endpoints: EndpointDirectoryReader,
+) -> ProviderObservationAccess {
+    match (access, endpoints) {
+        (CollaborationAccess::Local { router, .. }, _) => {
+            ProviderObservationAccess::Local(std::sync::Arc::clone(router))
+        }
+        (CollaborationAccess::Api { .. }, EndpointDirectoryReader::Api(client)) => {
+            ProviderObservationAccess::Api(client)
+        }
+        (CollaborationAccess::Api { .. }, EndpointDirectoryReader::Local(router)) => {
+            ProviderObservationAccess::Local(router)
+        }
     }
 }
 
 async fn endpoint_is_provider(
-    control: &mut ControlClient,
+    endpoints: &EndpointDirectoryReader,
     target: &SessionRef,
 ) -> Result<bool, OperationError> {
-    let inventory = control.list_endpoints().await.map_err(|error| {
+    let inventory = endpoints.endpoints().await.map_err(|error| {
         OperationError::before_dispatch("observation-discovery", Some(target.clone()), error)
     })?;
     let endpoint = inventory
@@ -164,35 +303,48 @@ async fn endpoint_is_provider(
         .any(|channel| matches!(channel, ChannelDescription::ExternalProvider { .. })))
 }
 
-impl ControlClient {
+impl CollaborationClient {
+    /// One bounded provider observation; its result lists every event.
     pub async fn observe_provider_session(
-        &mut self,
+        &self,
         request: BoundedObservationRequest,
+    ) -> Result<BoundedObservationResult, ClientError> {
+        self.observe_provider_session_streaming(request, None).await
+    }
+
+    /// The same observation, handing each event to `observed` as the API streams it, while
+    /// the call is still open.
+    pub async fn observe_provider_session_streaming(
+        &self,
+        request: BoundedObservationRequest,
+        observed: Option<ObservationEventSink>,
     ) -> Result<BoundedObservationResult, ClientError> {
         let timeout = Duration::from_secs(request.timeout_seconds.saturating_add(5));
         let params = serde_json::to_value(request)
             .map_err(|_| ClientError::InvalidRequest("invalid provider observation request"))?;
+        let streamed = |notification: rmcp::model::ServerNotification| {
+            let (Some(observed), rmcp::model::ServerNotification::CustomNotification(custom)) =
+                (&observed, notification)
+            else {
+                return;
+            };
+            if custom.method != collaboration_protocol::OBSERVATION_EVENT_NOTIFICATION {
+                return;
+            }
+            if let Some(event) = custom.params.and_then(|params| {
+                serde_json::from_value::<collaboration_protocol::ObservationEventNotification>(
+                    params,
+                )
+                .ok()
+            }) {
+                let _streamed = observed.send(event);
+            }
+        };
         let response = self
             .connection
-            .call_with_timeout("provider/sessionObserve", params, timeout)
+            .call_observing("events_observe", params, timeout, &streamed)
             .await?;
         serde_json::from_value(response)
             .map_err(|_| ClientError::Protocol("invalid provider observation response"))
-    }
-
-    pub async fn listen_provider_session(
-        &mut self,
-        request: ProviderSessionListenRequest,
-    ) -> Result<ProviderSessionListenReady, ClientError> {
-        let params = serde_json::to_value(request)
-            .map_err(|_| ClientError::InvalidRequest("invalid provider listen request"))?;
-        let response = self
-            .connection
-            .call("provider/sessionListen", params)
-            .await?;
-        let ready: ProviderSessionListenReady = serde_json::from_value(response)
-            .map_err(|_| ClientError::Protocol("invalid provider listen response"))?;
-        // The server sends the snapshot as ordered notifications after this reply.
-        Ok(ready)
     }
 }

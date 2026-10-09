@@ -1,7 +1,7 @@
-//! Bind a read inventory to its initialized service, independently of native launch eligibility.
+//! Bind a read inventory to its manifest-derived service, independently of native launch eligibility.
 use collaboration_client::protocol::{
-    ChannelDescription, CodexGeneration, ControlInitializationResult, EndpointAvailability,
-    EndpointInventory, EndpointRef, NativeSessionView, UuidIdentity,
+    ChannelDescription, CodexGeneration, EndpointAvailability, EndpointInventory, EndpointRef,
+    NativeSessionView, UuidIdentity,
 };
 use std::collections::BTreeSet;
 
@@ -40,12 +40,12 @@ pub(super) struct NativeInventoryBinding {
 
 pub(super) fn bind_native_inventory(
     inventory: &EndpointInventory,
-    initialized: &ControlInitializationResult,
+    router_identity: &collaboration_client::RouterIdentity,
     expected_service: &UuidIdentity,
     selector: NativeEndpointSelector,
     view: NativeSessionView,
 ) -> Result<NativeInventoryBinding, NativeBindingRejection> {
-    if initialized.service_id != *expected_service
+    if router_identity.service_id != *expected_service
         || inventory
             .endpoints
             .iter()
@@ -54,7 +54,7 @@ pub(super) fn bind_native_inventory(
     {
         return Err(NativeBindingRejection::WrongService);
     }
-    if inventory.service_epoch != initialized.service_epoch {
+    if inventory.service_epoch != router_identity.service_epoch {
         return Err(NativeBindingRejection::StaleSnapshot);
     }
     let mut endpoints_seen = BTreeSet::new();

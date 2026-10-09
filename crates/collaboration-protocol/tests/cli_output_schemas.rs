@@ -131,15 +131,19 @@ fn published_envelopes_carry_pages_records_and_effects_without_wrapper_keys() {
 
     // Assert: a single read's result schema is the entity's own, with no
     // wrapper property standing between the record and its fields.
-    let document = collaboration_protocol::control_schema_document(None).unwrap();
-    let definitions = serde_json::to_string(&document).unwrap();
-    for wrapper in [
-        r#""MessageShowResult":{"properties":{"message""#,
-        r#""ThreadShowResult":{"properties":{"thread""#,
+    for (result, wrapper) in [
+        (
+            serde_json::to_value(schemars::schema_for!(message_board::MessageShowResult)).unwrap(),
+            "message",
+        ),
+        (
+            serde_json::to_value(schemars::schema_for!(message_board::ThreadShowResult)).unwrap(),
+            "thread",
+        ),
     ] {
         assert!(
-            !definitions.contains(wrapper),
-            "a single read must publish the entity, not {wrapper}"
+            result.pointer(&format!("/properties/{wrapper}")).is_none(),
+            "a single read must publish the entity, not a {wrapper} wrapper"
         );
     }
 }

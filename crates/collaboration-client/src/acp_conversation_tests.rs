@@ -182,7 +182,7 @@ async fn sdk_identity_preflight_fails_before_acp_discovery_or_mutation() {
         (Some(foreign_identity), Some(local_identity.clone())),
     ] {
         let result = AcpConversation::create(
-            std::path::Path::new("/path-that-must-not-be-read"),
+            &crate::CollaborationAccess::api(std::path::Path::new("/path-that-must-not-be-read")),
             ConversationCreateRequest {
                 operation_id: collaboration_protocol::OperationId::generate(),
                 endpoint: local_endpoint.clone(),
@@ -251,7 +251,7 @@ async fn invalid_prompt_deadline_fails_before_discovery_or_creation() {
         session_id: SessionId::try_from("sender".to_owned()).expect("session ID"),
     };
     let error = AcpConversation::create_and_prompt(
-        std::path::Path::new("/path-that-must-not-be-read"),
+        &crate::CollaborationAccess::api(std::path::Path::new("/path-that-must-not-be-read")),
         ConversationCreatePromptRequest {
             create: ConversationCreateRequest {
                 operation_id: collaboration_protocol::OperationId::generate(),

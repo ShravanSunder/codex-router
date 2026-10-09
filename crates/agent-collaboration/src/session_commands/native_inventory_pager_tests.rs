@@ -50,7 +50,7 @@ async fn source_filtered_pages_reject_contradictory_rows_without_a_retry() {
                 )
             };
             response["sessions"][0]["source"] = serde_json::to_value(returned).unwrap();
-            let (mut client, peer) = connect_fixture(vec![("codex/sessionList", response)]).await;
+            let (mut client, peer) = connect_fixture(vec![("sessions_list", response)]).await;
             let mut request = paging_request(view);
             request.source = requested;
             let expected = (!matches!(view, NativeSessionView::Stored))
@@ -65,7 +65,6 @@ async fn source_filtered_pages_reject_contradictory_rows_without_a_retry() {
                 "a source-filtered read must not publish another classification: {result:?}"
             );
             assert!(pager.next_page(&mut client).await.is_err());
-            client.close().await.unwrap();
             assert_eq!(
                 peer.await.unwrap().len(),
                 1,
@@ -83,7 +82,7 @@ async fn active_pages_reject_non_active_runtime_rows_without_a_retry() {
         json!({"type":"systemError"}),
     ] {
         let (mut client, peer) = connect_fixture(vec![(
-            "codex/sessionList",
+            "sessions_list",
             page("not-active", status, json!("unused-next")),
         )])
         .await;
@@ -101,7 +100,6 @@ async fn active_pages_reject_non_active_runtime_rows_without_a_retry() {
             "Active must not publish another runtime state: {result:?}"
         );
         assert!(pager.next_page(&mut client).await.is_err());
-        client.close().await.unwrap();
         assert_eq!(peer.await.unwrap().len(), 1);
     }
 }
@@ -112,10 +110,10 @@ async fn continuation_cannot_escape_the_captured_source_filter() {
     wrong["sessions"][0]["source"] = json!("subagents");
     let (mut client, peer) = connect_fixture(vec![
         (
-            "codex/sessionList",
+            "sessions_list",
             stored_page("first-page-correct-source", json!("after-valid-page")),
         ),
-        ("codex/sessionList", wrong),
+        ("sessions_list", wrong),
     ])
     .await;
     let mut pager =
@@ -135,14 +133,13 @@ async fn continuation_cannot_escape_the_captured_source_filter() {
         Err(ClientError::Protocol("inventory source filter mismatch"))
     ));
     assert!(pager.next_page(&mut client).await.is_err());
-    client.close().await.unwrap();
     let requests = peer.await.unwrap();
     assert_eq!(requests.len(), 2);
-    assert_eq!(requests[1]["params"]["cursor"], "after-valid-page");
+    assert_eq!(requests[1]["arguments"]["cursor"], "after-valid-page");
     assert!(
         requests
             .iter()
-            .all(|request| request["params"]["source"] == "interactive")
+            .all(|request| request["arguments"]["source"] == "interactive")
     );
 }
 
@@ -169,8 +166,7 @@ async fn matching_source_filters_wildcards_and_active_flags_remain_valid() {
                     )
                 };
                 response["sessions"][0]["source"] = serde_json::to_value(source).unwrap();
-                let (mut client, peer) =
-                    connect_fixture(vec![("codex/sessionList", response)]).await;
+                let (mut client, peer) = connect_fixture(vec![("sessions_list", response)]).await;
                 let mut request = paging_request(view);
                 request.source = requested;
                 let expected = (!matches!(view, NativeSessionView::Stored))
@@ -180,7 +176,6 @@ async fn matching_source_filters_wildcards_and_active_flags_remain_valid() {
                 assert_eq!(page.sessions.len(), 1);
                 assert_eq!(page.sessions[0].source, source);
                 assert!(pager.next_page(&mut client).await.unwrap().is_none());
-                client.close().await.unwrap();
                 assert_eq!(peer.await.unwrap().len(), 1);
             }
         }
@@ -194,12 +189,12 @@ async fn sparse_stored_pages_preserve_the_entire_request_and_have_no_runtime_gen
     let mut exhausted = stored_page("none", Value::Null);
     exhausted["sessions"] = json!([]);
     let (mut client, peer) = connect_fixture(vec![
-        ("codex/sessionList", sparse),
+        ("sessions_list", sparse),
         (
-            "codex/sessionList",
+            "sessions_list",
             stored_page("source-only", json!("opaque second")),
         ),
-        ("codex/sessionList", exhausted),
+        ("sessions_list", exhausted),
     ])
     .await;
     let mut pager =
@@ -213,7 +208,6 @@ async fn sparse_stored_pages_preserve_the_entire_request_and_have_no_runtime_gen
         pager.next_page(&mut client).await.unwrap().is_none(),
         "exhaustion cannot trigger a new read"
     );
-    client.close().await.unwrap();
     let requests = peer.await.unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(
@@ -221,18 +215,18 @@ async fn sparse_stored_pages_preserve_the_entire_request_and_have_no_runtime_gen
         "source-only"
     );
     for request in &requests {
-        assert_eq!(request["params"]["view"], "stored");
-        assert_eq!(request["params"]["endpoint"], endpoint());
+        assert_eq!(request["arguments"]["view"], "stored");
+        assert_eq!(request["arguments"]["endpoint"], endpoint());
         assert_eq!(
-            request["params"]["scope"],
+            request["arguments"]["scope"],
             json!({"kind":"cwd","path":"/repo"})
         );
-        assert_eq!(request["params"]["source"], "interactive");
-        assert_eq!(request["params"]["query"], "native query");
-        assert_eq!(request["params"]["includeEmptySessions"], false);
+        assert_eq!(request["arguments"]["source"], "interactive");
+        assert_eq!(request["arguments"]["query"], "native query");
+        assert_eq!(request["arguments"]["includeEmptySessions"], false);
     }
-    assert_eq!(requests[1]["params"]["cursor"], "opaque/first?unchanged");
-    assert_eq!(requests[2]["params"]["cursor"], "opaque second");
+    assert_eq!(requests[1]["arguments"]["cursor"], "opaque/first?unchanged");
+    assert_eq!(requests[2]["arguments"]["cursor"], "opaque second");
 }
 
 #[tokio::test]
@@ -257,14 +251,13 @@ async fn stored_and_runtime_observations_cannot_be_mixed_or_retried() {
     ] {
         let expected = (!matches!(view, NativeSessionView::Stored))
             .then(|| serde_json::from_value(generation()).unwrap());
-        let (mut client, peer) = connect_fixture(vec![("codex/sessionList", response)]).await;
+        let (mut client, peer) = connect_fixture(vec![("sessions_list", response)]).await;
         let mut pager = NativeInventoryPager::new(paging_request(view), expected).unwrap();
         assert!(pager.next_page(&mut client).await.is_err());
         assert!(
             pager.next_page(&mut client).await.is_err(),
             "a rejected pager cannot issue a retry or report exhaustion"
         );
-        client.close().await.unwrap();
         assert_eq!(peer.await.unwrap().len(), 1);
     }
     for view in [
@@ -286,14 +279,13 @@ async fn foreign_endpoint_and_service_pages_are_rejected_by_the_public_client() 
     ] {
         let mut response = stored_page("equal-id", Value::Null);
         response["sessions"][0]["target"]["endpoint"] = foreign;
-        let (mut client, peer) = connect_fixture(vec![("codex/sessionList", response)]).await;
+        let (mut client, peer) = connect_fixture(vec![("sessions_list", response)]).await;
         let mut pager =
             NativeInventoryPager::new(paging_request(NativeSessionView::Stored), None).unwrap();
         assert!(matches!(
             pager.next_page(&mut client).await,
             Err(ClientError::Protocol("inconsistent session inventory"))
         ));
-        client.close().await.unwrap();
         assert_eq!(peer.await.unwrap().len(), 1);
     }
 }
@@ -301,17 +293,14 @@ async fn foreign_endpoint_and_service_pages_are_rejected_by_the_public_client() 
 #[tokio::test]
 async fn repeated_oversized_and_duplicate_continuations_stop_without_another_request() {
     for steps in [
-        vec![(
-            "codex/sessionList",
-            stored_page("one", json!("x".repeat(1025))),
-        )],
+        vec![("sessions_list", stored_page("one", json!("x".repeat(1025))))],
         vec![
-            ("codex/sessionList", stored_page("one", json!("repeat"))),
-            ("codex/sessionList", stored_page("two", json!("repeat"))),
+            ("sessions_list", stored_page("one", json!("repeat"))),
+            ("sessions_list", stored_page("two", json!("repeat"))),
         ],
         vec![
-            ("codex/sessionList", stored_page("same-id", json!("next"))),
-            ("codex/sessionList", stored_page("same-id", Value::Null)),
+            ("sessions_list", stored_page("same-id", json!("next"))),
+            ("sessions_list", stored_page("same-id", Value::Null)),
         ],
     ] {
         let expected_reads = steps.len();
@@ -327,7 +316,6 @@ async fn repeated_oversized_and_duplicate_continuations_stop_without_another_req
             }
         }
         assert!(pager.next_page(&mut client).await.is_err());
-        client.close().await.unwrap();
         assert_eq!(peer.await.unwrap().len(), expected_reads);
     }
 }

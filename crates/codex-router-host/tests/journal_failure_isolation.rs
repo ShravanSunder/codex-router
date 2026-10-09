@@ -1,10 +1,10 @@
 use codex_router_host::{CollaborationRuntime, CollaborationRuntimeInputs};
-use collaboration_client::{ControlClient, JournalStatus};
+use collaboration_client::{CollaborationClient, JournalStatus};
 use collaboration_protocol::EndpointAvailability;
 use std::os::unix::fs::DirBuilderExt;
 
 #[tokio::test]
-async fn journal_open_failure_does_not_disable_control_and_native_publication() {
+async fn journal_open_failure_does_not_disable_the_api_and_native_publication() {
     // Arrange: an owner-private fixture path deliberately cannot be opened as SQLite.
     let root = std::env::temp_dir().join(format!("journal-isolation-{}", std::process::id()));
     std::fs::DirBuilder::new()
@@ -27,14 +27,9 @@ async fn journal_open_failure_does_not_disable_control_and_native_publication() 
     })
     .await
     .unwrap_or_else(|error| panic!("communication startup: {error}"));
-    let mut client = ControlClient::connect(&root, "journal-failure-proof", "1")
+    let client = CollaborationClient::connect(&root, "journal-failure-proof", "1")
         .await
         .unwrap_or_else(|error| panic!("connect: {error}"));
-    let control_digest = String::from(client.identity().control_schema_digest.clone());
-    let control_schema_path = root.join(format!(
-        "control-schema-{}.json",
-        control_digest.trim_start_matches("sha256:")
-    ));
     let status = client
         .journal_status()
         .await
@@ -54,16 +49,10 @@ async fn journal_open_failure_does_not_disable_control_and_native_publication() 
         .await
         .unwrap_or_else(|error| panic!("endpoints: {error}"));
     let listener_present = root.join("codex-native.sock").exists();
-    client
-        .close()
-        .await
-        .unwrap_or_else(|error| panic!("close: {error}"));
     runtime
         .shutdown()
         .await
         .unwrap_or_else(|error| panic!("shutdown: {error}"));
-    std::fs::remove_file(control_schema_path)
-        .unwrap_or_else(|error| panic!("Control schema cleanup: {error}"));
     std::fs::remove_file(root.join("service-identity.json"))
         .unwrap_or_else(|error| panic!("identity cleanup: {error}"));
     std::fs::remove_dir(blocked_database)

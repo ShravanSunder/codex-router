@@ -13,9 +13,8 @@ async fn invalid_source_binding_cannot_reach_runtime_session_reads() {
         .unwrap()
         .push(repeated);
     for invalid in [foreign, duplicate] {
-        let (mut client, peer) = connect_fixture(vec![("endpoint/list", invalid)]).await;
+        let (mut client, peer) = connect_fixture(vec![("endpoints_list", invalid)]).await;
         let result = load_runtime_records(&mut client, &[], false).await;
-        let _closed = client.close().await;
         assert!(result.is_err());
         assert_eq!(peer.await.unwrap().len(), 1, "reject before sessionList");
     }
@@ -29,9 +28,9 @@ async fn ambiguous_native_attribution_preserves_the_independent_provider_invento
     ambiguous["endpoints"].as_array_mut().unwrap().push(second);
     let provider_endpoint = ambiguous["endpoints"][1]["endpoint"].clone();
     let (mut client, peer) = connect_fixture(vec![
-        ("endpoint/list", ambiguous),
+        ("endpoints_list", ambiguous),
         (
-            "provider/sessionList",
+            "provider_sessions_list",
             json!({
                 "endpoint":provider_endpoint,"observedAt":"2026-10-06T00:00:00Z",
                 "sessions":[],"nextCursor":null
@@ -40,7 +39,6 @@ async fn ambiguous_native_attribution_preserves_the_independent_provider_invento
     ])
     .await;
     let result = load_provider_records(&mut client).await;
-    client.close().await.unwrap();
     let (attribution, records) = result.unwrap();
     assert!(
         attribution.is_none(),
@@ -60,9 +58,9 @@ async fn provider_only_inventory_remains_readable_without_native_attribution() {
     providers["endpoints"].as_array_mut().unwrap().remove(0);
     let provider_endpoint = providers["endpoints"][0]["endpoint"].clone();
     let (mut client, peer) = connect_fixture(vec![
-        ("endpoint/list", providers),
+        ("endpoints_list", providers),
         (
-            "provider/sessionList",
+            "provider_sessions_list",
             json!({
                 "endpoint":provider_endpoint,"observedAt":"2026-10-06T00:00:00Z",
                 "sessions":[{
@@ -76,7 +74,6 @@ async fn provider_only_inventory_remains_readable_without_native_attribution() {
     ])
     .await;
     let (attribution, records) = load_provider_records(&mut client).await.unwrap();
-    client.close().await.unwrap();
     assert!(attribution.is_none());
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].session_id, "healthy-provider");

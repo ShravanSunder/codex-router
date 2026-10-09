@@ -36,6 +36,7 @@ tokio = { workspace = true, features = ["io-std"] }
 unicode-width.workspace = true
 
 [dev-dependencies]
+collaboration-mcp = { path = "../collaboration-mcp", version = "0.1.30", features = ["test-support"] }
 claude-code-peer-messaging = { path = "../claude-code-peer-messaging", version = "0.1.37" }
 tempfile = "3.27.0"
 jsonschema.workspace = true

@@ -16,7 +16,7 @@ pub struct ManifestPublication {
 impl ManifestPublication {
     /// Caller holds service ownership and has bound the advertised listener.
     pub fn publish(directory: &Path, manifest: &ServiceManifest) -> io::Result<Self> {
-        if manifest.version != 2 {
+        if manifest.version != collaboration_protocol::SERVICE_MANIFEST_VERSION {
             return Err(io::Error::other("unsupported manifest version"));
         }
         let path = directory.join("service.json");

@@ -16,7 +16,7 @@ pub(crate) async fn project_record(
                 .map_err(|_| StorageError::InvalidRecord)?;
             let record = store.read_instruction(&id).await?;
             serde_json::to_value(
-                crate::instruction_dispatch::snapshot(record)
+                crate::instruction_projection::snapshot(record)
                     .map_err(|_| StorageError::InvalidRecord)?,
             )
         }

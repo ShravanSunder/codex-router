@@ -1,27 +1,23 @@
-//! Actual Control service and source-local SQLite paging, without a live native backend.
+//! Actual collaboration API and source-local SQLite paging, without a live native backend.
 use super::*;
 use crate::sessions::picker_runtime_inventory::native_inventory_binding::{
     NativeEndpointSelector, NativeInventoryContext, bind_native_inventory,
 };
 use collaboration_service::{
-    LocalControlService, ManifestPublication, NativeControlBackend, NativeGenerationGate,
-    ServiceIdentity,
+    CollaborationApplication, NativeControlBackend, NativeGenerationGate, ServiceIdentity,
 };
 use std::{io::ErrorKind, os::unix::net::UnixListener, path::PathBuf};
-use tokio_util::sync::CancellationToken;
 
 struct StoredServiceFixture {
     root: tempfile::TempDir,
-    publication: ManifestPublication,
-    stop: CancellationToken,
-    server: tokio::task::JoinHandle<()>,
+    served: collaboration_mcp::test_support::ServedCollaborationApi,
     native_listener: UnixListener,
     database: PathBuf,
     original_database: Vec<u8>,
 }
 
 impl StoredServiceFixture {
-    async fn open(service_id: &str, model: &str) -> (ControlClient, Self) {
+    async fn open(service_id: &str, model: &str) -> (CollaborationClient, Self) {
         let root = tempfile::Builder::new()
             .prefix("sel-pages-")
             .tempdir_in("/tmp")
@@ -59,8 +55,7 @@ impl StoredServiceFixture {
             "endpoint":endpoint,"label":"Source paging fixture","availability":{"state":"unprobed"},
             "channels":[{"kind":"nativeCodex","transport":"unixWebSocket","path":"native.sock","schemaDigest":null,"generation":null}]
         })).unwrap();
-        let digest = format!("sha256:{}", "a".repeat(64));
-        let identity = ServiceIdentity::new(service_id, EPOCH, &digest)
+        let identity = ServiceIdentity::new(service_id, EPOCH)
             .unwrap()
             .with_endpoints(vec![description])
             .unwrap()
@@ -70,28 +65,20 @@ impl StoredServiceFixture {
                 codex_home: home,
             })
             .unwrap();
-        let service = LocalControlService::bind(&directory.join("control.sock"), identity).unwrap();
-        let manifest = serde_json::from_value(json!({
-            "version":2,"serviceId":service_id,"serviceEpoch":EPOCH,"machineLabel":"Source paging fixture",
-            "control":{"transport":"unixJsonLines","path":"control.sock"},"controlSchemaDigest":digest,
-            "mcp":{"transport":"streamableHttp","url":"http://127.0.0.1:0/mcp"}
-        })).unwrap();
-        let publication = ManifestPublication::publish(&directory, &manifest).unwrap();
-        let stop = CancellationToken::new();
-        let server_stop = stop.clone();
-        let server = tokio::spawn(async move {
-            service.run(server_stop).await.unwrap();
-        });
-        let client = ControlClient::connect(&directory, "source-paging-test", "1")
+        let served = collaboration_mcp::test_support::ServedCollaborationApi::start(
+            &directory,
+            CollaborationApplication::new(identity),
+        )
+        .await
+        .unwrap();
+        let client = CollaborationClient::connect(&directory, "source-paging-test", "1")
             .await
             .unwrap();
         (
             client,
             Self {
                 root,
-                publication,
-                stop,
-                server,
+                served,
                 native_listener,
                 database,
                 original_database,
@@ -119,14 +106,12 @@ impl StoredServiceFixture {
             ErrorKind::WouldBlock,
             "stored paging cannot attach or create native work"
         );
-        self.stop.cancel();
-        self.server.await.unwrap();
+        self.served.stop().await.unwrap();
         assert_eq!(
             std::fs::read(&self.database).unwrap(),
             self.original_database,
             "source catalog reads must leave stored bytes intact"
         );
-        drop(self.publication);
         drop(self.root);
     }
 }
@@ -195,7 +180,6 @@ async fn stored_source_predicate_divergence_keeps_valid_later_pages_available() 
         assert_eq!(actual_ids, expected_ids);
         assert_eq!(sparse_pages, expected_sparse_pages);
     }
-    client.close().await.unwrap();
     fixture.finish().await;
 }
 
@@ -229,7 +213,6 @@ async fn real_source_catalog_respects_interactive_subagent_and_all_page_filters(
             "source-owned paging must keep its requested filter"
         );
     }
-    client.close().await.unwrap();
     fixture.finish().await;
 }
 
@@ -298,7 +281,6 @@ async fn real_source_services_page_sparse_stored_catalogs_without_runtime_genera
         let exhausted = pager.next_page(&mut client).await.unwrap().unwrap();
         assert!(exhausted.sessions.is_empty() && exhausted.next_cursor.is_none());
         assert!(pager.next_page(&mut client).await.unwrap().is_none());
-        client.close().await.unwrap();
         fixture.finish().await;
     }
     assert_eq!(observed[0].session_id, observed[1].session_id);
@@ -319,7 +301,6 @@ async fn real_source_service_rejects_an_inventory_request_for_another_service() 
         pager.next_page(&mut client).await.is_err(),
         "source rejection cannot turn into exhausted success or a retry"
     );
-    let _closed = client.close().await;
     fixture.finish().await;
 }
 
@@ -360,9 +341,9 @@ async fn concurrent_source_services_keep_equal_session_ids_and_cross_source_read
         request
     };
     // A live second service must not make a request sent to the first service valid.
-    // The existing client retires a connection on a protocol mismatch. Keep that
-    // negative probe independent from the healthy readers; do not weaken retirement.
-    let mut rejected_client = ControlClient::connect(
+    // Each API call is independent; the failed pager remains rejected. Keep its
+    // negative request separate and verify both healthy source readers still work.
+    let mut rejected_client = CollaborationClient::connect(
         &std::fs::canonicalize(first_fixture.root.path()).unwrap(),
         "wrong-source-probe",
         "1",
@@ -373,7 +354,6 @@ async fn concurrent_source_services_keep_equal_session_ids_and_cross_source_read
         NativeInventoryPager::new(request_for(second_binding.endpoint.clone()), None).unwrap();
     assert!(wrong_source.next_page(&mut rejected_client).await.is_err());
     assert!(wrong_source.next_page(&mut rejected_client).await.is_err());
-    let _closed = rejected_client.close().await;
 
     let mut first_pager =
         NativeInventoryPager::new(request_for(first_binding.endpoint.clone()), None).unwrap();
@@ -412,8 +392,5 @@ async fn concurrent_source_services_keep_equal_session_ids_and_cross_source_read
     assert_eq!(first_record.model.as_deref(), Some("first-source-model"));
     assert_eq!(second_record.model.as_deref(), Some("second-source-model"));
     assert!(first_record.normalized_cwd.is_none() && second_record.normalized_cwd.is_none());
-    let (first_closed, second_closed) = tokio::join!(first_client.close(), second_client.close());
-    first_closed.unwrap();
-    second_closed.unwrap();
     tokio::join!(first_fixture.finish(), second_fixture.finish());
 }

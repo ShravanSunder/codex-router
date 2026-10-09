@@ -1,4 +1,4 @@
-//! Control-owned native operation parameters and results; native payload schemas stay upstream.
+//! Router-owned native operation parameters and results; native payload schemas stay upstream.
 use crate::{
     AcceptedResumeEffect, CodexGeneration, MessageContent, MessageDelivery, MessageInputKind,
     MessageRepresentation, NonEmptyText, SessionRef,

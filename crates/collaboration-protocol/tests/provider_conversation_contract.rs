@@ -1,28 +1,15 @@
 use collaboration_protocol::{
     ConversationBindingIdentity, ConversationCreateOutcome, ConversationCreateRequest,
-    ConversationOperationFailure, ConversationOperationSettlement, ConversationPromptRequest,
-    control_error_is_valid, control_schema_document,
+    ConversationOperationFailure, ConversationOperationSettlement, ConversationOperationSnapshot,
+    ConversationOperationWaitResult, ConversationPromptRequest,
 };
 use serde_json::{Value, json};
 
-fn method_validator(
-    schema: &Value,
-    method: &str,
-    pairing: &str,
-) -> Result<jsonschema::Validator, String> {
-    let schema_reference = schema
-        .get("x-methods")
-        .and_then(|methods| methods.get(method))
-        .and_then(|contract| contract.get(pairing))
-        .and_then(|reference| reference.get("$ref"))
-        .and_then(Value::as_str)
-        .ok_or_else(|| format!("missing {method} {pairing} reference"))?;
-    let mut selected = schema.clone();
-    selected
-        .as_object_mut()
-        .ok_or_else(|| "schema document must be an object".to_owned())?
-        .insert("$ref".to_owned(), json!(schema_reference));
-    jsonschema::validator_for(&selected).map_err(|error| error.to_string())
+/// The JSON Schema a conversation tool publishes for `TWire`, as a validator.
+fn type_validator<TWire: schemars::JsonSchema>() -> Result<jsonschema::Validator, String> {
+    let schema =
+        serde_json::to_value(schemars::schema_for!(TWire)).map_err(|error| error.to_string())?;
+    jsonschema::validator_for(&schema).map_err(|error| error.to_string())
 }
 
 fn endpoint() -> Value {
@@ -122,65 +109,30 @@ fn conversation_create_outcome_keeps_caller_operation_identity()
 }
 
 #[test]
-fn external_conversation_methods_have_closed_typed_pairings() {
-    let schema = control_schema_document(None).unwrap_or_else(|error| panic!("schema: {error}"));
-    let methods = schema["x-methods"]
-        .as_object()
-        .unwrap_or_else(|| panic!("method map"));
-
-    for method in [
-        "conversation/create",
-        "conversation/load",
-        "conversation/prompt",
-        "conversation/cancel",
-        "conversation/operationShow",
-        "conversation/operationWait",
-        "conversation/operationReconcile",
-    ] {
-        assert!(methods.contains_key(method), "missing {method}");
-        for pairing in ["params", "result", "request", "response", "error"] {
-            let pointer = methods[method][pairing]["$ref"]
-                .as_str()
-                .unwrap_or_else(|| panic!("missing {method} {pairing}"));
-            assert!(
-                schema.pointer(pointer.trim_start_matches('#')).is_some(),
-                "unresolved {method} {pairing}"
-            );
-        }
-    }
-}
-
-#[test]
 fn mutations_require_caller_operation_identity_and_allow_unpinned_generation() {
-    let schema = control_schema_document(None).unwrap_or_else(|error| panic!("schema: {error}"));
-    let create_validator = method_validator(&schema, "conversation/create", "request")
-        .unwrap_or_else(|error| panic!("create validator: {error}"));
+    let create_validator = type_validator::<ConversationCreateRequest>()
+        .unwrap_or_else(|error| panic!("validator: {error}"));
     let actor = session("creator-session");
     let mut request = json!({
-        "jsonrpc": "2.0",
-        "id": "create-1",
-        "method": "conversation/create",
-        "params": {
-            "operationId": "019f0000-0000-7000-8000-000000000010",
-            "endpoint": actor["endpoint"],
-            "generation": generation(),
-            "workingDirectory": "/tmp/provider-work",
-            "createdBy": actor,
-            "approver": session("approver-session"),
-            "requestedPolicy": {"access": "workspace-write"}
-        }
+        "operationId": "019f0000-0000-7000-8000-000000000010",
+        "endpoint": actor["endpoint"],
+        "generation": generation(),
+        "workingDirectory": "/tmp/provider-work",
+        "createdBy": actor,
+        "approver": session("approver-session"),
+        "requestedPolicy": {"access": "workspace-write"}
     });
     assert!(create_validator.is_valid(&request));
 
-    request["params"]
+    request
         .as_object_mut()
         .unwrap_or_else(|| panic!("params"))
         .remove("operationId");
     assert!(!create_validator.is_valid(&request));
-    request["params"]["operationId"] = json!("server-generated-later");
+    request["operationId"] = json!("server-generated-later");
     assert!(!create_validator.is_valid(&request));
-    request["params"]["operationId"] = json!("019f0000-0000-7000-8000-000000000010");
-    request["params"]
+    request["operationId"] = json!("019f0000-0000-7000-8000-000000000010");
+    request
         .as_object_mut()
         .unwrap_or_else(|| panic!("params"))
         .remove("generation");
@@ -269,29 +221,19 @@ fn provider_prompt_input_id_is_additive_and_kept_verbatim() {
 
 #[test]
 fn failures_preserve_known_target_and_operation_effect_evidence() {
-    let schema = control_schema_document(None).unwrap_or_else(|error| panic!("schema: {error}"));
-    let validator = method_validator(&schema, "conversation/prompt", "error")
-        .unwrap_or_else(|error| panic!("prompt error validator: {error}"));
+    let validator = type_validator::<ConversationOperationFailure>()
+        .unwrap_or_else(|error| panic!("validator: {error}"));
     let mut failure = json!({
-        "jsonrpc": "2.0",
-        "id": "prompt-1",
-        "error": {
-            "code": -32050,
-            "message": "provider response was lost",
-            "data": {
-                "kind": "outcomeUnknown",
-                "stage": "settlement",
-                "effect": "unknown",
-                "message": "provider response was lost",
-                "operationId": "019f0000-0000-7000-8000-000000000011",
-                "target": session("provider-conversation")
-            }
-        }
+        "kind": "outcomeUnknown",
+        "stage": "settlement",
+        "effect": "unknown",
+        "message": "provider response was lost",
+        "operationId": "019f0000-0000-7000-8000-000000000011",
+        "target": session("provider-conversation")
     });
     assert!(validator.is_valid(&failure));
-    assert!(control_error_is_valid("conversation/prompt", &failure));
 
-    failure["error"]["data"]
+    failure
         .as_object_mut()
         .unwrap_or_else(|| panic!("failure data"))
         .remove("effect");
@@ -300,9 +242,8 @@ fn failures_preserve_known_target_and_operation_effect_evidence() {
 
 #[test]
 fn unavailable_conversation_failure_carries_catalog_recovery_and_legacy_errors_decode() {
-    let schema = control_schema_document(None).expect("schema");
-    let validator =
-        method_validator(&schema, "conversation/create", "error").expect("create error validator");
+    let validator = type_validator::<ConversationOperationFailure>()
+        .unwrap_or_else(|error| panic!("validator: {error}"));
     let availability = json!({
         "state":"unavailable","observedAt":"2026-09-24T00:00:00Z",
         "reason":"provider executable is missing","fix":"install the provider binary"
@@ -316,12 +257,9 @@ fn unavailable_conversation_failure_carries_catalog_recovery_and_legacy_errors_d
     let failure: ConversationOperationFailure =
         serde_json::from_value(data.clone()).expect("typed failure");
     assert_eq!(serde_json::to_value(failure).expect("round trip"), data);
-    let response = json!({"jsonrpc":"2.0","id":"create-1","error":{
-        "code":-32050,"message":data["message"],"data":data
-    }});
-    assert!(validator.is_valid(&response));
+    assert!(validator.is_valid(&data));
 
-    let mut legacy = response["error"]["data"].clone();
+    let mut legacy = data;
     legacy
         .as_object_mut()
         .expect("legacy error")
@@ -340,31 +278,22 @@ fn unavailable_conversation_failure_carries_catalog_recovery_and_legacy_errors_d
 
 #[test]
 fn inspection_and_wait_keep_durable_metadata_separate_from_ephemeral_output() {
-    let schema = control_schema_document(None).unwrap_or_else(|error| panic!("schema: {error}"));
-    let show_validator = method_validator(&schema, "conversation/operationShow", "response")
-        .unwrap_or_else(|error| panic!("show validator: {error}"));
-    let show_response = json!({
-        "jsonrpc": "2.0",
-        "id": "show-1",
-        "result": operation_snapshot()
-    });
+    let show_validator = type_validator::<ConversationOperationSnapshot>()
+        .unwrap_or_else(|error| panic!("validator: {error}"));
+    let show_response = operation_snapshot();
     assert!(show_validator.is_valid(&show_response));
 
-    let wait_validator = method_validator(&schema, "conversation/operationWait", "response")
-        .unwrap_or_else(|error| panic!("wait validator: {error}"));
+    let wait_validator = type_validator::<ConversationOperationWaitResult>()
+        .unwrap_or_else(|error| panic!("validator: {error}"));
     let wait_response = json!({
-        "jsonrpc": "2.0",
-        "id": "wait-1",
-        "result": {
-            "operation": operation_snapshot(),
-            "output": {
-                "kind": "available",
-                "settlement": {
-                    "kind": "promptCompleted",
-                    "target": session("provider-conversation"),
-                    "stopReason": "end_turn",
-                    "response": "ephemeral provider reply"
-                }
+        "operation": operation_snapshot(),
+        "output": {
+            "kind": "available",
+            "settlement": {
+                "kind": "promptCompleted",
+                "target": session("provider-conversation"),
+                "stopReason": "end_turn",
+                "response": "ephemeral provider reply"
             }
         }
     });
@@ -375,15 +304,14 @@ fn inspection_and_wait_keep_durable_metadata_separate_from_ephemeral_output() {
     assert!(wait_errors.is_empty(), "{}", wait_errors.join("; "));
 
     let mut invalid_show = show_response;
-    invalid_show["result"]["prompt"] = json!("must never be durable metadata");
+    invalid_show["prompt"] = json!("must never be durable metadata");
     assert!(!show_validator.is_valid(&invalid_show));
 }
 
 #[test]
 fn output_limit_reasons_decode_strictly_and_validate_in_operation_wait() {
-    let schema = control_schema_document(None).unwrap_or_else(|error| panic!("schema: {error}"));
-    let wait_validator = method_validator(&schema, "conversation/operationWait", "response")
-        .unwrap_or_else(|error| panic!("wait validator: {error}"));
+    let wait_validator = type_validator::<ConversationOperationWaitResult>()
+        .unwrap_or_else(|error| panic!("validator: {error}"));
 
     for reason in ["outputLimitExceeded", "outputInvalid"] {
         let typed_reason: collaboration_protocol::ConversationOutputUnavailableReason =
@@ -391,12 +319,8 @@ fn output_limit_reasons_decode_strictly_and_validate_in_operation_wait() {
         assert_eq!(serde_json::to_value(typed_reason).unwrap(), json!(reason));
 
         let response = json!({
-            "jsonrpc":"2.0",
-            "id":"wait-output-limit",
-            "result":{
-                "operation":operation_snapshot(),
-                "output":{"kind":"outputUnavailable","reason":reason}
-            }
+            "operation":operation_snapshot(),
+            "output":{"kind":"outputUnavailable","reason":reason}
         });
         assert!(
             wait_validator.is_valid(&response),

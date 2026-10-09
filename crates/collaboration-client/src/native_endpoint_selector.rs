@@ -1,5 +1,5 @@
 //! Public endpoint resolution immediately before native TUI launch.
-use crate::{ControlClient, NativeTransportError};
+use crate::{CollaborationClient, NativeTransportError};
 use collaboration_protocol::{ChannelDescription, EndpointAvailability, EndpointRef};
 use std::{
     io,
@@ -26,7 +26,7 @@ fn resolve_native_endpoint(
         .enable_all()
         .build()?;
     runtime.block_on(async {
-        let mut client = ControlClient::connect(
+        let client = CollaborationClient::connect(
             directory,
             "agent-collaboration-launch",
             env!("CARGO_PKG_VERSION"),
@@ -45,10 +45,14 @@ fn resolve_native_endpoint(
                 "selected session source does not match Router service",
             ));
         }
-        let inventory = client
-            .list_endpoints()
-            .await
-            .map_err(|_| io::Error::other("endpoint discovery failed"))?;
+        let inventory = client.list_endpoints().await.map_err(|error| {
+            match NativeTransportError::from_discovery(error) {
+                overloaded @ NativeTransportError::Overloaded { .. } => {
+                    io::Error::other(overloaded)
+                }
+                _ => io::Error::other("endpoint discovery failed"),
+            }
+        })?;
         let endpoint = inventory
             .endpoints
             .into_iter()
@@ -93,10 +97,6 @@ fn resolve_native_endpoint(
                 "native selector escaped service directory",
             ));
         }
-        client
-            .close()
-            .await
-            .map_err(|_| io::Error::other("discovery connection close failed"))?;
         Ok(socket)
     })
 }

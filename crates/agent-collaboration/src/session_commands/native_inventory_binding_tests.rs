@@ -6,12 +6,14 @@ const SERVICE: &str = "00000000-0000-4000-8000-000000000001";
 const EPOCH: &str = "00000000-0000-4000-8000-000000000002";
 const FOREIGN: &str = "00000000-0000-4000-8000-000000000003";
 
-fn initialized() -> ControlInitializationResult {
-    serde_json::from_value(json!({
-        "version":{"major":1,"minor":0}, "serviceId":SERVICE, "serviceEpoch":EPOCH,
-        "controlSchemaDigest":format!("sha256:{}", "a".repeat(64))
-    }))
-    .unwrap()
+fn manifest_identity() -> collaboration_client::RouterIdentity {
+    collaboration_client::RouterIdentity {
+        service_id: SERVICE.to_owned().try_into().unwrap(),
+        service_epoch: EPOCH.to_owned().try_into().unwrap(),
+        service_version: "1".to_owned(),
+        machine_label: "Binding fixture".to_owned().try_into().unwrap(),
+        native_schema_digest: None,
+    }
 }
 
 fn native(endpoint_id: &str) -> Value {
@@ -31,11 +33,11 @@ fn bind(
         "serviceEpoch":EPOCH,"sequence":0,"endpoints":endpoints
     }))
     .unwrap();
-    let initialized = initialized();
+    let router_identity = manifest_identity();
     bind_native_inventory(
         &inventory,
-        &initialized,
-        &initialized.service_id,
+        &router_identity,
+        &router_identity.service_id,
         NativeEndpointSelector::UniqueNative,
         view,
     )
@@ -118,13 +120,13 @@ fn expected_service_epoch_and_exact_selector_cannot_be_substituted() {
         "serviceEpoch":EPOCH,"sequence":0,"endpoints":[native("codex-other"),native("codex-local")]
     }))
     .unwrap();
-    let initialized = initialized();
+    let router_identity = manifest_identity();
     let endpoint: EndpointRef =
         serde_json::from_value(json!({"serviceId":SERVICE,"endpointId":"codex-local"})).unwrap();
     let binding = bind_native_inventory(
         &inventory,
-        &initialized,
-        &initialized.service_id,
+        &router_identity,
+        &router_identity.service_id,
         NativeEndpointSelector::Exact(endpoint.clone()),
         NativeSessionView::Loaded,
     )
@@ -134,8 +136,8 @@ fn expected_service_epoch_and_exact_selector_cannot_be_substituted() {
     assert_eq!(
         bind_native_inventory(
             &inventory,
-            &initialized,
-            &initialized.service_id,
+            &router_identity,
+            &router_identity.service_id,
             NativeEndpointSelector::Exact(endpoint.clone()),
             NativeSessionView::Loaded
         )
@@ -146,7 +148,7 @@ fn expected_service_epoch_and_exact_selector_cannot_be_substituted() {
     assert_eq!(
         bind_native_inventory(
             &inventory,
-            &initialized,
+            &router_identity,
             &foreign,
             NativeEndpointSelector::UniqueNative,
             NativeSessionView::Stored
@@ -157,8 +159,8 @@ fn expected_service_epoch_and_exact_selector_cannot_be_substituted() {
     assert_eq!(
         bind_native_inventory(
             &inventory,
-            &initialized,
-            &initialized.service_id,
+            &router_identity,
+            &router_identity.service_id,
             NativeEndpointSelector::Exact(endpoint),
             NativeSessionView::Stored
         ),

@@ -110,12 +110,20 @@ impl SessionsCommandError {
     pub(crate) fn permission_diagnostic(
         &self,
     ) -> Option<&collaboration_client::protocol::PermissionDiagnostic> {
+        self.launch_discovery_failure()?.permission_diagnostic()
+    }
+
+    /// The overload's message when the API shed the launch's endpoint discovery.
+    pub(crate) fn overload_message(&self) -> Option<&str> {
+        self.launch_discovery_failure()?.overload_message()
+    }
+
+    fn launch_discovery_failure(&self) -> Option<&collaboration_client::NativeTransportError> {
         let Self::CodexLaunch(error) = self else {
             return None;
         };
         error
             .get_ref()?
-            .downcast_ref::<collaboration_client::NativeTransportError>()?
-            .permission_diagnostic()
+            .downcast_ref::<collaboration_client::NativeTransportError>()
     }
 }

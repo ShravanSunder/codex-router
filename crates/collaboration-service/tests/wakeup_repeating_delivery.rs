@@ -138,22 +138,18 @@ async fn recurring_wake_stores_and_dispatches_two_distinct_pushes() {
         .await
         .expect("create recurring wake");
 
-    let identity = ServiceIdentity::new(
-        SERVICE_ID,
-        SERVICE_ID,
-        &format!("sha256:{}", "a".repeat(64)),
-    )
-    .expect("create service identity")
-    .with_machine_identity(
-        MachineIdentity::new(service_identity.clone(), Some("wake-repeating-fixture"))
-            .expect("create machine identity"),
-    )
-    .expect("attach machine identity")
-    .with_endpoints(vec![description])
-    .expect("add native endpoint")
-    .with_automation_store(Arc::clone(&store))
-    .with_native_backend(native_backend.clone())
-    .expect("add native backend");
+    let identity = ServiceIdentity::new(SERVICE_ID, SERVICE_ID)
+        .expect("create service identity")
+        .with_machine_identity(
+            MachineIdentity::new(service_identity.clone(), Some("wake-repeating-fixture"))
+                .expect("create machine identity"),
+        )
+        .expect("attach machine identity")
+        .with_endpoints(vec![description])
+        .expect("add native endpoint")
+        .with_automation_store(Arc::clone(&store))
+        .with_native_backend(native_backend.clone())
+        .expect("add native backend");
     let route: Arc<dyn SessionDeliveryRoute> = Arc::new(CodexAppServerDeliveryRoute::new(
         service_identity,
         identity.endpoint_directory(),

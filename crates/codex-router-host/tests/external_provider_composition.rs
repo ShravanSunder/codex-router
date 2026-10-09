@@ -2,7 +2,7 @@ use codex_router_host::{
     CollaborationRuntime, CollaborationRuntimeInputs, ExternalProviderLaunchBinding,
     ExternalProviderStartup,
 };
-use collaboration_client::{ControlClient, MessageSendRequest, PublicMessageContent};
+use collaboration_client::{CollaborationClient, MessageSendRequest, PublicMessageContent};
 use collaboration_protocol::{
     ChannelDescription, CodexGeneration, ConversationCreateRequest,
     ConversationOperationSettlement, ConversationOperationWaitOutput,
@@ -13,8 +13,13 @@ use collaboration_protocol::{
 };
 use std::os::unix::fs::PermissionsExt as _;
 
+#[path = "support/provider_conversation_submission.rs"]
+#[allow(dead_code)]
+mod provider_conversation_submission;
+use provider_conversation_submission::{submit_provider_create, submit_provider_prompt};
+
 #[tokio::test]
-async fn initialized_control_reaches_host_owned_provider_and_reuses_target() {
+async fn collaboration_api_reaches_host_owned_provider_and_reuses_target() {
     let root = tempfile::tempdir().expect("runtime root");
     std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700))
         .expect("private runtime root");
@@ -61,9 +66,9 @@ sys.stdin.read()
     )
     .await
     .expect("collaboration runtime");
-    let mut client = ControlClient::connect(root.path(), "provider-composition", "1")
+    let client = CollaborationClient::connect(root.path(), "provider-composition", "1")
         .await
-        .expect("Control client");
+        .expect("collaboration API client");
     let inventory = client.list_endpoints().await.expect("endpoint inventory");
     let provider_endpoint = inventory
         .endpoints
@@ -92,8 +97,9 @@ sys.stdin.read()
         session_id: SessionId::try_from("composition-caller".to_owned()).expect("actor session"),
     };
     let create_operation = OperationId::generate();
-    client
-        .create_provider_conversation(ConversationCreateRequest {
+    submit_provider_create(
+        &client,
+        ConversationCreateRequest {
             settings: None,
             operation_id: create_operation.clone(),
             endpoint: provider_endpoint.endpoint.clone(),
@@ -107,9 +113,10 @@ sys.stdin.read()
             requested_policy: ProviderRequestedPolicy {
                 access: RouterAccess::WriteRestricted,
             },
-        })
-        .await
-        .expect("create admitted");
+        },
+    )
+    .await
+    .expect("create admitted");
     let create = client
         .wait_for_provider_conversation_operation(ConversationOperationWaitRequest {
             operation_id: create_operation,
@@ -125,8 +132,9 @@ sys.stdin.read()
     };
 
     let prompt_operation = OperationId::generate();
-    client
-        .prompt_provider_conversation(ConversationPromptRequest {
+    submit_provider_prompt(
+        &client,
+        ConversationPromptRequest {
             input_id: None,
             operation_id: prompt_operation.clone(),
             target: target.clone(),
@@ -137,9 +145,10 @@ sys.stdin.read()
                 sender: actor,
                 text: MessageText::try_from("composition prompt".to_owned()).expect("prompt"),
             },
-        })
-        .await
-        .expect("prompt admitted");
+        },
+    )
+    .await
+    .expect("prompt admitted");
     let prompt = client
         .wait_for_provider_conversation_operation(ConversationOperationWaitRequest {
             operation_id: prompt_operation,
@@ -241,7 +250,7 @@ print(json.dumps({'jsonrpc':'2.0','id':request['id'],'result':{'protocolVersion'
     let mut runtime = start.await.expect("runtime");
     let service_id = runtime.service_id().clone();
     let service_epoch = runtime.service_epoch().clone();
-    let mut client = ControlClient::connect(root.path(), "retirement-proof", "1")
+    let client = CollaborationClient::connect(root.path(), "retirement-proof", "1")
         .await
         .expect("client");
     let mut listener_failure = Box::pin(runtime.listener_failure());
@@ -265,8 +274,9 @@ print(json.dumps({'jsonrpc':'2.0','id':request['id'],'result':{'protocolVersion'
     })
     .await
     .expect("provider retirement published");
-    let failure = client
-        .create_provider_conversation(ConversationCreateRequest {
+    let failure = submit_provider_create(
+        &client,
+        ConversationCreateRequest {
             settings: None,
             operation_id: OperationId::generate(),
             endpoint: provider_endpoint.endpoint,
@@ -297,19 +307,26 @@ print(json.dumps({'jsonrpc':'2.0','id':request['id'],'result':{'protocolVersion'
             requested_policy: ProviderRequestedPolicy {
                 access: RouterAccess::WriteRestricted,
             },
-        })
+        },
+    )
+    .await
+    .expect_err("retired provider rejects admission");
+    // The API's endpoint directory names the retirement, so the create is refused before any
+    // provider work is submitted.
+    assert!(
+        matches!(
+            &failure,
+            collaboration_client::ConversationClientError::UnavailableEndpoint { endpoint, .. }
+                if String::from(endpoint.endpoint_id.clone()) == "claude-local"
+        ),
+        "{failure:?}"
+    );
+    let surviving_client = CollaborationClient::connect(root.path(), "retirement-survivor", "1")
         .await
-        .expect_err("retired provider rejects admission");
-    assert!(matches!(
-        failure,
-        collaboration_client::ClientError::Rejected { .. }
-    ));
-    let mut surviving_client = ControlClient::connect(root.path(), "retirement-survivor", "1")
-        .await
-        .expect("fresh Control connection survives provider retirement");
+        .expect("a fresh API client survives provider retirement");
     let inventory = tokio::select! {
         failure = &mut listener_failure => panic!("provider retirement killed collaboration listeners: {failure}"),
-        inventory = surviving_client.list_endpoints() => inventory.expect("Control remains usable"),
+        inventory = surviving_client.list_endpoints() => inventory.expect("the API remains usable"),
     };
     assert!(inventory.endpoints.iter().any(|endpoint| {
         String::from(endpoint.endpoint.endpoint_id.clone()) == "claude-local"

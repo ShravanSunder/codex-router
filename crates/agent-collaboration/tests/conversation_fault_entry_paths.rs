@@ -7,7 +7,6 @@ use std::os::unix::fs::DirBuilderExt;
 use std::process::Stdio;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio_util::sync::CancellationToken;
 
 fn create_result_line(stdout: &[u8]) -> Value {
     let lines: Vec<_> = String::from_utf8_lossy(stdout)
@@ -123,7 +122,6 @@ async fn fork_response_loss_after_session_new_reports_unknown_without_replay() {
         .expect("private fixture directory");
     let service_id = "00000000-0000-4000-8000-000000000001";
     let epoch = "00000000-0000-4000-8000-000000000002";
-    let digest = format!("sha256:{}", "a".repeat(64));
     let endpoint = json!({"serviceId":service_id,"endpointId":"codex-local"});
     let description = serde_json::from_value(json!({
         "endpoint":endpoint,"label":"fork loss fixture",
@@ -132,23 +130,16 @@ async fn fork_response_loss_after_session_new_reports_unknown_without_replay() {
             "schemaDigest":format!("sha256:{}", collaboration_client::protocol::ACP_SCHEMA_DIGEST)}]
     }))
     .expect("endpoint description");
-    let identity = collaboration_service::ServiceIdentity::new(service_id, epoch, &digest)
+    let identity = collaboration_service::ServiceIdentity::new(service_id, epoch)
         .expect("identity")
         .with_endpoints(vec![description])
         .expect("endpoint");
-    let control =
-        collaboration_service::LocalControlService::bind(&root.join("control.sock"), identity)
-            .expect("control bind");
-    let manifest = serde_json::from_value(json!({
-        "version":2,"serviceId":service_id,"serviceEpoch":epoch,
-        "machineLabel":"fixture-host","control":{"transport":"unixJsonLines","path":"control.sock"},
-        "controlSchemaDigest":digest,"mcp":{"transport":"streamableHttp","url":"http://127.0.0.1:0/mcp"}
-    }))
-    .expect("manifest");
-    let publication = collaboration_service::ManifestPublication::publish(&root, &manifest)
-        .expect("publish manifest");
-    let stop = CancellationToken::new();
-    let service = tokio::spawn(control.run(stop.clone()));
+    let served = collaboration_mcp::test_support::ServedCollaborationApi::start(
+        &root,
+        collaboration_service::CollaborationApplication::new(identity),
+    )
+    .await
+    .expect("serve collaboration API");
     let acp = tokio::net::UnixListener::bind(root.join("acp.sock")).expect("ACP bind");
     let peer = tokio::spawn(async move {
         let (stream, _) = acp.accept().await.expect("ACP accept");
@@ -213,9 +204,7 @@ async fn fork_response_loss_after_session_new_reports_unknown_without_replay() {
     .expect("CLI deadline")
     .expect("CLI output");
     peer.await.expect("peer join");
-    stop.cancel();
-    service.await.expect("service join").expect("service stop");
-    drop(publication);
+    served.stop().await.expect("collaboration API stops");
     std::fs::remove_file(root.join("acp.sock")).expect("ACP cleanup");
     std::fs::remove_dir(&root).expect("fixture cleanup");
     assert_eq!(output.status.code(), Some(5));
@@ -268,24 +257,21 @@ async fn acp_initialize_response_loss_reports_no_effect_before_conversation_crea
         .expect("private fixture directory");
     let service_id = "00000000-0000-4000-8000-000000000001";
     let epoch = "00000000-0000-4000-8000-000000000002";
-    let digest = format!("sha256:{}", "a".repeat(64));
     let description = serde_json::from_value(json!({
         "endpoint":{"serviceId":service_id,"endpointId":"codex-local"}, "label":"initialize loss fixture",
         "availability":{"state":"available","observedAt":"2026-09-19T00:00:00Z"},
         "channels":[{"kind":"acp","transport":"unixJsonLines","path":"acp.sock","schemaDigest":format!("sha256:{}", collaboration_client::protocol::ACP_SCHEMA_DIGEST)}]
     })).expect("endpoint description");
-    let identity = collaboration_service::ServiceIdentity::new(service_id, epoch, &digest)
+    let identity = collaboration_service::ServiceIdentity::new(service_id, epoch)
         .expect("identity")
         .with_endpoints(vec![description])
         .expect("endpoint");
-    let control =
-        collaboration_service::LocalControlService::bind(&root.join("control.sock"), identity)
-            .expect("control bind");
-    let manifest = serde_json::from_value(json!({"version":2,"serviceId":service_id,"serviceEpoch":epoch,"machineLabel":"fixture-host","control":{"transport":"unixJsonLines","path":"control.sock"},"controlSchemaDigest":digest,"mcp":{"transport":"streamableHttp","url":"http://127.0.0.1:0/mcp"}})).expect("manifest");
-    let publication = collaboration_service::ManifestPublication::publish(&root, &manifest)
-        .expect("publish manifest");
-    let stop = CancellationToken::new();
-    let service = tokio::spawn(control.run(stop.clone()));
+    let served = collaboration_mcp::test_support::ServedCollaborationApi::start(
+        &root,
+        collaboration_service::CollaborationApplication::new(identity),
+    )
+    .await
+    .expect("serve collaboration API");
     let acp = tokio::net::UnixListener::bind(root.join("acp.sock")).expect("ACP bind");
     let peer = tokio::spawn(async move {
         let (stream, _) = acp.accept().await.expect("ACP accept");
@@ -330,9 +316,7 @@ async fn acp_initialize_response_loss_reports_no_effect_before_conversation_crea
     .expect("CLI deadline")
     .expect("CLI output");
     peer.await.expect("peer join");
-    stop.cancel();
-    service.await.expect("service join").expect("service stop");
-    drop(publication);
+    served.stop().await.expect("collaboration API stops");
     std::fs::remove_file(root.join("acp.sock")).expect("ACP cleanup");
     std::fs::remove_dir(&root).expect("fixture cleanup");
     assert_eq!(output.status.code(), Some(2));
@@ -347,7 +331,7 @@ async fn acp_initialize_response_loss_reports_no_effect_before_conversation_crea
 #[tokio::test]
 async fn compiled_cli_conversation_records_deserialize_for_success_errors_deadline_and_interrupt() {
     // This is deliberately a compiled-CLI test. Each outcome comes from a real
-    // Control discovery plus a deterministic ACP peer, then is decoded through
+    // API discovery plus a deterministic ACP peer, then is decoded through
     // the public closed DTO rather than constructed as a fixture record.
     let root = std::path::PathBuf::from(format!(
         "/tmp/conversation-records-{}",
@@ -359,7 +343,6 @@ async fn compiled_cli_conversation_records_deserialize_for_success_errors_deadli
         .expect("private fixture directory");
     let service_id = "00000000-0000-4000-8000-0000c0dec001";
     let epoch = "00000000-0000-4000-8000-0000c0dec002";
-    let digest = format!("sha256:{}", "d".repeat(64));
     let endpoint = json!({"serviceId":service_id,"endpointId":"codex-local"});
     let description = serde_json::from_value(json!({
         "endpoint":endpoint,"label":"record fixture",
@@ -368,22 +351,16 @@ async fn compiled_cli_conversation_records_deserialize_for_success_errors_deadli
             "schemaDigest":format!("sha256:{}", collaboration_client::protocol::ACP_SCHEMA_DIGEST)}]
     }))
     .expect("endpoint description");
-    let identity = collaboration_service::ServiceIdentity::new(service_id, epoch, &digest)
+    let identity = collaboration_service::ServiceIdentity::new(service_id, epoch)
         .expect("identity")
         .with_endpoints(vec![description])
         .expect("endpoint");
-    let control =
-        collaboration_service::LocalControlService::bind(&root.join("control.sock"), identity)
-            .expect("control bind");
-    let manifest = serde_json::from_value(json!({
-        "version":2,"serviceId":service_id,"serviceEpoch":epoch,
-        "machineLabel":"fixture-host","control":{"transport":"unixJsonLines","path":"control.sock"},
-        "controlSchemaDigest":digest,"mcp":{"transport":"streamableHttp","url":"http://127.0.0.1:0/mcp"}
-    })).expect("manifest");
-    let publication = collaboration_service::ManifestPublication::publish(&root, &manifest)
-        .expect("publish manifest");
-    let stop = CancellationToken::new();
-    let service = tokio::spawn(control.run(stop.clone()));
+    let served = collaboration_mcp::test_support::ServedCollaborationApi::start(
+        &root,
+        collaboration_service::CollaborationApplication::new(identity),
+    )
+    .await
+    .expect("serve collaboration API");
     let acp = tokio::net::UnixListener::bind(root.join("acp.sock")).expect("ACP bind");
     let (interrupt_prompt_seen, interrupt_prompt_ready) = tokio::sync::oneshot::channel();
     let peer = tokio::spawn(async move {
@@ -669,9 +646,7 @@ async fn compiled_cli_conversation_records_deserialize_for_success_errors_deadli
         .await
         .expect("peer deadline")
         .expect("peer join");
-    stop.cancel();
-    service.await.expect("service join").expect("service stop");
-    drop(publication);
+    served.stop().await.expect("collaboration API stops");
     std::fs::remove_file(root.join("acp.sock")).expect("ACP cleanup");
     std::fs::remove_dir(&root).expect("fixture cleanup");
 }
@@ -731,30 +706,22 @@ async fn run_resumed_prompt_after_load(load_error: Option<Value>) -> std::proces
         .expect("private fixture directory");
     let service_id = "00000000-0000-4000-8000-000000000001";
     let epoch = "00000000-0000-4000-8000-000000000002";
-    let digest = format!("sha256:{}", "a".repeat(64));
     let description = serde_json::from_value(json!({
         "endpoint":{"serviceId":service_id,"endpointId":"codex-local"}, "label":"resumed load fixture",
         "availability":{"state":"available","observedAt":"2026-09-19T00:00:00Z"},
         "channels":[{"kind":"acp","transport":"unixJsonLines","path":"acp.sock","schemaDigest":format!("sha256:{}", collaboration_client::protocol::ACP_SCHEMA_DIGEST)}]
     }))
     .expect("endpoint description");
-    let identity = collaboration_service::ServiceIdentity::new(service_id, epoch, &digest)
+    let identity = collaboration_service::ServiceIdentity::new(service_id, epoch)
         .expect("identity")
         .with_endpoints(vec![description])
         .expect("endpoint");
-    let control =
-        collaboration_service::LocalControlService::bind(&root.join("control.sock"), identity)
-            .expect("control bind");
-    let manifest = serde_json::from_value(json!({
-        "version":2,"serviceId":service_id,"serviceEpoch":epoch,
-        "machineLabel":"fixture-host","control":{"transport":"unixJsonLines","path":"control.sock"},
-        "controlSchemaDigest":digest,"mcp":{"transport":"streamableHttp","url":"http://127.0.0.1:0/mcp"}
-    }))
-    .expect("manifest");
-    let publication = collaboration_service::ManifestPublication::publish(&root, &manifest)
-        .expect("publish manifest");
-    let stop = CancellationToken::new();
-    let service = tokio::spawn(control.run(stop.clone()));
+    let served = collaboration_mcp::test_support::ServedCollaborationApi::start(
+        &root,
+        collaboration_service::CollaborationApplication::new(identity),
+    )
+    .await
+    .expect("serve collaboration API");
     let acp = tokio::net::UnixListener::bind(root.join("acp.sock")).expect("ACP bind");
     let peer = tokio::spawn(async move {
         let (stream, _) = acp.accept().await.expect("ACP accept");
@@ -838,9 +805,7 @@ async fn run_resumed_prompt_after_load(load_error: Option<Value>) -> std::proces
     .expect("CLI deadline")
     .expect("CLI output");
     peer.await.expect("peer join");
-    stop.cancel();
-    service.await.expect("service join").expect("service stop");
-    drop(publication);
+    served.stop().await.expect("collaboration API stops");
     std::fs::remove_file(root.join("acp.sock")).expect("ACP cleanup");
     std::fs::remove_dir(&root).expect("fixture cleanup");
     output

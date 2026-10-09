@@ -3,7 +3,7 @@ use collaboration_client::protocol::{
     CodexGeneration, NativeSessionListParams, NativeSessionListResult, NativeSessionObservation,
     NativeSessionSource, NativeSessionView, NativeThreadStatus, SessionRef,
 };
-use collaboration_client::{ClientError, ControlClient};
+use collaboration_client::{ClientError, CollaborationClient};
 use std::collections::BTreeSet;
 
 const MAX_INVENTORY_ROWS: usize = 4096;
@@ -66,7 +66,7 @@ impl NativeInventoryPager {
 
     pub(super) async fn next_page(
         &mut self,
-        client: &mut ControlClient,
+        client: &mut CollaborationClient,
     ) -> Result<Option<NativeSessionListResult>, ClientError> {
         match self.paging_state {
             NativePagingState::Ready => {}

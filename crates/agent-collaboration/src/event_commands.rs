@@ -1,7 +1,7 @@
 //! Scoped Session event output; attachment is explicit and cancellation only closes observation.
 use clap::{Parser, Subcommand};
 use collaboration_client::protocol::{EndpointId, EndpointRef, SessionId, SessionRef};
-use collaboration_client::{BoundedObservationRequest, ControlClient, SessionObservation};
+use collaboration_client::{BoundedObservationRequest, CollaborationClient, SessionObservation};
 use serde_json::json;
 use std::{
     ffi::OsString,
@@ -54,6 +54,9 @@ enum EventCommand {
         after_sequence: Option<u64>,
         #[arg(long)]
         epoch: Option<u64>,
+        /// Print each event as an `observationEvent` line as it arrives, before the result.
+        #[arg(long)]
+        stream: bool,
     },
 }
 
@@ -123,6 +126,7 @@ pub fn run_event_command(arguments: Vec<OsString>) -> i32 {
                 max_bytes,
                 after_sequence,
                 epoch,
+                stream,
             } => {
                 observe(
                     &directory,
@@ -134,6 +138,7 @@ pub fn run_event_command(arguments: Vec<OsString>) -> i32 {
                         max_bytes,
                         after_sequence,
                         epoch,
+                        stream,
                     },
                 )
                 .await
@@ -163,17 +168,24 @@ async fn listen(
                 collaboration_client::ClientError::Protocol("invalid session"),
             )
         })?;
-        SessionObservation::attach_by_ids_with_context(directory, endpoint_id, session_id).await
+        SessionObservation::attach_by_ids_with_context(
+            &collaboration_client::CollaborationAccess::api(directory),
+            endpoint_id,
+            session_id,
+        )
+        .await
     }
     .await;
     let mut observation = match attached {
         Ok(value) => value,
         Err(error) => {
-            if let Some(exit) = crate::permission_diagnostic_reporting::report_permission_error(
-                error.source(),
-                crate::permission_diagnostic_reporting::PermissionDiagnosticRendering::Command,
-                true,
-            ) {
+            if let Some(exit) =
+                crate::permission_diagnostic_reporting::report_actionable_client_error(
+                    error.source(),
+                    crate::permission_diagnostic_reporting::PermissionDiagnosticRendering::Command,
+                    true,
+                )
+            {
                 return exit;
             }
             return report_observation_error(error);
@@ -256,6 +268,18 @@ struct ObserveInput {
     max_bytes: usize,
     after_sequence: Option<u64>,
     epoch: Option<u64>,
+    stream: bool,
+}
+
+/// One streamed event, printed as it arrives.
+fn print_observed_event(
+    event: collaboration_client::ObservationEventNotification,
+) -> io::Result<()> {
+    writeln!(
+        io::stdout(),
+        "{}",
+        json!({"kind":"observationEvent","event":event.event,"cursor":event.cursor})
+    )
 }
 
 async fn observe(directory: &std::path::Path, input: ObserveInput) -> i32 {
@@ -281,38 +305,43 @@ async fn observe(directory: &std::path::Path, input: ObserveInput) -> i32 {
             );
         }
     };
-    let control =
-        match ControlClient::connect(directory, "agent-collaboration", env!("CARGO_PKG_VERSION"))
-            .await
-        {
-            Ok(value) => value,
-            Err(error) => {
-                return crate::permission_diagnostic_reporting::report_permission_error(
-                    &error,
-                    crate::permission_diagnostic_reporting::PermissionDiagnosticRendering::Command,
+    let client = match CollaborationClient::connect(
+        directory,
+        "agent-collaboration",
+        env!("CARGO_PKG_VERSION"),
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(error) => {
+            return crate::permission_diagnostic_reporting::report_actionable_client_error(
+                &error,
+                crate::permission_diagnostic_reporting::PermissionDiagnosticRendering::Command,
+                true,
+            )
+            .unwrap_or_else(|| {
+                crate::endpoint_commands::report_failure(
+                    "unavailable",
+                    "collaboration API discovery failed",
+                    3,
                     true,
                 )
-                .unwrap_or_else(|| {
-                    crate::endpoint_commands::report_failure(
-                        "unavailable",
-                        "Control discovery failed",
-                        3,
-                        true,
-                    )
-                });
-            }
-        };
+            });
+        }
+    };
     let target = SessionRef {
         endpoint: EndpointRef {
-            service_id: control.identity().service_id.clone(),
+            service_id: client.identity().service_id.clone(),
             endpoint_id,
         },
         session_id,
     };
-    drop(control);
+    drop(client);
     let cancel = tokio_util::sync::CancellationToken::new();
+    let access = collaboration_client::CollaborationAccess::api(directory);
+    let (observed, mut streamed) = tokio::sync::mpsc::unbounded_channel();
     let observation = SessionObservation::observe_bounded(
-        directory,
+        &access,
         BoundedObservationRequest {
             target,
             timeout_seconds: input.timeout_seconds,
@@ -322,15 +351,31 @@ async fn observe(directory: &std::path::Path, input: ObserveInput) -> i32 {
             epoch: input.epoch,
         },
         cancel.clone(),
+        input.stream.then_some(observed),
     );
     tokio::pin!(observation);
-    let result = tokio::select! {
-        result = &mut observation => result,
-        _ = tokio::signal::ctrl_c() => {
-            cancel.cancel();
-            observation.await
+    let mut interrupted = std::pin::pin!(tokio::signal::ctrl_c());
+    let mut cancelled = false;
+    let result = loop {
+        tokio::select! {
+            biased;
+            Some(event) = streamed.recv() => {
+                if print_observed_event(event).is_err() {
+                    return 3;
+                }
+            }
+            result = &mut observation => break result,
+            _ = &mut interrupted, if !cancelled => {
+                cancel.cancel();
+                cancelled = true;
+            }
         }
     };
+    while let Ok(event) = streamed.try_recv() {
+        if print_observed_event(event).is_err() {
+            return 3;
+        }
+    }
     match result {
         Ok(result) => match serde_json::to_writer(io::stdout(), &result)
             .and_then(|()| writeln!(io::stdout()).map_err(serde_json::Error::io))

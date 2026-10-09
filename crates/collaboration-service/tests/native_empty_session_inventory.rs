@@ -1,15 +1,14 @@
-use collaboration_client::ControlClient;
 use collaboration_protocol::{
     CodexGeneration, NativeSessionListParams, NativeSessionObservation, NativeSessionScope,
     NativeSessionSource, NativeSessionView, SessionRef,
 };
-use collaboration_service::{
-    NativeControlBackend, NativeGenerationGate, ServiceIdentity, serve_control_connection,
-};
+use collaboration_service::{NativeControlBackend, NativeGenerationGate, ServiceIdentity};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, sync::Arc};
 use tokio_tungstenite::tungstenite::Message;
+#[path = "support/served_api.rs"]
+mod served_api;
 
 #[tokio::test]
 async fn runtime_inventory_filters_unmaterialized_threads_and_keeps_rows_on_turn_errors() {
@@ -79,18 +78,15 @@ async fn runtime_inventory_filters_unmaterialized_threads_and_keeps_rows_on_turn
         gate,
         codex_home: temporary.path().to_owned(),
     };
-    let identity = ServiceIdentity::new(
-        service_id,
-        service_epoch,
-        &format!("sha256:{}", "a".repeat(64)),
-    )
-    .expect("service identity")
-    .with_endpoints(vec![endpoint])
-    .expect("register endpoint")
-    .with_native_backend(native_backend)
-    .expect("register native backend");
-    let (client_stream, service_stream) = tokio::net::UnixStream::pair().expect("control pair");
-    let service = tokio::spawn(serve_control_connection(service_stream, identity));
+    let identity = ServiceIdentity::new(service_id, service_epoch)
+        .expect("service identity")
+        .with_endpoints(vec![endpoint])
+        .expect("register endpoint")
+        .with_native_backend(native_backend)
+        .expect("register native backend");
+    let served = served_api::ServedApi::start(identity)
+        .await
+        .expect("serve the API");
     let thread_ids = ["empty-thread", "error-thread", "preview-thread"];
     let backend = tokio::spawn(async move {
         let mut turns_list_params = Vec::new();
@@ -204,9 +200,10 @@ async fn runtime_inventory_filters_unmaterialized_threads_and_keeps_rows_on_turn
         }
         turns_list_params
     });
-    let mut client = ControlClient::initialize(client_stream, "empty-session-inventory", "1")
+    let client = served
+        .client("empty-session-inventory")
         .await
-        .expect("initialize Control client");
+        .expect("connect the API client");
     let request = |view, include_empty_sessions| NativeSessionListParams {
         endpoint: target.endpoint.clone(),
         view,
@@ -268,9 +265,6 @@ async fn runtime_inventory_filters_unmaterialized_threads_and_keeps_rows_on_turn
             )
     }));
 
-    client.close().await.expect("close Control client");
-    service
-        .await
-        .expect("service task")
-        .expect("service result");
+    drop(client);
+    served.stop().await.expect("service result");
 }
