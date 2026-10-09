@@ -247,13 +247,14 @@ async fn router_memory_key_and_model_reach_real_http_peer() -> Result<(), &'stat
                     .into_body()
                     .collect()
                     .await
-                    .is_ok_and(|body| body.to_bytes().as_ref() == request_body());
+                    .is_ok_and(|body| {
+                        body.to_bytes().as_ref()
+                            == br#"{"model":"anthropic/claude-haiku-5.5","input":"Reply exactly ROUTER_SELECTOR_PROVIDER_OK. No tools.","max_output_tokens":128,"stream":false}"#
+                    });
                 if auth_ok && privacy_ok && path_ok && body_ok {
                     observations.fetch_add(1, Ordering::Relaxed);
                 }
-                let response = format!(
-                    r#"{{"model":"{MODEL_NAME}","status":"completed","output":[{{"type":"message","content":[{{"type":"output_text","text":"{MARKER_TEXT}"}}]}}]}}"#
-                );
+                let response = r#"{"model":"anthropic/claude-haiku-5.5","status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"ROUTER_SELECTOR_PROVIDER_OK"}]}]}"#;
                 Ok::<_, Infallible>(hyper::Response::new(Full::new(Bytes::from(response))))
             }
         });
