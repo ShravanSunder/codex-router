@@ -480,6 +480,18 @@ fn selection_diagnostics_unreplayable_http_quota_error_uses_real_handler() {
     assert!(captured_logs.contains("codex_router.selection_rejected"));
     assert!(captured_logs.contains("selection.stage=\"http_replay_unavailable\""));
     assert!(captured_logs.contains("error.class=\"quota_replay_unavailable\""));
+    let rejection_line = captured_logs
+        .lines()
+        .find(|line| {
+            line.contains("codex_router.selection_rejected")
+                && line.contains("selection.stage=\"http_replay_unavailable\"")
+                && line.contains("error.class=\"quota_replay_unavailable\"")
+        })
+        .expect("the real handler should emit its quota replay rejection");
+    assert!(
+        rejection_line.contains("route.band=\"responses\""),
+        "the prepared selection's route band must remain on its rejection event"
+    );
     assert!(!captured_logs.contains("acct_primary_unreplayable_quota"));
     assert!(!captured_logs.contains("primary-unreplayable-quota"));
     assert!(!captured_logs.contains("unreplayable_padding"));
@@ -585,6 +597,18 @@ fn selection_diagnostics_http_attempt_limit_failure_reaches_real_handler_and_503
     assert!(captured_logs.contains("codex_router.selection_rejected"));
     assert!(captured_logs.contains("selection.stage=\"http_account_attempt_limit\""));
     assert!(captured_logs.contains("error.class=\"sqlite\""));
+    let rejection_line = captured_logs
+        .lines()
+        .find(|line| {
+            line.contains("codex_router.selection_rejected")
+                && line.contains("selection.stage=\"http_account_attempt_limit\"")
+                && line.contains("error.class=\"sqlite\"")
+        })
+        .expect("the real handler should emit its early account read rejection");
+    assert!(
+        !rejection_line.contains("route.band="),
+        "an early account read rejection must not invent a selected route band"
+    );
     assert!(!captured_logs.contains("body_private_marker"));
     assert!(!captured_logs.contains("no such table"));
     assert!(!captured_logs.contains("current-token"));

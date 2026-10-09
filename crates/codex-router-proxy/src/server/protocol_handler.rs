@@ -385,6 +385,7 @@ impl LoopbackProtocolConnectionHandler {
                 Err(error) => return http_error_response(error),
             };
             let (upstream_request, completion) = prepared.into_parts();
+            let route_band = completion.route_band();
             let response = match self.upstream.send_streaming(upstream_request).await {
                 Ok(response) => response,
                 Err(error) => return http_error_response(error),
@@ -404,7 +405,7 @@ impl LoopbackProtocolConnectionHandler {
                         crate::account_selection::record_selection_rejected(
                             crate::account_selection::SelectionDiagnosticStage::HttpReplayUnavailable,
                             "quota_replay_unavailable",
-                            None,
+                            Some(route_band),
                         );
                         return quota_state_unavailable_response();
                     }
@@ -418,7 +419,7 @@ impl LoopbackProtocolConnectionHandler {
                     crate::account_selection::record_selection_rejected(
                         crate::account_selection::SelectionDiagnosticStage::HttpPrecommitObservation,
                         crate::account_selection::selection_error_class(&error),
-                        None,
+                        Some(route_band),
                     );
                     return http_error_response(error);
                 }
@@ -426,7 +427,7 @@ impl LoopbackProtocolConnectionHandler {
                     crate::account_selection::record_selection_rejected(
                         crate::account_selection::SelectionDiagnosticStage::HttpPrecommitObservation,
                         "observation_failed",
-                        None,
+                        Some(route_band),
                     );
                     return empty_response(StatusCode::SERVICE_UNAVAILABLE);
                 }
