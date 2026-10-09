@@ -25,6 +25,34 @@ pub(super) enum SessionsLaunchTarget {
 }
 
 impl SessionsLaunchTarget {
+    pub(super) fn resolve_for_selection(
+        &mut self,
+        identity: &super::SessionPickerIdentity,
+    ) -> Result<(), SessionsCommandError> {
+        match identity {
+            super::SessionPickerIdentity::LocalCodex(_) => self.resolve_for_launch(),
+            super::SessionPickerIdentity::HostedCodex(target) => {
+                let Self::Hosted {
+                    app_server_socket,
+                    service_directory,
+                    ..
+                } = self
+                else {
+                    return Err(SessionsCommandError::SessionSourceUnavailable);
+                };
+                *app_server_socket = collaboration_client::resolve_public_native_for_endpoint(
+                    service_directory,
+                    &target.endpoint,
+                )
+                .map_err(SessionsCommandError::CodexLaunch)?;
+                Ok(())
+            }
+            super::SessionPickerIdentity::HostedProvider(_) => {
+                Err(SessionsCommandError::SessionSourceUnavailable)
+            }
+        }
+    }
+
     pub(super) fn resolve_for_launch(&mut self) -> Result<(), SessionsCommandError> {
         if let Self::Hosted {
             app_server_socket,

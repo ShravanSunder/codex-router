@@ -645,7 +645,7 @@ mod quota_reset_pty_test {
             "initial sessions picker",
         )?;
         let pointer_focus_start = terminal.transcript_len();
-        terminal.send_sgr_mouse_left_down(10, 14)?;
+        terminal.send_sgr_mouse_left_down(10, 15)?;
         stage(
             terminal.wait_for_text_after(
                 "BETA_CONVERSATION_ACTIVE",

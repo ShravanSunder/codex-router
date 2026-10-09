@@ -41,7 +41,7 @@ pub async fn run_delivery_proof(
         }
         println!(
             "{}",
-            json!({"kind":"ownedDeliveryThreadCreated","threadId":thread,"model":"gpt-5.6-luna"})
+            json!({"kind":"ownedDeliveryThreadCreated","threadId":thread,"model":super::owned_thread_registry::PROOF_MODEL})
         );
     }
     let sender =

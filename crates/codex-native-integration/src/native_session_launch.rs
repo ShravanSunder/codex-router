@@ -3,6 +3,93 @@
 use std::ffi::OsStr;
 use std::ffi::OsString;
 use std::path::Path;
+use std::path::PathBuf;
+
+/// The working directory a native launch projects from its invocation arguments.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum NativeWorkingDirectoryMetadata {
+    /// No explicit directory override was found, so the invoking directory is used.
+    Invoking { directory: PathBuf },
+    /// Exactly one explicit directory override with an available value was found.
+    Explicit { directory: OsString },
+    /// An explicit override was missing its value or multiple overrides were present.
+    UnresolvedExplicit,
+}
+
+/// Reports the native launch's directory metadata without changing its arguments.
+///
+/// This recognizes the working-directory spellings already handled by native launch
+/// projection. It does not resolve, canonicalize, or check the directory on disk.
+#[must_use]
+pub fn native_working_directory_metadata(
+    invoking_directory: &Path,
+    user_arguments: &[OsString],
+) -> NativeWorkingDirectoryMetadata {
+    let mut explicit_directory = None;
+
+    for (argument_index, argument) in user_arguments.iter().enumerate() {
+        let encoded_argument = argument.as_encoded_bytes();
+        let directory_override = if argument == OsStr::new("--cd") || argument == OsStr::new("-C") {
+            let Some(value) = user_arguments.get(argument_index + 1) else {
+                return NativeWorkingDirectoryMetadata::UnresolvedExplicit;
+            };
+            Some(value.clone())
+        } else if encoded_argument.starts_with(b"--cd=") {
+            let Some(directory) = os_string_after_ascii_prefix(argument, b"--cd=".len()) else {
+                return NativeWorkingDirectoryMetadata::UnresolvedExplicit;
+            };
+            Some(directory)
+        } else if encoded_argument.starts_with(b"-C") && encoded_argument.len() > 2 {
+            let Some(directory) = os_string_after_ascii_prefix(argument, b"-C".len()) else {
+                return NativeWorkingDirectoryMetadata::UnresolvedExplicit;
+            };
+            Some(directory)
+        } else {
+            None
+        };
+
+        let Some(directory_override) = directory_override else {
+            continue;
+        };
+
+        if explicit_directory.replace(directory_override).is_some() {
+            return NativeWorkingDirectoryMetadata::UnresolvedExplicit;
+        }
+    }
+
+    match explicit_directory {
+        Some(directory) => NativeWorkingDirectoryMetadata::Explicit { directory },
+        None => NativeWorkingDirectoryMetadata::Invoking {
+            directory: invoking_directory.to_path_buf(),
+        },
+    }
+}
+
+fn os_string_after_ascii_prefix(argument: &OsStr, prefix_length: usize) -> Option<OsString> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::{OsStrExt, OsStringExt};
+
+        let suffix = argument.as_bytes().get(prefix_length..)?;
+        Some(OsString::from_vec(suffix.to_vec()))
+    }
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::{OsStrExt, OsStringExt};
+
+        let suffix = argument
+            .encode_wide()
+            .skip(prefix_length)
+            .collect::<Vec<_>>();
+        Some(OsString::from_wide(&suffix))
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    {
+        argument.to_str()?.get(prefix_length..).map(OsString::from)
+    }
+}
 
 /// Explicit configuration profile for native Codex launches.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

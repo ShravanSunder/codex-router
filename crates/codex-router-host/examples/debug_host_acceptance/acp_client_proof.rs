@@ -36,7 +36,9 @@ pub(super) async fn run_client_proof(
             return Err("ACP preparation failed".into());
         }
         let thread = peer.inspect_thread(second).await?;
-        if thread.get("model").and_then(serde_json::Value::as_str) != Some("gpt-5.6-luna") {
+        if thread.get("model").and_then(serde_json::Value::as_str)
+            != Some(super::owned_thread_registry::PROOF_MODEL)
+        {
             return Err("ACP target model is not Luna".into());
         }
         let script = cwd.join("scripts/proof-tools/acp-client-proof.mjs");
@@ -79,7 +81,9 @@ pub(super) async fn run_client_proof(
             return Err("ACP CLI preparation failed".into());
         }
         let thread = peer.inspect_thread(second).await?;
-        if thread.get("model").and_then(serde_json::Value::as_str) != Some("gpt-5.6-luna") {
+        if thread.get("model").and_then(serde_json::Value::as_str)
+            != Some(super::owned_thread_registry::PROOF_MODEL)
+        {
             return Err("ACP CLI target model is not Luna".into());
         }
         let output = tokio::time::timeout(

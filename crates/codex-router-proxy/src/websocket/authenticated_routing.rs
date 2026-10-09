@@ -147,7 +147,10 @@ where
                 .resolve_provider_credentials(selected.account_id(), RESPONSES_WEBSOCKET.provider)
             {
                 Ok(resolved) => resolved,
-                Err(_reason) => {
+                Err(reason) => {
+                    super::credential_resolution_diagnostic::observe_credential_resolution_failure(
+                        &reason,
+                    );
                     self.emit_audit_event(websocket_credential_rejection_audit_event(
                         account_hash.clone(),
                     ));
@@ -360,7 +363,10 @@ where
                 .await
             {
                 Ok(resolved) => resolved,
-                Err(_reason) => {
+                Err(reason) => {
+                    super::credential_resolution_diagnostic::observe_credential_resolution_failure(
+                        &reason,
+                    );
                     self.emit_audit_event(websocket_credential_rejection_audit_event(
                         account_hash.clone(),
                     ));

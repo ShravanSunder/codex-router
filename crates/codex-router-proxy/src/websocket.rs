@@ -79,6 +79,8 @@ use crate::capacity_retry::CapacityRetryTracker;
 
 #[path = "websocket/account_turn_admission.rs"]
 mod account_turn_admission;
+#[path = "websocket/credential_resolution_diagnostic.rs"]
+mod credential_resolution_diagnostic;
 use crate::capacity_retry::MAX_THREAD_ID_BYTES;
 use crate::db_write_actor::DbWriteEnqueueResult;
 use crate::headers::Header;

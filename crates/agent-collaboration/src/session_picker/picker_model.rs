@@ -54,6 +54,9 @@ pub(super) enum SessionsPickerFocus {
 pub(crate) struct SessionsPickerModel {
     pub(super) request: SessionsPickerRequest,
     pub(super) width: usize,
+    pub(super) machine_controls: super::picker_machine_controls::PickerMachineControls,
+    pub(super) fork_confirmation: Option<super::picker_fork_confirmation::ForkConfirmation>,
+    pub(super) source_progress: Vec<super::source_reload_progress::SourceReadProgress>,
     pub(super) root: SessionsPickerRoot,
     pub(super) provider: SessionsProvider,
     pub(super) source: SessionsSource,
@@ -69,7 +72,18 @@ pub(crate) struct SessionsPickerModel {
 }
 
 impl SessionsPickerModel {
-    pub(crate) fn new(request: SessionsPickerRequest, width: usize) -> Self {
+    pub(crate) fn new(mut request: SessionsPickerRequest, width: usize) -> Self {
+        let default_source = match request.machine_mode {
+            super::PickerMachineSourceMode::HostedDefault => {
+                super::PickerSourceContext::DefaultHosted
+            }
+            super::PickerMachineSourceMode::LocalCodex => super::PickerSourceContext::LocalCodex,
+        };
+        for record in &mut request.records {
+            if record.source_context.is_none() {
+                record.source_context = Some(default_source.clone());
+            }
+        }
         let mut model = Self {
             root: request.root,
             provider: request.provider.clone(),
@@ -78,6 +92,9 @@ impl SessionsPickerModel {
             sort: request.sort,
             request,
             width,
+            machine_controls: super::picker_machine_controls::PickerMachineControls::default(),
+            fork_confirmation: None,
+            source_progress: Vec::new(),
             search: String::new(),
             show_help: false,
             runtime_coverage: PickerRuntimeCoverage::Unobserved,
@@ -189,6 +206,12 @@ impl SessionsPickerModel {
         let previous_index = self.focused_visible_index();
         self.pointer_window_start = None;
         self.request.records = snapshot.records;
+        let default_source = self.source_contexts().into_iter().next();
+        for record in &mut self.request.records {
+            if record.source_context.is_none() {
+                record.source_context = default_source.clone();
+            }
+        }
         self.runtime_coverage = snapshot.runtime_coverage;
         self.rebuild_visible_rows();
         self.restore_focus_or_fallback(previous_index);
@@ -282,25 +305,80 @@ impl SessionsPickerModel {
         }
     }
 
+    pub(super) fn source_contexts(&self) -> Vec<super::PickerSourceContext> {
+        if let super::picker_machine_controls::PickerMachineStage::Loading { source, .. } =
+            &self.machine_controls.stage
+        {
+            return vec![source.as_ref().clone()];
+        }
+        if let super::picker_machine_controls::PickerMachineFilter::Single { source } =
+            &self.machine_controls.filter
+        {
+            return vec![source.as_ref().clone()];
+        }
+        let default_source = match self.request.machine_mode {
+            super::PickerMachineSourceMode::HostedDefault => {
+                super::PickerSourceContext::DefaultHosted
+            }
+            super::PickerMachineSourceMode::LocalCodex => super::PickerSourceContext::LocalCodex,
+        };
+        let mut sources = vec![default_source];
+        if self.machine_controls.filter == super::picker_machine_controls::PickerMachineFilter::All
+            && let crate::sessions::RouterRegistryRead::Ready(registry) =
+                &self.request.router_registry
+        {
+            sources.extend(
+                registry
+                    .routers
+                    .iter()
+                    .cloned()
+                    .map(super::PickerSourceContext::ConfiguredHosted),
+            );
+        }
+        sources
+    }
+
+    pub(super) fn start_new_action(&mut self) -> Option<SessionsPickerOutcome> {
+        if self
+            .machine_controls
+            .open_new(&self.request.router_registry)
+        {
+            None
+        } else {
+            Some(SessionsPickerOutcome::StartNewSession)
+        }
+    }
+
     pub(crate) fn activation_outcome_for_focus(&self) -> Option<SessionsPickerOutcome> {
         match self.focused_record() {
             Some(record) if record.identity.is_provider() => None,
             Some(record) => Some(SessionsPickerOutcome::ResumeSession(
-                record.session_id.clone(),
+                crate::sessions::SessionActionSelection::from_picker_record(record),
             )),
             None => Some(SessionsPickerOutcome::StartNewSession),
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn fork_outcome_for_focus(&self) -> Option<SessionsPickerOutcome> {
         self.focused_record()
             .filter(|record| !record.identity.is_provider())
-            .map(|record| SessionsPickerOutcome::ForkSession(record.session_id.clone()))
+            .map(|record| {
+                SessionsPickerOutcome::ForkSession(
+                    crate::sessions::SessionActionSelection::from_picker_record(record),
+                )
+            })
     }
 
     #[cfg(test)]
     pub(crate) fn render_snapshot(&self) -> String {
         render_model_snapshot(self)
+    }
+
+    pub(super) fn open_fork_confirmation(&mut self) {
+        self.fork_confirmation = self.focused_record().map(|record| {
+            super::picker_fork_confirmation::ForkConfirmation::capture(record, &self.request)
+        });
     }
 
     #[cfg(test)]

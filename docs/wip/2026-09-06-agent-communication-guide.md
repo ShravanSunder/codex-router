@@ -144,6 +144,10 @@ target/debug/examples/debug_host_acceptance \
 
 The harness uses port18787, a fresh private backend socket, the debug Router root/profile, normal Codex storage, fresh Luna-pinned threads and owned-child cleanup. It refuses an occupied debug port. It verifies backend routing and Remote Control disablement before model work, checks forbidden socket/TCP access, and requires both agents' successful CLI calls plus the checked result. Production identities must remain unchanged. Failure is not permission to retry, change models or widen sandbox access.
 
+If the existing debug profile uses another loopback port, set `CODEX_ROUTER_ACCEPTANCE_PORT` for the harness invocation. The harness uses that port for profile validation, occupied-port refusal, Host launch, routing verification and cleanup; it retains 18787 when the variable is absent. Invalid values and the production port are rejected before launch. This does not edit the profile or provision its account store.
+
+Fresh owned native threads and marker turns explicitly select `gpt-6-luna` with `medium` effort. Creation and fork replies must retain that model/effort as well as the debug provider and read-only policy. This is an invocation-local test setting; it does not change saved profiles or establish model entitlement. Correlated turn-error receipts retain only recognized native classifications, valid numeric HTTP status when supplied, and the retry boolean. Backend messages and additional details are omitted; missing status leaves the failure cause unresolved.
+
 The independent ACP proof uses the pinned official SDK against the published ACP channel and verifies a Luna-owned thread before prompting. The replacement proof observes the old connection closing, explicitly reconnects and reloads the same persisted thread, then submits a distinct follow-up prompt. No request is replayed. A separate blank ACP session is created without prompting it. Native TUI persisted-thread recovery and continued Luna work have been demonstrated with the same native process after a bounded debug restart. Native attempt limits still apply to longer outages; Host readiness or successful cleanup alone is not a recovery receipt.
 
 ## Acceptance hook isolation
@@ -153,6 +157,10 @@ The acceptance harness disables ordinary hooks on fresh native proof threads. It
 Additional bounded modes use the same debug setup and cleanup:
 
 ```sh
+# One owned parent marker turn, same-source native fork, and preserved parent/policy/cwd.
+target/debug/examples/debug_host_acceptance \
+  "$PWD/target/debug/codex-router" --native-fork
+
 # Real event CLI, busy/idle queue, steer and exact interruption.
 target/debug/examples/debug_host_acceptance \
   "$PWD/target/debug/codex-router" --delivery \
@@ -162,5 +170,7 @@ target/debug/examples/debug_host_acceptance \
 target/debug/examples/debug_host_acceptance \
   "$PWD/target/debug/codex-router" --lifecycle-readers
 ```
+
+The native fork cell uses only the current run's freshly created read-only Luna parent, inherits its policy/model, and checks a distinct child plus unchanged parent history and metadata. It sends one marker model turn and one fork request; failures never trigger a fork retry. This is source-side native API proof, not configured machine-picker attachment proof.
 
 Official ACP SDK modes accept the pinned SDK module path after --acp-client, --acp-permission, --acp-permission-race or --acp-replacement. They are explicit acceptance invocations; ordinary application clients use the published protocol.

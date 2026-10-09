@@ -43,10 +43,12 @@ pub use native_protocol_observation::AppServerObservation;
 pub use native_protocol_observation::CodexProtocolError;
 pub use native_protocol_observation::observe_app_server;
 pub use native_session_launch::CallerOverrides;
+pub use native_session_launch::NativeWorkingDirectoryMetadata;
 pub use native_session_launch::ResumeModelChoice;
 pub use native_session_launch::SessionLaunch;
 pub use native_session_launch::SessionProfile;
 pub use native_session_launch::caller_overrides;
+pub use native_session_launch::native_working_directory_metadata;
 pub use native_state_paths::CodexPaths;
 pub use remote_control_observation::RemoteControlObservation;
 pub use remote_resume_permission_keys::{

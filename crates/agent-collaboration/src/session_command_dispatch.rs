@@ -58,8 +58,11 @@ mod session_catalog_records;
 use session_catalog_records::SessionRecord;
 pub(crate) use session_catalog_records::{
     SessionConversationPreview, SessionConversationSource, SessionPickerIdentity,
-    SessionPickerRecord,
+    SessionPickerRecord, SessionRowProvenance,
 };
+#[path = "session_commands/session_action_selection.rs"]
+mod session_action_selection;
+pub(crate) use session_action_selection::SessionActionSelection;
 #[path = "session_commands/session_catalog_query.rs"]
 mod session_catalog_query;
 use codex_native_integration::ResumeModelChoice;
@@ -70,8 +73,15 @@ use session_catalog_query::{
     load_session_records_for_query_with_identity,
 };
 
+#[path = "session_commands/router_connection_registry.rs"]
+pub(crate) mod router_connection_registry;
+pub(crate) use router_connection_registry::{RouterRegistryError, RouterRegistryRead};
+
 #[path = "session_commands/picker_runtime_inventory.rs"]
 mod picker_runtime_inventory;
+
+#[path = "session_commands/configured_inventory_query.rs"]
+mod configured_inventory_query;
 
 const SESSION_TITLE_MAX_CHARS: usize = 96;
 const SESSION_CONTEXT_MAX_CHARS: usize = 32;
@@ -164,7 +174,10 @@ fn run_id_session<W: Write>(
         )?;
         return Ok(());
     }
-    runner.run_codex_resume(&command.codex_args, session_id, &model_choice)
+    runner.run_codex_resume(
+        &command.codex_args,
+        &SessionActionSelection::default_catalog(session_id.to_owned(), model_choice),
+    )
 }
 
 /// Reads the model and reasoning effort one stored session last ran with.
@@ -261,6 +274,7 @@ fn run_interactive_session(
         context,
         Some(repository_identity.clone()),
     ))?;
+    drop(runtime);
     let request = SessionsPickerRequest {
         root: picker_root,
         provider: picker_provider,
@@ -270,7 +284,25 @@ fn run_interactive_session(
         repository_identity: repository_identity.clone(),
         current_provider: current_provider_for_picker(context),
         new_session_args_display: codex_args_display(&command.codex_args),
+        native_arguments: command.codex_args.clone(),
         include_empty_sessions: command.include_empty_sessions,
+        router_registry: match launch_target {
+            SessionsLaunchTarget::Hosted {
+                service_directory, ..
+            } => service_directory
+                .parent()
+                .map(router_connection_registry::read_router_registry)
+                .unwrap_or(RouterRegistryRead::Missing),
+            SessionsLaunchTarget::Local { .. } => RouterRegistryRead::Missing,
+        },
+        machine_mode: match launch_target {
+            SessionsLaunchTarget::Hosted { .. } => {
+                crate::presentation::session_picker::PickerMachineSourceMode::HostedDefault
+            }
+            SessionsLaunchTarget::Local { .. } => {
+                crate::presentation::session_picker::PickerMachineSourceMode::LocalCodex
+            }
+        },
         records: records
             .iter()
             .map(SessionPickerRecord::from_record)
@@ -288,37 +320,17 @@ fn run_interactive_session(
         return Err(SessionsCommandError::PickerCanceled);
     };
     match outcome {
-        SessionsPickerOutcome::ResumeSession(session_id) => {
-            validate_resume_session_id(&session_id)?;
-            let model_choice = selected_model_choice(context, &records, &session_id);
-            runner.run_codex_resume(&command.codex_args, &session_id, &model_choice)
+        SessionsPickerOutcome::ResumeSession(selection) => {
+            validate_resume_session_id(&selection.session_id())?;
+            runner.run_codex_resume(&command.codex_args, &selection)
         }
-        SessionsPickerOutcome::ForkSession(session_id) => {
-            validate_resume_session_id(&session_id)?;
-            let model_choice = selected_model_choice(context, &records, &session_id);
-            runner.run_codex_fork(&command.codex_args, &session_id, &model_choice)
+        SessionsPickerOutcome::ForkSession(selection) => {
+            validate_resume_session_id(&selection.session_id())?;
+            runner.run_codex_fork(&command.codex_args, &selection)
         }
         SessionsPickerOutcome::StartNewSession => runner.run_codex_new(&command.codex_args),
         SessionsPickerOutcome::TerminalTooNarrow => Err(SessionsCommandError::TerminalTooNarrow),
     }
-}
-
-/// Reads the selected row's model and effort, preferring the records already offered.
-///
-/// The picker can page in rows beyond the first load, so a selection that is not in the
-/// offered set falls back to a direct catalog read rather than resuming with no choice.
-fn selected_model_choice(
-    context: &CliContext,
-    offered_records: &[SessionRecord],
-    session_id: &str,
-) -> ResumeModelChoice {
-    offered_records
-        .iter()
-        .find(|record| record.session_id == session_id)
-        .map_or_else(
-            || stored_model_choice_for_session(context, session_id),
-            stored_model_choice_from_record,
-        )
 }
 
 fn session_picker_record_loader(
@@ -326,33 +338,72 @@ fn session_picker_record_loader(
     repository_identity: RepositoryIdentity,
     service_directory: Option<std::path::PathBuf>,
 ) -> SessionsPickerRecordLoader {
-    let runtime_inventory =
-        std::sync::Mutex::new(picker_runtime_inventory::PickerRuntimeInventory::default());
-    std::sync::Arc::new(move |query| {
-        let include_empty_sessions = query.include_empty_sessions;
-        let record_query = SessionRecordQuery::from_picker_query(query);
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(|error| error.to_string())?;
-        let mut inventory = runtime_inventory
-            .lock()
-            .map_err(|_| "runtime inventory lock failed".to_owned())?;
-        runtime.block_on(async {
-            let records = load_session_records_for_query_with_identity(
+    let runtime_inventory = std::sync::Arc::new(tokio::sync::Mutex::new(
+        picker_runtime_inventory::PickerRuntimeInventory::default(),
+    ));
+    let expected_source = if service_directory.is_some() {
+        crate::presentation::session_picker::PickerSourceContext::DefaultHosted
+    } else {
+        crate::presentation::session_picker::PickerSourceContext::LocalCodex
+    };
+    std::sync::Arc::new(move |request| {
+        let context = context.clone();
+        let repository_identity = repository_identity.clone();
+        let service_directory = service_directory.clone();
+        let runtime_inventory = std::sync::Arc::clone(&runtime_inventory);
+        let expected_source = expected_source.clone();
+        Box::pin(async move {
+            use crate::presentation::session_picker::{
+                PickerSourceContext, SourceInventoryRejection, SourceInventoryResult,
+            };
+            if matches!(
+                request.source_context,
+                PickerSourceContext::ConfiguredHosted(_)
+            ) {
+                return SourceInventoryResult::Rejected {
+                    reason: configured_inventory_query::qualify_configured_query(&request.query)
+                        .err()
+                        .unwrap_or(SourceInventoryRejection::EndpointUnqualified),
+                    request,
+                };
+            }
+            if request.source_context != expected_source {
+                return SourceInventoryResult::Rejected {
+                    request,
+                    reason: SourceInventoryRejection::InvalidInventory,
+                };
+            }
+            let query = request.query.clone();
+            let include_empty_sessions = query.include_empty_sessions;
+            let record_query = SessionRecordQuery::from_picker_query(query);
+            let records = match load_session_records_for_query_with_identity(
                 record_query,
                 &context,
-                Some(repository_identity.clone()),
+                Some(repository_identity),
             )
             .await
-            .map_err(|error| error.to_string())?;
+            {
+                Ok(records) => records,
+                Err(_) => {
+                    return SourceInventoryResult::Rejected {
+                        request,
+                        reason: SourceInventoryRejection::SourceUnavailable,
+                    };
+                }
+            };
             let stored = records
                 .iter()
                 .map(SessionPickerRecord::from_record)
                 .collect();
-            Ok(inventory
+            let mut inventory = runtime_inventory.lock().await;
+            let snapshot = inventory
                 .refresh(service_directory.as_deref(), stored, include_empty_sessions)
-                .await)
+                .await;
+            SourceInventoryResult::Ready {
+                bound_endpoint: None,
+                request,
+                snapshot,
+            }
         })
     })
 }
@@ -388,7 +439,10 @@ fn run_last_session<W: Write>(
         return Ok(());
     }
 
-    runner.run_codex_resume(&codex_args, &record.session_id, &model_choice)
+    runner.run_codex_resume(
+        &codex_args,
+        &SessionActionSelection::default_catalog(record.session_id, model_choice),
+    )
 }
 
 fn run_new_session<W: Write>(
@@ -510,8 +564,7 @@ pub(crate) trait SessionsCommandRunner {
     fn run_codex_resume(
         &mut self,
         codex_args: &[OsString],
-        session_id: &str,
-        model_choice: &ResumeModelChoice,
+        selection: &SessionActionSelection,
     ) -> Result<(), SessionsCommandError>;
 
     /// Launches `codex --profile codex-router fork <session_id>` with the session's
@@ -519,8 +572,7 @@ pub(crate) trait SessionsCommandRunner {
     fn run_codex_fork(
         &mut self,
         codex_args: &[OsString],
-        session_id: &str,
-        model_choice: &ResumeModelChoice,
+        selection: &SessionActionSelection,
     ) -> Result<(), SessionsCommandError>;
 }
 
@@ -548,14 +600,22 @@ impl SessionsCommandRunner for ProcessSessionsCommandRunner {
     fn run_codex_resume(
         &mut self,
         codex_args: &[OsString],
-        session_id: &str,
-        model_choice: &ResumeModelChoice,
+        selection: &SessionActionSelection,
     ) -> Result<(), SessionsCommandError> {
+        if matches!(
+            &selection.source_context,
+            Some(crate::presentation::session_picker::PickerSourceContext::ConfiguredHosted(_))
+        ) {
+            return Err(SessionsCommandError::SessionSourceUnqualified);
+        }
         self.launch_target.ensure_profile_allows_remote_resume()?;
-        self.launch_target.resolve_for_launch()?;
-        let launch = self
-            .launch_target
-            .resume_launch(codex_args, session_id, model_choice);
+        self.launch_target
+            .resolve_for_selection(&selection.identity)?;
+        let launch = self.launch_target.resume_launch(
+            codex_args,
+            &selection.session_id(),
+            &selection.model_choice,
+        );
         let status = Command::new("codex")
             .args(launch.arguments())
             .status()
@@ -572,14 +632,22 @@ impl SessionsCommandRunner for ProcessSessionsCommandRunner {
     fn run_codex_fork(
         &mut self,
         codex_args: &[OsString],
-        session_id: &str,
-        model_choice: &ResumeModelChoice,
+        selection: &SessionActionSelection,
     ) -> Result<(), SessionsCommandError> {
+        if matches!(
+            &selection.source_context,
+            Some(crate::presentation::session_picker::PickerSourceContext::ConfiguredHosted(_))
+        ) {
+            return Err(SessionsCommandError::SessionSourceUnqualified);
+        }
         self.launch_target.ensure_profile_allows_remote_resume()?;
-        self.launch_target.resolve_for_launch()?;
-        let launch = self
-            .launch_target
-            .fork_launch(codex_args, session_id, model_choice);
+        self.launch_target
+            .resolve_for_selection(&selection.identity)?;
+        let launch = self.launch_target.fork_launch(
+            codex_args,
+            &selection.session_id(),
+            &selection.model_choice,
+        );
         let status = Command::new("codex")
             .args(launch.arguments())
             .status()

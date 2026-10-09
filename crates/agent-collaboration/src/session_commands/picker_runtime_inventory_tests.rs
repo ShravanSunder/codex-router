@@ -1,6 +1,9 @@
 //! Real public-client boundary: inventory reads never resume or submit work.
 use super::*;
 
+#[path = "native_inventory_pager_tests.rs"]
+mod native_inventory_pager_tests;
+
 #[test]
 fn runtime_picker_empty_native_names_preserve_fallback_titles_and_search() {
     for (name, fallback, expected) in [
@@ -74,6 +77,26 @@ fn page(id: &str, status: Value, cursor: Value) -> Value {
             "observation":{"kind":"runtime","status":status,"turnId":null},"model":"gpt-5.6-sol","reasoningEffort":"medium","idleSeconds":0}],"nextCursor":cursor
     })
 }
+
+#[tokio::test]
+async fn malformed_runtime_continuation_is_rejected_before_another_read() {
+    let mut malformed = page("first", json!({"type":"idle"}), json!(""));
+    malformed["sessions"] = json!([]);
+    let (mut client, peer) = connect_fixture(vec![
+        ("endpoints_list", inventory()),
+        ("sessions_list", malformed),
+    ])
+    .await;
+    let result = load_runtime_records(&mut client, &[], false).await;
+    assert!(
+        matches!(
+            result,
+            Err(ClientError::Protocol("invalid inventory continuation"))
+        ),
+        "malformed continuation cannot issue a second read: {result:?}"
+    );
+    assert_eq!(peer.await.unwrap().len(), 2);
+}
 fn inspected(id: &str) -> Value {
     json!({"target":{"endpoint":endpoint(),"sessionId":id},"generation":generation(),
     "effectiveAccess":null,
@@ -81,6 +104,10 @@ fn inspected(id: &str) -> Value {
     "thread":{"id":id,"name":format!("Live {id}"),"cwd":"/repo","modelProvider":"debug-provider","createdAt":100,"updatedAt":200,
     "gitInfo":{"branch":"feature/live","originUrl":"https://example.invalid/repo.git"}}})
 }
+
+#[path = "native_inventory_binding_client_tests.rs"]
+mod native_inventory_binding_client_tests;
+
 /// A stand-in API answering `steps` in order, each `(tool, result)`. The handle yields the
 /// calls as `{"tool", "arguments"}` once every step was answered and no further call came.
 async fn connect_fixture(
@@ -143,6 +170,8 @@ async fn paged_runtime_only_threads_include_metadata_and_blocked_status_without_
     assert_eq!(rows.len(), 2);
     assert_eq!(rows[0].title, "Live first");
     assert_eq!(rows[0].branch, "feature/live");
+    assert_eq!(rows[0].model.as_deref(), Some("gpt-5.6-sol"));
+    assert_eq!(rows[0].reasoning_effort.as_deref(), Some("medium"));
     assert_eq!(
         rows[0].runtime_status,
         crate::picker_runtime_status::PickerRuntimeStatus::Idle
@@ -217,7 +246,7 @@ async fn stored_metadata_is_preserved_while_runtime_status_is_refreshed() {
         "first",
         "Stored title",
         "/repo",
-        &json!({"name":"Stored title"}),
+        &json!({"name":"Stored title","model":"gpt-6.1-sol","reasoningEffort":"low"}),
     );
     stored.conversation.snippets = vec!["Retained preview".into()];
     let (mut client, peer) = connect_fixture(vec![
@@ -240,6 +269,8 @@ async fn stored_metadata_is_preserved_while_runtime_status_is_refreshed() {
     peer.await.unwrap();
     // Assert
     assert_eq!(rows[0].title, "Stored title");
+    assert_eq!(rows[0].model.as_deref(), Some("gpt-6.1-sol"));
+    assert_eq!(rows[0].reasoning_effort.as_deref(), Some("low"));
     assert_eq!(rows[0].conversation.snippets, vec!["Retained preview"]);
     assert_eq!(rows[0].runtime_status, PickerRuntimeStatus::Active);
 }
@@ -492,4 +523,23 @@ fn ephemeral_system_runtime_record_preserves_system_classification() {
     );
     assert_eq!(row.thread_source.as_deref(), Some("system"));
     assert_eq!(row.source.as_deref(), Some("vscode"));
+}
+
+#[test]
+fn hosted_display_attribution_is_separate_from_actual_runtime_observation() {
+    let local = runtime_record("legacy-id", "Local catalog", "/owned/project", &json!({}));
+    assert_eq!(
+        local.provenance,
+        super::super::SessionRowProvenance::LocalHomeCatalog
+    );
+    let endpoint: EndpointRef = serde_json::from_value(endpoint()).unwrap();
+    let attributed = local.with_hosted_codex(&endpoint);
+    assert_eq!(
+        attributed.provenance,
+        super::super::SessionRowProvenance::DefaultAttributed
+    );
+    assert!(matches!(
+        attributed.identity,
+        SessionPickerIdentity::HostedCodex(_)
+    ));
 }

@@ -15,6 +15,10 @@ pub const ROUTER_KEYCHAIN_SERVICE: &str = "codex-router";
 const POOLED_KEY_ACCOUNT_PREFIX: &str = "pooled-credential-key:";
 const AES_256_KEY_LENGTH: usize = 32;
 
+#[cfg(all(target_os = "macos", any(test, not(feature = "keychain-test-guard"))))]
+#[path = "keychain_data_key/platform_key_read_diagnostic.rs"]
+mod platform_key_read_diagnostic;
+
 /// AES-256 data key shared by credential-store handles in one process.
 #[derive(Clone)]
 pub struct PooledCredentialDataKey(Arc<Zeroizing<[u8; AES_256_KEY_LENGTH]>>);
@@ -92,11 +96,7 @@ impl KeychainAccess for PlatformKeychainAccess {
 
         let entry = Cred::build(MacKeychainDomain::User, service, account)
             .map_err(|_| KeychainAccessError::Unavailable)?;
-        match entry.get_secret() {
-            Ok(secret) => Ok(Some(secret)),
-            Err(keyring_core::Error::NoEntry) => Ok(None),
-            Err(_) => Err(KeychainAccessError::Unavailable),
-        }
+        platform_key_read_diagnostic::map_platform_key_read_result(entry.get_secret())
     }
 
     fn add_secret(
@@ -113,6 +113,27 @@ impl KeychainAccess for PlatformKeychainAccess {
         keychain
             .add_generic_password(service, account, secret)
             .map_err(|_| KeychainAccessError::Unavailable)
+    }
+}
+
+#[cfg(all(target_os = "macos", any(test, not(feature = "keychain-test-guard"))))]
+fn platform_key_read_status_code(error: &keyring_core::Error) -> Option<i32> {
+    match error {
+        keyring_core::Error::PlatformFailure(error)
+        | keyring_core::Error::NoStorageAccess(error) => error
+            .downcast_ref::<security_framework::base::Error>()
+            .map(|error| error.code()),
+        _ => None,
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+fn synthetic_platform_key_error(code: i32, storage_access: bool) -> keyring_core::Error {
+    let error = Box::new(security_framework::base::Error::from_code(code));
+    if storage_access {
+        keyring_core::Error::NoStorageAccess(error)
+    } else {
+        keyring_core::Error::PlatformFailure(error)
     }
 }
 
