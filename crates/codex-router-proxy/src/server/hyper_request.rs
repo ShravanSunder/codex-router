@@ -72,11 +72,9 @@ pub(super) async fn bounded_request_metadata_body(
         } else {
             full_replay_body = None;
         }
-        let replay_body_is_complete = full_replay_body
-            .as_deref()
-            .is_some_and(request_metadata_prefix_is_complete_json);
         replay_frames.push_back(frame);
-        if replay_body_is_complete || full_replay_body.is_none() {
+        // Only Incoming EOF establishes completeness, even after valid JSON.
+        if full_replay_body.is_none() {
             break;
         }
     }

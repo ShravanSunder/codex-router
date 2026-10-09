@@ -224,6 +224,8 @@ mod credential_retry_tests;
 
 #[path = "proxy_tests/auth_rejection_fixtures.rs"]
 mod auth_rejection_fixtures;
+#[path = "proxy_tests/request_body_completion_tests.rs"]
+mod request_body_completion_tests;
 #[path = "proxy_tests/request_local_http_tests.rs"]
 mod request_local_http_tests;
 #[path = "proxy_tests/request_local_websocket_tests.rs"]
