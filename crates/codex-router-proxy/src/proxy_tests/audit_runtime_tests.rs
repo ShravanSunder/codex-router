@@ -1,6 +1,6 @@
 use super::*;
 
-async fn assembled_loopback_router_runtime_writes_redacted_private_audit_events() {
+async fn run_private_http_audit_scenario() {
     let temp_dir = ProxyTestTempDir::new("assembled_runtime_audit");
     let database_path = temp_dir.path().join("state.sqlite");
     let secret_path = temp_dir.path().join("secrets");
@@ -136,13 +136,23 @@ async fn assembled_loopback_router_runtime_writes_redacted_private_audit_events(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn assembled_loopback_router_runtime_writes_redacted_private_audit_events() {
+    run_private_http_audit_scenario().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn loopback_router_runtime_dispatches_websocket_upgrade_to_tunnel() {
+    run_private_websocket_audit_scenario().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn assembled_loopback_router_runtime_redacts_http_and_websocket_audit_events() {
-    assembled_loopback_router_runtime_writes_redacted_private_audit_events().await;
-    loopback_router_runtime_dispatches_websocket_upgrade_to_tunnel().await;
+    run_private_http_audit_scenario().await;
+    run_private_websocket_audit_scenario().await;
 }
 
 #[allow(clippy::result_large_err)]
-async fn loopback_router_runtime_dispatches_websocket_upgrade_to_tunnel() {
+async fn run_private_websocket_audit_scenario() {
     let temp_dir = ProxyTestTempDir::new("runtime_websocket");
     let database_path = temp_dir.path().join("state.sqlite");
     let secret_path = temp_dir.path().join("secrets");

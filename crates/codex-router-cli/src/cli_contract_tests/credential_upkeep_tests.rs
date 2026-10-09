@@ -385,7 +385,9 @@ async fn upkeep_shutdown_drains_in_flight_rotation_before_returning() {
             .is_err()
     );
     must_ok(release_sender.send(()));
-    worker.shutdown().await;
+    tokio::time::timeout(Duration::from_secs(2), worker.shutdown())
+        .await
+        .expect("released upkeep rotation should drain within the original 2s bound");
     wait_for_upkeep_generation(&state_path, &account_id, 2).await;
 }
 
@@ -500,7 +502,9 @@ async fn upkeep_shutdown_does_not_admit_a_queued_account_after_stop() {
     if post_stop_entry.is_some() {
         must_ok(release_sender.send(()));
     }
-    worker.shutdown().await;
+    tokio::time::timeout(Duration::from_secs(3), worker.shutdown())
+        .await
+        .expect("released upkeep work should drain within the original 3s bound");
     assert!(
         post_stop_entry.is_none(),
         "queued account reached provider after Stop: {post_stop_entry:?}"

@@ -41,6 +41,69 @@ use super::seed_smoke_account;
 
 const FIXTURE_WAIT: Duration = Duration::from_secs(30);
 
+#[tokio::test]
+async fn floor_fixture_seeding_uses_caller_runtime_and_persists_500_basis_points()
+-> Result<(), String> {
+    let root = SmokeTempRoot::new("floor-seed-caller-runtime")?;
+    let state_path = root.path().join("router/state.sqlite");
+    let secret_root = root.path().join("router/secrets");
+    fs::create_dir_all(&secret_root)
+        .map_err(|error| format!("seed regression fixture directory failed: {error}"))?;
+    seed_floor_fixture(&state_path, &secret_root).await?;
+    let expected_account = account_id(QUOTA_RECONNECT_PRIMARY_FOR_INITIAL_ADMISSION.account_id)?;
+    // The seed deliberately preserves the legacy fixture schema; inspect its real row directly.
+    let observed = tokio::process::Command::new("python3")
+        .arg("-c")
+        .arg(
+            r#"
+import json, sqlite3, sys
+connection = sqlite3.connect("file:" + sys.argv[1] + "?mode=ro", uri=True, timeout=0)
+try:
+    rows = connection.execute(
+        "SELECT account_id, weekly_quota_floor_basis_points FROM account_routing_policies WHERE account_id = ?",
+        (sys.argv[2],),
+    ).fetchall()
+    print(json.dumps(rows))
+finally:
+    connection.close()
+"#,
+        )
+        .arg(&state_path)
+        .arg(expected_account.as_str())
+        .kill_on_drop(true)
+        .output()
+        .await
+        .map_err(|error| format!("seed regression fixture SELECT failed: {error}"))?;
+    if !observed.status.success() {
+        return Err(format!(
+            "seed regression fixture SELECT status={} stderr={}",
+            observed.status,
+            String::from_utf8_lossy(&observed.stderr)
+        ));
+    }
+    let rows: Vec<(String, u16)> = serde_json::from_slice(&observed.stdout)
+        .map_err(|error| format!("seed regression fixture SELECT result failed: {error}"))?;
+    if rows != [(expected_account.as_str().to_owned(), 500)] {
+        return Err(
+            "seed regression exact account policy row does not contain literal 500".to_owned(),
+        );
+    }
+    let probe = tokio::time::timeout(Duration::from_secs(1), async {
+        tokio::task::yield_now().await;
+        42u8
+    })
+    .await
+    .map_err(|error| format!("caller runtime probe failed after seeding: {error}"))?;
+    if probe != 42 {
+        return Err("caller runtime result changed after seeding".to_owned());
+    }
+    eprintln!(
+        "FLOOR_SEED_CALLER_RUNTIME account={} weekly_quota_floor_basis_points=500 real_policy_row=true runtime_after_seed=true",
+        expected_account.as_str()
+    );
+    Ok(())
+}
+
 #[derive(Clone, Copy, Debug)]
 enum FloorJourney {
     HealthyPeer,
@@ -134,7 +197,7 @@ impl Drop for FloorRouter {
     }
 }
 
-fn seed_floor_fixture(state_path: &Path, secret_root: &Path) -> Result<(), String> {
+async fn seed_floor_fixture(state_path: &Path, secret_root: &Path) -> Result<(), String> {
     let state = SqliteStateStore::open(state_path)
         .map_err(|error| format!("floor fixture state open failed: {error}"))?;
     let secrets =
@@ -153,20 +216,17 @@ fn seed_floor_fixture(state_path: &Path, secret_root: &Path) -> Result<(), Strin
         &secrets,
         QUOTA_RECONNECT_PRIMARY_FOR_INITIAL_ADMISSION,
     )?;
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|error| format!("floor policy runtime failed: {error}"))?;
-    let mutation = runtime
-        .block_on(AsyncWeeklyQuotaFloorMutationStore::open(state_path))
+    let mutation = AsyncWeeklyQuotaFloorMutationStore::open(state_path)
+        .await
         .map_err(|error| format!("floor policy store failed: {error}"))?;
     let floor = WeeklyQuotaFloorBasisPoints::new(500)
         .map_err(|error| format!("floor policy invalid: {error}"))?;
-    runtime
-        .block_on(
-            mutation.set_weekly_quota_floor_by_label(QUOTA_RECONNECT_PRIMARY.label, Some(floor)),
-        )
-        .map_err(|error| format!("floor policy write failed: {error}"))?;
+    let written = mutation
+        .set_weekly_quota_floor_by_label(QUOTA_RECONNECT_PRIMARY.label, Some(floor))
+        .await
+        .map_err(|error| format!("floor policy write failed: {error}"));
+    mutation.close().await;
+    written?;
     Ok(())
 }
 
@@ -222,7 +282,7 @@ async fn run_floor_journey(
         fs::create_dir_all(path)
             .map_err(|error| format!("floor fixture directory creation failed: {error}"))?;
     }
-    seed_floor_fixture(&state_path, &secret_root)?;
+    seed_floor_fixture(&state_path, &secret_root).await?;
     let upstream = FloorUpstream::start(journey)?;
     let router = FloorRouter::start(&state_path, &secret_root, &upstream.address).await?;
     let profile = CodexRouterProfile::new(router.port);
