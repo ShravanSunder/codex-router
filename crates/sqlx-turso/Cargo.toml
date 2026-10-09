@@ -1,0 +1,66 @@
+[package]
+name = "sqlx-turso"
+description = "SQLx driver for the Turso database engine: connections, checked queries, migrations and Sync"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+readme = "README.md"
+
+[lints]
+workspace = true
+
+[features]
+# `sync` is opt-in: Turso's Sync turns on rustls's aws-lc-rs provider, which conflicts with the
+# ring provider Router's TLS clients use when both share one build. Sync tests and lints run in
+# their own `-p sqlx-turso --all-features` invocation.
+default = ["runtime-tokio", "macros", "migrate", "chrono"]
+runtime-tokio = ["sqlx-turso-core/runtime-tokio"]
+macros = ["dep:sqlx-turso-macros", "sqlx-turso-core/macros"]
+sync = ["sqlx-turso-core/sync"]
+migrate = ["sqlx-turso-core/migrate"]
+chrono = ["sqlx-turso-core/chrono", "sqlx-turso-macros?/chrono"]
+
+[dependencies]
+sqlx.workspace = true
+sqlx-turso-core.workspace = true
+sqlx-turso-macros = { workspace = true, optional = true }
+
+[dev-dependencies]
+chrono.workspace = true
+# No features: the Sync tests call rustls's aws-lc-rs provider, which Turso's Sync turns on.
+rustls = { version = "0.23.45", default-features = false }
+serde.workspace = true
+serde_json.workspace = true
+sqlx = { workspace = true, features = ["macros", "migrate"] }
+tempfile = "3.27.0"
+tokio = { workspace = true, features = ["fs"] }
+trybuild.workspace = true
+
+[[example]]
+name = "seed_native_schema"
+required-features = ["migrate"]
+
+[[test]]
+name = "checked_query_macros"
+required-features = ["macros", "migrate", "chrono"]
+
+[[test]]
+name = "checked_query_diagnostics"
+required-features = ["macros"]
+
+[[test]]
+name = "owned_migration_transactions"
+required-features = ["macros", "migrate", "chrono"]
+
+[[test]]
+name = "foreign_key_enforcement"
+required-features = ["macros", "migrate", "chrono"]
+
+# Runs in its own `-p sqlx-turso --all-features` invocation; see the `sync` feature note above.
+[[test]]
+name = "sync_replication"
+required-features = ["macros", "migrate", "chrono", "sync"]
+
+[[test]]
+name = "turso_only_dependency_graph"
