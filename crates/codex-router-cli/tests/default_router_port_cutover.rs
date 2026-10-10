@@ -21,6 +21,7 @@ const PORTS_RESERVED_FOR_OTHER_ROUTER_SURFACES: [u16; 4] =
     [8787, 18787, 43127, PRODUCTION_ROUTER_PORT];
 
 #[tokio::test]
+#[ignore = "opt-in real CLI cutover acceptance; requires unused loopback port 19741 and never stops an existing listener"]
 async fn compiled_cli_default_router_port_cutover_uses_isolated_state() -> Result<(), Box<dyn Error>>
 {
     let fixture_directory = tempfile::tempdir()?;
