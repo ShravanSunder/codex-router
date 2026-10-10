@@ -3,6 +3,12 @@
 Date: 2026-06-22
 Status: implemented; router-owned multi-account live proof is approval-gated
 
+Login syntax updated: 2026-10-10. The old `--device-auth`, `--codex-bin` and
+`--allow-plaintext-file-secrets` options are no longer accepted. For functional
+Router tests, use the existing `keychain-test-support` Cargo feature with fresh
+fixture roots and test credentials; it does not access the OS Keychain. This
+test setup does not require OAuth login and does not prove live account access.
+
 ## Purpose
 
 This runbook is the approval boundary for live OpenAI OAuth and quota proof.
@@ -28,19 +34,21 @@ quota command.
 Router-owned account setup:
 
 ```shell
-cargo run -p codex-router-cli -- account login --label <label> --device-auth --allow-plaintext-file-secrets
+cargo run -p codex-router-cli -- account login --provider openai --label <label>
 cargo run -p codex-router-cli -- account list
 cargo run -p codex-router-cli -- quota refresh
 cargo run -p codex-router-cli -- quota status --all-limits
 ```
 
-By default, router-owned state is under `$HOME/.codex-router`. Use
-`--router-root <path>` only for tests or an alternate local router home.
+Installed releases default router-owned state to `$HOME/.codex-router`; debug
+builds default to `$HOME/.codex-router-debug`. Use an explicit
+`--router-root <path>` for a fixture or alternate local router home.
 
-`account login --device-auth` delegates the interactive OAuth device-code flow
-to the installed `codex` binary in a temporary owner-only `CODEX_HOME`, then
-imports the resulting OAuth `auth.json` into router-owned account state. Use
-`--codex-bin <path>` when the test must pin a specific Codex binary.
+`account login --provider openai` runs Router's native OpenAI device-code flow
+and activates its credentials in Router-owned state. It does not launch a
+Codex child or enable a plaintext credential backend. The current functional
+test factory uses a deterministic file-backed test key; normal builds use the
+encrypted credential store and its Keychain key.
 
 `quota refresh` uses the router-owned credential resolver and persists provider
 quota windows to SQLite. `quota status` reads SQLite only and performs no
@@ -65,7 +73,7 @@ and generation were not run.
 The implemented CLI surface for local router proof is:
 
 ```shell
-cargo run -p codex-router-cli -- account login [--router-root <path>] --label <label> --device-auth --allow-plaintext-file-secrets
+cargo run -p codex-router-cli -- account login --provider openai [--router-root <path>] --label <label>
 cargo run -p codex-router-cli -- account list [--router-root <path>]
 cargo run -p codex-router-cli -- quota refresh [--router-root <path>]
 cargo run -p codex-router-cli -- quota status [--router-root <path>] --all-limits
@@ -78,7 +86,7 @@ cargo run -p codex-router-cli -- live quota --profiles-root <prodex-profiles-roo
 ```
 
 The account, quota, profile, token, and serve commands prove router-owned local
-behavior. Real provider execution through `account login --device-auth`, `quota
+behavior. Real provider execution through `account login --provider openai`, `quota
 refresh`, or `live quota` is live OAuth/quota proof and must follow the approval
 boundary below.
 
@@ -104,7 +112,7 @@ tests does not authorize this live gate.
 Approved live quota proof commands for this revision:
 
 ```shell
-cargo run -p codex-router-cli -- account login --label <label> --device-auth --allow-plaintext-file-secrets
+cargo run -p codex-router-cli -- account login --provider openai --label <label>
 cargo run -p codex-router-cli -- quota refresh
 cargo run -p codex-router-cli -- quota status --all-limits
 cargo run -p codex-router-cli -- live quota --profiles-root <oauth-profiles-root> --dry-run
