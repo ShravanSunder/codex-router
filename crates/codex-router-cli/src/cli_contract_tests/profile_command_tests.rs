@@ -107,6 +107,28 @@ fn profile_print_emits_router_custom_provider_without_home_mutation() {
 }
 
 #[test]
+fn profile_print_uses_default_production_port_without_writing() {
+    let test_root = TestRoot::new("profile-print-default-port");
+    must_ok(fs::create_dir(test_root.path()));
+    let codex_home = test_root.path().join("codex-home");
+
+    let output = run_cli(
+        [
+            "codex-router",
+            "profile",
+            "print",
+            "--codex-home",
+            path_to_str(&codex_home),
+        ],
+        CliContext::new(vec![("CODEX_ROUTER_FORCE_TTY".to_owned(), "1".to_owned())]),
+    );
+
+    assert_router_profile_contract(&output.stdout, 19741);
+    assert!(!codex_home.join("codex-router.config.toml").exists());
+    assert!(output.stderr.is_empty());
+}
+
+#[test]
 fn profile_doctor_reports_tokenless_auth_without_token_value() {
     let output = run_cli(
         ["codex-router", "profile", "doctor"],
@@ -365,7 +387,7 @@ fn profile_write_command_with_approval_writes_only_temp_codex_home() {
     );
     assert_eq!(
         must_ok(fs::read_to_string(&target_path)),
-        CodexRouterProfile::new(8787).render()
+        CodexRouterProfile::new(19741).render()
     );
     assert!(output.stderr.is_empty());
 }

@@ -128,6 +128,15 @@ fn unsafe_or_unrepresentable_profiles_fail_without_exposing_contents() {
 }
 
 #[test]
+fn debug_profile_rejects_current_production_port_and_allows_old_port_as_an_override() {
+    let production_profile = PROFILE.replace("18787", "19741");
+    assert!(DebugCodexProfile::parse(&production_profile, 19741).is_err());
+
+    let explicit_old_port_profile = PROFILE.replace("18787", "8787");
+    assert!(DebugCodexProfile::parse(&explicit_old_port_profile, 8787).is_ok());
+}
+
+#[test]
 fn local_only_profile_settings_are_accepted_but_not_projected() {
     let profile = format!(
         "approval_policy = \"never\"\napprovals_reviewer = \"local\"\nauto_review = \"enabled\"\napps = []\n{PROFILE}\n[notice.model_migrations]\n\"gpt-5.4-mini\" = \"gpt-6-luna\"\n[tui]\nscreen_reader_detection_done = true\n"

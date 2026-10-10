@@ -69,9 +69,9 @@ cargo run -p codex-router-cli -- account login [--router-root <path>] --label <l
 cargo run -p codex-router-cli -- account list [--router-root <path>]
 cargo run -p codex-router-cli -- quota refresh [--router-root <path>]
 cargo run -p codex-router-cli -- quota status [--router-root <path>] --all-limits
-cargo run -p codex-router-cli -- profile print --port 8787
+cargo run -p codex-router-cli -- profile print
 cargo run -p codex-router-cli -- profile doctor
-cargo run -p codex-router-cli -- profile write --codex-home <temp-codex-home> --port 8787 --dry-run
+cargo run -p codex-router-cli -- profile write --codex-home <temp-codex-home> --dry-run
 cargo run -p codex-router-cli -- serve [--state-db <state.sqlite>] [--secret-root <secret-root>] [--upstream-base-url <url>]
 cargo run -p codex-router-cli -- live quota --profiles-root <prodex-profiles-root> --dry-run
 cargo run -p codex-router-cli -- live quota --profiles-root <prodex-profiles-root> --approve-network-account-use

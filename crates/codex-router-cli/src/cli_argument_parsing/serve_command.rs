@@ -3,8 +3,8 @@
 use super::super::CliError;
 use super::super::DEFAULT_CHATGPT_BACKEND_BASE_URL;
 use super::super::DEFAULT_MAX_SNAPSHOT_AGE_SECONDS;
-use super::super::DEFAULT_PROFILE_PORT;
 use super::super::DEFAULT_QUOTA_REFRESH_INTERVAL_SECONDS;
+use super::super::DEFAULT_ROUTER_PORT;
 use super::super::DEFAULT_SESSION_PIN_IDLE_TTL_SECONDS;
 use super::super::default_router_root;
 use super::ArgumentParser;
@@ -52,7 +52,7 @@ impl ServeCommand {
         let listen_host = options
             .listen_host
             .unwrap_or_else(|| "127.0.0.1".to_owned());
-        let port = options.port.unwrap_or(DEFAULT_PROFILE_PORT);
+        let port = options.port.unwrap_or(DEFAULT_ROUTER_PORT);
         let router_root = default_router_root()?;
         let state_db = options
             .state_db

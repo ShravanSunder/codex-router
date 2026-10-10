@@ -53,6 +53,7 @@ pub use remote_resume_permission_keys::{
     REMOTE_RESUME_PERMISSION_KEYS, profile_remote_resume_permission_keys,
 };
 pub use router_profile_projection::CodexRouterProfile;
+pub use router_profile_projection::DEFAULT_ROUTER_PORT;
 pub use router_profile_projection::router_permission_profile_overrides;
 pub use router_tool_locations::{
     READ_ONLY_INSIDE_TOOL_LOCATIONS, RESTRICTED_TOOL_LOCATIONS, WORKSPACE_TOOL_LOCATIONS,

@@ -282,10 +282,22 @@ fn serve_command_defaults_to_home_router_paths_and_provider_upstream() {
     let router_root = default_router_root_for_test();
     assert_eq!(command.state_db, router_root.join("state.sqlite"));
     assert_eq!(command.secret_root, router_root.join("secrets"));
+    assert_eq!(command.port, 19741);
     assert_eq!(
         command.upstream_base_url,
         codex_router_auth::live_quota::DEFAULT_CHATGPT_BACKEND_BASE_URL
     );
+
+    let explicit_command = match CliCommand::parse([
+        OsString::from("serve"),
+        OsString::from("--port"),
+        OsString::from("9876"),
+    ]) {
+        Ok(CliCommand::Serve(command)) => command,
+        Ok(other) => panic!("serve command should parse, got {other:?}"),
+        Err(error) => panic!("serve command should parse: {error}"),
+    };
+    assert_eq!(explicit_command.port, 9876);
 }
 
 #[test]

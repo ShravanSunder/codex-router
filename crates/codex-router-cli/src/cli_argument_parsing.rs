@@ -4,7 +4,7 @@ mod serve_command;
 pub(super) use serve_command::ServeCommand;
 
 use super::{
-    AccountCommand, CliError, DEFAULT_PROFILE_PORT, HostCommand, LiveCommand, QuotaCommand, Shell,
+    AccountCommand, CliError, DEFAULT_ROUTER_PORT, HostCommand, LiveCommand, QuotaCommand, Shell,
     router_secret_root_or_default,
 };
 use std::ffi::OsString;
@@ -254,7 +254,7 @@ struct ProfileOptions {
 impl ProfileOptions {
     fn parse(parser: &mut ArgumentParser) -> Result<Self, CliError> {
         let mut options = Self {
-            port: DEFAULT_PROFILE_PORT,
+            port: DEFAULT_ROUTER_PORT,
             codex_home: None,
             dry_run: false,
             approve_codex_home_write: false,

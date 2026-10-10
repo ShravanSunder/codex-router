@@ -5,7 +5,7 @@ mod host_replacement;
 mod proof_permissions;
 
 use codex_native_integration::{
-    AppServerCommandSpec, CodexPaths, CodexRouterProfile, DebugCodexProfile,
+    AppServerCommandSpec, CodexPaths, CodexRouterProfile, DEFAULT_ROUTER_PORT, DebugCodexProfile,
 };
 use codex_router_host::{
     AppServerLaunchPlan, ChildCommandSpec, ChildOutput, HostConfig, HostConfigInputs,
@@ -72,8 +72,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             validate_resume_run_directory(&options.run_directory, options.port)?;
         }
     }
-    if options.port == 8787 || options.port == 0 {
-        return Err("Select an unused debug port, never production 8787.".into());
+    if options.port == DEFAULT_ROUTER_PORT || options.port == 0 {
+        return Err(format!(
+            "Select an unused debug port, never production {DEFAULT_ROUTER_PORT}."
+        )
+        .into());
     }
     if !options.router_binary.is_absolute() || !options.router_binary.is_file() {
         return Err(
@@ -473,10 +476,10 @@ supports_websockets = true
     fn luna_profile_validates_saved_route_before_in_memory_retargeting() {
         assert!(luna_profile_from_text(&debug_profile("http://127.0.0.1:18787/v1"), 28787).is_ok());
         for (saved_endpoint, selected_port) in [
-            ("http://127.0.0.1:8787/v1", 28787),
+            ("http://127.0.0.1:19741/v1", 28787),
             ("http://0.0.0.0:18787/v1", 28787),
             ("not-a-url", 28787),
-            ("http://127.0.0.1:18787/v1", 8787),
+            ("http://127.0.0.1:18787/v1", 19741),
         ] {
             assert!(
                 luna_profile_from_text(&debug_profile(saved_endpoint), selected_port).is_err(),
