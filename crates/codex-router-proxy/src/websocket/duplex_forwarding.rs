@@ -266,7 +266,15 @@ where
                 let is_close = matches!(local_message, Message::Close(_));
                 let is_response_create = is_response_create(&local_message);
                 if is_response_create {
-                    if account_turn_admission.before_next_create().await {
+                    let reconnect_required = tokio::select! {
+                        biased;
+                        () = tunnel_shutdown.cancelled() => {
+                            close_websocket_sink_best_effort(&mut upstream_write).await?;
+                            return Ok(());
+                        }
+                        reconnect_required = account_turn_admission.before_next_create() => reconnect_required,
+                    };
+                    if reconnect_required {
                         tunnel_shutdown.cancel();
                         let _ = close_websocket_sink_best_effort(&mut upstream_write).await;
                         return Ok(());
