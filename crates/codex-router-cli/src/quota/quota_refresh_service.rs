@@ -210,6 +210,22 @@ where
         } else {
             DEFAULT_ROUTE_BANDS
         };
+        let mut initial_responses_refresh_attempt = if account.provider() == Provider::Openai {
+            match begin_responses_refresh_attempt_before_resolution(
+                &quota_history_state,
+                account.account_id(),
+            )
+            .await?
+            {
+                Some(attempt) => Some(attempt),
+                None => {
+                    record_superseded_account_refresh(&mut *stdout, account, &mut failed_count)?;
+                    continue 'accounts;
+                }
+            }
+        } else {
+            None
+        };
         let credential_resolution_started_at = if account.provider() == Provider::Claude {
             Some(current_unix_seconds())
         } else {
@@ -222,34 +238,11 @@ where
             Ok(resolved) => resolved,
             Err(error) => {
                 failed_count = failed_count.saturating_add(route_bands.len() as u64);
-                let current_account = if account.provider() == Provider::Openai {
-                    quota_history_state
-                        .list_accounts()
-                        .await?
-                        .into_iter()
-                        .find(|current| current.account_id() == account.account_id())
-                } else {
-                    None
-                };
-                let responses_credit_attempt = match current_account
-                    .as_ref()
-                    .and_then(AccountRecord::active_credential_generation)
-                {
-                    Some(generation) => {
-                        begin_credit_refresh_attempt_for_current_generation(
-                            &quota_history_state,
-                            account.account_id(),
-                            generation,
-                        )
-                        .await?
-                    }
-                    None => None,
-                };
                 let failure_status_attempt_unix_seconds =
                     credential_resolution_started_at.unwrap_or(observed_unix_seconds);
                 for route_band in route_bands {
                     if *route_band == USER_QUOTA_ROUTE_BAND {
-                        if let Some(attempt) = responses_credit_attempt.as_ref() {
+                        if let Some(attempt) = initial_responses_refresh_attempt.as_ref() {
                             quota_history_state
                                 .record_responses_refresh_failure(
                                     attempt,
@@ -263,23 +256,6 @@ where
                                     ),
                                 )
                                 .await?;
-                        } else if current_account.is_some() {
-                            quota_history_state
-                                .record_refresh_failure_preserving_selector_windows(
-                                    account.account_id(),
-                                    route_band,
-                                    observed_unix_seconds,
-                                    QuotaRefreshErrorClass::AuthError,
-                                )
-                                .await?;
-                            append_failure_quota_history_observations(
-                                &quota_history_state,
-                                account,
-                                route_band,
-                                observed_unix_seconds,
-                                QuotaRefreshErrorClass::AuthError,
-                            )
-                            .await?;
                         }
                     } else {
                         quota_history_state
@@ -475,9 +451,15 @@ where
         }
         for route_band in route_bands {
             let mut credit_refresh_attempt = if *route_band == USER_QUOTA_ROUTE_BAND {
-                match begin_credit_refresh_attempt_for_current_generation(
+                let initial_attempt =
+                    initial_responses_refresh_attempt.take().ok_or_else(|| {
+                        QuotaCommandError::ProviderResponse {
+                            message: "Responses refresh attempt was not allocated".to_owned(),
+                        }
+                    })?;
+                match responses_refresh_attempt_for_resolved_generation(
                     &quota_history_state,
-                    account.account_id(),
+                    initial_attempt,
                     resolved.credential_generation(),
                 )
                 .await?

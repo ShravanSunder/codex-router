@@ -400,3 +400,6 @@ async fn generation_replacement_during_provider_read_rejects_stale_commit_and_re
         "generation-one provider facts must not overwrite generation-two authority"
     );
 }
+
+#[path = "quota_initial_resolution_tests.rs"]
+mod quota_initial_resolution_tests;
