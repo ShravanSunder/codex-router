@@ -275,7 +275,7 @@ fn loopback_b1_credential_maintenance_refusal_excludes_account_on_next_request()
         runtime_config(&database_path, &secret_root)
             .with_quota_clock(1_100, 300)
             .with_debug_claude_upstream_endpoint(upstream_endpoint),
-        credentials,
+        credentials.into(),
     )
     .unwrap_or_else(|error| panic!("fixture Router should start: {error}"))
     .with_test_claude_refresh_client(refresh_client);
@@ -436,7 +436,7 @@ fn loopback_b1_reauth_required_pin_releases_and_selects_elsewhere() {
         runtime_config(&database_path, &secret_root)
             .with_quota_clock(1_100, 300)
             .with_debug_claude_upstream_endpoint(upstream_endpoint.clone()),
-        credentials.clone(),
+        credentials.clone().into(),
     )
     .unwrap_or_else(|error| panic!("fixture Router should start: {error}"));
     let first_router_address = first_runtime.local_addr();
@@ -480,7 +480,7 @@ fn loopback_b1_reauth_required_pin_releases_and_selects_elsewhere() {
         runtime_config(&database_path, &secret_root)
             .with_quota_clock(1_100, 300)
             .with_debug_claude_upstream_endpoint(upstream_endpoint),
-        credentials,
+        credentials.into(),
     )
     .unwrap_or_else(|error| panic!("replacement fixture Router should start: {error}"));
     let second_router_address = second_runtime.local_addr();

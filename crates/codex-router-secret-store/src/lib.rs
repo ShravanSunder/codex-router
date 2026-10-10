@@ -13,6 +13,7 @@ pub mod keychain_data_key;
 pub mod local_router_token;
 pub mod model;
 pub mod refresh_lease;
+pub mod runtime_credential_store;
 
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;

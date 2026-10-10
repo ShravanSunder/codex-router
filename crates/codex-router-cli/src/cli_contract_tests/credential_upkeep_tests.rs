@@ -98,7 +98,7 @@ fn enabled_exhausted_idle_account_renews_across_simulated_days_without_quota_pro
     let worker = must_ok(
         start_background_credential_upkeep_worker_with_client_and_clock(
             &state_path,
-            secrets,
+            secrets.into(),
             client,
             move || clock.load(Ordering::SeqCst),
         ),
@@ -230,7 +230,7 @@ fn credential_upkeep_refreshes_exhausted_and_idle_claude_accounts() {
     let worker = must_ok(
         start_background_credential_upkeep_worker_with_client_and_clock(
             &state_path,
-            secrets.clone(),
+            secrets.clone().into(),
             RecordingClaudeUpkeepRefreshClient {
                 observed_account_ids: observed_sender,
             },
@@ -350,7 +350,7 @@ fn upkeep_shutdown_drains_in_flight_rotation_before_returning() {
     let worker = must_ok(
         start_background_credential_upkeep_worker_with_client_and_clock(
             &state_path,
-            secrets,
+            secrets.into(),
             HeldUpkeepRefreshClient {
                 entered_sender,
                 release_receiver: Arc::new(Mutex::new(release_receiver)),
@@ -451,7 +451,7 @@ fn upkeep_shutdown_does_not_admit_a_queued_account_after_stop() {
     let worker = must_ok(
         start_background_credential_upkeep_worker_with_client_and_clock(
             &state_path,
-            credential_store,
+            credential_store.into(),
             HeldQueuedUpkeepRefreshClient {
                 entered_sender,
                 release_receiver: Arc::new(Mutex::new(release_receiver)),

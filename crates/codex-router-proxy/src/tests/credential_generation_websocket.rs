@@ -123,7 +123,7 @@ fn assembled_loopback_websocket_preserves_ordinary_socket_across_credential_gene
         secret_path,
     )
     .with_quota_clock(FIXED_QUOTA_TIME, 300);
-    let runtime = LoopbackRouterRuntime::start(config, secrets.clone())
+    let runtime = LoopbackRouterRuntime::start(config, secrets.clone().into())
         .unwrap_or_else(|error| panic!("assembled ordinary runtime should start: {error}"));
     let router_address = runtime.local_addr();
     let runtime_thread = thread::spawn(move || runtime.serve_protocol_connections(1));

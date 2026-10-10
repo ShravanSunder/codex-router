@@ -20,6 +20,7 @@ use crate::credential_key::has_credential_bundle_marker;
 use crate::model::SecretKey;
 use crate::model::SecretStoreError;
 
+mod debug_plaintext;
 mod pooled_credential_files;
 pub(crate) use pooled_credential_files::PooledCredentialTemporaryFile;
 
@@ -29,10 +30,20 @@ static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 #[derive(Clone, Debug)]
 pub struct FileSecretStore {
     root: PathBuf,
+    #[cfg(debug_assertions)]
+    credential_policy: FileCredentialPolicy,
     #[cfg(any(test, feature = "test-support"))]
     write_trace: Option<FileWriteTrace>,
     #[cfg(any(test, feature = "test-support"))]
     read_trace: Option<FileReadTrace>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg(debug_assertions)]
+enum FileCredentialPolicy {
+    GeneralSecretsOnly,
+    #[cfg(debug_assertions)]
+    DebugPlaintextPooled,
 }
 
 trait FileWriteObserver {
@@ -180,6 +191,8 @@ impl FileSecretStore {
 
         Ok(Self {
             root,
+            #[cfg(debug_assertions)]
+            credential_policy: FileCredentialPolicy::GeneralSecretsOnly,
             #[cfg(any(test, feature = "test-support"))]
             write_trace: None,
             #[cfg(any(test, feature = "test-support"))]
@@ -227,6 +240,8 @@ impl FileSecretStore {
 
         Ok(Self {
             root,
+            #[cfg(debug_assertions)]
+            credential_policy: FileCredentialPolicy::GeneralSecretsOnly,
             #[cfg(any(test, feature = "test-support"))]
             write_trace: None,
             #[cfg(any(test, feature = "test-support"))]
@@ -391,7 +406,7 @@ impl FileSecretStore {
 
 impl SecretStore for FileSecretStore {
     fn write_secret(&self, key: &SecretKey, secret: &SecretString) -> Result<(), SecretStoreError> {
-        reject_pooled_credential_key(key)?;
+        let _credential_lock = self.authorize_plaintext_credential_operation(key)?;
         let target_path = self.secret_path(key);
         self.write_atomically(
             &target_path,
@@ -401,7 +416,7 @@ impl SecretStore for FileSecretStore {
     }
 
     fn read_secret(&self, key: &SecretKey) -> Result<SecretString, SecretStoreError> {
-        reject_pooled_credential_key(key)?;
+        let _credential_lock = self.authorize_plaintext_credential_operation(key)?;
         let target_path = self.secret_path(key);
         reject_symlink_path(&target_path)?;
         let value = self.read_file_to_string(&target_path)?;
@@ -410,9 +425,16 @@ impl SecretStore for FileSecretStore {
     }
 
     fn delete_staged(&self, key: &SecretKey) -> Result<(), SecretStoreError> {
-        Err(SecretStoreError::PooledCredentialRequiresEncryption {
-            key: key.as_str().to_owned(),
-        })
+        self.delete_plaintext_staged_credential(key)
+    }
+
+    fn prune_obsolete_generations(
+        &self,
+        provider: codex_router_core::provider::Provider,
+        account_id: &codex_router_core::ids::AccountId,
+        previously_active_generation: u64,
+    ) -> Result<Vec<u64>, SecretStoreError> {
+        self.prune_plaintext_generations(provider, account_id, previously_active_generation)
     }
 }
 

@@ -258,7 +258,7 @@ pub(super) fn proxy_refresh_fixture(
         secret_root,
     )
     .with_quota_clock(1_000, 300);
-    let router = LoopbackRouterRuntime::start(config, secrets.clone())
+    let router = LoopbackRouterRuntime::start(config, secrets.clone().into())
         .expect("fixture router should start")
         .with_credential_refresh_shutdown_drain(drain_limit);
     (router, account_id, database_path, secrets)

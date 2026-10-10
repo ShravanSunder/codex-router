@@ -7,6 +7,7 @@ use codex_router_core::redaction::SecretString;
 use codex_router_secret_store::SecretStore;
 use codex_router_secret_store::account_tokens::AccountCredentialBundle;
 use codex_router_secret_store::account_tokens::openai_account_credential_bundle_key;
+use codex_router_secret_store::encrypted_credential_store::EncryptedCredentialStore;
 use codex_router_state::account::AccountRecord;
 use codex_router_state::credential_maintenance::CredentialFailureClass;
 use codex_router_state::credential_maintenance::CredentialMaintenanceState;
@@ -112,7 +113,13 @@ async fn unavailable_credential_stores_skip_upkeep_without_health_changes() {
             "{suffix}"
         );
 
-        let cycle = run_upkeep_cycle(&state, &secrets, NoopCredentialRefreshClient, 1_100).await;
+        let cycle = run_upkeep_cycle(
+            &state,
+            &secrets.clone().into(),
+            NoopCredentialRefreshClient,
+            1_100,
+        )
+        .await;
         let maintenance_after = state
             .load_credential_maintenance(&account_id)
             .await
@@ -185,8 +192,13 @@ async fn terminal_and_cooldown_states_do_not_become_local_worker_failures() {
                 .expect("terminal bundle"),
         )
         .expect("terminal secret");
-    let terminal_cycle =
-        run_upkeep_cycle(&state, &secrets, NoopCredentialRefreshClient, 1_000).await;
+    let terminal_cycle = run_upkeep_cycle(
+        &state,
+        &secrets.clone().into(),
+        NoopCredentialRefreshClient,
+        1_000,
+    )
+    .await;
     assert!(!terminal_cycle.had_local_error);
     assert_eq!(terminal_cycle.earliest_due, None);
     let terminal_health = state
@@ -284,8 +296,13 @@ async fn terminal_and_cooldown_states_do_not_become_local_worker_failures() {
             .await
             .expect("reauth disposition")
     );
-    let cooldown_cycle =
-        run_upkeep_cycle(&state, &secrets, NoopCredentialRefreshClient, 1_000).await;
+    let cooldown_cycle = run_upkeep_cycle(
+        &state,
+        &secrets.clone().into(),
+        NoopCredentialRefreshClient,
+        1_000,
+    )
+    .await;
     assert!(!cooldown_cycle.had_local_error);
     assert_eq!(cooldown_cycle.earliest_due, Some(1_060));
     let reauth_health = state
@@ -304,7 +321,7 @@ async fn terminal_and_cooldown_states_do_not_become_local_worker_failures() {
         .expect("read-only fixture state");
     let overdue_retry = run_upkeep_cycle(
         &read_only_state,
-        &secrets,
+        &secrets.clone().into(),
         NoopCredentialRefreshClient,
         1_060,
     )
@@ -319,8 +336,13 @@ async fn terminal_and_cooldown_states_do_not_become_local_worker_failures() {
         .close()
         .await
         .expect("read-only state close");
-    let unavailable_cycle =
-        run_upkeep_cycle(&state, &secrets, NoopCredentialRefreshClient, 1_000).await;
+    let unavailable_cycle = run_upkeep_cycle(
+        &state,
+        &secrets.clone().into(),
+        NoopCredentialRefreshClient,
+        1_000,
+    )
+    .await;
     assert!(unavailable_cycle.had_local_error);
     assert_eq!(unavailable_cycle.earliest_due, None);
     assert_eq!(
@@ -397,7 +419,7 @@ async fn terminal_and_cooldown_states_do_not_become_local_worker_failures() {
     let calls = Arc::new(AtomicUsize::new(0));
     let claimed_cycle = run_upkeep_cycle(
         &claim_state,
-        &secrets,
+        &secrets.clone().into(),
         CountingRefreshClient {
             calls: Arc::clone(&calls),
         },

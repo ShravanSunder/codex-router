@@ -62,6 +62,7 @@ impl EncryptedCredentialStore {
     pub fn open_production_for_process(
         secret_root: impl AsRef<std::path::Path>,
     ) -> Result<Self, SecretStoreError> {
+        FileSecretStore::reject_debug_plaintext_declaration(secret_root.as_ref())?;
         with_platform_keychain_for_production(|keychain| {
             Self::open_for_process_with_keychain(secret_root, keychain)
         })
@@ -72,9 +73,11 @@ impl EncryptedCredentialStore {
         secret_root: impl AsRef<std::path::Path>,
         keychain: &dyn KeychainAccess,
     ) -> Result<Self, SecretStoreError> {
+        FileSecretStore::reject_debug_plaintext_declaration(secret_root.as_ref())?;
         let file_store = FileSecretStore::open(secret_root)?;
         let _store_lock =
             CredentialStoreLock::acquire(file_store.root(), CredentialStoreLockMode::Exclusive)?;
+        FileSecretStore::reject_debug_plaintext_declaration(file_store.root())?;
         let data_key = match load_or_create_pooled_credential_data_key(&file_store, keychain) {
             Ok(data_key) => data_key,
             Err(error @ (SecretStoreError::KeyUnavailable | SecretStoreError::KeyMissing)) => {

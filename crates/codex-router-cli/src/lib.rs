@@ -17,8 +17,8 @@ use codex_router_proxy::session_account_affinity_cache::DEFAULT_SESSION_PIN_IDLE
 #[cfg(debug_assertions)]
 use codex_router_proxy::upstream::ClaudeUpstreamEndpoint;
 use codex_router_proxy::upstream::UpstreamEndpoint;
-use codex_router_secret_store::encrypted_credential_store::EncryptedCredentialStore;
 use codex_router_secret_store::file_backend::FileSecretStore;
+use codex_router_secret_store::runtime_credential_store::RuntimeCredentialStore;
 
 pub mod account;
 mod credential_runtime;
@@ -227,10 +227,10 @@ where
 fn run_serve_command_with_upkeep_start(
     stdout: &mut impl Write,
     command: cli_argument_parsing::ServeCommand,
-    credential_store: EncryptedCredentialStore,
+    credential_store: RuntimeCredentialStore,
     upkeep_start: impl FnOnce(
         &Path,
-        EncryptedCredentialStore,
+        RuntimeCredentialStore,
     ) -> Result<
         credential_upkeep_worker::CredentialUpkeepWorker,
         credential_upkeep_worker::CredentialUpkeepStartError,
@@ -248,10 +248,10 @@ fn run_serve_command_with_upkeep_start(
 fn run_serve_command_with_upkeep_start_and_token_reload_observer(
     stdout: &mut impl Write,
     command: cli_argument_parsing::ServeCommand,
-    credential_store: EncryptedCredentialStore,
+    credential_store: RuntimeCredentialStore,
     upkeep_start: impl FnOnce(
         &Path,
-        EncryptedCredentialStore,
+        RuntimeCredentialStore,
     ) -> Result<
         credential_upkeep_worker::CredentialUpkeepWorker,
         credential_upkeep_worker::CredentialUpkeepStartError,
@@ -525,6 +525,11 @@ where
     let command = CliCommand::parse(args)?;
     match command {
         CliCommand::Serve(command) => {
+            #[cfg(debug_assertions)]
+            if command.allow_plaintext_file_secrets {
+                secret_store_factory::initialize_plaintext_debug_root(&command.secret_root)
+                    .map_err(|_| CliError::CredentialStoreOpen)?;
+            }
             let credential_store =
                 secret_store_factory::open_cli_secret_store(&command.secret_root)
                     .map_err(|_| CliError::CredentialStoreOpen)?;
@@ -600,9 +605,9 @@ where
             writeln!(stdout, "codex-router {}", env!("CARGO_PKG_VERSION"))
                 .map_err(CliError::Stdout)?;
         }
-        CliCommand::Help => {
+        CliCommand::Help(text) => {
             stdout
-                .write_all(HELP_TEXT.as_bytes())
+                .write_all(text.as_bytes())
                 .map_err(CliError::Stdout)?;
         }
     }

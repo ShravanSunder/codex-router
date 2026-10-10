@@ -231,7 +231,7 @@ async fn credential_authority_fails_closed_and_binds_only_provider_effective_fie
     assert!(matches!(
         load_reset_credential_authority(
             &fixture.database_path,
-            &fixture.secret_store,
+            &fixture.secret_store.clone().into(),
             &missing_account,
             expected_generation,
             200,
@@ -378,7 +378,7 @@ async fn authority_read_does_not_create_absent_state_or_secret_roots() {
 
     let result = load_reset_credential_authority(
         &database_path,
-        &credential_store,
+        &credential_store.clone().into(),
         &account_id,
         ActiveCredentialGeneration::new(1),
         100,
@@ -429,7 +429,7 @@ async fn claude_account_cannot_read_an_openai_quota_reset_bundle() {
 
     let result = load_reset_credential_authority(
         &fixture.database_path,
-        &fixture.secret_store,
+        &fixture.secret_store.clone().into(),
         &claude_id,
         ActiveCredentialGeneration::new(1),
         200,
@@ -595,7 +595,7 @@ impl AuthorityFixture {
     ) -> Result<PinnedResetAuthority, CredentialAuthorityError> {
         load_reset_credential_authority(
             &self.database_path,
-            &self.secret_store,
+            &self.secret_store.clone().into(),
             &self.account_id,
             expected_generation,
             200,

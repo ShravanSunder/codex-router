@@ -1,4 +1,5 @@
 use super::*;
+use codex_router_secret_store::encrypted_credential_store::EncryptedCredentialStore;
 
 #[test]
 fn serve_provisions_local_token_and_keeps_codex_optional() {
@@ -204,7 +205,7 @@ fn serve_starts_and_codex_route_fails_closed_for_unavailable_pooled_stores() {
             let result = run_serve_command_with_upkeep_start(
                 &mut stdout,
                 command,
-                credential_store,
+                credential_store.into(),
                 credential_upkeep_worker::start_background_credential_upkeep_worker,
             );
             (result, stdout)
@@ -625,7 +626,7 @@ fn serve_startup_maintains_idle_enabled_oauth_account_across_simulated_days() {
         let result = run_serve_command_with_upkeep_start(
             &mut stdout,
             command,
-            credential_store,
+            credential_store.into(),
             move |state_path, credential_store| {
                 let clock = Arc::clone(&worker_clock);
                 let worker = start_background_credential_upkeep_worker_with_client_and_clock(

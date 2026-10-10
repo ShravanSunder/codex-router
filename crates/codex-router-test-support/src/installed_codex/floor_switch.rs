@@ -92,7 +92,7 @@ impl FloorRouter {
                 state_path.to_path_buf(),
                 secret_root.to_path_buf(),
             ),
-            credential_store,
+            credential_store.into(),
         )
         .map_err(|error| format!("floor fixture router failed to start: {error}"))?;
         let port = runtime.local_addr().port();
