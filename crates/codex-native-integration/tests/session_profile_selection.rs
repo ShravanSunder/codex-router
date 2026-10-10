@@ -19,12 +19,14 @@ fn debug_app_server_profile_preserves_provider_overrides_without_remote_control(
 model = "fixture-model"
 model_provider = "codex-router-debug"
 [model_providers.codex-router-debug]
-name = "Debug provider"
+name = "OpenAI"
 base_url = "http://127.0.0.1:18787/v1"
 wire_api = "responses"
 requires_openai_auth = false
 supports_websockets = true
 stream_max_retries = 2
+[features]
+enable_request_compression = false
 "#,
         18787,
     )

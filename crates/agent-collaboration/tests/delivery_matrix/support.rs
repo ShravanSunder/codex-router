@@ -13,6 +13,8 @@ use tokio::io::{AsyncBufReadExt as _, BufReader};
 
 const PEER_TOKEN: &str = "0123456789abcdef0123456789abcdef";
 
+const DELIVERY_MATRIX_DEBUG_PROFILE: &str = "model = \"gpt-5.6-luna\"\nmodel_reasoning_effort = \"high\"\nmodel_provider = \"codex-router-debug\"\n\n[features]\nenable_request_compression = false\n\n[model_providers.codex-router-debug]\nname = \"OpenAI\"\nbase_url = \"http://127.0.0.1:43127/v1\"\nwire_api = \"responses\"\nrequires_openai_auth = false\nsupports_websockets = true\n";
+
 enum ProviderFixtureMode {
     CodexAndPeerRecipients,
     AcpTarget,
@@ -61,10 +63,9 @@ fn prepare_fixture(mode: ProviderFixtureMode) -> ProofResult<()> {
         managed_executable,
         root.join("codex-home/packages/standalone/current/codex"),
     )?;
-    let profile = "model = \"gpt-5.6-luna\"\nmodel_reasoning_effort = \"high\"\nmodel_provider = \"codex-router-debug\"\n\n[model_providers.codex-router-debug]\nname = \"isolated matrix router\"\nbase_url = \"http://127.0.0.1:43127/v1\"\nwire_api = \"responses\"\nrequires_openai_auth = false\nsupports_websockets = true\n";
     write_private_file(
         &root.join("codex-home/codex-router-debug.config.toml"),
-        profile.as_bytes(),
+        DELIVERY_MATRIX_DEBUG_PROFILE.as_bytes(),
     )?;
     write_private_file(
         &root.join("debug-host-context.json"),
@@ -375,4 +376,11 @@ impl PeerFixture {
         self.task.await??;
         Ok(())
     }
+}
+
+#[test]
+fn delivery_matrix_debug_profile_passes_strict_parser()
+-> Result<(), codex_native_integration::DebugProfileError> {
+    codex_native_integration::DebugCodexProfile::parse(DELIVERY_MATRIX_DEBUG_PROFILE, 43127)?;
+    Ok(())
 }

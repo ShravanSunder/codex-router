@@ -11,12 +11,14 @@ model_provider = "codex-router-debug"
 [projects."/work/fixture"]
 trust_level = "trusted"
 [model_providers.codex-router-debug]
-name = "Debug provider"
+name = "OpenAI"
 base_url = "http://127.0.0.1:18787/v1"
 wire_api = "responses"
 requires_openai_auth = false
 supports_websockets = true
 stream_max_retries = 2
+[features]
+enable_request_compression = false
 "#;
 
 const NETWORK_PROFILE: &str = r#"
@@ -38,6 +40,8 @@ enabled = true
 mode = "full"
 domains = { "*" = "allow" }
 unix_sockets = { "/tmp/debug-router/agent-communication/control.sock" = "allow" }
+[features]
+enable_request_compression = false
 [features.network_proxy]
 enabled = true
 mode = "full"
@@ -50,7 +54,7 @@ dangerously_allow_all_unix_sockets = false
 domains = { "*" = "allow" }
 unix_sockets = { "/tmp/debug-router/agent-communication/control.sock" = "allow" }
 [model_providers.codex-router-debug]
-name = "Debug provider"
+name = "OpenAI"
 base_url = "http://127.0.0.1:18787/v1"
 wire_api = "responses"
 requires_openai_auth = false
@@ -71,25 +75,39 @@ fn backend_overrides_preserve_supported_debug_profile_values() {
     .with_debug_profile(&profile);
     // Act: decode the actual -c values rather than asserting a serializer's spelling.
     let args = command.arguments();
-    let mut configuration = String::new();
+    let mut decoded = toml::Table::new();
     let mut iter = args.iter();
     while let Some(argument) = iter.next() {
         if argument == "-c" {
-            configuration.push_str(iter.next().unwrap().to_str().unwrap());
-            configuration.push('\n');
+            let override_table = iter
+                .next()
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .parse::<toml::Table>()
+                .unwrap();
+            merge_configuration(&mut decoded, override_table);
         }
     }
     // Assert: no model/project/provider/retry setting was silently dropped, and the
     // debug launch keeps Router's permission profiles so access validation still passes.
     let mut expected = toml::from_str::<toml::Table>(PROFILE).unwrap();
-    expected.extend(
+    merge_configuration(
+        &mut expected,
         router_permission_profile_overrides()
             .join("\n")
             .parse::<toml::Table>()
             .unwrap(),
     );
-    let decoded = toml::from_str::<toml::Table>(&configuration).unwrap();
     assert_eq!(decoded, expected);
+    assert_eq!(
+        decoded["model_providers"]["codex-router-debug"]["name"].as_str(),
+        Some("OpenAI")
+    );
+    assert_eq!(
+        decoded["features"]["enable_request_compression"].as_bool(),
+        Some(false)
+    );
     for profile in ["router-write-restricted", "router-workspace-write"] {
         assert_eq!(
             decoded["permissions"][profile]["network"]["enabled"].as_bool(),
@@ -180,14 +198,14 @@ fn network_experiment_configuration_is_typed_and_closed() {
 
 #[test]
 fn image_generation_profile_accepts_openai_auth_without_weakening_network_validation() {
-    let image_profile = format!("{PROFILE}\n[features]\nimage_generation = true\n").replace(
+    let image_profile = format!("{PROFILE}\nimage_generation = true\n").replace(
         "requires_openai_auth = false",
         "requires_openai_auth = true",
     );
     let image_network_profile = NETWORK_PROFILE
         .replace(
             "[features.network_proxy]",
-            "[features]\nimage_generation = true\n[features.network_proxy]",
+            "image_generation = true\n[features.network_proxy]",
         )
         .replace(
             "requires_openai_auth = false",
@@ -205,5 +223,43 @@ fn image_generation_profile_accepts_openai_auth_without_weakening_network_valida
         image_network_profile.replace("credential_broker = false", "credential_broker = true"),
     ] {
         assert!(DebugCodexProfile::parse(&rejected, 18787).is_err());
+    }
+}
+
+#[test]
+fn debug_profile_requires_literal_native_capability_and_uncompressed_requests() {
+    for valid in [PROFILE, NETWORK_PROFILE] {
+        for invalid in [
+            valid.replace("name = \"OpenAI\"", "name = \"codex-router-debug\""),
+            valid.replace("name = \"OpenAI\"", "name = \"openai\""),
+            valid.replace(
+                "enable_request_compression = false",
+                "enable_request_compression = true",
+            ),
+            valid.replace(
+                "enable_request_compression = false",
+                "enable_request_compression = \"false\"",
+            ),
+            valid.replace("enable_request_compression = false\n", ""),
+        ] {
+            assert!(
+                DebugCodexProfile::parse(&invalid, 18787).is_err(),
+                "invalid native capability accepted"
+            );
+        }
+    }
+}
+
+// Each -c value is a separate config layer, rather than one TOML document.
+fn merge_configuration(configuration: &mut toml::Table, overrides: toml::Table) {
+    for (key, value) in overrides {
+        match (configuration.get_mut(&key), value) {
+            (Some(toml::Value::Table(existing)), toml::Value::Table(next)) => {
+                merge_configuration(existing, next);
+            }
+            (_, replacement) => {
+                configuration.insert(key, replacement);
+            }
+        }
     }
 }

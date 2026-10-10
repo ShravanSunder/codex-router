@@ -153,7 +153,7 @@ async fn private_router_root_with_profile_requires_dedicated_socket_before_launc
     let profile = codex_home.join("codex-router-debug.config.toml");
     std::fs::write(
         &profile,
-        "model_provider = \"codex-router-debug\"\n\n[model_providers.codex-router-debug]\nname = \"fixture\"\nbase_url = \"http://127.0.0.1:19087/v1\"\nwire_api = \"responses\"\nrequires_openai_auth = false\nsupports_websockets = true\n",
+        "model_provider = \"codex-router-debug\"\n\n[model_providers.codex-router-debug]\nname = \"OpenAI\"\nbase_url = \"http://127.0.0.1:19087/v1\"\nwire_api = \"responses\"\nrequires_openai_auth = false\nsupports_websockets = true\n\n[features]\nenable_request_compression = false\n",
     )?;
     let router_root = directory.path().join("private-router");
     let launchctl_executable = directory.path().join("launchctl");
@@ -736,7 +736,7 @@ fn install_debug_profile(codex_home: &Path, port: u16) -> std::io::Result<()> {
     std::fs::write(
         codex_home.join("codex-router-debug.config.toml"),
         format!(
-            "model_provider = \"codex-router-debug\"\n\n[model_providers.codex-router-debug]\nname = \"fixture\"\nbase_url = \"http://127.0.0.1:{port}/v1\"\nwire_api = \"responses\"\nrequires_openai_auth = false\nsupports_websockets = true\n"
+            "model_provider = \"codex-router-debug\"\n\n[model_providers.codex-router-debug]\nname = \"OpenAI\"\nbase_url = \"http://127.0.0.1:{port}/v1\"\nwire_api = \"responses\"\nrequires_openai_auth = false\nsupports_websockets = true\n\n[features]\nenable_request_compression = false\n"
         ),
     )
 }
