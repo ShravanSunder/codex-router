@@ -67,7 +67,20 @@ If startup/profile/client acceptance fails, collect bounded sanitized failure ev
 
 ## Isolated cutover rehearsal
 
-The permanent default-bind acceptance test is opt-in locally because the production default may be occupied. A mandatory explicit CI step runs it with `--ignored` on a controlled runner; it fails if19741 is occupied and never touches a borrower. The required rehearsal uses one owned real CLI/config instance with fresh private state: old explicit unused proof port/profile, owned stop and listener release, profile cutover to19741, real default serve at19741, `/healthz`/appropriate no-model request, and owned teardown proving both listeners free. It uses the existing CLI boundary and establishes the port/config interaction. Native Host/app-server and OAuth journeys require separate acceptance and are not inferred. Permanent test: `crates/codex-router-cli/tests/default_router_port_cutover.rs` (requires `keychain-test-support`). Observed command: `RUSTC=<pinned-toolchain-rustc> rustup run 1.98.1 cargo test --locked --offline -p codex-router-cli --features keychain-test-support --test default_router_port_cutover compiled_cli_default_router_port_cutover_uses_isolated_state -- --nocapture`, exit0,1passed/0failed. Latest owned phases: old private proof port53211 → default19741; each returned health200, unauthenticated401 and valid-local-token empty-account503. Both children exited successfully; old/new ports were rebindable. Parsed new generated profile SHA-256: `e1c3aa5b26f39adf865cf477394a75ac6505bd73273974d7a6bd5bc0c161079a`. Actual typed commandExecution output recovered through supported native thread/read into ignored local evidence `tmp/default-router-port-command-proof.json`; no provider transcript files read and no duplicate retention rerun. Evidence was produced on the source captured in implementation commit103068f8; final corrective source/commit linkage and CI receipts will be attached before readiness.
+The permanent default-bind acceptance test is opt-in locally because the production default may be occupied. A mandatory explicit CI step runs it with `--ignored` on a controlled runner; it fails if19741 is occupied and never touches a borrower. The required rehearsal uses one owned real CLI/config instance with fresh private state: old explicit unused proof port/profile, owned stop and listener release, profile cutover to19741, real default serve at19741, `/healthz`/appropriate no-model request, and owned teardown proving both listeners free. It uses the existing CLI boundary and establishes the port/config interaction. Native Host/app-server and OAuth journeys require separate acceptance and are not inferred. Permanent test: `crates/codex-router-cli/tests/default_router_port_cutover.rs` (requires `keychain-test-support`). The explicit acceptance command uses the same Cargo arguments as the observed passing run; the environment derives the pinned toolchain path without machine-specific metadata:
+
+```sh
+port_proof_toolchain_bin="$(dirname "$(rustup which cargo)")"
+PATH="$port_proof_toolchain_bin:$PATH" RUSTC="$(rustup which rustc)" \
+  rustup run 1.98.1 cargo test --locked --offline \
+  -p codex-router-cli --features keychain-test-support \
+  --test default_router_port_cutover -- --ignored --nocapture
+```
+
+Observed result: exit0,1passed/0failed. Corrective owned phases used old private port55957 → default19741; each returned health200, unauthenticated401 and valid-local-token empty-account503. Both children exited successfully and both ports were rebindable. Parsed new generated profile SHA-256: `e1c3aa5b26f39adf865cf477394a75ac6505bd73273974d7a6bd5bc0c161079a`.
+
+[Corrective source85bbff4e](https://github.com/ShravanSunder/codex-router/commit/85bbff4eec507da9449fa847a41f32637b759151) contains the opt-in test and mandatory CI gate. Twenty committed source blobs match the before/after-proof byte hashes retained in the owning worktree. The subsequent packet-only correction preserves that executable source. Actual command outputs and private process details remain in ignored local evidence; no provider transcript files were read. Hosted current-head CI and production acceptance remain separate gates.
+
 
 ## Evidence and outstanding gates
 
