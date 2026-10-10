@@ -187,6 +187,8 @@ jobs:
         run: cargo nextest run --profile ci --workspace --features codex-router-cli/keychain-test-support --exclude codex-router-quota-reset-test-harness --exclude sqlx-turso --exclude sqlx-turso-core --exclude sqlx-turso-macros
       - name: Wait for tests
         wait-all:
+      - name: Test isolated default Router port cutover
+        run: cargo test --locked -p codex-router-cli --features keychain-test-support --test default_router_port_cutover -- --ignored --nocapture
       # The Turso driver runs after the timing-sensitive suites above have finished: its
       # trybuild test compiles a cold dependency graph that would compete with them. Every
       # feature runs once (Sync against tursodb), then the driver core without Sync, which

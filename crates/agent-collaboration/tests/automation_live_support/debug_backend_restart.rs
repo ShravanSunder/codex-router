@@ -1,6 +1,6 @@
 //! Restart only the verified acceptance Host's retained native child through its existing CLI.
 use super::proof_context::{ProofContext, ProofResult};
-use codex_native_integration::NativeProtocolConnection;
+use codex_native_integration::{DEFAULT_ROUTER_PORT, NativeProtocolConnection};
 use collaboration_client::protocol::ChannelDescription;
 use serde_json::{Value, json};
 use std::{path::Path, time::Duration};
@@ -38,7 +38,9 @@ pub async fn restart(proof: &mut ProofContext) -> ProofResult<()> {
     let port = marker
         .get("port")
         .and_then(Value::as_u64)
-        .filter(|port| *port > 0 && *port <= u64::from(u16::MAX) && *port != 8787)
+        .filter(|port| {
+            *port > 0 && *port <= u64::from(u16::MAX) && *port != u64::from(DEFAULT_ROUTER_PORT)
+        })
         .ok_or("Debug provider port missing")?;
     let binary =
         Path::new(env!("CARGO_BIN_EXE_agent-collaboration")).with_file_name("codex-router");

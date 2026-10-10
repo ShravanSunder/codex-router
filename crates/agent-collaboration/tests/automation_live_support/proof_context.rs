@@ -2,7 +2,8 @@
 #[path = "native_notification_diagnostics.rs"]
 mod native_notification_diagnostics;
 use codex_native_integration::{
-    NativeOperation, NativePayloadSchemas, NativeProtocolConnection, NativeSchemaExport,
+    DEFAULT_ROUTER_PORT, NativeOperation, NativePayloadSchemas, NativeProtocolConnection,
+    NativeSchemaExport,
 };
 use collaboration_client::CollaborationClient;
 use collaboration_client::protocol::{
@@ -56,7 +57,7 @@ impl ProofContext {
             || marker
                 .get("port")
                 .and_then(Value::as_u64)
-                .is_none_or(|port| port == 8787 || port == 0)
+                .is_none_or(|port| port == u64::from(DEFAULT_ROUTER_PORT) || port == 0)
         {
             return Err("Host did not establish the isolated debug profile and Luna model".into());
         }

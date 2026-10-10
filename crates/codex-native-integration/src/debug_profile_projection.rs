@@ -1,4 +1,5 @@
 //! Read-only debug configuration projected through supported native server overrides.
+use crate::router_profile_projection::DEFAULT_ROUTER_PORT;
 use std::{collections::BTreeSet, io::Read, path::Path};
 
 const MAX_PROFILE_BYTES: usize = 64 * 1024;
@@ -70,7 +71,7 @@ impl DebugCodexProfile {
         }
         validate_network_experiment_configuration(&table)?;
         if port == 0
-            || port == 8787
+            || port == DEFAULT_ROUTER_PORT
             || table.get("model_provider").and_then(toml::Value::as_str)
                 != Some("codex-router-debug")
         {

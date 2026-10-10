@@ -21,7 +21,6 @@ pub(crate) mod operator_client;
 mod provider_launch_configuration;
 pub(crate) mod replacement_outcome;
 
-const DEFAULT_HOST_PORT: u16 = 8787;
 const STATUS_REQUEST_DEADLINE: Duration = Duration::from_secs(40);
 const APP_SERVER_RESTART_DEADLINE: Duration = Duration::from_secs(40);
 const ROUTER_RESTART_DEADLINE: Duration = Duration::from_secs(30);
@@ -136,7 +135,7 @@ struct ClapHostCommand {
     #[arg(
         long,
         global = true,
-        help = "Provider port (debug default: 18787; installed default: 8787)"
+        help = "Provider port (debug default: 18787; installed default: 19741)"
     )]
     port: Option<u16>,
     #[arg(long, global = true, value_parser = parse_loopback_mcp_bind)]
@@ -427,6 +426,19 @@ pub enum HostCommandError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn explicit_host_port_overrides_keep_the_selected_port() {
+        for port in [8787, 9876] {
+            let command = HostCommand::parse(vec![
+                OsString::from("--port"),
+                OsString::from(port.to_string()),
+            ])
+            .expect("explicit Host port");
+
+            assert_eq!(command.port, Some(port));
+        }
+    }
 
     #[test]
     fn operator_deadlines_cover_their_owned_lifecycle_bounds() {

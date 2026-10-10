@@ -11,6 +11,7 @@ use std::sync::Arc;
 use codex_native_integration::AppServerCommandSpec;
 use codex_native_integration::CodexPaths;
 use codex_native_integration::CodexRouterProfile;
+use codex_native_integration::DEFAULT_ROUTER_PORT;
 use codex_native_integration::DesktopLaunchPolicyCommand;
 use codex_router_host::AppServerLaunchPlan;
 use codex_router_host::ChildCommandSpec;
@@ -232,7 +233,7 @@ impl HostLaunchMode {
 
     pub(super) const fn default_port(self) -> u16 {
         match self {
-            Self::OwnerProduction => super::DEFAULT_HOST_PORT,
+            Self::OwnerProduction => DEFAULT_ROUTER_PORT,
             Self::IsolatedDebug => 18787,
         }
     }
@@ -398,7 +399,7 @@ mod tests {
             HostLaunchMode::resolve(&owner_root, &owner_context, false, Some(&owner_home)),
             HostLaunchMode::OwnerProduction,
         );
-        assert_eq!(HostLaunchMode::OwnerProduction.default_port(), 8787);
+        assert_eq!(HostLaunchMode::OwnerProduction.default_port(), 19741);
         assert_eq!(HostLaunchMode::IsolatedDebug.default_port(), 18787);
     }
 
