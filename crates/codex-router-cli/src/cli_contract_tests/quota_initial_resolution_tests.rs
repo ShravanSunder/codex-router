@@ -26,6 +26,10 @@ async fn assert_delayed_initial_failure_preserves_newer_authority(successful_gen
     let test_root = TestRoot::new("quota-refresh-delayed-initial-resolution-failure");
     must_ok(fs::create_dir(test_root.path()));
     let state_path = test_root.path().join("state.sqlite");
+    let secret_root = test_root.path().join("secrets");
+    let secrets = must_ok(
+        codex_router_secret_store::test_support::open_encrypted_credential_store(&secret_root),
+    );
     let state = must_ok(AsyncSqliteStateStore::open(&state_path).await);
     let account_id = account_id("acct_delayed_initial_resolution_failure");
     must_ok(
@@ -41,6 +45,22 @@ async fn assert_delayed_initial_failure_preserves_newer_authority(successful_gen
             )
             .await,
     );
+    let initial_access = if successful_generation == 1 {
+        "newer-resolution-token"
+    } else {
+        "superseded-generation-one-token"
+    };
+    let initial_key = must_ok(openai_account_credential_bundle_key(&account_id, 1));
+    must_ok(
+        secrets.write_secret(
+            &initial_key,
+            &must_ok(
+                AccountCredentialBundle::imported_codex_auth(initial_access, None)
+                    .with_expires_unix_seconds(4_000_000_000)
+                    .to_secret_string(),
+            ),
+        ),
+    );
     let (address, stop_server, provider_server) = start_credit_quota_fixture().await;
 
     let entered = Arc::new(tokio::sync::Notify::new());
@@ -50,7 +70,7 @@ async fn assert_delayed_initial_failure_preserves_newer_authority(successful_gen
         release: Arc::clone(&release),
     };
     let older_state_path = state_path.clone();
-    let older_secret_root = test_root.path().join("unused-older-secrets");
+    let older_secret_root = secret_root.clone();
     let older_refresh = tokio::spawn(async move {
         refresh_quota_store_paths_with_dependencies_async(
             &mut Vec::new(),
@@ -67,6 +87,41 @@ async fn assert_delayed_initial_failure_preserves_newer_authority(successful_gen
         .await
         .expect("older refresh must enter initial resolution before the newer cycle");
 
+    let exhausted_peer_id =
+        AccountId::new("acct_a_exhausted_peer").expect("fixed exhausted peer id must validate");
+    assert!(exhausted_peer_id.as_str() < account_id.as_str());
+    must_ok(
+        state
+            .upsert_account(
+                &AccountRecord::new(
+                    codex_router_core::provider::Provider::Openai,
+                    exhausted_peer_id.clone(),
+                    "exhausted-peer",
+                    AccountStatus::Enabled,
+                )
+                .with_active_credential_generation(1),
+            )
+            .await,
+    );
+    must_ok(
+        state
+            .save_account_credit_usage_policy(
+                &exhausted_peer_id,
+                codex_router_core::credit_usage::CreditUsagePolicy::Allow,
+            )
+            .await,
+    );
+    let exhausted_key = must_ok(openai_account_credential_bundle_key(&exhausted_peer_id, 1));
+    must_ok(
+        secrets.write_secret(
+            &exhausted_key,
+            &must_ok(
+                AccountCredentialBundle::imported_codex_auth("exhausted-peer-token", None)
+                    .with_expires_unix_seconds(4_000_000_000)
+                    .to_secret_string(),
+            ),
+        ),
+    );
     if successful_generation != 1 {
         must_ok(
             state
@@ -77,23 +132,42 @@ async fn assert_delayed_initial_failure_preserves_newer_authority(successful_gen
                 )
                 .await,
         );
+        let current_key = must_ok(openai_account_credential_bundle_key(
+            &account_id,
+            successful_generation,
+        ));
+        must_ok(
+            secrets.write_secret(
+                &current_key,
+                &must_ok(
+                    AccountCredentialBundle::imported_codex_auth("newer-resolution-token", None)
+                        .with_expires_unix_seconds(4_000_000_000)
+                        .to_secret_string(),
+                ),
+            ),
+        );
     }
-    let newer_resolver = FixedGenerationCredentialResolver {
-        access_token: "newer-resolution-token",
-        credential_generation: successful_generation,
-    };
-    must_ok(
-        refresh_quota_store_paths_with_dependencies_async(
-            &mut Vec::new(),
-            &state_path,
-            &test_root.path().join("unused-newer-secrets"),
-            format!("http://{address}"),
-            &newer_resolver,
-            &must_ok(HttpQuotaRefreshProvider::new()),
+    {
+        let resolver_state = must_ok(SqliteStateStore::open(&state_path));
+        let newer_resolver = RouterCredentialResolver::new(
+            &resolver_state,
+            &secrets,
+            NoopCredentialRefreshClient,
             200,
-        )
-        .await,
-    );
+        );
+        must_ok(
+            refresh_quota_store_paths_with_dependencies_async(
+                &mut Vec::new(),
+                &state_path,
+                &secret_root,
+                format!("http://{address}"),
+                &newer_resolver,
+                &must_ok(HttpQuotaRefreshProvider::new()),
+                200,
+            )
+            .await,
+        );
+    }
     let newer_status = must_ok(
         state
             .quota_refresh_statuses_for_route_band("responses")
@@ -129,7 +203,7 @@ async fn assert_delayed_initial_failure_preserves_newer_authority(successful_gen
         "the older initial resolver error must make its refresh command fail"
     );
     stop_server.notify_one();
-    assert_eq!(provider_server.await.expect("local fixture must join"), 4);
+    assert_eq!(provider_server.await.expect("local fixture must join"), 8);
     let final_status = must_ok(
         state
             .quota_refresh_statuses_for_route_band("responses")
@@ -147,6 +221,32 @@ async fn assert_delayed_initial_failure_preserves_newer_authority(successful_gen
         (newer_status, newer_credit, true),
         "an initial resolver error from the older cycle must preserve both quota freshness and committed credit authority"
     );
+    let inputs = must_ok(state.selector_inputs_for_route_band("responses", 201).await);
+    assert_eq!(inputs.len(), 2);
+    assert_eq!(inputs[0].account_id(), &exhausted_peer_id);
+    assert_eq!(inputs[0].account_status(), AccountStatus::Enabled);
+    assert_eq!(inputs[0].active_credential_generation(), Some(1));
+    assert_eq!(inputs[0].windows().len(), 2);
+    assert!(inputs[0].windows().iter().all(|window| {
+        window.status() == SelectorQuotaWindowStatus::Ineligible
+            && window.remaining_headroom() == 0
+            && window.observed_unix_seconds() == 200
+    }));
+    let exhausted_credit = must_ok(
+        state
+            .load_account_credit_observation(&exhausted_peer_id)
+            .await,
+    )
+    .expect("peer exhaustion must be a committed current credit observation");
+    assert_eq!(exhausted_credit.credential_generation(), 1);
+    assert_eq!(exhausted_credit.latest_started_attempt(), 1);
+    assert_eq!(exhausted_credit.committed_attempt(), Some(1));
+    assert_eq!(exhausted_credit.observed_unix_seconds(), Some(200));
+    assert_eq!(
+        exhausted_credit.provider_observation().availability(),
+        &codex_router_core::credit_usage::CreditAvailability::Depleted,
+    );
+    assert!(!exhausted_credit.authorizes_credit_usage(Some(1), 201));
     let selector = repository_selector(&state, 201);
     let selected = must_ok(
         selector
@@ -159,6 +259,7 @@ async fn assert_delayed_initial_failure_preserves_newer_authority(successful_gen
     );
     assert_eq!(selected.account_id(), &account_id);
     drop(selector);
+    assert_preserved_account_routes_through_cli_serve(state_path, secret_root).await;
     must_ok(state.close().await);
 }
 
@@ -190,11 +291,28 @@ async fn start_credit_quota_fixture() -> (
                         .expect("local quota fixture should accept");
                     let request = read_http_request(&mut stream).await;
                     let (is_usage_request, _) = is_quota_provider_request(&request);
-                    assert!(request.to_ascii_lowercase().contains(
+                    let request_headers = request.to_ascii_lowercase();
+                    let exhausted_peer = request_headers.contains(
+                        "authorization: bearer exhausted-peer-token\r\n"
+                    );
+                    assert!(exhausted_peer || request_headers.contains(
                         "authorization: bearer newer-resolution-token\r\n"
-                    ), "only the newer successful resolution may reach the fixture");
+                    ), "only valid current file credentials may reach the fixture");
                     request_count += 1;
-                    let body = if is_usage_request {
+                    let body = if exhausted_peer && is_usage_request {
+                        r#"{
+                          "rate_limit": {
+                            "primary_window": {"used_percent":100,"reset_at":8000,"limit_window_seconds":18000},
+                            "secondary_window": {"used_percent":100,"reset_at":9000,"limit_window_seconds":604800}
+                          },
+                          "additional_rate_limits":[],
+                          "credits":{"has_credits":false,"unlimited":false,"balance":"0"},
+                          "spend_control":{"reached":false},
+                          "reset_credits":{"available":0}
+                        }"#
+                    } else if exhausted_peer {
+                        r#"{"reset_credits":{"available":0}}"#
+                    } else if is_usage_request {
                         r#"{
                           "rate_limit": {
                             "primary_window": {"used_percent":20,"reset_at":8000,"limit_window_seconds":18000},
