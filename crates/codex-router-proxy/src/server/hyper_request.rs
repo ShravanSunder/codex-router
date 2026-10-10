@@ -72,11 +72,9 @@ pub(super) async fn bounded_request_metadata_body(
         } else {
             full_replay_body = None;
         }
-        let replay_body_is_complete = full_replay_body
-            .as_deref()
-            .is_some_and(request_metadata_prefix_is_complete_json);
         replay_frames.push_back(frame);
-        if replay_body_is_complete || full_replay_body.is_none() {
+        // Only Incoming EOF establishes completeness, even after valid JSON.
+        if full_replay_body.is_none() {
             break;
         }
     }
@@ -118,8 +116,11 @@ pub(super) struct PreparedHttpResponseForCommit {
 }
 
 #[derive(Debug)]
-pub(super) enum PrecommitHttpQuotaResponse {
+pub(super) enum PrecommitHttpResponseFailure {
     AccountQuotaExhausted,
+    CredentialRejected {
+        account_id: codex_router_core::ids::AccountId,
+    },
     ObservationFailed,
     ProbeFailed(HttpProxyError),
 }
@@ -127,6 +128,32 @@ pub(super) enum PrecommitHttpQuotaResponse {
 pub(super) enum PrecommitHttpResponseProbe {
     Forward(AsyncStreamingHttpProxyResponse),
     AccountQuotaExhausted { body: Vec<u8> },
+    CredentialRejected,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(super) enum PrecommitAuthRecoveryScope {
+    ResponsesPost,
+    PassThrough,
+}
+
+impl PrecommitAuthRecoveryScope {
+    pub(super) fn for_request(request: &HttpProxyRequest) -> Self {
+        if request.method() == Method::Post
+            && request.path().split('?').next() == Some("/v1/responses")
+        {
+            Self::ResponsesPost
+        } else {
+            Self::PassThrough
+        }
+    }
+}
+
+pub(super) fn provider_credential_failure_response()
+-> HttpResponse<BoxBody<Bytes, AsyncHttpBodyError>> {
+    http_error_response(HttpProxyError::ProviderCredential {
+        reason: codex_router_auth::resolver::CredentialResolverError::RefreshUnavailable,
+    })
 }
 
 pub(super) fn observe_precommit_http_quota_exhaustion_for_retry(
@@ -134,13 +161,13 @@ pub(super) fn observe_precommit_http_quota_exhaustion_for_retry(
     account_id: codex_router_core::ids::AccountId,
     route_band: RouteBand,
     observed_unix_seconds: u64,
-) -> Result<(), PrecommitHttpQuotaResponse> {
+) -> Result<(), PrecommitHttpResponseFailure> {
     let Some(observer) = provider_error_observer else {
         return Ok(());
     };
     observer
         .mark_runtime_account_quota_exhausted(account_id.clone(), route_band, observed_unix_seconds)
-        .map_err(|_error| PrecommitHttpQuotaResponse::ObservationFailed)?;
+        .map_err(|_error| PrecommitHttpResponseFailure::ObservationFailed)?;
     match observer.enqueue_provider_quota_exhaustion(
         account_id,
         route_band,
@@ -149,15 +176,21 @@ pub(super) fn observe_precommit_http_quota_exhaustion_for_retry(
     ) {
         DbWriteEnqueueResult::Enqueued => Ok(()),
         DbWriteEnqueueResult::FullDegraded | DbWriteEnqueueResult::ClosedDegraded => {
-            Err(PrecommitHttpQuotaResponse::ObservationFailed)
+            Err(PrecommitHttpResponseFailure::ObservationFailed)
         }
     }
 }
 
-pub(super) async fn split_precommit_http_quota_response(
+pub(super) async fn split_precommit_http_response(
     response: AsyncStreamingHttpProxyResponse,
+    auth_recovery_scope: PrecommitAuthRecoveryScope,
 ) -> Result<PrecommitHttpResponseProbe, HttpProxyError> {
     let (status, headers, mut body) = response.into_parts();
+    if status == StatusCode::UNAUTHORIZED.as_u16()
+        && auth_recovery_scope == PrecommitAuthRecoveryScope::ResponsesPost
+    {
+        return Ok(PrecommitHttpResponseProbe::CredentialRejected);
+    }
     let mut replay_frames = VecDeque::new();
     let mut buffered = Vec::new();
     let mut scanned_bytes = 0_usize;

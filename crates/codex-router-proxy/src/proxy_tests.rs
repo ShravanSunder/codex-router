@@ -222,6 +222,17 @@ mod concurrent_selection_tests;
 #[path = "proxy_tests/credential_retry_tests.rs"]
 mod credential_retry_tests;
 
+#[path = "proxy_tests/auth_rejection_fixtures.rs"]
+mod auth_rejection_fixtures;
+#[path = "proxy_tests/request_body_completion_tests.rs"]
+mod request_body_completion_tests;
+#[path = "proxy_tests/request_local_http_tests.rs"]
+mod request_local_http_tests;
+#[path = "proxy_tests/request_local_websocket_tests.rs"]
+mod request_local_websocket_tests;
+#[path = "proxy_tests/websocket_auth_budget_tests.rs"]
+mod websocket_auth_budget_tests;
+
 #[path = "proxy_tests/credit_runtime_tests.rs"]
 mod credit_runtime_tests;
 

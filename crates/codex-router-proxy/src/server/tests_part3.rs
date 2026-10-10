@@ -525,12 +525,15 @@ pub(super) async fn precommit_http_usage_limit_body_requests_account_retry_befor
     let response =
         AsyncStreamingHttpProxyResponse::new(429, HeaderCollection::new(Vec::new()), body);
 
-    match split_precommit_http_quota_response(response).await {
+    match split_precommit_http_response(response, PrecommitAuthRecoveryScope::PassThrough).await {
         Ok(PrecommitHttpResponseProbe::AccountQuotaExhausted { body }) => {
             assert_eq!(body, usage_limit_body.to_vec());
         }
         Ok(PrecommitHttpResponseProbe::Forward(_response)) => {
             panic!("quota response should request account retry before commit");
+        }
+        Ok(PrecommitHttpResponseProbe::CredentialRejected) => {
+            panic!("quota response must not be classified as credential rejection");
         }
         Err(error) => panic!("quota response should classify before commit: {error}"),
     }
@@ -635,7 +638,7 @@ pub(super) async fn precommit_http_non_error_body_replays_exact_bytes() {
     let response =
         AsyncStreamingHttpProxyResponse::new(200, HeaderCollection::new(Vec::new()), body);
 
-    match split_precommit_http_quota_response(response).await {
+    match split_precommit_http_response(response, PrecommitAuthRecoveryScope::PassThrough).await {
         Ok(PrecommitHttpResponseProbe::Forward(response)) => {
             let (_status, _headers, body) = response.into_parts();
             let forwarded_bytes = match body.collect().await {
@@ -646,6 +649,9 @@ pub(super) async fn precommit_http_non_error_body_replays_exact_bytes() {
         }
         Ok(PrecommitHttpResponseProbe::AccountQuotaExhausted { .. }) => {
             panic!("non-error response should pass through");
+        }
+        Ok(PrecommitHttpResponseProbe::CredentialRejected) => {
+            panic!("successful response must not be classified as credential rejection");
         }
         Err(error) => panic!("non-error response should pass through: {error}"),
     }
