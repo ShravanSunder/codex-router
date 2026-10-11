@@ -107,6 +107,21 @@ pub(super) fn weekly_quota_floor_intent(
     }
 }
 
+pub(super) async fn begin_responses_refresh_attempt_before_resolution(
+    state: &AsyncSqliteStateStore,
+    account_id: &AccountId,
+) -> Result<Option<CreditRefreshAttempt>, QuotaCommandError> {
+    let Some(current_account) = state.load_account(account_id).await? else {
+        return Ok(None);
+    };
+    let Some(generation) = current_account.active_credential_generation() else {
+        return Ok(None);
+    };
+    // The resolver can wait across another refresh or credential rotation.
+    // Its failure must retain the authority it observed before that wait.
+    begin_credit_refresh_attempt_for_current_generation(state, account_id, generation).await
+}
+
 pub(super) async fn begin_credit_refresh_attempt_for_current_generation(
     state: &AsyncSqliteStateStore,
     account_id: &AccountId,
@@ -120,6 +135,26 @@ pub(super) async fn begin_credit_refresh_attempt_for_current_generation(
         Err(StateStoreError::AccountConcurrentModification { .. }) => Ok(None),
         Err(error) => Err(error.into()),
     }
+}
+
+pub(super) async fn responses_refresh_attempt_for_resolved_generation(
+    state: &AsyncSqliteStateStore,
+    initial_attempt: CreditRefreshAttempt,
+    resolved_generation: u64,
+) -> Result<Option<CreditRefreshAttempt>, QuotaCommandError> {
+    if initial_attempt.credential_generation() != resolved_generation {
+        return begin_credit_refresh_attempt_for_current_generation(
+            state,
+            initial_attempt.account_id(),
+            resolved_generation,
+        )
+        .await;
+    }
+    let current_generation = state
+        .load_account(initial_attempt.account_id())
+        .await?
+        .and_then(|account| account.active_credential_generation());
+    Ok((current_generation == Some(resolved_generation)).then_some(initial_attempt))
 }
 
 pub(super) fn record_superseded_account_refresh(
