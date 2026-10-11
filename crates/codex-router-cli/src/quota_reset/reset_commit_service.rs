@@ -6,7 +6,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use codex_router_core::ids::AccountId;
-use codex_router_secret_store::encrypted_credential_store::EncryptedCredentialStore;
+use codex_router_secret_store::runtime_credential_store::RuntimeCredentialStore;
 
 use super::QuotaResetError;
 use super::credential_authority::CredentialFingerprint;
@@ -31,13 +31,13 @@ use super::reset_credit_policy::validate_credit_inventory;
 
 pub(in crate::quota_reset) struct LiveResetAuthorityReader {
     state_database_path: PathBuf,
-    credential_store: EncryptedCredentialStore,
+    credential_store: RuntimeCredentialStore,
 }
 
 impl LiveResetAuthorityReader {
     pub(in crate::quota_reset) fn new(
         state_database_path: PathBuf,
-        credential_store: EncryptedCredentialStore,
+        credential_store: RuntimeCredentialStore,
     ) -> Self {
         Self {
             state_database_path,

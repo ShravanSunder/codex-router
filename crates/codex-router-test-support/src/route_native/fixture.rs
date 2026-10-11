@@ -131,7 +131,7 @@ pub(super) fn start_route_native_router(
             local_token,
         )
         .with_quota_clock(1_030, 60),
-        credential_store,
+        credential_store.into(),
     )
     .map_err(|error| format!("failed to start route-native router: {error}"))?;
     let address = runtime.local_addr();
