@@ -12,7 +12,7 @@ use codex_router_core::redaction::SecretString;
 use codex_router_secret_store::SecretStore;
 use codex_router_secret_store::account_tokens::AccountCredentialBundle;
 use codex_router_secret_store::account_tokens::openai_account_credential_bundle_key;
-use codex_router_secret_store::encrypted_credential_store::EncryptedCredentialStore;
+use codex_router_secret_store::runtime_credential_store::RuntimeCredentialStore;
 use codex_router_state::account::AccountStatus;
 use sha2::Digest;
 use sha2::Sha256;
@@ -118,7 +118,7 @@ impl fmt::Debug for PinnedResetAuthority {
 /// Dropping this value is cancellation-safe: it only releases reserved capacity.
 #[must_use = "prepared credential reads must be started or explicitly dropped"]
 pub(in crate::quota_reset) struct PreparedCredentialAuthorityRead {
-    credential_store: EncryptedCredentialStore,
+    credential_store: RuntimeCredentialStore,
     account_id: AccountId,
     expected_generation: ActiveCredentialGeneration,
     now_unix_seconds: u64,
@@ -201,7 +201,7 @@ where
 /// Resolves one exact account and credential generation without refresh or persistence.
 pub(in crate::quota_reset) async fn prepare_reset_credential_authority_read(
     state_database_path: &Path,
-    credential_store: &EncryptedCredentialStore,
+    credential_store: &RuntimeCredentialStore,
     account_id: &AccountId,
     expected_generation: ActiveCredentialGeneration,
     now_unix_seconds: u64,
@@ -265,7 +265,7 @@ pub(in crate::quota_reset) async fn prepare_reset_credential_authority_read(
 #[cfg(test)]
 pub(in crate::quota_reset) async fn load_reset_credential_authority(
     state_database_path: &Path,
-    credential_store: &EncryptedCredentialStore,
+    credential_store: &RuntimeCredentialStore,
     account_id: &AccountId,
     expected_generation: ActiveCredentialGeneration,
     now_unix_seconds: u64,
@@ -283,7 +283,7 @@ pub(in crate::quota_reset) async fn load_reset_credential_authority(
 }
 
 fn load_exact_credential_authority(
-    credential_store: &EncryptedCredentialStore,
+    credential_store: &RuntimeCredentialStore,
     account_id: AccountId,
     active_credential_generation: ActiveCredentialGeneration,
     now_unix_seconds: u64,

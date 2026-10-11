@@ -3,6 +3,10 @@
 mod serve_command;
 pub(super) use serve_command::ServeCommand;
 
+#[cfg(test)]
+#[path = "cli_argument_parsing/debug_plaintext_tests.rs"]
+mod debug_plaintext_tests;
+
 use super::{
     AccountCommand, CliError, DEFAULT_PROFILE_PORT, HostCommand, LiveCommand, QuotaCommand, Shell,
     router_secret_root_or_default,
@@ -21,7 +25,7 @@ pub(super) enum CliCommand {
     Live(LiveCommand),
     Host(HostCommand),
     Version,
-    Help,
+    Help(&'static str),
 }
 
 impl CliCommand {
@@ -31,11 +35,11 @@ impl CliCommand {
     {
         let mut parser = ArgumentParser::new(args.into_iter().collect());
         let Some(command) = parser.next_string()? else {
-            return Ok(Self::Help);
+            return Ok(Self::Help(super::HELP_TEXT));
         };
         if is_binary_name(&command) {
             let Some(command_after_binary_name) = parser.next_string()? else {
-                return Ok(Self::Help);
+                return Ok(Self::Help(super::HELP_TEXT));
             };
             return Self::parse_after_binary(command_after_binary_name, &mut parser);
         }
@@ -45,7 +49,13 @@ impl CliCommand {
 
     fn parse_after_binary(command: String, parser: &mut ArgumentParser) -> Result<Self, CliError> {
         match command.as_str() {
-            "serve" => Ok(Self::Serve(ServeCommand::parse(parser)?)),
+            "serve" => {
+                if parser.next_if_help()? {
+                    parser.reject_remaining()?;
+                    return Ok(Self::Help(serve_command::HELP_TEXT));
+                }
+                Ok(Self::Serve(ServeCommand::parse(parser)?))
+            }
             "profile" => Ok(Self::Profile(ProfileCommand::parse(parser)?)),
             "doctor" => {
                 parser.reject_remaining()?;
@@ -63,7 +73,7 @@ impl CliCommand {
                 parser.reject_remaining()?;
                 Ok(Self::Version)
             }
-            "--help" | "-h" | "help" => Ok(Self::Help),
+            "--help" | "-h" | "help" => Ok(Self::Help(super::HELP_TEXT)),
             unknown => Err(CliError::UnknownCommand {
                 command: unknown.to_owned(),
             }),

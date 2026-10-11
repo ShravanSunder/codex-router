@@ -360,7 +360,6 @@ fn nested_user_facing_help_does_not_leak_internal_commands() {
             "import-codex-auth",
             "live quota",
             "--codex-bin",
-            "--allow-plaintext-file-secrets",
             "--device-auth",
         ] {
             assert!(

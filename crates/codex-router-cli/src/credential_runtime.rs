@@ -109,7 +109,7 @@ where
             runtime,
             state_db_path: state_db_path.to_path_buf(),
             state_store,
-            secret_store,
+            secret_store: secret_store.into(),
             refresh_client,
             refresh_leases: AsyncRefreshLeaseRegistry::new(),
         })

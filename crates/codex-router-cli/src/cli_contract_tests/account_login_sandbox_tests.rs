@@ -255,7 +255,7 @@ fn claude_login_and_refresh_use_only_router_owned_credentials() {
             &mut reader,
             command,
             &login_flow,
-            secret_store.clone(),
+            secret_store.clone().into(),
         ),
     );
 

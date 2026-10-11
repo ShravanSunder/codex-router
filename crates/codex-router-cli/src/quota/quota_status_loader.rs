@@ -7,7 +7,7 @@ use codex_router_core::route_profile::RESPONSES_HTTP;
 #[derive(Clone)]
 pub(super) struct QuotaCredentialResources {
     credential_store:
-        Option<codex_router_secret_store::encrypted_credential_store::EncryptedCredentialStore>,
+        Option<codex_router_secret_store::runtime_credential_store::RuntimeCredentialStore>,
     availability: CredentialStoreAvailability,
 }
 
@@ -25,7 +25,7 @@ impl QuotaCredentialResources {
     }
 
     fn from_opened_store(
-        credential_store: codex_router_secret_store::encrypted_credential_store::EncryptedCredentialStore,
+        credential_store: codex_router_secret_store::runtime_credential_store::RuntimeCredentialStore,
     ) -> Self {
         let availability = credential_store_availability(&credential_store);
         Self {
@@ -36,8 +36,7 @@ impl QuotaCredentialResources {
 
     pub(super) fn credential_store(
         &self,
-    ) -> Option<codex_router_secret_store::encrypted_credential_store::EncryptedCredentialStore>
-    {
+    ) -> Option<codex_router_secret_store::runtime_credential_store::RuntimeCredentialStore> {
         self.credential_store.clone()
     }
 
@@ -100,16 +99,16 @@ pub(super) async fn load_quota_status_report_with_availability_async(
 }
 
 fn credential_store_availability(
-    credential_store: &codex_router_secret_store::encrypted_credential_store::EncryptedCredentialStore,
+    credential_store: &codex_router_secret_store::runtime_credential_store::RuntimeCredentialStore,
 ) -> CredentialStoreAvailability {
     match credential_store.status() {
-        codex_router_secret_store::encrypted_credential_store::EncryptedCredentialStoreStatus::Ready => {
+        codex_router_secret_store::runtime_credential_store::RuntimeCredentialStoreStatus::Ready => {
             CredentialStoreAvailability::Ready
         }
-        codex_router_secret_store::encrypted_credential_store::EncryptedCredentialStoreStatus::KeyUnavailable => {
+        codex_router_secret_store::runtime_credential_store::RuntimeCredentialStoreStatus::KeyUnavailable => {
             CredentialStoreAvailability::KeychainLocked
         }
-        codex_router_secret_store::encrypted_credential_store::EncryptedCredentialStoreStatus::MigrationIncomplete { accounts, failure } => {
+        codex_router_secret_store::runtime_credential_store::RuntimeCredentialStoreStatus::MigrationIncomplete { accounts, failure } => {
             CredentialStoreAvailability::MigrationIncomplete { accounts, failure }
         }
     }

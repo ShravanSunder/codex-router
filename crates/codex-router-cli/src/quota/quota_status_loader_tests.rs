@@ -321,7 +321,7 @@ async fn quota_status_reload_and_reset_session_reuse_the_process_credential_stor
     let adds_after_open = keychain.add_count.load(Ordering::SeqCst);
     assert!(reads_after_open > 0, "startup should read the Keychain key");
 
-    let credential_resources = QuotaCredentialResources::from_opened_store(credential_store);
+    let credential_resources = QuotaCredentialResources::from_opened_store(credential_store.into());
     let report = load_quota_status_report_with_availability_async(
         &router_root,
         false,
