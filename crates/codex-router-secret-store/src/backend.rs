@@ -15,7 +15,7 @@ pub trait SecretStore {
 
     /// Writes a new credential generation without activating it.
     ///
-    /// Backends that store pooled credentials must keep this write encrypted.
+    /// Pooled writes remain encrypted except in explicitly declared debug plaintext roots.
     /// Activation belongs to the auth coordinator after the staged value has
     /// been written successfully.
     fn write_staged(&self, key: &SecretKey, secret: &SecretString) -> Result<(), SecretStoreError> {

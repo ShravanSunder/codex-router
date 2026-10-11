@@ -286,7 +286,7 @@ mod tests {
         fn create(
             &self,
             _router_root: &Path,
-            _credential_store: codex_router_secret_store::encrypted_credential_store::EncryptedCredentialStore,
+            _credential_store: codex_router_secret_store::runtime_credential_store::RuntimeCredentialStore,
         ) -> Result<InteractiveResetSession, QuotaResetError> {
             Err(QuotaResetError::Response {
                 message: "test factory must not be called".to_owned(),

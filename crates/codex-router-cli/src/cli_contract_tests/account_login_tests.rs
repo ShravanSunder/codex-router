@@ -59,13 +59,9 @@ fn account_login_selects_claude_oauth_flow() {
 }
 
 #[test]
-fn account_login_rejects_legacy_codex_child_and_plaintext_file_options() {
+fn account_login_rejects_legacy_codex_child_options() {
     for provider in ["openai", "claude"] {
-        for legacy_options in [
-            vec!["--device-auth"],
-            vec!["--codex-bin", "codex"],
-            vec!["--allow-plaintext-file-secrets"],
-        ] {
+        for legacy_options in [vec!["--device-auth"], vec!["--codex-bin", "codex"]] {
             let mut arguments = vec![
                 OsString::from("account"),
                 OsString::from("login"),
@@ -77,7 +73,7 @@ fn account_login_rejects_legacy_codex_child_and_plaintext_file_options() {
             arguments.extend(legacy_options.into_iter().map(OsString::from));
 
             let error = CliCommand::parse(arguments)
-                .expect_err("login must not accept Codex child or plaintext-file options");
+                .expect_err("login must not accept legacy Codex child options");
             assert!(matches!(error, CliError::UnknownOption { .. }));
         }
     }
@@ -109,7 +105,7 @@ pub(super) fn openai_device_login_activates_fake_issuer_tokens_without_plaintext
             &mut reader,
             command,
             &client,
-            traced_secret_store,
+            traced_secret_store.into(),
         ),
     );
 

@@ -240,7 +240,7 @@ impl LoopbackRouterRuntime {
     /// Opens router-owned state and binds using the process-owned encrypted credential handle.
     pub fn start(
         config: LoopbackRouterRuntimeConfig,
-        credential_store: EncryptedCredentialStore,
+        credential_store: RuntimeCredentialStore,
     ) -> Result<Self, LoopbackRouterRuntimeError> {
         let caller_dispatcher = tracing::dispatcher::get_default(|dispatcher| dispatcher.clone());
         Self::start_with_test_maintenance_completion_sender(
@@ -271,7 +271,7 @@ impl LoopbackRouterRuntime {
     #[cfg(test)]
     pub(crate) fn start_with_maintenance_completion_sender(
         config: LoopbackRouterRuntimeConfig,
-        credential_store: EncryptedCredentialStore,
+        credential_store: RuntimeCredentialStore,
         completion_sender: std::sync::mpsc::Sender<crate::maintenance_actor::MaintenanceCompletion>,
     ) -> Result<Self, LoopbackRouterRuntimeError> {
         let caller_dispatcher = tracing::dispatcher::get_default(|dispatcher| dispatcher.clone());
@@ -285,7 +285,7 @@ impl LoopbackRouterRuntime {
 
     pub(super) fn start_with_test_maintenance_completion_sender(
         config: LoopbackRouterRuntimeConfig,
-        credential_store: EncryptedCredentialStore,
+        credential_store: RuntimeCredentialStore,
         #[cfg(test)] completion_sender: Option<
             std::sync::mpsc::Sender<crate::maintenance_actor::MaintenanceCompletion>,
         >,
@@ -300,11 +300,11 @@ impl LoopbackRouterRuntime {
         let fixed_now_unix_seconds = config.fixed_now_unix_seconds;
         let claude_edge_runtime_config = config.claude_edge_runtime_config.clone();
         let credential_store_availability = match credential_store.status() {
-            EncryptedCredentialStoreStatus::Ready => CredentialStoreAvailability::Available,
-            EncryptedCredentialStoreStatus::KeyUnavailable => {
+            RuntimeCredentialStoreStatus::Ready => CredentialStoreAvailability::Available,
+            RuntimeCredentialStoreStatus::KeyUnavailable => {
                 CredentialStoreAvailability::KeyUnreadable
             }
-            EncryptedCredentialStoreStatus::MigrationIncomplete { .. } => {
+            RuntimeCredentialStoreStatus::MigrationIncomplete { .. } => {
                 CredentialStoreAvailability::MigrationIncomplete
             }
         };
