@@ -5,6 +5,8 @@ mod host_replacement;
 mod launch_options;
 #[path = "automation_debug_host/proof_permissions.rs"]
 mod proof_permissions;
+#[path = "automation_debug_host/startup_diagnostics.rs"]
+mod startup_diagnostics;
 
 use codex_native_integration::{
     AppServerCommandSpec, CodexPaths, CodexRouterProfile, DebugCodexProfile,
@@ -44,6 +46,7 @@ struct DebugHostContext {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    startup_diagnostics::enable_startup_diagnostics()?;
     let Some(options) = parse_options()? else {
         return Ok(());
     };
