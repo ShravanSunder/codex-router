@@ -76,7 +76,7 @@ fn served_router_http_uses_persisted_quota_while_background_refresh_is_blocked()
         local_token.clone(),
     )
     .with_quota_clock(1_030, 60);
-    let runtime = must_ok(LoopbackRouterRuntime::start(runtime_config, secrets));
+    let runtime = must_ok(LoopbackRouterRuntime::start(runtime_config, secrets.into()));
     let runtime_address = runtime.local_addr();
     assert_eq!(runtime_address.port(), router_port);
     let router_thread = thread::spawn(move || {
@@ -232,7 +232,7 @@ fn served_router_websocket_uses_persisted_quota_while_background_refresh_is_bloc
         local_token.clone(),
     )
     .with_quota_clock(1_030, 60);
-    let runtime = must_ok(LoopbackRouterRuntime::start(runtime_config, secrets));
+    let runtime = must_ok(LoopbackRouterRuntime::start(runtime_config, secrets.into()));
     assert_eq!(runtime.local_addr().port(), router_port);
     let router_thread = thread::spawn(move || {
         if let Err(error) = runtime.serve_protocol_connections(1) {

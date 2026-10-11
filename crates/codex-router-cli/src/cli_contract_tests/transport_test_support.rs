@@ -164,3 +164,80 @@ pub(super) fn connect_tokenless_websocket_with_retry(
 
     panic!("local websocket client should connect to CLI serve listener: {last_error:?}");
 }
+
+pub(super) async fn assert_preserved_account_routes_through_cli_serve(
+    state_path: PathBuf,
+    secret_root: PathBuf,
+) {
+    let listener = must_ok(tokio::net::TcpListener::bind("127.0.0.1:0").await);
+    let upstream_address = must_ok(listener.local_addr());
+    let upstream = tokio::spawn(async move {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let (stream, _peer_address) = must_ok(listener.accept().await);
+            let mut stream = must_ok(stream.into_std());
+            must_ok(stream.set_nonblocking(false));
+            must_ok(stream.set_read_timeout(Some(Duration::from_secs(2))));
+            must_ok(stream.set_write_timeout(Some(Duration::from_secs(2))));
+            must_ok(tokio::task::spawn_blocking(move || {
+                let request = read_http_request_with_body(&mut stream);
+                assert!(request.starts_with("POST /v1/responses HTTP/1.1\r\n"));
+                assert!(request.to_ascii_lowercase().contains(
+                    "authorization: bearer newer-resolution-token\r\n"
+                ));
+                assert!(!request.contains("superseded-generation-one-token"));
+                assert!(!request.contains("exhausted-peer-token"));
+                let body = r#"{"id":"quota-fenced-response"}"#;
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                must_ok(stream.write_all(response.as_bytes()));
+            }).await);
+        })
+        .await
+        .expect("the preserved account must reach the real HTTP upstream");
+    });
+    let serve = tokio::task::spawn_blocking(move || {
+        let router_port = reserve_loopback_port();
+        let client = thread::spawn(move || {
+            send_tokenless_loopback_request_with_retry(router_port, br#"{"input":"fixture"}"#)
+        });
+        let router_port_text = router_port.to_string();
+        let upstream_base_url = format!("http://{upstream_address}/v1");
+        let output = run_cli(
+            [
+                "codex-router",
+                "serve",
+                "--listen-host",
+                "127.0.0.1",
+                "--port",
+                &router_port_text,
+                "--state-db",
+                path_to_str(&state_path),
+                "--secret-root",
+                path_to_str(&secret_root),
+                "--upstream-base-url",
+                &upstream_base_url,
+                "--now-unix-seconds",
+                "201",
+                "--max-snapshot-age-seconds",
+                "300",
+                "--disable-background-quota-refresh",
+                "--max-connections",
+                "1",
+            ],
+            CliContext::new(Vec::new()),
+        );
+        assert!(output.stderr.is_empty(), "serve stderr: {}", output.stderr);
+        assert!(
+            output
+                .stdout
+                .contains(&format!("listening: 127.0.0.1:{router_port}\n"))
+        );
+        let response = client.join().expect("HTTP client must join");
+        assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response}");
+        assert!(response.contains(r#"{"id":"quota-fenced-response"}"#));
+    });
+    must_ok(serve.await);
+    must_ok(upstream.await);
+}

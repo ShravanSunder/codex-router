@@ -160,70 +160,100 @@ where
         else {
             return Ok(());
         };
-        let first_frame = frame_from_message(first_message);
-        let decision = tokio::select! {
-            () = self.session_shutdown.cancelled() => {
-                close_websocket_stream_best_effort(&mut local_websocket).await?;
-                return Ok(());
-            }
-            decision = self.router.route_first_frame(handshake, first_frame) => {
-                match decision {
-                    Ok(decision) => decision,
-                    Err(close_reason) => {
-                        if handle_pre_upstream_close_reason(&mut local_websocket, &close_reason).await? {
-                            return Ok(());
+        let original_first_frame = frame_from_message(first_message);
+        let mut attempted_accounts = Vec::new();
+        let (
+            mut upstream_websocket,
+            session_registration,
+            affinity_owner_context,
+            first_frame,
+            revocation,
+        ) = loop {
+            let decision = tokio::select! {
+                () = self.session_shutdown.cancelled() => {
+                    close_websocket_stream_best_effort(&mut local_websocket).await?;
+                    return Ok(());
+                }
+                decision = self.router.route_first_frame_with_attempted_accounts(
+                    handshake.clone(), original_first_frame.clone(), &mut attempted_accounts
+                ) => {
+                    match decision {
+                        Ok(decision) => decision,
+                        Err(close_reason) => {
+                            if handle_pre_upstream_close_reason(&mut local_websocket, &close_reason).await? {
+                                return Ok(());
+                            }
+                            return Err(WebSocketTunnelError::CloseReason(close_reason));
                         }
-                        return Err(WebSocketTunnelError::CloseReason(close_reason));
                     }
                 }
-            }
-        };
-        let WebSocketFirstFrameDecision::OpenUpstream {
-            token_generation,
-            headers,
-            first_frame,
-            affinity_owner_context,
-        } = decision;
-        let selected_account_id = match affinity_owner_context.as_ref() {
-            Some(context) => context.account_id.clone(),
-            None => {
-                return Err(WebSocketTunnelError::TaskJoin(
-                    "selected websocket account context was missing".to_owned(),
-                ));
-            }
-        };
-        let session_registration = self.revocations.register_cancellation_with_peer_addr(
-            token_generation,
-            selected_account_id,
-            self.local_peer_addr,
-        );
-        self.revocations.set_capacity_retry_thread_id(
-            session_registration.session_id,
-            capacity_retry_thread_id(&headers),
-        );
-        let revocation = session_registration.cancellation().clone();
+            };
+            let WebSocketFirstFrameDecision::OpenUpstream {
+                token_generation,
+                headers,
+                first_frame,
+                affinity_owner_context,
+            } = decision;
+            let selected_account_id = match affinity_owner_context.as_ref() {
+                Some(context) => context.account_id.clone(),
+                None => {
+                    return Err(WebSocketTunnelError::TaskJoin(
+                        "selected websocket account context was missing".to_owned(),
+                    ));
+                }
+            };
+            let session_registration = self.revocations.register_cancellation_with_peer_addr(
+                token_generation,
+                selected_account_id,
+                self.local_peer_addr,
+            );
+            self.revocations.set_capacity_retry_thread_id(
+                session_registration.session_id,
+                capacity_retry_thread_id(&headers),
+            );
+            let revocation = session_registration.cancellation().clone();
 
-        let mut upstream_request = upstream_url.into_client_request()?;
-        apply_upstream_headers(upstream_request.headers_mut(), &headers)?;
-        let (mut upstream_websocket, _response) = tokio::select! {
-            biased;
-            () = session_registration.quota_floor_reconnect.cancelled() => {
-                self.revocations.note_quota_reconnect_signal();
-                local_websocket
-                    .send(Message::text(CODEX_WEBSOCKET_RECONNECT_SIGNAL))
-                    .await?;
-                close_websocket_stream_best_effort(&mut local_websocket).await?;
-                return Ok(());
+            let mut upstream_request = upstream_url.into_client_request()?;
+            apply_upstream_headers(upstream_request.headers_mut(), &headers)?;
+            let connection = tokio::select! {
+                biased;
+                () = session_registration.quota_floor_reconnect.cancelled() => {
+                    self.revocations.note_quota_reconnect_signal();
+                    local_websocket
+                        .send(Message::text(CODEX_WEBSOCKET_RECONNECT_SIGNAL))
+                        .await?;
+                    close_websocket_stream_best_effort(&mut local_websocket).await?;
+                    return Ok(());
+                }
+                () = self.session_shutdown.cancelled() => {
+                    close_websocket_stream_best_effort(&mut local_websocket).await?;
+                    return Ok(());
+                }
+                () = revocation.cancelled() => {
+                    close_websocket_stream_best_effort(&mut local_websocket).await?;
+                    return Ok(());
+                }
+                connection = connect_async_with_config(upstream_request, Some(router_websocket_config()), false) => connection,
+            };
+            match connection {
+                Ok((upstream_websocket, _response)) => {
+                    break (
+                        upstream_websocket,
+                        session_registration,
+                        affinity_owner_context,
+                        first_frame,
+                        revocation,
+                    );
+                }
+                Err(error) if matches!(&error, tungstenite::Error::Http(response) if response.status().as_u16() == 401) =>
+                {
+                    // The shared vector excludes this failed handshake candidate;
+                    // release its connection/load ownership before choosing another.
+                    drop(session_registration);
+                    drop(affinity_owner_context);
+                }
+                Err(error) => return Err(WebSocketTunnelError::Transport(error)),
             }
-            () = self.session_shutdown.cancelled() => {
-                close_websocket_stream_best_effort(&mut local_websocket).await?;
-                return Ok(());
-            }
-            () = revocation.cancelled() => {
-                close_websocket_stream_best_effort(&mut local_websocket).await?;
-                return Ok(());
-            }
-            connection = connect_async_with_config(upstream_request, Some(router_websocket_config()), false) => connection?,
         };
         let upstream_first_message = message_from_frame(first_frame)?;
         let initial_turn_active = is_response_create(&upstream_first_message);

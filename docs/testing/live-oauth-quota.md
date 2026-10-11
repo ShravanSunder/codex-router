@@ -3,11 +3,12 @@
 Date: 2026-06-22
 Status: implemented; router-owned multi-account live proof is approval-gated
 
-Login syntax updated: 2026-10-10. The old `--device-auth`, `--codex-bin` and
-`--allow-plaintext-file-secrets` options are no longer accepted. For functional
-Router tests, use the existing `keychain-test-support` Cargo feature with fresh
-fixture roots and test credentials; it does not access the OS Keychain. This
-test setup does not require OAuth login and does not prove live account access.
+Login syntax updated: 2026-10-11. The old `--device-auth` and `--codex-bin`
+options are no longer accepted. Debug builds support
+`--allow-plaintext-file-secrets` for explicit isolated paths; declared plaintext
+roots reopen without Keychain access. Functional tests can also use the existing
+`keychain-test-support` Cargo feature with fresh fixture credentials. Neither
+setup requires OAuth login or proves live provider behavior.
 
 ## Purpose
 
@@ -40,15 +41,13 @@ cargo run -p codex-router-cli -- quota refresh
 cargo run -p codex-router-cli -- quota status --all-limits
 ```
 
-Installed releases default router-owned state to `$HOME/.codex-router`; debug
-builds default to `$HOME/.codex-router-debug`. Use an explicit
-`--router-root <path>` for a fixture or alternate local router home.
+Installed and release builds default to `$HOME/.codex-router`; debug Cargo
+runs default to `$HOME/.codex-router-debug`. Use an explicit `--router-root`
+for an isolated test store.
 
-`account login --provider openai` runs Router's native OpenAI device-code flow
-and activates its credentials in Router-owned state. It does not launch a
-Codex child or enable a plaintext credential backend. The current functional
-test factory uses a deterministic file-backed test key; normal builds use the
-encrypted credential store and its Keychain key.
+`account login --provider openai` uses the native device-code flow.
+`--provider claude` uses the native Claude callback flow. Normal credentials
+use the encrypted store.
 
 `quota refresh` uses the router-owned credential resolver and persists provider
 quota windows to SQLite. `quota status` reads SQLite only and performs no
@@ -73,7 +72,7 @@ and generation were not run.
 The implemented CLI surface for local router proof is:
 
 ```shell
-cargo run -p codex-router-cli -- account login --provider openai [--router-root <path>] --label <label>
+cargo run -p codex-router-cli -- account login [--router-root <path>] --provider openai --label <label>
 cargo run -p codex-router-cli -- account list [--router-root <path>]
 cargo run -p codex-router-cli -- quota refresh [--router-root <path>]
 cargo run -p codex-router-cli -- quota status [--router-root <path>] --all-limits
@@ -86,7 +85,7 @@ cargo run -p codex-router-cli -- live quota --profiles-root <prodex-profiles-roo
 ```
 
 The account, quota, profile, token, and serve commands prove router-owned local
-behavior. Real provider execution through `account login --provider openai`, `quota
+behavior. Real provider execution through `account login`, `quota
 refresh`, or `live quota` is live OAuth/quota proof and must follow the approval
 boundary below.
 
@@ -94,6 +93,38 @@ Do not invent or run additional live commands such as `codex-router
 live-proof`, `account logout`, `account remove`, or model-traffic live proof
 commands unless that CLI surface has first been designed, implemented, tested,
 and added to this runbook.
+
+## Debug Plaintext Credentials
+
+Debug builds can explicitly create a fresh plaintext credential root:
+
+```shell
+debug_router_root=$(mktemp -d /tmp/codex-router-plaintext.XXXXXX)
+debug_router_port=18788 # Choose an unused nonzero loopback port.
+cargo run -p codex-router-cli -- serve --port "$debug_router_port" \
+  --require-debug-isolation --allow-plaintext-file-secrets \
+  --state-db "$debug_router_root/state.sqlite" \
+  --secret-root "$debug_router_root/secrets"
+```
+
+Use the listening port printed by `serve` for your local client. Account login
+can initialize the same mode with an explicit absolute `--router-root` and
+`--allow-plaintext-file-secrets`; running login remains live provider activity
+under the approval boundary below.
+
+Credential bundles use actual plaintext `.secret` files with private file and
+root permissions. A private root declaration selects this backend on later
+account, quota and serve opens, so those commands do not need the flag again.
+The mode avoids Keychain access. Initialization refuses encrypted or mixed
+stores, production paths and aliases; it does not convert existing credentials.
+Release builds reject both the flag and declared plaintext roots.
+
+The local `debug_plaintext_cli` integration test exercises compiled startup,
+credential activation, account/quota reopening and HTTP selection against a
+controlled provider with fresh synthetic credentials. It proves the storage
+and serving path; live quota, native compaction and real-provider acceptance
+remain separate checks. The `keychain-test-support` build feature instead uses
+a fixture encryption key for encrypted files and does not select plaintext.
 
 ## Approval Boundary
 
