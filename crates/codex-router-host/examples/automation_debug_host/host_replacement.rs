@@ -1,21 +1,12 @@
 //! Re-exec support for the isolated acceptance Host.
 
+use super::launch_options::DebugHostOptions;
 use codex_router_host::{ChildCommandSpec, ChildOutput, HostCoordinationPaths, HostInstance};
-use std::{ffi::OsString, path::Path};
 
 pub(super) fn build_host_replacement_command(
-    run_directory: &Path,
-    router_binary: &Path,
-    port: u16,
+    options: &DebugHostOptions,
 ) -> Result<ChildCommandSpec, std::io::Error> {
-    let arguments = [
-        OsString::from("--resume-run-directory"),
-        run_directory.as_os_str().to_owned(),
-        OsString::from("--router-binary"),
-        router_binary.as_os_str().to_owned(),
-        OsString::from("--port"),
-        OsString::from(port.to_string()),
-    ];
+    let arguments = options.resume_arguments();
     Ok(ChildCommandSpec::new(std::env::current_exe()?)
         .with_arguments(arguments)
         .with_output(ChildOutput::Telemetry))
