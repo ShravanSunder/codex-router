@@ -1,5 +1,8 @@
 //! Root-policy proof with fresh private fixtures and an observed Keychain boundary.
 use super::*;
+use crate::credential_migration::{
+    migrate_pooled_credentials_at_production_startup, migrate_pooled_credentials_at_startup,
+};
 use crate::encrypted_credential_store::EncryptedCredentialStore;
 use crate::keychain_data_key::{KeychainAccess, KeychainAccessError};
 use std::sync::atomic::AtomicUsize;
@@ -15,6 +18,144 @@ impl KeychainAccess for CountingKeychain {
         self.0.fetch_add(1, Ordering::SeqCst);
         Err(KeychainAccessError::Unavailable)
     }
+}
+
+#[derive(Default)]
+struct CountingMigrationKeychain(AtomicUsize);
+
+impl KeychainAccess for CountingMigrationKeychain {
+    fn read_secret(&self, _: &str, _: &str) -> Result<Option<Vec<u8>>, KeychainAccessError> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        Ok(Some(vec![0x63; 32]))
+    }
+
+    fn add_secret(&self, _: &str, _: &str, _: &[u8]) -> Result<(), KeychainAccessError> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+fn snapshot_fixture_files(root: &Path) -> std::collections::BTreeMap<PathBuf, Vec<u8>> {
+    fs::read_dir(root)
+        .expect("fixture directory")
+        .map(|entry| {
+            let path = entry.expect("fixture entry").path();
+            let bytes = fs::read(&path).expect("fixture file bytes");
+            (path, bytes)
+        })
+        .collect()
+}
+
+fn assert_no_encrypted_migration_files(root: &Path) {
+    assert!(!root.join("store-id").exists());
+    assert!(!root.join("format-v2.marker").exists());
+    assert!(fs::read_dir(root).expect("fixture directory").all(|entry| {
+        !entry
+            .expect("fixture entry")
+            .file_name()
+            .to_string_lossy()
+            .ends_with(".v2")
+    }));
+}
+
+#[test]
+fn plaintext_migration_declared_empty_root_is_unchanged_without_keychain() {
+    let directory = tempfile::tempdir().expect("fixture");
+    #[cfg(debug_assertions)]
+    FileSecretStore::initialize_debug_plaintext(directory.path()).expect("declared empty root");
+    #[cfg(not(debug_assertions))]
+    fs::write(directory.path().join(DECLARATION_FILE), DECLARATION_VALUE).expect("declaration");
+    let before = snapshot_fixture_files(directory.path());
+    let keychain = CountingMigrationKeychain::default();
+    let result = migrate_pooled_credentials_at_startup(directory.path(), &keychain);
+    eprintln!(
+        "empty root: unchanged={}; keychain_calls={}; format_marker={}",
+        before == snapshot_fixture_files(directory.path()),
+        keychain.0.load(Ordering::SeqCst),
+        directory.path().join("format-v2.marker").exists()
+    );
+    assert!(
+        matches!(result, Err(SecretStoreError::DebugPlaintextUnavailable)),
+        "declared-root migration must refuse: {result:?}"
+    );
+    assert_eq!(keychain.0.load(Ordering::SeqCst), 0);
+    assert_eq!(snapshot_fixture_files(directory.path()), before);
+    assert_no_encrypted_migration_files(directory.path());
+}
+
+#[test]
+fn plaintext_migration_production_wrapper_refuses_before_banned_keychain_adapter() {
+    let directory = tempfile::tempdir().expect("fixture");
+    fs::write(directory.path().join(DECLARATION_FILE), DECLARATION_VALUE).expect("declaration");
+    let before = snapshot_fixture_files(directory.path());
+    let result = migrate_pooled_credentials_at_production_startup(directory.path());
+    assert!(
+        matches!(result, Err(SecretStoreError::DebugPlaintextUnavailable)),
+        "the declaration must reject before the test-banned production adapter: {result:?}"
+    );
+    assert_eq!(snapshot_fixture_files(directory.path()), before);
+    assert_no_encrypted_migration_files(directory.path());
+}
+
+#[test]
+fn plaintext_migration_rechecks_declaration_after_exclusive_lock_wait() {
+    use crate::credential_store_lock::{CredentialStoreLock, CredentialStoreLockMode};
+    use std::os::unix::fs::PermissionsExt;
+    let directory = tempfile::tempdir().expect("fixture");
+    let file_store = FileSecretStore::open(directory.path()).expect("file store");
+    let lock = CredentialStoreLock::acquire(directory.path(), CredentialStoreLockMode::Exclusive)
+        .expect("held setup lock");
+    fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o750))
+        .expect("event baseline");
+    let keychain = std::sync::Arc::new(CountingMigrationKeychain::default());
+    let child_keychain = keychain.clone();
+    let root = directory.path().to_path_buf();
+    let migration =
+        std::thread::spawn(move || migrate_pooled_credentials_at_startup(root, &*child_keychain));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let passed_precheck = loop {
+        if fs::metadata(directory.path())
+            .expect("root metadata")
+            .permissions()
+            .mode()
+            & 0o777
+            == 0o700
+        {
+            break true;
+        }
+        if std::time::Instant::now() >= deadline {
+            break false;
+        }
+        std::thread::yield_now();
+    };
+    // The existing open's 0700 transition proves the public migration passed
+    // its initial check and is waiting behind this Exclusive lock.
+    file_store
+        .write_atomically(
+            &directory.path().join(DECLARATION_FILE),
+            DECLARATION_FILE,
+            DECLARATION_VALUE,
+        )
+        .expect("declaration while migration waits");
+    let before = snapshot_fixture_files(directory.path());
+    drop(lock);
+    let result = migration.join().expect("migration joined");
+    eprintln!(
+        "migration race cleanup: joined=true; unchanged={}; keychain_calls={}",
+        before == snapshot_fixture_files(directory.path()),
+        keychain.0.load(Ordering::SeqCst)
+    );
+    assert!(
+        passed_precheck,
+        "migration did not reach its observed pre-lock boundary"
+    );
+    assert!(
+        matches!(result, Err(SecretStoreError::DebugPlaintextUnavailable)),
+        "migration must recheck after acquiring Exclusive: {result:?}"
+    );
+    assert_eq!(keychain.0.load(Ordering::SeqCst), 0);
+    assert_eq!(snapshot_fixture_files(directory.path()), before);
+    assert_no_encrypted_migration_files(directory.path());
 }
 
 #[test]
@@ -60,6 +201,49 @@ mod debug {
             generation,
         )
         .expect("key")
+    }
+
+    #[test]
+    fn plaintext_migration_initialized_bundle_is_never_converted_or_deleted() {
+        let directory = tempfile::tempdir().expect("fixture");
+        let store = FileSecretStore::initialize_debug_plaintext(directory.path())
+            .expect("declared plaintext root");
+        let key = credential_key(1);
+        let bundle = AccountCredentialBundle::imported_codex_auth(
+            "migration-access-canary",
+            Some("migration-refresh-canary".to_owned()),
+        );
+        let payload = bundle.to_secret_string().expect("normal credential bundle");
+        store
+            .write_secret(&key, &payload)
+            .expect("actual plaintext bundle write");
+        let before = snapshot_fixture_files(directory.path());
+        let keychain = CountingMigrationKeychain::default();
+        let result = migrate_pooled_credentials_at_startup(directory.path(), &keychain);
+        eprintln!(
+            "populated root: unchanged={}; plaintext_exists={}; envelope_exists={}; keychain_calls={}",
+            before == snapshot_fixture_files(directory.path()),
+            store.secret_path(&key).exists(),
+            directory
+                .path()
+                .join(format!("{}.v2", key.as_str()))
+                .exists(),
+            keychain.0.load(Ordering::SeqCst)
+        );
+        assert!(
+            matches!(result, Err(SecretStoreError::DebugPlaintextUnavailable)),
+            "initialized plaintext bundle must never be migrated: {result:?}"
+        );
+        assert_eq!(keychain.0.load(Ordering::SeqCst), 0);
+        assert_eq!(snapshot_fixture_files(directory.path()), before);
+        assert_eq!(
+            store
+                .read_secret(&key)
+                .expect("unchanged plaintext read")
+                .expose_secret(),
+            payload.expose_secret()
+        );
+        assert_no_encrypted_migration_files(directory.path());
     }
 
     #[test]
