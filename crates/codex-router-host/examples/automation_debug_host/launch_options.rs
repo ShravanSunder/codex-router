@@ -1,7 +1,7 @@
 //! Accepted debug launch options and their existing Host configuration projection.
 use codex_router_host::{
     ChildCommandSpec, ChildOutput, ExternalProviderLaunchBinding, ExternalProviderStartup,
-    HostConfig,
+    HostConfig, HostCoordinationPaths,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -128,6 +128,14 @@ fn select_run_directory(
 }
 
 impl DebugHostOptions {
+    pub(super) fn host_coordination_paths(&self, router_root: &Path) -> HostCoordinationPaths {
+        // The Host derives Claude's local routing token owner from the lock parent.
+        HostCoordinationPaths::new(
+            self.run_directory.join("host.sock"),
+            router_root.join("host.lock"),
+        )
+    }
+
     pub(super) fn resume_arguments(&self) -> Vec<OsString> {
         let mut arguments = vec![
             OsString::from("--resume-run-directory"),

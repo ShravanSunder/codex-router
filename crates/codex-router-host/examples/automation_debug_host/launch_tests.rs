@@ -249,10 +249,7 @@ fn isolated_acp_options() -> launch_options::DebugHostOptions {
 fn isolated_acp_options_attach_actual_provider_and_global_selector() {
     let options = isolated_acp_options();
     let config = HostConfig::new(HostConfigInputs {
-        coordination_paths: HostCoordinationPaths::new(
-            "/tmp/host.sock".into(),
-            "/tmp/host.lock".into(),
-        ),
+        coordination_paths: options.host_coordination_paths(Path::new("/tmp/sqlite-proof-account")),
         router_endpoint: "127.0.0.1:28787".parse().expect("loopback endpoint"),
         mcp_bind: "127.0.0.1:0".parse().expect("ephemeral MCP"),
         app_server_socket: "/tmp/native.sock".into(),
@@ -262,6 +259,10 @@ fn isolated_acp_options_attach_actual_provider_and_global_selector() {
     let configured = options
         .attach_provider(config.clone(), Some("/global/claude".into()))
         .expect("provider attachment");
+    assert_eq!(
+        configured.coordination_paths().router_secret_root(),
+        Some(PathBuf::from("/tmp/sqlite-proof-account/secrets"))
+    );
     assert_eq!(configured.external_provider_startups().len(), 1);
     let codex_router_host::ExternalProviderStartup::Launch(binding) =
         &configured.external_provider_startups()[0]
@@ -311,6 +312,83 @@ fn isolated_router_child_uses_selected_root_and_debug_isolation() {
     assert_eq!(
         options.router_child_command(Path::new("/tmp/sqlite-proof-account")),
         expected
+    );
+}
+
+#[test]
+fn host_and_router_share_declared_root_without_copying_tokens() {
+    let options = isolated_acp_options();
+    let paths = options.host_coordination_paths(Path::new("/tmp/sqlite-proof-account"));
+    assert_eq!(
+        paths.router_secret_root(),
+        Some(PathBuf::from("/tmp/sqlite-proof-account/secrets"))
+    );
+    assert_eq!(
+        paths.instance_lock(),
+        Path::new("/tmp/sqlite-proof-account/host.lock")
+    );
+    assert_eq!(
+        paths.operator_socket(),
+        Path::new("/tmp/sqlite-proof/host.sock")
+    );
+    let expected_router = ChildCommandSpec::new("/tmp/router".into())
+        .with_arguments([
+            "serve",
+            "--require-debug-isolation",
+            "--port",
+            "28787",
+            "--state-db",
+            "/tmp/sqlite-proof-account/state.sqlite",
+            "--secret-root",
+            "/tmp/sqlite-proof-account/secrets",
+            "--audit-file",
+            "/tmp/sqlite-proof/router-audit.jsonl",
+        ])
+        .with_output(ChildOutput::Telemetry);
+    assert_eq!(
+        options.router_child_command(Path::new("/tmp/sqlite-proof-account")),
+        expected_router
+    );
+}
+
+#[test]
+fn resumed_host_preserves_declared_root_local_token_owner() {
+    let options = isolated_acp_options();
+    let resumed = parse_options_from(options.resume_arguments())
+        .expect("resume options")
+        .expect("launch");
+    let paths = resumed.host_coordination_paths(Path::new("/tmp/sqlite-proof-account"));
+    assert_eq!(
+        paths.router_secret_root(),
+        Some(PathBuf::from("/tmp/sqlite-proof-account/secrets"))
+    );
+    assert_eq!(
+        paths.instance_lock(),
+        Path::new("/tmp/sqlite-proof-account/host.lock")
+    );
+    assert_eq!(
+        paths.operator_socket(),
+        Path::new("/tmp/sqlite-proof/host.sock")
+    );
+}
+
+#[test]
+fn default_host_uses_resolved_debug_root_for_local_token_owner() {
+    let mut options = isolated_acp_options();
+    options.router_root = None;
+    options.claude_provider = None;
+    let paths = options.host_coordination_paths(Path::new("/tmp/default-debug-account"));
+    assert_eq!(
+        paths.router_secret_root(),
+        Some(PathBuf::from("/tmp/default-debug-account/secrets"))
+    );
+    assert_eq!(
+        paths.instance_lock(),
+        Path::new("/tmp/default-debug-account/host.lock")
+    );
+    assert_eq!(
+        paths.operator_socket(),
+        Path::new("/tmp/sqlite-proof/host.sock")
     );
 }
 

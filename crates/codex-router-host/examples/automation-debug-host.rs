@@ -11,8 +11,7 @@ use codex_native_integration::{
 };
 use codex_router_host::{
     AppServerLaunchPlan, ChildCommandSpec, ChildOutput, HostConfig, HostConfigInputs,
-    HostCoordinationPaths, HostDeadlines, HostRuntime, ManagedChildLaunchPlans,
-    ManagedUpdateInputs,
+    HostDeadlines, HostRuntime, ManagedChildLaunchPlans, ManagedUpdateInputs,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -24,6 +23,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
+#[cfg(test)]
+use codex_router_host::HostCoordinationPaths;
 #[cfg(test)]
 use launch_options::parse_options_from;
 use launch_options::{ProviderCommand, RunDirectoryAdmission, parse_options};
@@ -127,10 +128,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let replacement_command = host_replacement::build_host_replacement_command(&options)?;
     let router = options.router_child_command(&debug_root);
     let config = HostConfig::new(HostConfigInputs {
-        coordination_paths: HostCoordinationPaths::new(
-            options.run_directory.join("host.sock"),
-            options.run_directory.join("host.lock"),
-        ),
+        coordination_paths: options.host_coordination_paths(&debug_root),
         router_endpoint: endpoint,
         mcp_bind: std::net::SocketAddr::from(([127, 0, 0, 1], 0)),
         app_server_socket: socket,
