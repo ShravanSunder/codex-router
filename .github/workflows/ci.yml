@@ -180,6 +180,7 @@ jobs:
       # trybuild test compiles a cold dependency graph that would compete with them.
       - name: Test the Turso driver with every feature
         run: cargo nextest run --profile ci --locked -p sqlx-turso -p sqlx-turso-core -p sqlx-turso-macros --all-features
+      # The only run with `chrono` off, which covers the driver's `not(feature = "chrono")` paths.
       - name: Test the Turso driver core with default features
         run: cargo nextest run --profile ci --locked -p sqlx-turso-core
 

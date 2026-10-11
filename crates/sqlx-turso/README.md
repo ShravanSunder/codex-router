@@ -2,7 +2,7 @@
 
 A SQLx driver for the [Turso](https://github.com/tursodatabase/turso) database engine: one owned
 connection per store, compile-time checked queries and SQLx migrations. Router's project stores
-use it. Replication uses Turso change capture to Cloudflare outside this driver.
+use it.
 
 ## Origin and license
 
