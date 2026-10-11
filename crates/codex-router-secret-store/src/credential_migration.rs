@@ -40,9 +40,11 @@ pub fn migrate_pooled_credentials_at_startup(
     secret_root: impl AsRef<Path>,
     keychain: &dyn KeychainAccess,
 ) -> Result<CredentialMigrationOutcome, SecretStoreError> {
+    FileSecretStore::reject_debug_plaintext_declaration(secret_root.as_ref())?;
     let file_store = FileSecretStore::open(secret_root)?;
     let _store_lock =
         CredentialStoreLock::acquire(file_store.root(), CredentialStoreLockMode::Exclusive)?;
+    FileSecretStore::reject_debug_plaintext_declaration(file_store.root())?;
     let diagnostic_accounts = file_store
         .list_migration_account_names()
         .unwrap_or_default();
@@ -120,6 +122,7 @@ pub fn migrate_pooled_credentials_at_startup(
 pub fn migrate_pooled_credentials_at_production_startup(
     secret_root: impl AsRef<Path>,
 ) -> Result<CredentialMigrationOutcome, SecretStoreError> {
+    FileSecretStore::reject_debug_plaintext_declaration(secret_root.as_ref())?;
     with_platform_keychain_for_production(|keychain| {
         migrate_pooled_credentials_at_startup(secret_root, keychain)
     })

@@ -32,8 +32,8 @@ use codex_router_core::ids::AccountId;
 #[cfg(test)]
 use codex_router_secret_store::SecretStore;
 use codex_router_secret_store::affinity_secret::load_or_create_router_affinity_hash_secret;
-use codex_router_secret_store::encrypted_credential_store::EncryptedCredentialStore;
 use codex_router_secret_store::model::SecretStoreError;
+use codex_router_secret_store::runtime_credential_store::RuntimeCredentialStore;
 use codex_router_state::sqlite::AsyncSqliteStateStore;
 #[cfg(test)]
 use codex_router_state::sqlite::SqliteStateStore;
@@ -125,7 +125,7 @@ pub(crate) struct ProxyRuntimeCredentialResources {
 
 impl ProxyRuntimeCredentialResources {
     pub(crate) fn open(
-        secret_store: EncryptedCredentialStore,
+        secret_store: RuntimeCredentialStore,
         fixed_now_unix_seconds: Option<u64>,
     ) -> Result<Self, ProxyRuntimeCredentialResourcesOpenError> {
         let affinity_secret = load_or_create_router_affinity_hash_secret(&secret_store)

@@ -5,6 +5,8 @@ pub(super) struct AccountLoginOptions {
     router_root: Option<PathBuf>,
     label: Option<String>,
     pub(super) provider: Option<Provider>,
+    #[cfg(debug_assertions)]
+    pub(super) allow_plaintext_file_secrets: bool,
 }
 
 impl AccountLoginOptions {
@@ -19,6 +21,10 @@ impl AccountLoginOptions {
                 }
                 "--label" => {
                     options.label = Some(parser.next_required_value("--label")?);
+                }
+                #[cfg(debug_assertions)]
+                "--allow-plaintext-file-secrets" => {
+                    options.allow_plaintext_file_secrets = true;
                 }
                 "--provider" if options.provider.is_none() => {
                     let value = parser.next_required_value("--provider")?;
@@ -47,6 +53,13 @@ impl AccountLoginOptions {
     }
 
     pub(super) fn router_root(&self) -> Result<PathBuf, CliError> {
+        #[cfg(debug_assertions)]
+        if self.allow_plaintext_file_secrets {
+            let root = self.router_root.as_ref().ok_or(CliError::MissingOption {
+                option: "--router-root",
+            })?;
+            crate::secret_store_factory::validate_plaintext_debug_path(root)?;
+        }
         router_root_or_default(self.router_root.clone())
     }
 

@@ -336,8 +336,8 @@ fn run_claude_loopback_scenario_with_store(
     let router_thread = std::thread::spawn(move || {
         let mut serve_result = None;
         let logs = crate::test_log_capture::capture_log_output(|| {
-            let runtime =
-                LoopbackRouterRuntime::start(config, credential_store).expect("fixture router");
+            let runtime = LoopbackRouterRuntime::start(config, credential_store.into())
+                .expect("fixture router");
             let runtime = match refresh_client {
                 Some(refresh_client) => runtime.with_test_claude_refresh_client(refresh_client),
                 None => runtime,

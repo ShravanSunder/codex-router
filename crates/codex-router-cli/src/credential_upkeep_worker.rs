@@ -16,8 +16,8 @@ use codex_router_auth::resolver::NoopCredentialRefreshClient;
 #[cfg(not(test))]
 use codex_router_auth::resolver::ProviderCredentialRefreshClients;
 use codex_router_auth::resolver::current_unix_seconds;
-use codex_router_secret_store::encrypted_credential_store::EncryptedCredentialStore;
 use codex_router_secret_store::model::SecretStoreError;
+use codex_router_secret_store::runtime_credential_store::RuntimeCredentialStore;
 use codex_router_state::account::AccountStatus;
 use codex_router_state::credential_maintenance::CredentialMaintenanceState;
 use codex_router_state::sqlite::AsyncSqliteStateStore;
@@ -110,7 +110,7 @@ pub enum CredentialUpkeepStartError {
 
 pub(crate) fn start_background_credential_upkeep_worker(
     state_db_path: &Path,
-    secret_store: EncryptedCredentialStore,
+    secret_store: RuntimeCredentialStore,
 ) -> Result<CredentialUpkeepWorker, CredentialUpkeepStartError> {
     #[cfg(test)]
     return start_background_credential_upkeep_worker_with_client_and_clock(
@@ -130,7 +130,7 @@ pub(crate) fn start_background_credential_upkeep_worker(
 
 pub(crate) fn start_background_credential_upkeep_worker_with_client_and_clock<C, F>(
     state_db_path: &Path,
-    secrets: EncryptedCredentialStore,
+    secrets: RuntimeCredentialStore,
     refresh_client: C,
     observed_clock: F,
 ) -> Result<CredentialUpkeepWorker, CredentialUpkeepStartError>
@@ -252,7 +252,7 @@ fn bounded_upkeep_wait(
 #[cfg(test)]
 async fn run_upkeep_cycle<C>(
     state: &AsyncSqliteStateStore,
-    secrets: &EncryptedCredentialStore,
+    secrets: &RuntimeCredentialStore,
     refresh_client: C,
     observed_now: u64,
 ) -> UpkeepCycleResult
@@ -272,7 +272,7 @@ where
 
 async fn run_upkeep_cycle_until_stop<C>(
     state: &AsyncSqliteStateStore,
-    secrets: &EncryptedCredentialStore,
+    secrets: &RuntimeCredentialStore,
     refresh_client: C,
     observed_now: u64,
     stop_requested: &CancellationToken,
@@ -283,7 +283,7 @@ where
 {
     if !matches!(
         secrets.status(),
-        codex_router_secret_store::encrypted_credential_store::EncryptedCredentialStoreStatus::Ready
+        codex_router_secret_store::runtime_credential_store::RuntimeCredentialStoreStatus::Ready
     ) {
         return UpkeepCycleResult::default();
     }

@@ -28,6 +28,8 @@ pub(crate) struct ServeCommand {
     pub(crate) debug_claude_upstream_base_url: Option<String>,
     #[cfg(debug_assertions)]
     pub(crate) require_debug_isolation: bool,
+    #[cfg(debug_assertions)]
+    pub(crate) allow_plaintext_file_secrets: bool,
     pub(crate) now_unix_seconds: Option<u64>,
     pub(crate) max_snapshot_age_seconds: u64,
     pub(crate) session_pin_idle_ttl_seconds: u64,
@@ -48,6 +50,25 @@ impl ServeCommand {
             return Err(CliError::MissingOption {
                 option: "--require-debug-isolation",
             });
+        }
+        #[cfg(debug_assertions)]
+        if options.allow_plaintext_file_secrets {
+            if !options.require_debug_isolation {
+                return Err(CliError::MissingOption {
+                    option: "--require-debug-isolation",
+                });
+            }
+            let state = options.state_db.as_ref().ok_or(CliError::MissingOption {
+                option: "--state-db",
+            })?;
+            let secrets = options
+                .secret_root
+                .as_ref()
+                .ok_or(CliError::MissingOption {
+                    option: "--secret-root",
+                })?;
+            crate::secret_store_factory::validate_plaintext_debug_path(state)?;
+            crate::secret_store_factory::validate_plaintext_debug_path(secrets)?;
         }
         let listen_host = options
             .listen_host
@@ -74,6 +95,8 @@ impl ServeCommand {
             debug_claude_upstream_base_url: options.debug_claude_upstream_base_url,
             #[cfg(debug_assertions)]
             require_debug_isolation: options.require_debug_isolation,
+            #[cfg(debug_assertions)]
+            allow_plaintext_file_secrets: options.allow_plaintext_file_secrets,
             now_unix_seconds: options.now_unix_seconds,
             max_snapshot_age_seconds: options
                 .max_snapshot_age_seconds
@@ -108,6 +131,8 @@ struct ServeCommandOptions {
     debug_claude_upstream_base_url: Option<String>,
     #[cfg(debug_assertions)]
     require_debug_isolation: bool,
+    #[cfg(debug_assertions)]
+    allow_plaintext_file_secrets: bool,
     now_unix_seconds: Option<u64>,
     max_snapshot_age_seconds: Option<u64>,
     session_pin_idle_ttl_seconds: Option<NonZeroU64>,
@@ -132,6 +157,8 @@ impl ServeCommandOptions {
             debug_claude_upstream_base_url: None,
             #[cfg(debug_assertions)]
             require_debug_isolation: false,
+            #[cfg(debug_assertions)]
+            allow_plaintext_file_secrets: false,
             now_unix_seconds: None,
             max_snapshot_age_seconds: None,
             session_pin_idle_ttl_seconds: None,
@@ -173,6 +200,10 @@ impl ServeCommandOptions {
                 #[cfg(debug_assertions)]
                 "--require-debug-isolation" => {
                     options.require_debug_isolation = true;
+                }
+                #[cfg(debug_assertions)]
+                "--allow-plaintext-file-secrets" => {
+                    options.allow_plaintext_file_secrets = true;
                 }
                 "--now-unix-seconds" => {
                     let value = parser.next_required_value("--now-unix-seconds")?;
@@ -254,3 +285,10 @@ fn parse_claude_five_hour_reserve_percent(
         maximum: 99,
     })
 }
+
+#[cfg(not(debug_assertions))]
+pub(super) const HELP_TEXT: &str =
+    "codex-router serve\n\nRun the local Codex account router with encrypted pooled credentials.\n";
+
+#[cfg(debug_assertions)]
+pub(super) const HELP_TEXT: &str = "codex-router serve\n\nRun the local Codex account router with encrypted pooled credentials by default.\n\ndebug-only options:\n  --allow-plaintext-file-secrets  Store pooled credentials in plaintext without Keychain\n  Requires --require-debug-isolation, --state-db <absolute path> and\n  --secret-root <absolute isolated path>; the secret root remembers this mode.\n";

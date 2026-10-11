@@ -184,7 +184,7 @@ fn loopback_claude_key_unavailable_returns_reason_two() {
     let (endpoint, probe_start, upstream_probe) = fake_claude_upstream_probe();
     let runtime = LoopbackRouterRuntime::start(
         runtime_config(&database_path, &secret_root).with_debug_claude_upstream_endpoint(endpoint),
-        EncryptedCredentialStore::key_unavailable(file_store),
+        EncryptedCredentialStore::key_unavailable(file_store).into(),
     )
     .unwrap_or_else(|error| panic!("fixture Router should start with locked credentials: {error}"));
 
@@ -213,7 +213,8 @@ fn loopback_claude_migration_incomplete_returns_reason_two() {
             file_store,
             vec!["Claude Migrating".to_owned()],
             CredentialMigrationFailure::MigrationNotComplete,
-        ),
+        )
+        .into(),
     )
     .unwrap_or_else(|error| {
         panic!("fixture Router should start with incomplete migration: {error}")
@@ -342,7 +343,7 @@ fn loopback_claude_hard_weekly_floor_returns_reason_five() {
     let config = runtime_config(&database_path, &secret_root)
         .with_quota_clock(1_100, 300)
         .with_debug_claude_upstream_endpoint(endpoint);
-    let runtime = LoopbackRouterRuntime::start(config, credentials)
+    let runtime = LoopbackRouterRuntime::start(config, credentials.into())
         .unwrap_or_else(|error| panic!("fixture Router should start: {error}"));
 
     assert_r12_message(
@@ -470,7 +471,7 @@ fn loopback_exhaustion_preserves_provider_attempt_one_usage_limit_response() {
                 panic!("isolated fixture Claude upstream should be valid: {error}")
             }),
         );
-    let runtime = LoopbackRouterRuntime::start(config, credentials)
+    let runtime = LoopbackRouterRuntime::start(config, credentials.into())
         .unwrap_or_else(|error| panic!("fixture Router should start: {error}"));
 
     let response = serve_one_request(runtime);
