@@ -8,7 +8,8 @@ fn profile_render_includes_codex_custom_provider_contract() {
     assert!(!rendered.contains("[profiles.codex-router]\n"));
     assert!(rendered.contains("model_provider = \"codex-router\"\n"));
     assert!(rendered.contains("[model_providers.codex-router]\n"));
-    assert!(rendered.contains("name = \"codex-router\"\n"));
+    assert!(rendered.contains("name = \"OpenAI\"\n"));
+    assert!(rendered.contains("enable_request_compression = false\n"));
     assert!(rendered.contains("base_url = \"http://127.0.0.1:8787/v1\"\n"));
     assert!(rendered.contains("wire_api = \"responses\"\n"));
     assert!(rendered.contains("requires_openai_auth = true\n"));
@@ -72,7 +73,12 @@ fn profile_print_command_renders_profile_without_writing() {
             .stdout
             .contains("model_provider = \"codex-router\"\n")
     );
-    assert!(output.stdout.contains("name = \"codex-router\"\n"));
+    assert!(output.stdout.contains("name = \"OpenAI\"\n"));
+    assert!(
+        output
+            .stdout
+            .contains("enable_request_compression = false\n")
+    );
     assert!(
         output
             .stdout

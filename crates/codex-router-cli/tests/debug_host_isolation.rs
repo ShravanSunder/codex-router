@@ -14,7 +14,7 @@ fn debug_host_rejects_unsafe_endpoint_before_creating_runtime_state() {
     ));
     let native_home = root.join("native-home");
     std::fs::create_dir_all(&native_home).unwrap();
-    std::fs::write(native_home.join("codex-router-debug.config.toml"), "model_provider = \"codex-router-debug\"\n\n[model_providers.codex-router-debug]\nname = \"fixture\"\nbase_url = \"http://127.0.0.1:18787/v1\"\nwire_api = \"responses\"\nrequires_openai_auth = false\nsupports_websockets = true\n").unwrap();
+    std::fs::write(native_home.join("codex-router-debug.config.toml"), "model_provider = \"codex-router-debug\"\n\n[model_providers.codex-router-debug]\nname = \"OpenAI\"\nbase_url = \"http://127.0.0.1:18787/v1\"\nwire_api = \"responses\"\nrequires_openai_auth = false\nsupports_websockets = true\n\n[features]\nenable_request_compression = false\n").unwrap();
     let normal_socket = native_home.join("app-server-control/app-server-control.sock");
     for socket in [None, normal_socket.to_str()] {
         let router_root = root.join("router-state");
