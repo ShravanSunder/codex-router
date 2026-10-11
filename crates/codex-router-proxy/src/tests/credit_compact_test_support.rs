@@ -294,7 +294,7 @@ fn assert_compact_transport_result(
 
     let mut output = None;
     let captured_logs = crate::test_log_capture::capture_log_output(|| {
-        let runtime = LoopbackRouterRuntime::start(config, secrets)
+        let runtime = LoopbackRouterRuntime::start(config, secrets.into())
             .expect("compact loopback runtime should start");
         let router_address = runtime.local_addr();
         let client_thread = std::thread::spawn(move || {

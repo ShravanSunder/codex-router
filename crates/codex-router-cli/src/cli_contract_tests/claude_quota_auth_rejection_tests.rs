@@ -353,7 +353,7 @@ fn claude_usage_401_after_renewal_preserves_account_for_upkeep_and_records_failu
     let upkeep_worker = must_ok(
         crate::credential_upkeep_worker::start_background_credential_upkeep_worker_with_client_and_clock(
             &state_path,
-            secrets,
+            secrets.into(),
             RecordingClaudeUpkeepRefreshClient {
                 observed_account_ids: observed_sender,
             },
