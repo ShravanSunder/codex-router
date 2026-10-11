@@ -79,14 +79,8 @@ fn backend_overrides_preserve_supported_debug_profile_values() {
     let mut iter = args.iter();
     while let Some(argument) = iter.next() {
         if argument == "-c" {
-            let override_table = iter
-                .next()
-                .unwrap()
-                .to_str()
-                .unwrap()
-                .parse::<toml::Table>()
+            apply_ordered_cli_override(&mut decoded, iter.next().unwrap().to_str().unwrap())
                 .unwrap();
-            merge_configuration(&mut decoded, override_table);
         }
     }
     // Assert: no model/project/provider/retry setting was silently dropped, and the
@@ -250,7 +244,7 @@ fn debug_profile_requires_literal_native_capability_and_uncompressed_requests() 
     }
 }
 
-// Each -c value is a separate config layer, rather than one TOML document.
+// Merge the completed CLI layer onto normal-home configuration, not each -c value.
 fn merge_configuration(configuration: &mut toml::Table, overrides: toml::Table) {
     for (key, value) in overrides {
         match (configuration.get_mut(&key), value) {
@@ -260,6 +254,150 @@ fn merge_configuration(configuration: &mut toml::Table, overrides: toml::Table) 
             (_, replacement) => {
                 configuration.insert(key, replacement);
             }
+        }
+    }
+}
+
+// Native builds ONE CLI layer in argv order, replacing the value at the final path.
+// These emitted paths are unquoted; root table assignments replace earlier subtrees.
+fn apply_ordered_cli_override(
+    configuration: &mut toml::Table,
+    argument: &str,
+) -> Result<(), &'static str> {
+    let (path, literal) = argument
+        .split_once('=')
+        .ok_or("missing override assignment")?;
+    let mut parsed = format!("value={literal}")
+        .parse::<toml::Table>()
+        .map_err(|_| "invalid override value")?;
+    let value = parsed.remove("value").ok_or("missing override value")?;
+    let segments: Vec<_> = path.split('.').collect();
+    let (leaf, parents) = segments.split_last().ok_or("missing override path")?;
+    let mut current = configuration;
+    for parent in parents {
+        current = current
+            .entry((*parent).to_owned())
+            .or_insert_with(|| toml::Value::Table(toml::Table::new()))
+            .as_table_mut()
+            .ok_or("override parent is not a table")?;
+    }
+    if path == "features.network_proxy"
+        && let Some(toml::Value::Table(existing)) = current.get_mut(*leaf)
+        && let toml::Value::Table(next) = &value
+    {
+        // This two-segment structured feature merges at its leaf in pinned Codex.
+        merge_configuration(existing, next.clone());
+    } else {
+        current.insert((*leaf).to_owned(), value);
+    }
+    Ok(())
+}
+
+#[test]
+fn minimal_debug_features_preserve_network_disable_in_ordered_cli_layer() {
+    let profile = DebugCodexProfile::parse(PROFILE, 18787).unwrap();
+    let paths = CodexPaths::from_codex_home("/unused-native-home".into());
+    let command = AppServerCommandSpec::new(
+        &paths,
+        &CodexRouterProfile::new(8787),
+        Path::new("/tmp/debug-proof/backend.sock"),
+    )
+    .with_debug_profile(&profile);
+    let args = command.arguments();
+    let overrides: Vec<_> = args
+        .windows(2)
+        .filter(|pair| pair[0] == "-c")
+        .map(|pair| pair[1].to_str().unwrap())
+        .collect();
+    let mut cli_layer = toml::Table::new();
+    for argument in &overrides {
+        apply_ordered_cli_override(&mut cli_layer, argument).unwrap();
+    }
+    assert_eq!(
+        cli_layer["features"]
+            .get("network_proxy")
+            .and_then(|proxy| proxy.get("enabled"))
+            .and_then(toml::Value::as_bool),
+        Some(false),
+        "later compression projection must not erase the earlier CLI network disable"
+    );
+    assert!(overrides.contains(&"features.network_proxy.enabled=false"));
+    assert!(overrides.contains(&"features.enable_request_compression=false"));
+    assert!(
+        !overrides
+            .iter()
+            .any(|argument| argument.starts_with("features="))
+    );
+    let mut home = "[features.network_proxy]\nenabled=true\nproxy_url=\"http://127.0.0.1:9999\"\n"
+        .parse::<toml::Table>()
+        .unwrap();
+    merge_configuration(&mut home, cli_layer);
+    assert_eq!(
+        home["features"]["network_proxy"]["enabled"].as_bool(),
+        Some(false)
+    );
+    assert_eq!(
+        home["features"]["enable_request_compression"].as_bool(),
+        Some(false)
+    );
+}
+
+#[test]
+fn explicit_debug_network_and_image_features_keep_validated_override_precedence() {
+    for text in [
+        NETWORK_PROFILE.to_owned(),
+        NETWORK_PROFILE
+            .replace(
+                "[features.network_proxy]",
+                "image_generation = true\n[features.network_proxy]",
+            )
+            .replace(
+                "requires_openai_auth = false",
+                "requires_openai_auth = true",
+            ),
+    ] {
+        let profile = DebugCodexProfile::parse(&text, 18787).unwrap();
+        let paths = CodexPaths::from_codex_home("/unused-native-home".into());
+        let command = AppServerCommandSpec::new(
+            &paths,
+            &CodexRouterProfile::new(8787),
+            Path::new("/tmp/debug-proof/backend.sock"),
+        )
+        .with_debug_profile(&profile);
+        let args = command.arguments();
+        let mut actual = toml::Table::new();
+        let overrides: Vec<_> = args
+            .windows(2)
+            .filter(|pair| pair[0] == "-c")
+            .map(|pair| pair[1].to_str().unwrap())
+            .collect();
+        for argument in &overrides {
+            apply_ordered_cli_override(&mut actual, argument).unwrap();
+        }
+        let expected = text.parse::<toml::Table>().unwrap();
+        assert_eq!(actual["features"], expected["features"]);
+        assert_eq!(actual["permissions"], expected["permissions"]);
+        assert_eq!(actual["model_providers"], expected["model_providers"]);
+        assert_eq!(actual["model"], expected["model"]);
+        assert_eq!(
+            actual["model_reasoning_effort"],
+            expected["model_reasoning_effort"]
+        );
+        assert_eq!(
+            actual["default_permissions"],
+            expected["default_permissions"]
+        );
+        assert_eq!(
+            actual["features"]["network_proxy"]["enabled"].as_bool(),
+            Some(true)
+        );
+        assert!(
+            !overrides
+                .iter()
+                .any(|argument| argument.starts_with("features="))
+        );
+        if text.contains("image_generation = true") {
+            assert!(overrides.contains(&"features.image_generation=true"));
         }
     }
 }

@@ -122,7 +122,15 @@ impl DebugCodexProfile {
             overrides: table
                 .into_iter()
                 .filter(|(key, _)| !LOCAL_ONLY_KEYS.contains(&key.as_str()))
-                .map(|(key, value)| format!("{key}={value}"))
+                .flat_map(|(key, value)| match (key.as_str(), value) {
+                    // Native builds one ordered CLI layer: a root features table
+                    // would erase Router's earlier network-proxy disable.
+                    ("features", toml::Value::Table(features)) => features
+                        .into_iter()
+                        .map(|(feature, value)| format!("features.{feature}={value}"))
+                        .collect(),
+                    (_, value) => vec![format!("{key}={value}")],
+                })
                 .collect(),
         })
     }
