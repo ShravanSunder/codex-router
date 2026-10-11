@@ -27,7 +27,7 @@ mod value;
 
 pub use arguments::TursoArguments;
 pub use column::TursoColumn;
-pub use connect_options::{TursoConnectOptions, TursoDatabaseTarget, TursoSyncOptions};
+pub use connect_options::{TursoConnectOptions, TursoDatabaseTarget};
 pub use connection::TursoConnection;
 pub use database::Turso;
 pub use error::{TursoAdapterError, TursoDatabaseError};

@@ -12,7 +12,6 @@ workspace = true
 [features]
 default = ["runtime-tokio"]
 runtime-tokio = ["sqlx-core/_rt-tokio"]
-sync = ["turso/sync"]
 migrate = ["sqlx-core/migrate"]
 macros = [
     "dep:sqlx-macros-core",
