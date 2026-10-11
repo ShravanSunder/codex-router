@@ -376,3 +376,99 @@ fn acp_options_require_explicit_absolute_root_and_executable() {
         assert!(parse_options_from(arguments.into_iter().map(OsString::from)).is_err());
     }
 }
+
+#[derive(Debug, Default, Eq, PartialEq)]
+struct ObservedNativeFeatureControls {
+    hooks_enabled: Option<bool>,
+    request_compression_enabled: Option<bool>,
+    network_proxy_enabled: Option<bool>,
+}
+
+fn observe_ordered_native_feature_controls(
+    arguments: &[OsString],
+) -> ObservedNativeFeatureControls {
+    let mut observed = ObservedNativeFeatureControls::default();
+    for pair in arguments.windows(2).filter(|pair| pair[0] == "-c") {
+        let assignment = pair[1].to_str().expect("UTF-8 native override");
+        let (key, literal) = assignment.split_once('=').expect("override assignment");
+        let value: toml::Table = format!("value={literal}")
+            .parse()
+            .expect("literal override");
+        let value = &value["value"];
+        match key {
+            "features" => {
+                // Native's whole-table assignment removes earlier sibling keys.
+                observed = ObservedNativeFeatureControls {
+                    hooks_enabled: value.get("hooks").and_then(toml::Value::as_bool),
+                    request_compression_enabled: value
+                        .get("enable_request_compression")
+                        .and_then(toml::Value::as_bool),
+                    network_proxy_enabled: value
+                        .get("network_proxy")
+                        .and_then(|proxy| proxy.get("enabled"))
+                        .and_then(toml::Value::as_bool),
+                };
+            }
+            "features.hooks" => observed.hooks_enabled = value.as_bool(),
+            "features.enable_request_compression" => {
+                observed.request_compression_enabled = value.as_bool()
+            }
+            "features.network_proxy" => {
+                if let Some(enabled) = value.get("enabled") {
+                    observed.network_proxy_enabled = enabled.as_bool();
+                }
+            }
+            "features.network_proxy.enabled" => observed.network_proxy_enabled = value.as_bool(),
+            _ => {}
+        }
+    }
+    observed
+}
+
+#[test]
+fn full_native_argument_order_preserves_owned_hooks_and_merged_profile_controls()
+-> Result<(), Box<dyn std::error::Error>> {
+    // Arrange: assemble the actual example's helper + spec argv in production order.
+    let run = TestRunDirectory::create()?;
+    let profile = luna_profile_from_text(&debug_profile("http://127.0.0.1:18787/v1"), 28787)?;
+    let paths = CodexPaths::from_codex_home("/unused-native-home".into());
+    let spec = AppServerCommandSpec::new(
+        &paths,
+        &CodexRouterProfile::new(28787),
+        &run.0.join("native-socket/app-server.sock"),
+    )
+    .with_debug_profile(&profile);
+    let mut arguments = vec![OsString::from("-c"), OsString::from("features.hooks=false")];
+    arguments.extend(proof_permissions::automation_proof_startup_arguments(
+        &run.0,
+    )?);
+    arguments.extend(spec.arguments());
+
+    // Act / Assert: independent literal controls, not the renderer's own output.
+    let expected = ObservedNativeFeatureControls {
+        hooks_enabled: Some(false),
+        request_compression_enabled: Some(false),
+        network_proxy_enabled: Some(false),
+    };
+    assert_eq!(
+        observe_ordered_native_feature_controls(&arguments),
+        expected
+    );
+    assert!(!arguments.iter().any(|argument| {
+        argument
+            .to_str()
+            .is_some_and(|value| value.starts_with("features="))
+    }));
+
+    // The exact old whole-features shape destroys the owned hooks/proxy controls.
+    let mut legacy = arguments;
+    legacy.extend([
+        OsString::from("-c"),
+        OsString::from("features={enable_request_compression=false}"),
+    ]);
+    let broken = observe_ordered_native_feature_controls(&legacy);
+    assert_ne!(broken, expected);
+    assert_eq!(broken.hooks_enabled, None);
+    assert_eq!(broken.network_proxy_enabled, None);
+    Ok(())
+}
