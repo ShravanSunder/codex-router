@@ -64,7 +64,8 @@ pub(super) fn assert_router_profile_contract(output: &str, port: u16) {
     assert!(!output.contains("[profiles.codex-router]\n"));
     assert!(output.contains("model_provider = \"codex-router\"\n"));
     assert!(output.contains("[model_providers.codex-router]\n"));
-    assert!(output.contains("name = \"codex-router\"\n"));
+    assert!(output.contains("name = \"OpenAI\"\n"));
+    assert!(output.contains("enable_request_compression = false\n"));
     assert!(output.contains(format!("base_url = \"http://127.0.0.1:{port}/v1\"\n").as_str()));
     assert!(output.contains("wire_api = \"responses\"\n"));
     assert!(output.contains("requires_openai_auth = true\n"));

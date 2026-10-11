@@ -26,7 +26,8 @@ fn codex_paths_keep_native_state_under_normal_codex_home() {
 fn expected_router_root_overrides() -> Vec<String> {
     vec![
         "model_provider=\"codex-router\"".to_owned(),
-        "model_providers.codex-router.name=\"codex-router\"".to_owned(),
+        "features.enable_request_compression=false".to_owned(),
+        "model_providers.codex-router.name=\"OpenAI\"".to_owned(),
         "model_providers.codex-router.base_url=\"http://127.0.0.1:8787/v1\"".to_owned(),
         "model_providers.codex-router.wire_api=\"responses\"".to_owned(),
         "model_providers.codex-router.requires_openai_auth=true".to_owned(),
@@ -61,11 +62,13 @@ fn router_profile_has_one_rendering_and_root_override_projection() {
         concat!(
             "model_provider = \"codex-router\"\n\n",
             "[model_providers.codex-router]\n",
-            "name = \"codex-router\"\n",
+            "name = \"OpenAI\"\n",
             "base_url = \"http://127.0.0.1:8787/v1\"\n",
             "wire_api = \"responses\"\n",
             "requires_openai_auth = true\n",
-            "supports_websockets = true\n",
+            "supports_websockets = true\n\n",
+            "[features]\n",
+            "enable_request_compression = false\n",
         )
     );
     // Assert: the managed child also carries both Router profiles' direct network.
@@ -473,4 +476,40 @@ fn stored_values_that_cannot_be_quoted_are_dropped_from_the_launch() {
             .any(|argument| argument.starts_with("model="))
     );
     assert!(arguments.contains(&"model_reasoning_effort=\"high\"".to_owned()));
+}
+
+#[test]
+fn emitted_file_and_actual_argv_preserve_native_compaction_capability() {
+    for port in [8787, 18787] {
+        let profile = CodexRouterProfile::new(port);
+        let rendered = profile.render().parse::<toml::Table>().unwrap();
+        let paths = CodexPaths::from_codex_home("/unused-native-home".into());
+        let command = AppServerCommandSpec::new(&paths, &profile, &paths.app_server_socket());
+        let arguments = command.arguments();
+        let overrides: Vec<&str> = arguments
+            .windows(2)
+            .filter(|pair| pair[0] == "-c")
+            .map(|pair| pair[1].to_str().unwrap())
+            .collect();
+        let actual = overrides.join("\n").parse::<toml::Table>().unwrap();
+        for configuration in [rendered, actual] {
+            assert_eq!(
+                configuration["model_provider"].as_str(),
+                Some("codex-router")
+            );
+            let provider = &configuration["model_providers"]["codex-router"];
+            assert_eq!(provider["name"].as_str(), Some("OpenAI"));
+            assert_eq!(
+                provider["base_url"].as_str(),
+                Some(format!("http://127.0.0.1:{port}/v1").as_str())
+            );
+            assert_eq!(provider["wire_api"].as_str(), Some("responses"));
+            assert_eq!(provider["requires_openai_auth"].as_bool(), Some(true));
+            assert_eq!(provider["supports_websockets"].as_bool(), Some(true));
+            assert_eq!(
+                configuration["features"]["enable_request_compression"].as_bool(),
+                Some(false)
+            );
+        }
+    }
 }

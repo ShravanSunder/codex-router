@@ -21,21 +21,26 @@ impl CodexRouterProfile {
 
     /// Renders the profile file used by existing CLI commands.
     ///
-    /// The profile carries model routing only. The Codex TUI refuses to resume a
+    /// The profile carries model routing and native protocol capabilities. The Codex TUI refuses to resume a
     /// remote thread when the selected profile sets any of
     /// [`crate::REMOTE_RESUME_PERMISSION_KEYS`], because a remote resume always
     /// restores the thread's saved permissions and would silently drop them.
     #[must_use]
     pub fn render(self) -> String {
+        // Upstream selects native compaction by the literal OpenAI name. Keep HTTP
+        // fallback uncompressed so Router can inspect its routing metadata.
         format!(
             r#"model_provider = "codex-router"
 
 [model_providers.codex-router]
-name = "codex-router"
+name = "OpenAI"
 base_url = "http://127.0.0.1:{}/v1"
 wire_api = "responses"
 requires_openai_auth = true
 supports_websockets = true
+
+[features]
+enable_request_compression = false
 "#,
             self.port
         )
@@ -47,7 +52,8 @@ supports_websockets = true
     pub fn root_overrides(self) -> Vec<String> {
         let mut overrides = vec![
             "model_provider=\"codex-router\"".to_owned(),
-            "model_providers.codex-router.name=\"codex-router\"".to_owned(),
+            "features.enable_request_compression=false".to_owned(),
+            "model_providers.codex-router.name=\"OpenAI\"".to_owned(),
             format!(
                 "model_providers.codex-router.base_url=\"http://127.0.0.1:{}/v1\"",
                 self.port

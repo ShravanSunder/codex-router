@@ -7,7 +7,7 @@ use codex_router_secret_store::test_support::open_encrypted_credential_store;
 use codex_router_state::sqlite::AsyncSqliteStateStore;
 use std::io;
 use std::os::unix::fs::PermissionsExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -80,12 +80,7 @@ impl IsolatedAcceptanceRoot {
         std::fs::set_permissions(&managed_codex, std::fs::Permissions::from_mode(0o700))?;
 
         let control_socket = root.join("agent-communication/control.sock");
-        let debug_profile = format!(
-            "model = \"claude-routing-acceptance\"\nmodel_provider = \"codex-router-debug\"\ndefault_permissions = \"router-write-restricted\"\n\n[permissions.router-write-restricted]\nextends = \":read-only\"\n[permissions.router-write-restricted.network]\nenabled = true\nmode = \"full\"\ndomains = {{ \"*\" = \"allow\" }}\nunix_sockets = {{ \"{}\" = \"allow\" }}\n\n[permissions.router-workspace-write]\nextends = \":workspace\"\n[permissions.router-workspace-write.network]\nenabled = true\nmode = \"full\"\ndomains = {{ \"*\" = \"allow\" }}\nunix_sockets = {{ \"{}\" = \"allow\" }}\n\n[features.network_proxy]\nenabled = true\nmode = \"full\"\nproxy_url = \"http://{MCP_ADDRESS}\"\nenable_socks5 = false\nallow_upstream_proxy = false\nallow_local_binding = false\ncredential_broker = false\ndangerously_allow_all_unix_sockets = false\ndomains = {{ \"*\" = \"allow\" }}\nunix_sockets = {{ \"{}\" = \"allow\" }}\n\n[model_providers.codex-router-debug]\nname = \"Claude routing acceptance\"\nbase_url = \"http://{ROUTER_ADDRESS}/v1\"\nwire_api = \"responses\"\nrequires_openai_auth = false\nsupports_websockets = true\n",
-            control_socket.display(),
-            control_socket.display(),
-            control_socket.display(),
-        );
+        let debug_profile = render_claude_acceptance_debug_profile(&control_socket);
         std::fs::write(
             codex_home.join("codex-router-debug.config.toml"),
             debug_profile,
@@ -346,4 +341,23 @@ fn executable_on_path(name: &str) -> Option<PathBuf> {
     std::env::split_paths(&path)
         .map(|directory| directory.join(name))
         .find(|candidate| candidate.is_file())
+}
+
+fn render_claude_acceptance_debug_profile(control_socket: &Path) -> String {
+    format!(
+        "model = \"claude-routing-acceptance\"\nmodel_provider = \"codex-router-debug\"\ndefault_permissions = \"router-write-restricted\"\n\n[permissions.router-write-restricted]\nextends = \":read-only\"\n[permissions.router-write-restricted.network]\nenabled = true\nmode = \"full\"\ndomains = {{ \"*\" = \"allow\" }}\nunix_sockets = {{ \"{}\" = \"allow\" }}\n\n[permissions.router-workspace-write]\nextends = \":workspace\"\n[permissions.router-workspace-write.network]\nenabled = true\nmode = \"full\"\ndomains = {{ \"*\" = \"allow\" }}\nunix_sockets = {{ \"{}\" = \"allow\" }}\n\n[features]\nenable_request_compression = false\n\n[features.network_proxy]\nenabled = true\nmode = \"full\"\nproxy_url = \"http://{MCP_ADDRESS}\"\nenable_socks5 = false\nallow_upstream_proxy = false\nallow_local_binding = false\ncredential_broker = false\ndangerously_allow_all_unix_sockets = false\ndomains = {{ \"*\" = \"allow\" }}\nunix_sockets = {{ \"{}\" = \"allow\" }}\n\n[model_providers.codex-router-debug]\nname = \"OpenAI\"\nbase_url = \"http://{ROUTER_ADDRESS}/v1\"\nwire_api = \"responses\"\nrequires_openai_auth = false\nsupports_websockets = true\n",
+        control_socket.display(),
+        control_socket.display(),
+        control_socket.display(),
+    )
+}
+
+#[test]
+fn rendered_claude_acceptance_debug_profile_passes_strict_parser()
+-> Result<(), codex_native_integration::DebugProfileError> {
+    let profile = render_claude_acceptance_debug_profile(Path::new(
+        "/tmp/claude-acceptance/agent-communication/control.sock",
+    ));
+    codex_native_integration::DebugCodexProfile::parse(&profile, 19876)?;
+    Ok(())
 }

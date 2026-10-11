@@ -3,6 +3,13 @@
 Date: 2026-06-22
 Status: implemented; router-owned multi-account live proof is approval-gated
 
+Login syntax updated: 2026-10-11. The old `--device-auth` and `--codex-bin`
+options are no longer accepted. Debug builds support
+`--allow-plaintext-file-secrets` for explicit isolated paths; declared plaintext
+roots reopen without Keychain access. Functional tests can also use the existing
+`keychain-test-support` Cargo feature with fresh fixture credentials. Neither
+setup requires OAuth login or proves live provider behavior.
+
 ## Purpose
 
 This runbook is the approval boundary for live OpenAI OAuth and quota proof.

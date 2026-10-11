@@ -64,11 +64,13 @@ mod tests {
 model_reasoning_effort = "low"
 model_provider = "codex-router-debug"
 [model_providers.codex-router-debug]
-name = "Codex Router Debug"
+name = "OpenAI"
 base_url = "http://127.0.0.1:18787/v1"
 wire_api = "responses"
 requires_openai_auth = false
 supports_websockets = true
+[features]
+enable_request_compression = false
 "#;
         assert!(project_image_profile(source, 28787).is_ok());
         assert!(!source.contains("network_proxy"));
