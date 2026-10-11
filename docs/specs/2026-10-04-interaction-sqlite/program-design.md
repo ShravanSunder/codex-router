@@ -2,7 +2,7 @@
 
 Governing contract: [specification.md](specification.md); authorized outcomes: [requirements.md](requirements.md).
 
-The existing interaction broker remains the domain and response owner. Its private history store opens the explicit sibling interaction.sqlite path. No component opens interaction-history.json. SQLite-only history removes import/provenance/recovery coupling; the cost is that previous typed JSON data does not enter the new view. LegacyApprovalHistoryStore continues to own approval-history.json separately.
+The existing interaction broker remains the domain and response owner. Its private history store opens the explicit sibling interaction.sqlite path. No component opens interaction-history.json. SQLite-only history removes import/provenance/recovery coupling; the cost is that previous typed JSON data does not enter the new view. ServiceInteractionBroker continues to own approval-history.json separately.
 
 | Entity | Owner and home | Stored shape / interface |
 |---|---|---|
