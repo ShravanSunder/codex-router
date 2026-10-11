@@ -119,8 +119,8 @@ pub async fn set_foreign_keys(connection: &mut TursoConnection, enabled: bool) -
     Ok(())
 }
 
-/// Table-name prefixes the engine owns: SQLite's catalog and, on synced stores, Turso's change
-/// capture and Sync bookkeeping (`turso_cdc`, `turso_sync_last_change_id`, ...)
+/// Table-name prefixes the engine owns: SQLite's catalog and Turso's internal tables, such as
+/// the change-capture table `turso_cdc`
 const ENGINE_TABLE_PREFIXES: [&str; 3] = ["sqlite_", "turso_", "__turso_internal"];
 
 /// Every application table's name and whitespace-normalized definition, the migration history

@@ -2,7 +2,7 @@
 //!
 //! `sqlx-turso` exposes a distinct SQLx [`Database`](sqlx::Database), [`Turso`], backed by the
 //! Rust `turso` crate: one owned connection per store, checked queries through this crate's own
-//! [`query!`] family, SQLx migrations, and Turso Sync push and pull on the same connection.
+//! [`query!`] family and SQLx migrations.
 //!
 //! # Example
 //!
@@ -29,12 +29,10 @@
 //!
 //! # Features
 //!
-//! All but `sync` are on by default. `sync` is opt-in: it turns on rustls's aws-lc-rs provider,
-//! which conflicts with other rustls clients in the same build (see the crate README).
+//! All features are on by default.
 //!
 //! - `runtime-tokio`: the Tokio runtime integration
 //! - `macros`: `sqlx_turso::query!` and the rest of the checked query macros
-//! - `sync`: synced connections and `sync_push`, `sync_pull`, `sync_checkpoint`, `sync_stats`
 //! - `migrate`: SQLx's `Migrate` for [`TursoConnection`]
 //! - `chrono`: chrono date and time codecs
 //!
@@ -45,8 +43,8 @@
 pub use sqlx_turso_core::{
     Turso, TursoAdapterError, TursoArguments, TursoColumn, TursoConnectOptions, TursoConnection,
     TursoDatabaseError, TursoDatabaseTarget, TursoQueryResult, TursoRow, TursoStatement,
-    TursoStorageClass, TursoSyncOptions, TursoTransaction, TursoTransactionManager, TursoTypeInfo,
-    TursoValue, TursoValueRef,
+    TursoStorageClass, TursoTransaction, TursoTransactionManager, TursoTypeInfo, TursoValue,
+    TursoValueRef,
 };
 
 #[cfg(feature = "migrate")]

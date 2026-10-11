@@ -2,7 +2,7 @@
 //!
 //! Accepted forms: `turso:<path>`, `turso://<path>`, `turso::memory:` and `turso:<path>?mode=…`
 //! with `mode` one of `rw`, `rwc` or `memory`. `mode=ro` is rejected explicitly. Only the
-//! target and open mode round-trip; Sync settings are configured in code, never in a URL.
+//! target and open mode round-trip.
 
 use std::{path::PathBuf, str::FromStr};
 
