@@ -24,8 +24,6 @@ use std::{
 };
 
 #[cfg(test)]
-use codex_router_host::HostCoordinationPaths;
-#[cfg(test)]
 use launch_options::parse_options_from;
 use launch_options::{ProviderCommand, RunDirectoryAdmission, parse_options};
 
