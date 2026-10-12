@@ -15,8 +15,12 @@ mod cli_message_proof;
 mod lifecycle_reader_proof;
 #[path = "debug_host_acceptance/native_delivery_proof.rs"]
 mod native_delivery_proof;
+#[path = "debug_host_acceptance/native_fork_proof.rs"]
+mod native_fork_proof;
 #[path = "debug_host_acceptance/owned_thread_registry.rs"]
 mod owned_thread_registry;
+#[path = "debug_host_acceptance/owned_turn_error_diagnostic.rs"]
+mod owned_turn_error_diagnostic;
 #[path = "debug_host_acceptance/process_identity_guard.rs"]
 mod process_identity_guard;
 #[path = "debug_host_acceptance/proof_environment_settings.rs"]
@@ -28,6 +32,7 @@ enum MessageProof {
     LifecycleReaders,
     None,
     Native,
+    NativeFork,
     Cli(PathBuf),
     Agents(PathBuf),
     Acp(PathBuf),
@@ -72,6 +77,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 .ok_or("--acp-replacement requires pinned SDK module path")?,
         )?),
         Some("--messages") => MessageProof::Native,
+        Some("--native-fork") => MessageProof::NativeFork,
         Some("--delivery") => MessageProof::Delivery(std::fs::canonicalize(
             std::env::args_os()
                 .nth(3)
@@ -112,6 +118,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
         }
     };
     let home = PathBuf::from(std::env::var_os("HOME").ok_or("HOME unavailable")?);
+    let debug_port = match std::env::var("CODEX_ROUTER_ACCEPTANCE_PORT") {
+        Ok(value) => value.parse::<u16>()?,
+        Err(std::env::VarError::NotPresent) => 18787,
+        Err(error) => return Err(error.into()),
+    };
     let codex_home = home.join(".codex");
     if let Some(selected) = std::env::var_os("CODEX_HOME")
         && std::fs::canonicalize(selected)? != std::fs::canonicalize(&codex_home)?
@@ -120,11 +131,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
     }
     let router_root = home.join(".codex-router-debug");
     codex_native_integration::validate_debug_directory(&router_root, &home.join(".codex-router"))?;
-    let _profile = DebugCodexProfile::read(&codex_home, 18787)?;
+    let _profile = DebugCodexProfile::read(&codex_home, debug_port)?;
     // Refuse occupied debug routing; never stop a discovered listener.
     drop(std::net::TcpListener::bind((
         std::net::Ipv4Addr::LOCALHOST,
-        18787,
+        debug_port,
     ))?);
     let production_before = capture_production_identity().await?;
     let run_root = PathBuf::from("/tmp").join(format!(
@@ -143,14 +154,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .open(run_root.join("host-diagnostics.log"))?;
     let mut command = Command::new(&router_cli);
     command
-        .args([
-            "host",
-            "--require-debug-isolation",
-            "--port",
-            "18787",
-            "--router-root",
-        ])
+        .args(["host", "--require-debug-isolation", "--router-root"])
         .arg(&router_root)
+        .arg("--port")
+        .arg(debug_port.to_string())
         .env("CODEX_ROUTER_DEBUG_READINESS_TIMING", "1")
         .env("CODEX_HOME", &codex_home)
         .env("CODEX_ROUTER_DEBUG_APP_SERVER_SOCKET", &backend)
@@ -171,7 +178,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         } else {
             180
         }),
-        probe(&router_root, &mut host, &messages, &router_cli),
+        probe(&router_root, &mut host, &messages, &router_cli, debug_port),
     )
     .await;
     let probe_status = match &outcome {
@@ -194,7 +201,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     }
     .await;
     let debug_port_closed =
-        std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 18787)).is_ok();
+        std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, debug_port)).is_ok();
     let debug_backend_closed = std::os::unix::net::UnixStream::connect(&backend).is_err();
     let production_after = capture_production_identity().await?;
     println!(
@@ -217,6 +224,7 @@ async fn probe(
     host: &mut ProcessGroupChild,
     messages: &MessageProof,
     router_cli: &Path,
+    debug_port: u16,
 ) -> Result<(), Box<dyn Error>> {
     let directory = router_root.join("agent-communication");
     let endpoint = loop {
@@ -274,7 +282,7 @@ async fn probe(
         || config
             .pointer("/model_providers/codex-router-debug/base_url")
             .and_then(serde_json::Value::as_str)
-            != Some("http://127.0.0.1:18787/v1")
+            != Some(format!("http://127.0.0.1:{debug_port}/v1").as_str())
     {
         return Err("backend effective provider routing is not debug".into());
     }
@@ -349,6 +357,10 @@ async fn probe(
         owned.create(&mut peer, &cwd).await?
     };
     owned.inspect(&mut peer, &second).await?;
+    if matches!(messages, MessageProof::NativeFork) {
+        return native_fork_proof::run_owned_fork_proof(&mut native, &mut owned, &first, &cwd)
+            .await;
+    }
     for id in [&first, &second] {
         println!(
             "{}",
@@ -476,7 +488,7 @@ async fn probe(
         }
         println!(
             "{}",
-            json!({"kind":"recoveryHoldReady","threadId":first,"serviceDirectory":directory,"nativeSocket":socket,"model":"gpt-5.6-luna"})
+            json!({"kind":"recoveryHoldReady","threadId":first,"serviceDirectory":directory,"nativeSocket":socket,"model":owned_thread_registry::PROOF_MODEL})
         );
         recovery_observation::hold(&directory, &socket, &first).await?;
         println!(

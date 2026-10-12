@@ -148,13 +148,44 @@ fn owner_unverified_direct_message_uses_the_compact_line() {
 }
 
 #[test]
-fn preview_counts_source_scalars_before_escaping_and_reports_the_exact_remainder() {
-    let body = "🪿".repeat(101);
+fn preview_uses_the_literal_grammar_at_source_length_boundaries() {
+    let bodies = [
+        String::new(),
+        "🪿".repeat(99),
+        "🪿".repeat(100),
+        format!("{}…", "🪿".repeat(99)),
+        "🪿".repeat(101),
+        "🪿".repeat(1_340),
+    ];
+
+    for body in bodies {
+        let request = agent_dm_input(body.clone(), "machine");
+        let rendered = render_push_line(&request).expect("push line");
+        let source_scalars = body.chars().count();
+        let shown_source = body.chars().take(100).collect::<String>();
+        let expected_preview = if source_scalars > 100 {
+            format!("\"{shown_source}…\" (+{} more chars)", source_scalars - 100)
+        } else {
+            format!("\"{body}\"")
+        };
+        let expected_line = format!(
+            "✉️ ✳️ Main (claude-local/12345678) @machine → you · {expected_preview} · {}",
+            request.link
+        );
+
+        assert_eq!(rendered, expected_line, "source body: {body:?}");
+    }
+}
+
+#[test]
+fn shortened_preview_uses_source_scalars_before_escaping() {
+    let body = format!("{}\"\\\n{}{}", "🪿".repeat(97), "界", "尾");
     let request = agent_dm_input(body, "machine");
 
     let rendered = render_push_line(&request).expect("push line");
+    let expected_preview = format!(r#""{}\"\\⏎…" (+2 more chars)"#, "🪿".repeat(97));
 
-    assert!(rendered.contains(&format!("\"{}\" (+1)", "🪿".repeat(100))));
+    assert!(rendered.contains(&expected_preview), "{rendered:?}");
 }
 
 #[test]
@@ -342,7 +373,7 @@ fn subscription_notices_are_neutral_and_have_no_preview() {
 #[test]
 fn line_budget_trims_display_fields_without_truncating_emoji_or_link() {
     let machine_label = "🪿".repeat(120);
-    let mut request = agent_dm_input("🪿".repeat(200), &machine_label);
+    let mut request = agent_dm_input("\"".repeat(200), &machine_label);
     request.header_facts = PushHeaderFacts::DirectMessage {
         sender_display_name: display_name(&format!("✳️ {}", "界".repeat(117))),
     };
@@ -351,13 +382,25 @@ fn line_budget_trims_display_fields_without_truncating_emoji_or_link() {
 
     assert!(rendered.len() <= 1024);
     assert!(rendered.starts_with("✉️ "));
-    assert!(rendered.contains('…'));
+    let expected_preview = format!("\"{}…\" (+100 more chars)", "\\\"".repeat(100));
+    assert!(rendered.contains(&expected_preview), "{rendered:?}");
+    let header = rendered
+        .split_once(" · \"")
+        .map(|(header, _)| header)
+        .expect("body-bearing push has a preview");
+    assert!(
+        header.contains('…'),
+        "header fields were not fitted: {header:?}"
+    );
     assert!(rendered.ends_with(&request.link.to_string()));
 }
 
 #[test]
 fn header_parser_returns_display_facts_without_the_preview() {
-    let request = agent_dm_input("private preview text".to_owned(), "machine");
+    let request = agent_dm_input(
+        "private preview text ".to_owned() + &"🪿".repeat(1_340),
+        "machine",
+    );
     let rendered = render_push_line(&request).expect("push line");
 
     let ParsedPushLineHeader { kind, title } =
@@ -366,6 +409,7 @@ fn header_parser_returns_display_facts_without_the_preview() {
     assert_eq!(kind, PushKind::DirectMessage);
     assert!(title.contains("Main"));
     assert!(!title.contains("private preview text"));
+    assert!(!title.contains("more chars"));
 }
 
 #[test]

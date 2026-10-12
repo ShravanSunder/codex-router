@@ -36,6 +36,24 @@ const OBSERVATION_TIMEOUT: Duration = Duration::from_secs(120);
 const ACP_TARGET_EXPECTED_PROMPTS: usize = 9;
 const SUBSCRIPTION_NOTICE_LABEL: &str = "🧵 Router: new thread activity";
 
+fn assert_long_preview_literal(observed: &str, body: &str) -> ProofResult<()> {
+    let source_scalars = body.chars().count();
+    if source_scalars <= 100 || body.contains(['"', '\\', '\n', '\r']) {
+        return Err("matrix preview oracle requires a long body without escaped fields".into());
+    }
+    let source_prefix = body.chars().take(100).collect::<String>();
+    let expected_preview = format!(
+        "\"{source_prefix}…\" (+{} more chars)",
+        source_scalars - 100
+    );
+    if !observed.contains(&expected_preview) {
+        return Err(
+            format!("recipient output omitted literal preview {expected_preview:?}").into(),
+        );
+    }
+    Ok(())
+}
+
 #[test]
 #[ignore = "creates an isolated debug Host root and scripted ACP provider fixture"]
 fn prepare_delivery_matrix_provider_fixture() -> ProofResult<()> {
@@ -73,14 +91,34 @@ async fn exercise_push_delivery_matrix(
 
     // S1: an agent DM reaches a real Codex app-server and matches its inbox line.
     let codex_recipient = proof.start_thread("S1 Codex recipient").await?;
-    let s1_body = "S1 is green";
-    let s1_receipt = cli_send(&proof, Some(&sender), &codex_recipient, s1_body, false).await?;
+    let s1_prefix = matrix_marker("native-long");
+    let s1_body = format!(
+        "{s1_prefix} {}",
+        "N".repeat(1_339 - s1_prefix.chars().count())
+    );
+    assert_eq!(s1_body.chars().count(), 1_340);
+    let s1_receipt = cli_send(&proof, Some(&sender), &codex_recipient, &s1_body, false).await?;
     let s1_push_id = receipt_push_id(&s1_receipt)?;
-    let (_, s1_expected) = dm_notice_and_show(&mut proof, &codex_recipient, &s1_push_id).await?;
-    let s1_item =
-        wait_for_codex_input(&mut proof, &codex_recipient, s1_body, OBSERVATION_TIMEOUT).await?;
-    assert_exact_notice_line(&user_message_text(&s1_item)?, &s1_expected)?;
-    record_passed_matrix_cell(&proof, config_guard, "S1", &[user_message_text(&s1_item)?])?;
+    let (s1_show, s1_expected) =
+        dm_notice_and_show(&mut proof, &codex_recipient, &s1_push_id).await?;
+    let s1_item = wait_for_codex_input(
+        &mut proof,
+        &codex_recipient,
+        &s1_prefix,
+        OBSERVATION_TIMEOUT,
+    )
+    .await?;
+    let s1_observed = user_message_text(&s1_item)?;
+    assert_exact_notice_line(&s1_observed, &s1_expected)?;
+    assert_long_preview_literal(&s1_expected, &s1_body)?;
+    assert_long_preview_literal(&s1_observed, &s1_body)?;
+    let s1_fetched = cli_show(&proof, &codex_recipient, &s1_show.link).await?;
+    assert_eq!(
+        s1_fetched.pointer("/result/record/body"),
+        Some(&json!(s1_body))
+    );
+    assert!(s1_fetched.pointer("/result/record/preview").is_none());
+    record_passed_matrix_cell(&proof, config_guard, "S1", &[s1_observed])?;
     covered_cells.push("S1 Codex app-server");
 
     // S2: a long receipt is shortened to 100 Unicode scalars, linked, and fetchable in full.
@@ -97,16 +135,14 @@ async fn exercise_push_delivery_matrix(
         .expect_text_with_timeout(&s2_prefix, OBSERVATION_TIMEOUT)
         .await?;
     assert_exact_notice_line(&s2_observed, &s2_expected)?;
-    assert!(s2_expected.contains(&format!(
-        "\"{}\" (+1240)",
-        s2_body.chars().take(100).collect::<String>()
-    )));
-    assert!(s2_expected.contains("(+1240)"));
+    assert_long_preview_literal(&s2_expected, &s2_body)?;
+    assert_long_preview_literal(&s2_observed, &s2_body)?;
     let s2_fetched = cli_show(&proof, &peer.target, &s2_show.link).await?;
     assert_eq!(
         s2_fetched.pointer("/result/record/body"),
         Some(&json!(s2_body))
     );
+    assert!(s2_fetched.pointer("/result/record/preview").is_none());
     record_passed_matrix_cell(&proof, config_guard, "S2", &[s2_observed])?;
     covered_cells.push("S2 Claude peer");
 
@@ -257,7 +293,9 @@ async fn exercise_scripted_acp_target(
     let sender = proof.start_thread("ACP push matrix sender").await?;
     let target = create_provider_session(&mut proof, &sender).await?;
     let marker = matrix_marker("acp-target");
-    delivery_matrix_support::mcp_send(&proof, &sender, &target, &marker).await?;
+    let body = format!("{marker} {}", "A".repeat(1_339 - marker.chars().count()));
+    assert_eq!(body.chars().count(), 1_340);
+    delivery_matrix_support::mcp_send(&proof, &sender, &target, &body).await?;
 
     let inbox = proof
         .client
@@ -272,6 +310,7 @@ async fn exercise_scripted_acp_target(
         .find(|notice| notice.line.contains(&marker))
         .cloned()
         .ok_or("ACP target push is missing from the recipient inbox")?;
+    assert_long_preview_literal(&notice.line, &body)?;
     let show = proof
         .client
         .router_show(PushRecordShowParams {
@@ -279,6 +318,12 @@ async fn exercise_scripted_acp_target(
             reference: notice.push_id.as_str().to_owned(),
         })
         .await?;
+    assert_eq!(show.record.body.as_deref(), Some(body.as_str()));
+    assert!(
+        serde_json::to_value(&show)?
+            .pointer("/record/preview")
+            .is_none()
+    );
     let expected = expected_push_line(&show, &machine_label(&proof)?)?;
     assert_eq!(notice.line, expected);
     let observed = wait_for_acp_input(
@@ -289,6 +334,7 @@ async fn exercise_scripted_acp_target(
     )
     .await?;
     assert_exact_notice_line(&observed, &expected)?;
+    assert_long_preview_literal(&observed, &body)?;
     proof.record(
         "pushDeliveryMatrixAcp",
         json!({"pushId":show.record.push_id,"target":target,"firstLine":observed}),

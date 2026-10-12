@@ -337,7 +337,7 @@ async fn stored_page(
         query: params.query.clone(),
     };
     let rows = catalog.read_page(&query).await.map_err(|_| ())?;
-    // The SQL repository clause bounds the scan; the canonical predicate decides. A page
+    // SQL bounds the scan; repository and emitted source predicates decide. A page
     // may therefore return fewer rows than the page size. It never returns a gap: the
     // cursor advances over every row read, including the ones the predicate rejects.
     let repository_identity = repository_identity_for_scope(&params.scope);
@@ -386,6 +386,12 @@ async fn stored_page(
             source: params.source,
             query: params.query.clone(),
         };
+        // SQL source eligibility is broader for some stored tags and mixed-case values.
+        // Keep replies consistent with the classification emitted by both inventory views.
+        if params.source != NativeSessionSource::All && source != params.source {
+            last = Some(scope_cursor);
+            continue;
+        }
         if !params.include_empty_sessions && first_user_message.as_deref().is_none_or(str::is_empty)
         {
             last = Some(scope_cursor);

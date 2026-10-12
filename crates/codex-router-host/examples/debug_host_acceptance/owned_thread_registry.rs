@@ -1,9 +1,10 @@
-//! Acceptance targets originate only from this run's successful native thread/start calls.
+//! Acceptance targets are fresh starts or children of this run's owned native parents.
 use codex_native_integration::NativeProtocolConnection;
 use serde_json::{Value, json};
 use std::{collections::BTreeSet, error::Error, path::Path};
 
-const PROOF_MODEL: &str = "gpt-5.6-luna";
+pub(super) const PROOF_MODEL: &str = "gpt-6-luna";
+const PROOF_EFFORT: &str = "medium";
 
 pub struct OwnedTurnReceipt {
     thread_id: String,
@@ -15,6 +16,41 @@ pub struct OwnedThreadRegistry {
     threads: BTreeSet<String>,
 }
 impl OwnedThreadRegistry {
+    pub async fn fork_owned_thread(
+        &mut self,
+        client: &mut NativeProtocolConnection,
+        parent: &str,
+        cwd: &Path,
+    ) -> Result<String, Box<dyn Error>> {
+        self.require_owned(parent)?;
+        // No policy/config/model override: the native fork inherits its owned parent.
+        let response = client
+            .request(
+                "thread/fork",
+                json!({"threadId":parent,"cwd":cwd,"deferGoalContinuation":true}),
+            )
+            .await?;
+        let child = response
+            .pointer("/thread/id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+            .ok_or("native fork returned no child identity; effect is unknown")?
+            .to_owned();
+        if child == parent || !self.threads.insert(child.clone()) {
+            return Err("native fork did not return a distinct owned child".into());
+        }
+        if response.get("modelProvider").and_then(Value::as_str) != Some("codex-router-debug")
+            || response.get("model").and_then(Value::as_str) != Some(PROOF_MODEL)
+            || response.get("reasoningEffort").and_then(Value::as_str) != Some(PROOF_EFFORT)
+            || response.pointer("/sandbox/type").and_then(Value::as_str) != Some("readOnly")
+            || response.get("approvalPolicy").and_then(Value::as_str) != Some("never")
+            || response.get("approvalsReviewer").and_then(Value::as_str) != Some("user")
+            || response.get("cwd").and_then(Value::as_str) != cwd.to_str()
+        {
+            return Err("owned fork did not preserve source cwd/model/read-only policy".into());
+        }
+        Ok(child)
+    }
     pub async fn create(
         &mut self,
         client: &mut NativeProtocolConnection,
@@ -73,10 +109,12 @@ impl OwnedThreadRegistry {
         } else {
             fields.insert("sandbox".to_owned(), json!("read-only"));
         }
-        fields.insert(
-            "config".to_owned(),
-            super::proof_environment_settings::thread_overrides(configuration)?,
-        );
+        let mut configuration = super::proof_environment_settings::thread_overrides(configuration)?;
+        configuration
+            .as_object_mut()
+            .ok_or("proof configuration must be an object")?
+            .insert("model_reasoning_effort".to_owned(), json!(PROOF_EFFORT));
+        fields.insert("config".to_owned(), configuration);
         let response = match client.request("thread/start", parameters).await {
             Ok(response) => response,
             Err(error) => {
@@ -110,6 +148,11 @@ impl OwnedThreadRegistry {
         }
         if response.get("model").and_then(Value::as_str) != Some(PROOF_MODEL) {
             return Err("created proof thread did not retain Luna; no turn submitted".into());
+        }
+        if response.get("reasoningEffort").and_then(Value::as_str) != Some(PROOF_EFFORT) {
+            return Err(
+                "created proof thread did not retain explicit effort; no turn submitted".into(),
+            );
         }
         if response.pointer("/sandbox/type").and_then(Value::as_str) != Some("readOnly")
             || response.get("approvalPolicy").and_then(Value::as_str) != Some(approval_policy)
@@ -151,7 +194,7 @@ impl OwnedThreadRegistry {
         let response = client
             .request(
                 "turn/start",
-                json!({"threadId":id,"model":PROOF_MODEL,"input":[{"type":"text","text":text}]}),
+                json!({"threadId":id,"model":PROOF_MODEL,"effort":PROOF_EFFORT,"input":[{"type":"text","text":text}]}),
             )
             .await?;
         let turn = response
@@ -193,10 +236,17 @@ impl OwnedThreadRegistry {
         self.require_owned(&receipt.thread_id)?;
         let id = receipt.thread_id.as_str();
         let turn = receipt.turn_id;
+        let mut observed_methods = std::collections::BTreeMap::<String, u64>::new();
         let observed = tokio::time::timeout(std::time::Duration::from_secs(90), async {
             let mut output = String::new();
             loop {
                 let event = client.next_message().await?;
+                if let Some(method) = event.get("method").and_then(Value::as_str)
+                    && method.len() <= 96
+                    && (observed_methods.len() < 32 || observed_methods.contains_key(method))
+                {
+                    *observed_methods.entry(method.to_owned()).or_default() += 1;
+                }
                 let params = event
                     .get("params")
                     .ok_or("native event lacked parameters")?;
@@ -209,6 +259,16 @@ impl OwnedThreadRegistry {
                     );
                 }
                 match event.get("method").and_then(Value::as_str) {
+                    Some("error")
+                        if params.get("turnId").and_then(Value::as_str) == Some(turn.as_str()) =>
+                    {
+                        println!("{}", serde_json::to_string(
+                            &super::owned_turn_error_diagnostic::OwnedTurnErrorDiagnostic::from_parameters(params)
+                        )?);
+                        if params.get("willRetry").and_then(Value::as_bool) == Some(false) {
+                            return Err("owned native turn reported a terminal error".into());
+                        }
+                    }
                     Some("item/agentMessage/delta")
                         if params.get("turnId").and_then(Value::as_str) == Some(turn.as_str()) =>
                     {
@@ -251,109 +311,15 @@ impl OwnedThreadRegistry {
                 }
             }
         })
-        .await??;
-        Ok(observed)
+        .await;
+        println!(
+            "{}",
+            json!({"kind":"ownedTurnObservation","methods":observed_methods})
+        );
+        observed?
     }
 }
 
 #[cfg(test)]
-mod ownership_tests {
-    use super::*;
-    use futures_util::{SinkExt, StreamExt};
-
-    #[tokio::test]
-    async fn proof_creation_selects_luna_and_rejects_model_substitution() {
-        // Arrange: a real local carrier whose backend returns a different model.
-        let (client, server) = tokio::net::UnixStream::pair().unwrap();
-        let wire = tokio_tungstenite::WebSocketStream::from_raw_socket(
-            client,
-            tokio_tungstenite::tungstenite::protocol::Role::Client,
-            None,
-        )
-        .await;
-        let backend = tokio::spawn(async move {
-            let mut server = tokio_tungstenite::WebSocketStream::from_raw_socket(
-                server,
-                tokio_tungstenite::tungstenite::protocol::Role::Server,
-                None,
-            )
-            .await;
-            let request: Value =
-                serde_json::from_str(server.next().await.unwrap().unwrap().to_text().unwrap())
-                    .unwrap();
-            server
-                .send(tokio_tungstenite::tungstenite::Message::Text(
-                    json!({"id":request["id"],"result":{
-                        "thread":{"id":"wrong-model-thread"},
-                        "model":"gpt-5.6-sol","modelProvider":"codex-router-debug",
-                        "sandbox":{"type":"readOnly"},"approvalPolicy":"never"
-                    }})
-                    .to_string()
-                    .into(),
-                ))
-                .await
-                .unwrap();
-            request
-        });
-        let mut client = NativeProtocolConnection::from_websocket(wire);
-        let mut registry = OwnedThreadRegistry::default();
-        // Act: no real model is invoked by this protocol fixture.
-        let result = registry.create(&mut client, Path::new("/tmp")).await;
-        let request = backend.await.unwrap();
-        // Assert: explicit model selection and fail-closed ownership admission.
-        assert_eq!(
-            request.pointer("/params/model").and_then(Value::as_str),
-            Some("gpt-5.6-luna")
-        );
-        assert_eq!(
-            request
-                .pointer("/params/approvalsReviewer")
-                .and_then(Value::as_str),
-            Some("user")
-        );
-        assert_eq!(
-            request.pointer("/params/config/features.hooks"),
-            Some(&json!(false))
-        );
-        assert!(result.is_err());
-        assert!(registry.require_owned("wrong-model-thread").is_err());
-    }
-    #[test]
-    fn discovery_or_caller_text_does_not_grant_test_ownership() {
-        // Arrange: one explicit creation receipt, unrelated user-provided IDs.
-        let registry = OwnedThreadRegistry {
-            threads: BTreeSet::from(["created-here".to_owned()]),
-        };
-        // Act / Assert.
-        assert!(registry.require_owned("created-here").is_ok());
-        assert!(registry.require_owned("existing-user-thread").is_err());
-        assert!(registry.require_owned("").is_err());
-    }
-
-    #[tokio::test]
-    async fn unowned_submission_cannot_write_a_native_frame() {
-        // Arrange: a real carrier with no server protocol implementation.
-        let (client, server) = tokio::net::UnixStream::pair().unwrap();
-        let wire = tokio_tungstenite::WebSocketStream::from_raw_socket(
-            client,
-            tokio_tungstenite::tungstenite::protocol::Role::Client,
-            None,
-        )
-        .await;
-        let mut client = NativeProtocolConnection::from_websocket(wire);
-        let registry = OwnedThreadRegistry::default();
-        // Act: ownership rejection must complete before a request/response exchange can begin.
-        let result = tokio::time::timeout(
-            std::time::Duration::from_millis(100),
-            registry.submit_text(&mut client, "existing-user-thread", "must not send"),
-        )
-        .await
-        .unwrap();
-        // Assert: no frame was submitted and the untouched carrier is still open.
-        assert!(result.is_err());
-        let mut bytes = [0_u8; 128];
-        assert!(
-            matches!(server.try_read(&mut bytes), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock)
-        );
-    }
-}
+#[path = "owned_thread_registry_tests.rs"]
+mod ownership_tests;
