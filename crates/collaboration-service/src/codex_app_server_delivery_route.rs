@@ -29,6 +29,7 @@ pub struct CodexAppServerDeliveryRoute {
     endpoints: EndpointDirectory,
     backend: NativeControlBackend,
     holder: std::sync::Arc<crate::UnmaterializedThreadHolder>,
+    approval_broker: Option<std::sync::Weak<dyn codex_acp_adapter::ApprovalBroker>>,
 }
 
 struct NativeRouteDeliveryRequest {
@@ -54,7 +55,19 @@ impl CodexAppServerDeliveryRoute {
             endpoints,
             backend,
             holder,
+            approval_broker: None,
         }
+    }
+
+    /// Borrows the existing route owner without retaining the broker's delivery cycle.
+    #[must_use]
+    pub fn with_approval_broker(
+        mut self,
+        broker: &std::sync::Arc<crate::ServiceInteractionBroker>,
+    ) -> Self {
+        let broker_port: std::sync::Arc<dyn codex_acp_adapter::ApprovalBroker> = broker.clone();
+        self.approval_broker = Some(std::sync::Arc::downgrade(&broker_port));
+        self
     }
 
     async fn deliver_native(
@@ -71,6 +84,15 @@ impl CodexAppServerDeliveryRoute {
             return Ok(not_submitted("staleGeneration", false));
         }
         let generation = admission.generation().clone();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        let retirement = admission.retirement();
+        let recorded_route = tokio::select! {
+            biased;
+            () = retirement.cancelled() => crate::native_recorded_policy::RecordedNativeRouteClassification::UnresolvedAuthority,
+            result = tokio::time::timeout_at(deadline, crate::native_recorded_policy::classify_recorded_native_route(self.approval_broker.as_ref(), &request.target)) => {
+                result.unwrap_or(crate::native_recorded_policy::RecordedNativeRouteClassification::UnresolvedAuthority)
+            }
+        };
         let mut effects = NativeEffectEvidence {
             target: Some(request.target.clone()),
             generation: Some(generation.clone()),
@@ -78,7 +100,8 @@ impl CodexAppServerDeliveryRoute {
             native_turn_id: None,
             native_submission_id: None,
             allocation: PreparationEffect::NotRequested,
-            resume: if request.mode == MessageDelivery::Auto {
+            // This same classification pins dispatch; a generic queue cannot attach later.
+            resume: if request.mode == MessageDelivery::Auto || recorded_route.may_resume() {
                 PreparationEffect::Unknown
             } else {
                 PreparationEffect::NotRequested
@@ -134,6 +157,9 @@ impl CodexAppServerDeliveryRoute {
                         service_id: &self.service_id,
                         backend: &self.backend,
                         endpoints: &endpoints,
+                        approval_broker: self.approval_broker.as_ref(),
+                        recorded_route: Some(&recorded_route),
+                        attempt_deadline: Some(deadline),
                         held_connection: Some(binding.connection_mut()),
                         load_policy,
                     },
@@ -179,6 +205,9 @@ impl CodexAppServerDeliveryRoute {
                         service_id: &self.service_id,
                         backend: &self.backend,
                         endpoints: &endpoints,
+                        approval_broker: self.approval_broker.as_ref(),
+                        recorded_route: Some(&recorded_route),
+                        attempt_deadline: Some(deadline),
                         held_connection: None,
                         load_policy,
                     },
@@ -315,7 +344,8 @@ impl SessionDeliveryRoute for CodexAppServerDeliveryRoute {
             crate::CodexAppServerScheduledRuns::new(
                 self.backend.clone(),
                 std::sync::Arc::clone(&self.holder),
-            ),
+            )
+            .with_approval_broker(self.approval_broker.clone()),
         ))
     }
 

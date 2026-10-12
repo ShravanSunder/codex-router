@@ -338,16 +338,44 @@ async fn question_answer_delivery_reports_later_history_write_failure() {
         )
         .await
         .expect("question admitted");
-    tokio::fs::create_dir(directory.join("interaction-history.json.tmp"))
-        .await
-        .expect("block temporary history file");
     let answer = QuestionResponse::Answered {
         content: serde_json::from_value(serde_json::json!({"yes": true})).expect("answer"),
     };
+    let (recorded, validation_complete) = tokio::sync::oneshot::channel();
+    let (resume, proceed) = tokio::sync::oneshot::channel();
+    *broker.question_before_send.lock().await = Some(TypedAdmissionPause {
+        recorded,
+        resume: proceed,
+    });
+    let answering_broker = broker.clone();
+    let delivered_answer = answer.clone();
+    let answering = tokio::spawn(async move {
+        answering_broker
+            .respond_question("write-failure-question", &approver, delivered_answer)
+            .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(2), validation_complete)
+        .await
+        .expect("bounded validation wait")
+        .expect("validation reached pause");
+    let mut observer = <sqlx::SqliteConnection as sqlx::Connection>::connect_with(
+        &sqlx::sqlite::SqliteConnectOptions::new().filename(directory.join("interaction.sqlite")),
+    )
+    .await
+    .expect("independent SQLite writer");
+    let mut transaction = sqlx::Connection::begin(&mut observer)
+        .await
+        .expect("poison transaction");
+    sqlx::query("UPDATE typed_interaction_history SET record_json='{}' WHERE request_id='write-failure-question'")
+        .execute(&mut *transaction).await.expect("corrupt actual record after validation");
+    sqlx::query("UPDATE interaction_history_revision SET revision=revision+1")
+        .execute(&mut *transaction)
+        .await
+        .expect("publish independent revision");
+    transaction.commit().await.expect("actual poison committed");
+    resume.send(()).expect("permit answer delivery");
     assert!(matches!(
-        broker
-            .respond_question("write-failure-question", &approver, answer.clone())
-            .await,
+        answering.await.expect("answer task"),
         Err(InteractionHistoryError::Unavailable)
     ));
     assert_eq!(receiver.await.expect("response was delivered"), answer);
@@ -369,6 +397,76 @@ async fn question_answer_delivery_reports_later_history_write_failure() {
             state: QuestionHistoryState::Pending,
             ..
         }
+    ));
+}
+
+#[tokio::test]
+async fn approval_decision_real_sqlite_write_failure_keeps_channel_unsent_then_commit_precedes_delivery()
+ {
+    let (broker, _, directory) = super::tests::fixture_broker().await;
+    let (requester, approver) = typed_participants(&broker);
+    let mut receiver = broker
+        .request_typed_approval(
+            requester,
+            approver.clone(),
+            typed_request("approval-write-failure"),
+            CancellationToken::new(),
+            CancellationToken::new(),
+            None,
+        )
+        .await
+        .expect("pending approval");
+    let mut independent = <sqlx::SqliteConnection as sqlx::Connection>::connect_with(
+        &sqlx::sqlite::SqliteConnectOptions::new().filename(directory.join("interaction.sqlite")),
+    )
+    .await
+    .expect("independent SQLite observer");
+    sqlx::query("CREATE TRIGGER reject_history_update BEFORE UPDATE ON typed_interaction_history BEGIN SELECT RAISE(ABORT, 'fixture failed decision'); END")
+        .execute(&mut independent).await.expect("real write rejection");
+    let decide = || TypedInteractionDecision::SelectApproval {
+        option_id: "allow-once".into(),
+        acknowledge_persistent: false,
+        note: None,
+    };
+    assert!(matches!(
+        broker
+            .decide_typed_interaction("approval-write-failure", &approver, decide())
+            .await,
+        Err(InteractionHistoryError::Unavailable)
+    ));
+    assert!(matches!(
+        receiver.try_recv(),
+        Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+    ));
+    let record_json: String = sqlx::query_scalar("SELECT record_json FROM typed_interaction_history WHERE request_id='approval-write-failure'")
+        .fetch_one(&mut independent).await.expect("unchanged committed row");
+    let record: InteractionHistoryRecord = serde_json::from_str(&record_json).expect("record");
+    assert_eq!(
+        record.approval_state(),
+        Some(&InteractionHistoryState::Pending)
+    );
+    sqlx::query("DROP TRIGGER reject_history_update")
+        .execute(&mut independent)
+        .await
+        .expect("restore fixture");
+    let consumer = tokio::spawn(async move {
+        let outcome = receiver.await.expect("approval delivered after commit");
+        let committed: String = sqlx::query_scalar("SELECT record_json FROM typed_interaction_history WHERE request_id='approval-write-failure'")
+            .fetch_one(&mut independent).await.expect("decision already durable at channel receipt");
+        let record: InteractionHistoryRecord =
+            serde_json::from_str(&committed).expect("committed record");
+        assert!(
+            matches!(record.approval_state(),Some(InteractionHistoryState::Decided {option_id}) if option_id.as_str()=="allow-once")
+        );
+        outcome
+    });
+    broker
+        .decide_typed_interaction("approval-write-failure", &approver, decide())
+        .await
+        .expect("decision");
+    assert!(matches!(
+        consumer.await.expect("consumer"),
+        TypedApprovalResolution::Selected(_)
     ));
 }
 

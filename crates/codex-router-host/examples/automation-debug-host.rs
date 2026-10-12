@@ -1,16 +1,19 @@
 //! Opt-in acceptance Host: normal Codex home, existing debug provider, fresh runtime and Luna only.
 #[path = "automation_debug_host/host_replacement.rs"]
 mod host_replacement;
+#[path = "automation_debug_host/launch_options.rs"]
+mod launch_options;
 #[path = "automation_debug_host/proof_permissions.rs"]
 mod proof_permissions;
+#[path = "automation_debug_host/startup_diagnostics.rs"]
+mod startup_diagnostics;
 
 use codex_native_integration::{
     AppServerCommandSpec, CodexPaths, CodexRouterProfile, DEFAULT_ROUTER_PORT, DebugCodexProfile,
 };
 use codex_router_host::{
     AppServerLaunchPlan, ChildCommandSpec, ChildOutput, HostConfig, HostConfigInputs,
-    HostCoordinationPaths, HostDeadlines, HostRuntime, ManagedChildLaunchPlans,
-    ManagedUpdateInputs,
+    HostDeadlines, HostRuntime, ManagedChildLaunchPlans, ManagedUpdateInputs,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -22,19 +25,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum RunDirectoryAdmission {
-    Fresh,
-    Resume,
-}
-
-#[derive(Debug)]
-struct DebugHostOptions {
-    run_directory: PathBuf,
-    run_directory_admission: RunDirectoryAdmission,
-    router_binary: PathBuf,
-    port: u16,
-}
+#[cfg(test)]
+use launch_options::parse_options_from;
+use launch_options::{ProviderCommand, RunDirectoryAdmission, parse_options};
 
 #[derive(Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -47,10 +40,13 @@ struct DebugHostContext {
     model: String,
     port: u16,
     host_pid: u32,
+    router_root: Option<PathBuf>,
+    claude_provider: Option<ProviderCommand>,
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    startup_diagnostics::enable_startup_diagnostics()?;
     let Some(options) = parse_options()? else {
         return Ok(());
     };
@@ -66,10 +62,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "Acceptance requires normal Codex home; alternate CODEX_HOME is not allowed.".into(),
         );
     }
+    let debug_root = options
+        .router_root
+        .clone()
+        .unwrap_or_else(|| home.join(".codex-router-debug"));
+    codex_native_integration::validate_debug_directory(&debug_root, &home.join(".codex-router"))?;
     match options.run_directory_admission {
         RunDirectoryAdmission::Fresh => validate_fresh_run_directory(&options.run_directory)?,
         RunDirectoryAdmission::Resume => {
             validate_resume_run_directory(&options.run_directory, options.port)?;
+            let previous = read_existing_context(&options.run_directory)?;
+            validate_resume_binding(&previous, &options)?;
         }
     }
     if options.port == DEFAULT_ROUTER_PORT || options.port == 0 {
@@ -89,7 +92,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let probe = std::net::TcpListener::bind(endpoint)
         .map_err(|_| "The debug port is already occupied; no existing process was touched.")?;
     let profile = luna_profile(&codex_home, options.port)?;
-    let debug_root = home.join(".codex-router-debug");
     if !debug_root.join("state.sqlite").is_file() || !debug_root.join("secrets").is_dir() {
         return Err("Existing debug router state and credentials are required; this harness never copies production credentials.".into());
     }
@@ -127,32 +129,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut launch = AppServerLaunchPlan::new(native, executable, version)
         .with_schema_directory(collaboration.clone());
     launch.prepare_schema().await;
-    let replacement_command = host_replacement::build_host_replacement_command(
-        &options.run_directory,
-        &options.router_binary,
-        options.port,
-    )?;
-    let router = ChildCommandSpec::new(options.router_binary)
-        .with_arguments([
-            OsString::from("serve"),
-            OsString::from("--port"),
-            OsString::from(options.port.to_string()),
-            OsString::from("--state-db"),
-            debug_root.join("state.sqlite").into_os_string(),
-            OsString::from("--secret-root"),
-            debug_root.join("secrets").into_os_string(),
-            OsString::from("--audit-file"),
-            options
-                .run_directory
-                .join("router-audit.jsonl")
-                .into_os_string(),
-        ])
-        .with_output(ChildOutput::Telemetry);
+    let replacement_command = host_replacement::build_host_replacement_command(&options)?;
+    let router = options.router_child_command(&debug_root);
     let config = HostConfig::new(HostConfigInputs {
-        coordination_paths: HostCoordinationPaths::new(
-            options.run_directory.join("host.sock"),
-            options.run_directory.join("host.lock"),
-        ),
+        coordination_paths: options.host_coordination_paths(&debug_root),
         router_endpoint: endpoint,
         mcp_bind: std::net::SocketAddr::from(([127, 0, 0, 1], 0)),
         app_server_socket: socket,
@@ -160,6 +140,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         deadlines: HostDeadlines::production(),
     })
     .with_collaboration_directory(collaboration.clone(), codex_home);
+    let config = options.attach_provider(
+        config,
+        std::env::var_os("CLAUDE_CODE_EXECUTABLE").map(PathBuf::from),
+    )?;
     let prepared = DebugHostContext {
         kind: "debugHostPrepared".to_owned(),
         run_directory: options.run_directory.clone(),
@@ -169,6 +153,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         model: "gpt-5.6-luna".to_owned(),
         port: options.port,
         host_pid: std::process::id(),
+        router_root: options.router_root.clone(),
+        claude_provider: options.claude_provider.clone(),
     };
     let instance =
         host_replacement::acquire_acceptance_host_instance(config.coordination_paths().clone())?;
@@ -233,64 +219,6 @@ fn luna_profile_from_text(
         selected_port,
     )?)
 }
-fn parse_options() -> Result<Option<DebugHostOptions>, Box<dyn std::error::Error>> {
-    parse_options_from(std::env::args_os().skip(1))
-}
-
-fn parse_options_from(
-    arguments: impl IntoIterator<Item = OsString>,
-) -> Result<Option<DebugHostOptions>, Box<dyn std::error::Error>> {
-    let mut arguments = arguments.into_iter();
-    let mut run_directory = None::<(PathBuf, RunDirectoryAdmission)>;
-    let mut router_binary = None;
-    let mut port = 18787;
-    while let Some(flag) = arguments.next() {
-        if flag == "--help" || flag == "-h" {
-            println!(
-                "automation-debug-host (--run-directory /tmp/NEW-DIRECTORY | --resume-run-directory /tmp/OWNED-DIRECTORY) --router-binary /ABSOLUTE/target/debug/codex-router [--port 18787]\n\nOpt-in real acceptance Host. Uses the existing codex-router-debug profile with an in-memory Luna override. Fresh mode creates runtime/workspace directories. Resume mode reopens only a stopped Host's validated private directory. Starts only its own debug router and app-server and shuts its children down on SIGTERM. Never use production paths or ports. Keep this process running while the acceptance runner connects."
-            );
-            return Ok(None);
-        }
-        let value = arguments.next().ok_or("option value missing; use --help")?;
-        match flag.to_str() {
-            Some("--run-directory") => select_run_directory(
-                &mut run_directory,
-                PathBuf::from(value),
-                RunDirectoryAdmission::Fresh,
-            )?,
-            Some("--resume-run-directory") => select_run_directory(
-                &mut run_directory,
-                PathBuf::from(value),
-                RunDirectoryAdmission::Resume,
-            )?,
-            Some("--router-binary") => router_binary = Some(PathBuf::from(value)),
-            Some("--port") => port = value.to_str().ok_or("port is not UTF-8")?.parse()?,
-            _ => return Err("Unknown option; use --help".into()),
-        }
-    }
-    let (run_directory, run_directory_admission) = run_directory.ok_or(
-        "exactly one of --run-directory or --resume-run-directory is required; use --help",
-    )?;
-    Ok(Some(DebugHostOptions {
-        run_directory,
-        run_directory_admission,
-        router_binary: router_binary.ok_or("--router-binary required; use --help")?,
-        port,
-    }))
-}
-
-fn select_run_directory(
-    selected: &mut Option<(PathBuf, RunDirectoryAdmission)>,
-    run_directory: PathBuf,
-    admission: RunDirectoryAdmission,
-) -> Result<(), &'static str> {
-    if selected.is_some() {
-        return Err("--run-directory and --resume-run-directory are mutually exclusive");
-    }
-    *selected = Some((run_directory, admission));
-    Ok(())
-}
-
 fn validate_fresh_run_directory(run_directory: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let parent = run_directory
         .parent()
@@ -451,202 +379,18 @@ fn replace_resumed_context(context: &DebugHostContext) -> Result<(), Box<dyn std
     result
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::sync::atomic::{AtomicU64, Ordering};
-
-    fn debug_profile(endpoint: &str) -> String {
-        format!(
-            r#"
-model = "existing-model"
-model_reasoning_effort = "low"
-model_provider = "codex-router-debug"
-[model_providers.codex-router-debug]
-name = "OpenAI"
-base_url = "{endpoint}"
-wire_api = "responses"
-requires_openai_auth = false
-supports_websockets = true
-
-[features]
-enable_request_compression = false
-"#
-        )
+fn validate_resume_binding(
+    context: &DebugHostContext,
+    options: &launch_options::DebugHostOptions,
+) -> Result<(), &'static str> {
+    if context.router_root != options.router_root
+        || context.claude_provider != options.claude_provider
+    {
+        return Err("resume refused: Router root or ACP command changed");
     }
-
-    #[test]
-    fn luna_profile_validates_saved_route_before_in_memory_retargeting() {
-        assert!(luna_profile_from_text(&debug_profile("http://127.0.0.1:18787/v1"), 28787).is_ok());
-        for (saved_endpoint, selected_port) in [
-            ("http://127.0.0.1:19741/v1", 28787),
-            ("http://0.0.0.0:18787/v1", 28787),
-            ("not-a-url", 28787),
-            ("http://127.0.0.1:18787/v1", 19741),
-        ] {
-            assert!(
-                luna_profile_from_text(&debug_profile(saved_endpoint), selected_port).is_err(),
-                "invalid saved/selected route was admitted: {saved_endpoint} -> {selected_port}"
-            );
-        }
-    }
-
-    static NEXT_TEST_DIRECTORY: AtomicU64 = AtomicU64::new(1);
-
-    struct TestRunDirectory(PathBuf);
-
-    impl TestRunDirectory {
-        fn create() -> Result<Self, Box<dyn std::error::Error>> {
-            let root = PathBuf::from("/tmp").join(format!(
-                "automation-debug-host-resume-{}-{}",
-                std::process::id(),
-                NEXT_TEST_DIRECTORY.fetch_add(1, Ordering::Relaxed)
-            ));
-            std::fs::DirBuilder::new().mode(0o700).create(&root)?;
-            for child in ["agent-communication", "agent-workspace", "native-socket"] {
-                std::fs::DirBuilder::new()
-                    .mode(0o700)
-                    .create(root.join(child))?;
-            }
-            Ok(Self(root))
-        }
-
-        fn write_context(&self, process_id: u32) -> Result<(), Box<dyn std::error::Error>> {
-            write_fresh_context(&DebugHostContext {
-                kind: "debugHostPrepared".to_owned(),
-                run_directory: self.0.clone(),
-                service_directory: self.0.join("agent-communication"),
-                workspace: self.0.join("agent-workspace"),
-                profile: "codex-router-debug".to_owned(),
-                model: "gpt-5.6-luna".to_owned(),
-                port: 18787,
-                host_pid: process_id,
-            })
-        }
-    }
-
-    impl Drop for TestRunDirectory {
-        fn drop(&mut self) {
-            let _cleanup = std::fs::remove_dir_all(&self.0);
-        }
-    }
-
-    fn stopped_process_id() -> Result<u32, Box<dyn std::error::Error>> {
-        let mut child = std::process::Command::new("/usr/bin/true").spawn()?;
-        let process_id = child.id();
-        let _status = child.wait()?;
-        Ok(process_id)
-    }
-
-    #[test]
-    fn run_directory_modes_are_mutually_exclusive() {
-        let result = parse_options_from([
-            OsString::from("--run-directory"),
-            OsString::from("/tmp/fresh"),
-            OsString::from("--resume-run-directory"),
-            OsString::from("/tmp/resume"),
-        ]);
-        assert!(
-            result
-                .expect_err("conflicting run-directory modes must fail")
-                .to_string()
-                .contains("mutually exclusive")
-        );
-    }
-
-    #[test]
-    fn resume_rejects_marker_for_another_root() -> Result<(), Box<dyn std::error::Error>> {
-        let run = TestRunDirectory::create()?;
-        let foreign_run = TestRunDirectory::create()?;
-        run.write_context(stopped_process_id()?)?;
-        let marker_path = run.0.join("debug-host-context.json");
-        let mut marker: DebugHostContext = serde_json::from_slice(&std::fs::read(&marker_path)?)?;
-        marker.run_directory = foreign_run.0.clone();
-        std::fs::write(&marker_path, serde_json::to_vec(&marker)?)?;
-
-        let error =
-            validate_resume_run_directory(&run.0, 18787).expect_err("foreign marker must fail");
-        assert!(error.to_string().contains("does not match"));
-        Ok(())
-    }
-
-    #[test]
-    fn resume_rejects_invalid_context_marker() -> Result<(), Box<dyn std::error::Error>> {
-        let run = TestRunDirectory::create()?;
-        run.write_context(stopped_process_id()?)?;
-        let marker_path = run.0.join("debug-host-context.json");
-        let mut marker: DebugHostContext = serde_json::from_slice(&std::fs::read(&marker_path)?)?;
-        marker.model = "not-luna".to_owned();
-        std::fs::write(&marker_path, serde_json::to_vec(&marker)?)?;
-
-        let error =
-            validate_resume_run_directory(&run.0, 18787).expect_err("invalid marker must fail");
-        assert!(error.to_string().contains("does not match"));
-        Ok(())
-    }
-
-    #[test]
-    fn resume_rejects_live_prior_host_process() -> Result<(), Box<dyn std::error::Error>> {
-        let run = TestRunDirectory::create()?;
-        run.write_context(std::process::id())?;
-
-        let error =
-            validate_resume_run_directory(&run.0, 18787).expect_err("live marker PID must fail");
-        assert!(error.to_string().contains("still alive"));
-        Ok(())
-    }
-
-    #[test]
-    fn resume_admits_stopped_owned_private_root() -> Result<(), Box<dyn std::error::Error>> {
-        let run = TestRunDirectory::create()?;
-        run.write_context(stopped_process_id()?)?;
-
-        validate_resume_run_directory(&run.0, 18787)?;
-        Ok(())
-    }
-
-    #[test]
-    fn resume_replaces_marker_without_changing_service_data()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let run = TestRunDirectory::create()?;
-        run.write_context(stopped_process_id()?)?;
-        let database_path = run.0.join("agent-communication/project-board.sqlite");
-        std::fs::write(&database_path, b"preserved-board-state")?;
-        let resumed_context = DebugHostContext {
-            kind: "debugHostPrepared".to_owned(),
-            run_directory: run.0.clone(),
-            service_directory: run.0.join("agent-communication"),
-            workspace: run.0.join("agent-workspace"),
-            profile: "codex-router-debug".to_owned(),
-            model: "gpt-5.6-luna".to_owned(),
-            port: 18787,
-            host_pid: 4242,
-        };
-
-        replace_resumed_context(&resumed_context)?;
-
-        let published = read_existing_context(&run.0)?;
-        assert_eq!(published.host_pid, 4242);
-        assert_eq!(std::fs::read(database_path)?, b"preserved-board-state");
-        Ok(())
-    }
-
-    #[test]
-    fn resume_rejects_symlinked_context_marker() -> Result<(), Box<dyn std::error::Error>> {
-        use std::os::unix::fs::symlink;
-
-        let run = TestRunDirectory::create()?;
-        let target = run.0.join("context-target.json");
-        OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&target)?;
-        symlink(&target, run.0.join("debug-host-context.json"))?;
-
-        let error =
-            validate_resume_run_directory(&run.0, 18787).expect_err("symlink marker must fail");
-        assert!(error.to_string().contains("regular file"));
-        Ok(())
-    }
+    Ok(())
 }
+
+#[cfg(test)]
+#[path = "automation_debug_host/launch_tests.rs"]
+mod tests;

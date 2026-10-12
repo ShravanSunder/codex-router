@@ -47,7 +47,9 @@ pub enum SessionSetupError {
     #[error("Router host location {location} is unavailable for session grants")]
     HostLocationsUnavailable { location: String },
 }
+mod recorded_session_resume;
 mod router_permission_profile;
+pub use recorded_session_resume::RecordedSessionResume;
 /// Retains one connection and a receipt minted only by successful fresh thread/start.
 mod session_load_adoption;
 use router_permission_profile::{RouterSessionProfile, access_name};

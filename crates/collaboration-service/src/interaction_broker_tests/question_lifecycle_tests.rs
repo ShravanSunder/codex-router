@@ -519,11 +519,7 @@ async fn restart_cancels_populated_pending_interaction_history() {
             .is_empty()
     );
     assert!(broker_after_restart.list_questions(true).await.is_empty());
-    let records = interaction_records_without_timestamps(
-        &tokio::fs::read(directory.join("interaction-history.json"))
-            .await
-            .expect("history"),
-    );
+    let records = stored_interaction_records(&directory).await;
     assert!(matches!(records["restart-approval"].approval_state(),
         Some(crate::interaction_broker::InteractionHistoryState::Cancelled { reason }) if reason.as_str() == "hostRestarted"));
     assert!(matches!(&records["restart-question"],

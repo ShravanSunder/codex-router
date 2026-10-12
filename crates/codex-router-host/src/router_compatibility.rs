@@ -41,11 +41,33 @@ pub async fn probe_router(
     endpoint: SocketAddr,
     deadline: Duration,
 ) -> Result<RouterProbeResult, RouterProbeError> {
-    let deadline_at = tokio::time::Instant::now() + deadline;
+    let started_at = tokio::time::Instant::now();
+    let deadline_at = started_at + deadline;
     let mut stream = match tokio::time::timeout_at(deadline_at, TcpStream::connect(endpoint)).await
     {
         Ok(Ok(stream)) => stream,
-        Ok(Err(_)) | Err(_) => return Ok(RouterProbeResult::Unavailable),
+        Ok(Err(error)) => {
+            #[cfg(debug_assertions)]
+            tracing::debug!(target: "codex_router_host::startup_diagnostics", {
+                event.name = "codex_router.host.router_connect_unavailable",
+                connect_error = ?error.kind(),
+                elapsed_ms = u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX),
+                }, "Router connect failed"
+            );
+            #[cfg(not(debug_assertions))]
+            let _ = error;
+            return Ok(RouterProbeResult::Unavailable);
+        }
+        Err(_) => {
+            #[cfg(debug_assertions)]
+            tracing::debug!(target: "codex_router_host::startup_diagnostics", {
+                event.name = "codex_router.host.router_connect_unavailable",
+                connect_error = ?std::io::ErrorKind::TimedOut,
+                elapsed_ms = u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX),
+                }, "Router connect timed out"
+            );
+            return Ok(RouterProbeResult::Unavailable);
+        }
     };
     let request = format!("GET /healthz HTTP/1.1\r\nhost: {endpoint}\r\nconnection: close\r\n\r\n");
     match tokio::time::timeout_at(deadline_at, stream.write_all(request.as_bytes())).await {

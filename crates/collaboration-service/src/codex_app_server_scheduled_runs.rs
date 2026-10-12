@@ -19,6 +19,7 @@ use serde_json::{Value, json};
 pub struct CodexAppServerScheduledRuns {
     backend: NativeControlBackend,
     holder: std::sync::Arc<crate::UnmaterializedThreadHolder>,
+    approval_broker: Option<std::sync::Weak<dyn codex_acp_adapter::ApprovalBroker>>,
 }
 
 fn native_effects_into_automation(
@@ -39,7 +40,19 @@ impl CodexAppServerScheduledRuns {
         backend: NativeControlBackend,
         holder: std::sync::Arc<crate::UnmaterializedThreadHolder>,
     ) -> Self {
-        Self { backend, holder }
+        Self {
+            backend,
+            holder,
+            approval_broker: None,
+        }
+    }
+
+    pub(crate) fn with_approval_broker(
+        mut self,
+        broker: Option<std::sync::Weak<dyn codex_acp_adapter::ApprovalBroker>>,
+    ) -> Self {
+        self.approval_broker = broker;
+        self
     }
 
     async fn prepare_native(
@@ -491,10 +504,13 @@ impl ScheduledRunExecution for CodexAppServerScheduledRuns {
                         }));
                     }
                     let result = crate::scheduled_native_dispatch::dispatch(
-                        &self.backend,
-                        run,
-                        sink,
-                        Some(binding.connection_mut()),
+                        crate::scheduled_native_dispatch::ScheduledNativeDispatchInputs {
+                            backend: &self.backend,
+                            run,
+                            sink,
+                            held_connection: Some(binding.connection_mut()),
+                            approval_broker: self.approval_broker.as_ref(),
+                        },
                     )
                     .await;
                     match &result {
@@ -508,7 +524,16 @@ impl ScheduledRunExecution for CodexAppServerScheduledRuns {
                 }
                 HeldBindingCheckout::Busy => Ok(RunSubmission::NotStartedBusy),
                 HeldBindingCheckout::Missing => {
-                    crate::scheduled_native_dispatch::dispatch(&self.backend, run, sink, None).await
+                    crate::scheduled_native_dispatch::dispatch(
+                        crate::scheduled_native_dispatch::ScheduledNativeDispatchInputs {
+                            backend: &self.backend,
+                            run,
+                            sink,
+                            held_connection: None,
+                            approval_broker: self.approval_broker.as_ref(),
+                        },
+                    )
+                    .await
                 }
             }
         })

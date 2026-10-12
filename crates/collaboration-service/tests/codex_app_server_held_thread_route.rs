@@ -112,6 +112,12 @@ async fn scheduled_run_stale_generation_rejects_and_finishes_binding()
 }
 
 #[tokio::test]
+async fn scheduled_run_retired_generation_never_inputs_and_finishes_binding()
+-> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    exercise_held_empty_thread(Some(ScheduledScenario::Retired)).await
+}
+
+#[tokio::test]
 async fn codex_presence_reports_held_unmaterialized_thread_as_running()
 -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     exercise_held_empty_thread(Some(ScheduledScenario::Presence)).await
@@ -130,6 +136,7 @@ enum ScheduledScenario {
     Rejected,
     AdmissionRefused,
     Stale,
+    Retired,
     Presence,
     PresenceBusy,
 }
@@ -230,6 +237,7 @@ async fn exercise_held_empty_thread(
                 ScheduledScenario::Busy
                 | ScheduledScenario::AdmissionRefused
                 | ScheduledScenario::Stale
+                | ScheduledScenario::Retired
                 | ScheduledScenario::Presence
                 | ScheduledScenario::PresenceBusy,
             ) => &["initialize", "initialized", "thread/start"],
@@ -446,6 +454,9 @@ async fn exercise_held_empty_thread(
                 Some(Arc::clone(&schemas)),
             )?;
         }
+        if matches!(scenario, ScheduledScenario::Retired) {
+            backend_config.gate.retire()?;
+        }
         let busy_binding = if matches!(scenario, ScheduledScenario::Busy) {
             use codex_acp_adapter::UnmaterializedBindingStore;
             match holder.checkout("empty-thread") {
@@ -455,7 +466,7 @@ async fn exercise_held_empty_thread(
         } else {
             None
         };
-        let submission = route
+        let submission_result = route
             .submit_run(
                 collaboration_service::ScheduledRunSubmission {
                     run_id,
@@ -473,28 +484,41 @@ async fn exercise_held_empty_thread(
                 },
                 &sink,
             )
-            .await?;
-        match scenario {
-            ScheduledScenario::Started
-                if matches!(submission, RunSubmission::Started(_))
-                    && !holder.contains("empty-thread") => {}
-            ScheduledScenario::Busy
-                if matches!(submission, RunSubmission::NotStartedBusy)
-                    && holder.contains("empty-thread") => {}
-            ScheduledScenario::AdmissionRefused
-                if matches!(submission, RunSubmission::NotStartedBusy)
-                    && holder.contains("empty-thread") => {}
-            ScheduledScenario::Rejected
-                if matches!(submission, RunSubmission::Rejected(_))
-                    && holder.contains("empty-thread") => {}
-            ScheduledScenario::Stale
-                if matches!(submission, RunSubmission::Rejected(_))
-                    && !holder.contains("empty-thread") => {}
-            _ => {
-                return Err(format!(
-                    "unexpected scheduled submission or holder state: {submission:?}"
-                )
-                .into());
+            .await;
+        if matches!(scenario, ScheduledScenario::Retired) {
+            if !matches!(
+                submission_result,
+                Err(collaboration_service::DeliveryContractError::ClientOperation)
+            ) || holder.contains("empty-thread")
+            {
+                return Err(
+                    "retired generation submitted or retained a checked-out binding".into(),
+                );
+            }
+        } else {
+            let submission = submission_result?;
+            match scenario {
+                ScheduledScenario::Started
+                    if matches!(submission, RunSubmission::Started(_))
+                        && !holder.contains("empty-thread") => {}
+                ScheduledScenario::Busy
+                    if matches!(submission, RunSubmission::NotStartedBusy)
+                        && holder.contains("empty-thread") => {}
+                ScheduledScenario::AdmissionRefused
+                    if matches!(submission, RunSubmission::NotStartedBusy)
+                        && holder.contains("empty-thread") => {}
+                ScheduledScenario::Rejected
+                    if matches!(submission, RunSubmission::Rejected(_))
+                        && holder.contains("empty-thread") => {}
+                ScheduledScenario::Stale
+                    if matches!(submission, RunSubmission::Rejected(_))
+                        && !holder.contains("empty-thread") => {}
+                _ => {
+                    return Err(format!(
+                        "unexpected scheduled submission or holder state: {submission:?}"
+                    )
+                    .into());
+                }
             }
         }
         if matches!(scenario, ScheduledScenario::Stale) {

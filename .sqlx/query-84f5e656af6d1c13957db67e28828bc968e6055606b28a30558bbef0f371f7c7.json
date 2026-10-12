@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM typed_interaction_history WHERE request_id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "84f5e656af6d1c13957db67e28828bc968e6055606b28a30558bbef0f371f7c7"
+}

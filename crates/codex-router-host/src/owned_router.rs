@@ -49,6 +49,14 @@ impl RouterChild {
         self.process.process_id()
     }
 
+    /// Observe the retained child's status without signalling it.
+    #[cfg(debug_assertions)]
+    pub(crate) fn observe_startup_status(
+        &mut self,
+    ) -> Result<Option<std::process::ExitStatus>, ProcessGroupError> {
+        self.process.try_wait()
+    }
+
     /// Sends one SIGTERM and waits without any SIGKILL policy.
     pub async fn shutdown(&mut self) -> Result<RouterShutdownOutcome, RouterShutdownError> {
         if self.process.try_wait()?.is_some() {

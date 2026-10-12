@@ -193,6 +193,7 @@ pub(crate) async fn run_provider_session<P: InteractionPort>(
                             let _result = reply.send(Err(acp_operation_error(error)));
                             continue;
                         }
+                        crate::provider_transport_diagnostics::record_prompt_enqueued();
                         item_projection.discard_turn_local_cursors();
                         let turn_id = uuid::Uuid::now_v7().to_string();
                         runtime_handles.tool_registry.turn_started(session.session_id().0.as_ref(), &turn_id);

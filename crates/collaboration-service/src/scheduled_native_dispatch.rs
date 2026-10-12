@@ -15,12 +15,24 @@ use collaboration_protocol::{
 };
 use serde_json::{Value, json};
 
+pub(crate) struct ScheduledNativeDispatchInputs<'a> {
+    pub backend: &'a NativeControlBackend,
+    pub run: ScheduledRunSubmission,
+    pub sink: &'a dyn RunEvidenceSink,
+    pub held_connection: Option<&'a mut NativeProtocolConnection>,
+    pub approval_broker: Option<&'a std::sync::Weak<dyn codex_acp_adapter::ApprovalBroker>>,
+}
+
 pub(crate) async fn dispatch(
-    backend: &NativeControlBackend,
-    run: ScheduledRunSubmission,
-    sink: &dyn RunEvidenceSink,
-    held_connection: Option<&mut NativeProtocolConnection>,
+    inputs: ScheduledNativeDispatchInputs<'_>,
 ) -> Result<RunSubmission, DeliveryContractError> {
+    let ScheduledNativeDispatchInputs {
+        backend,
+        run,
+        sink,
+        held_connection,
+        approval_broker,
+    } = inputs;
     let run_id = run.run_id.clone();
     let (message_text, client_user_message_id, load_policy) = match run.payload {
         ScheduledRunPayload::Existing { prepared } => (
@@ -86,48 +98,106 @@ pub(crate) async fn dispatch(
         if read.pointer("/thread/id").and_then(Value::as_str) != Some(thread_id.as_str()) {
             return Err(DeliveryContractError::InvalidEvidence);
         }
-        match read.pointer("/thread/status/type").and_then(Value::as_str) {
+        let cold = match read.pointer("/thread/status/type").and_then(Value::as_str) {
             Some("active") => return Ok(RunSubmission::NotStartedBusy),
-            Some("notLoaded") => {
-                if load_policy == LoadPolicy::LoadedOnly {
-                    return Ok(RunSubmission::NotStartedBusy);
-                }
-                effects.resume = PreparationEffect::Unknown;
-                if matches!(
-                    sink.record(RouteEffectEvidence::CodexAppServer(effects.clone()))
-                        .await?,
-                    RunEvidenceDisposition::AdmissionRefused
-                ) {
-                    return Ok(RunSubmission::NotStartedBusy);
-                }
-                let resumed = connection
-                    .request_validated(
-                        &schemas,
-                        NativeOperation::ResumeThread,
-                        json!({"threadId":thread_id,"excludeTurns":true}),
-                    )
-                    .await;
-                effects.resume = match resumed {
-                    Ok(value)
-                        if value.pointer("/thread/id").and_then(Value::as_str)
-                            == Some(thread_id.as_str()) =>
-                    {
-                        PreparationEffect::Accepted
-                    }
-                    Ok(_) => return Ok(RunSubmission::Unknown),
-                    Err(NativeConnectionError::Rejected { .. }) => PreparationEffect::Rejected,
-                    Err(
-                        NativeConnectionError::InvalidInput | NativeConnectionError::Unavailable,
-                    ) => PreparationEffect::NotDispatched,
-                    Err(_) => return Ok(RunSubmission::Unknown),
-                };
-                sink.record(RouteEffectEvidence::CodexAppServer(effects))
-                    .await?;
+            Some("notLoaded") if load_policy == LoadPolicy::LoadedOnly => {
                 return Ok(RunSubmission::NotStartedBusy);
             }
-            Some("idle") => {}
+            Some("notLoaded") => true,
+            Some("idle") => false,
             _ => return Ok(RunSubmission::NotStartedBusy),
+        };
+        let prepared = match crate::native_recorded_policy::prepare_recorded_native_policy(
+            approval_broker,
+            &run.target,
+            read.pointer("/thread/cwd").and_then(Value::as_str),
+        )
+        .await
+        {
+            Ok(prepared) => prepared,
+            Err(_) => {
+                effects.submission = SubmissionEffect::NotDispatched;
+                sink.record(RouteEffectEvidence::CodexAppServer(effects))
+                    .await?;
+                return Ok(policy_rejected());
+            }
+        };
+        if cold || prepared.is_some() {
+            let parameters = prepared.as_ref().map_or_else(
+                || json!({"threadId":thread_id,"excludeTurns":true}),
+                |profile| {
+                    if cold {
+                        profile.native_parameters()
+                    } else {
+                        profile.native_parameters_for_loaded_thread()
+                    }
+                },
+            );
+            effects.resume = PreparationEffect::Unknown;
+            if matches!(
+                sink.record(RouteEffectEvidence::CodexAppServer(effects.clone()))
+                    .await?,
+                RunEvidenceDisposition::AdmissionRefused
+            ) {
+                return Ok(RunSubmission::NotStartedBusy);
+            }
+            let resumed = connection
+                .request_validated(&schemas, NativeOperation::ResumeThread, parameters)
+                .await;
+            let resumed = match resumed {
+                Ok(value) => {
+                    effects.resume = PreparationEffect::Accepted;
+                    value
+                }
+                Err(NativeConnectionError::Rejected { .. }) => {
+                    effects.resume = PreparationEffect::Rejected;
+                    sink.record(RouteEffectEvidence::CodexAppServer(effects))
+                        .await?;
+                    return Ok(RunSubmission::NotStartedBusy);
+                }
+                Err(NativeConnectionError::InvalidInput | NativeConnectionError::Unavailable) => {
+                    effects.resume = PreparationEffect::NotDispatched;
+                    sink.record(RouteEffectEvidence::CodexAppServer(effects))
+                        .await?;
+                    return Ok(RunSubmission::NotStartedBusy);
+                }
+                Err(_) => return Ok(RunSubmission::Unknown),
+            };
+            if resumed.pointer("/thread/id").and_then(Value::as_str) != Some(thread_id.as_str()) {
+                sink.record(RouteEffectEvidence::CodexAppServer(effects))
+                    .await?;
+                return Ok(RunSubmission::Unknown);
+            }
+            if let Some(profile) = prepared {
+                match profile.validate_response(&resumed).await {
+                    Ok(()) => {}
+                    Err(codex_acp_adapter::SessionSetupError::OutcomeUnknown) => {
+                        effects.submission = SubmissionEffect::NotDispatched;
+                        sink.record(RouteEffectEvidence::CodexAppServer(effects))
+                            .await?;
+                        return Ok(RunSubmission::Unknown);
+                    }
+                    Err(_) => {
+                        effects.submission = SubmissionEffect::NotDispatched;
+                        sink.record(RouteEffectEvidence::CodexAppServer(effects))
+                            .await?;
+                        return Ok(policy_rejected());
+                    }
+                }
+            }
+            sink.record(RouteEffectEvidence::CodexAppServer(effects.clone()))
+                .await?;
+            if cold {
+                return Ok(RunSubmission::NotStartedBusy);
+            }
         }
+    }
+    let retired = admission.retirement();
+    if retired.is_cancelled() {
+        effects.submission = SubmissionEffect::NotDispatched;
+        sink.record(RouteEffectEvidence::CodexAppServer(effects))
+            .await?;
+        return Ok(RunSubmission::NotStartedBusy);
     }
     effects.generation = Some(admission.generation().clone());
     effects.submission = SubmissionEffect::Dispatching;
@@ -145,10 +215,10 @@ pub(crate) async fn dispatch(
         }
         RunEvidenceDisposition::AdmissionRefused => return Ok(RunSubmission::NotStartedBusy),
     };
-    let retired = admission.retirement();
     let response = tokio::time::timeout(std::time::Duration::from_secs(30), async {
         tokio::select! {
             biased;
+            _ = retired.cancelled() => Err(NativeConnectionError::OutcomeUnknown),
             result = connection.request_validated(
                 &schemas,
                 NativeOperation::StartTurn,
@@ -156,7 +226,6 @@ pub(crate) async fn dispatch(
                     "clientUserMessageId":client_user_message_id.as_str(),
                     "effort":run.inputs.execution_configuration.effort.as_deref().unwrap_or_default()}),
             ) => result,
-            _ = retired.cancelled() => Err(NativeConnectionError::OutcomeUnknown),
         }
     })
     .await
@@ -243,4 +312,14 @@ pub(crate) async fn dispatch(
     sink.record(RouteEffectEvidence::CodexAppServer(effects))
         .await?;
     Ok(outcome)
+}
+
+fn policy_rejected() -> RunSubmission {
+    RunSubmission::Rejected(DeliveryRejection {
+        reason: DeliveryRejectionReason::SettingsUnresolved,
+        next_action: DeliveryNextAction::InspectTarget,
+        client_code: None,
+        detail: Some("Native scheduled target settings do not match its recorded policy".into()),
+        claims: None,
+    })
 }
