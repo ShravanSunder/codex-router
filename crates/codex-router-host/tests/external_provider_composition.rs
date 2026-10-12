@@ -60,9 +60,16 @@ sys.stdin.read()
             remote_control_server_name: None,
             owner_human_id: None,
         },
-        vec![ExternalProviderStartup::Launch(
-            ExternalProviderLaunchBinding::claude(provider, Vec::new()).expect("provider binding"),
-        )],
+        vec![ExternalProviderStartup::Launch({
+            let mut binding = ExternalProviderLaunchBinding::claude(provider, Vec::new())
+                .expect("provider binding");
+            codex_router_test_support::global_claude_fixture::declare_global_claude_fixture(
+                root.path(),
+                &mut binding.launch.environment,
+            )
+            .expect("declare test-owned global Claude executable");
+            binding
+        })],
     )
     .await
     .expect("collaboration runtime");
@@ -215,13 +222,19 @@ print(json.dumps({'jsonrpc':'2.0','id':request['id'],'result':{'protocolVersion'
             remote_control_server_name: None,
             owner_human_id: None,
         },
-        vec![ExternalProviderStartup::Launch(
-            ExternalProviderLaunchBinding::claude(
+        vec![ExternalProviderStartup::Launch({
+            let mut binding = ExternalProviderLaunchBinding::claude(
                 provider,
                 vec![barrier_path.display().to_string()],
             )
-            .expect("binding"),
-        )],
+            .expect("binding");
+            codex_router_test_support::global_claude_fixture::declare_global_claude_fixture(
+                root.path(),
+                &mut binding.launch.environment,
+            )
+            .expect("declare test-owned global Claude executable");
+            binding
+        })],
     );
     tokio::pin!(start);
     let (provider_barrier, _) = tokio::select! {

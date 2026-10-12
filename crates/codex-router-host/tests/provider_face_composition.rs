@@ -68,9 +68,16 @@ sys.stdin.read()
             peer_registry_directory: None,
             remote_control_server_name: None,
         },
-        vec![ExternalProviderStartup::Launch(
-            ExternalProviderLaunchBinding::claude(provider, Vec::new()).expect("provider binding"),
-        )],
+        vec![ExternalProviderStartup::Launch({
+            let mut binding = ExternalProviderLaunchBinding::claude(provider, Vec::new())
+                .expect("provider binding");
+            codex_router_test_support::global_claude_fixture::declare_global_claude_fixture(
+                root.path(),
+                &mut binding.launch.environment,
+            )
+            .expect("declare test-owned global Claude executable");
+            binding
+        })],
     )
     .await
     .expect("Host starts provider face");
@@ -209,9 +216,16 @@ sys.stdin.read()
             peer_registry_directory: None,
             remote_control_server_name: None,
         },
-        vec![ExternalProviderStartup::Launch(
-            ExternalProviderLaunchBinding::claude(provider, Vec::new()).expect("provider binding"),
-        )],
+        vec![ExternalProviderStartup::Launch({
+            let mut binding = ExternalProviderLaunchBinding::claude(provider, Vec::new())
+                .expect("provider binding");
+            codex_router_test_support::global_claude_fixture::declare_global_claude_fixture(
+                root.path(),
+                &mut binding.launch.environment,
+            )
+            .expect("declare test-owned global Claude executable");
+            binding
+        })],
     )
     .await
     .expect("Host starts provider face");

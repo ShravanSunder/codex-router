@@ -92,12 +92,17 @@ async fn start_host(root: &Path) -> TestResult<CollaborationRuntime> {
             peer_registry_directory: None,
             remote_control_server_name: None,
         },
-        vec![ExternalProviderStartup::Launch(
-            ExternalProviderLaunchBinding::claude(
+        vec![ExternalProviderStartup::Launch({
+            let mut binding = ExternalProviderLaunchBinding::claude(
                 provider,
                 vec![root.join("exit.sock").display().to_string()],
-            )?,
-        )],
+            )?;
+            codex_router_test_support::global_claude_fixture::declare_global_claude_fixture(
+                root,
+                &mut binding.launch.environment,
+            )?;
+            binding
+        })],
     )
     .await?)
 }

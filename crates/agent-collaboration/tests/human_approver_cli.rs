@@ -59,9 +59,14 @@ async fn cli_human_approver_from_create_can_decide_provider_permission() -> Test
             remote_control_server_name: None,
             owner_human_id: None,
         },
-        vec![ExternalProviderStartup::Launch(
-            ExternalProviderLaunchBinding::claude(provider_path, vec![])?,
-        )],
+        vec![ExternalProviderStartup::Launch({
+            let mut binding = ExternalProviderLaunchBinding::claude(provider_path, vec![])?;
+            codex_router_test_support::global_claude_fixture::declare_global_claude_fixture(
+                root.path(),
+                &mut binding.launch.environment,
+            )?;
+            binding
+        })],
     )
     .await?;
     let client = CollaborationClient::connect(root.path(), "human-approver-observer", "1").await?;

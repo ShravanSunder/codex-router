@@ -46,8 +46,8 @@ async fn host_router_selects_peer_and_provider_without_cross_loading() {
             owner_human_id: None,
         },
         vec![
-            ExternalProviderStartup::Launch(
-                ExternalProviderLaunchBinding::claude(
+            ExternalProviderStartup::Launch({
+                let mut binding = ExternalProviderLaunchBinding::claude(
                     executable.clone(),
                     vec![
                         "claude-held".to_owned(),
@@ -55,8 +55,14 @@ async fn host_router_selects_peer_and_provider_without_cross_loading() {
                         claude_prompts.display().to_string(),
                     ],
                 )
-                .expect("Claude binding"),
-            ),
+                .expect("Claude binding");
+                codex_router_test_support::global_claude_fixture::declare_global_claude_fixture(
+                    root.path(),
+                    &mut binding.launch.environment,
+                )
+                .expect("declare test-owned global Claude executable");
+                binding
+            }),
             ExternalProviderStartup::Launch(
                 ExternalProviderLaunchBinding::cursor(
                     executable,
@@ -273,8 +279,8 @@ async fn host_composed_permission_push_preserves_selected_option_through_provide
             owner_human_id: None,
         },
         vec![
-            ExternalProviderStartup::Launch(
-                ExternalProviderLaunchBinding::claude(
+            ExternalProviderStartup::Launch({
+                let mut binding = ExternalProviderLaunchBinding::claude(
                     executable.clone(),
                     vec![
                         "permission-requester".to_owned(),
@@ -285,8 +291,14 @@ async fn host_composed_permission_push_preserves_selected_option_through_provide
                         requester_prompts.display().to_string(),
                     ],
                 )
-                .expect("requester binding"),
-            ),
+                .expect("requester binding");
+                codex_router_test_support::global_claude_fixture::declare_global_claude_fixture(
+                    root.path(),
+                    &mut binding.launch.environment,
+                )
+                .expect("declare test-owned global Claude executable");
+                binding
+            }),
             ExternalProviderStartup::Launch(
                 ExternalProviderLaunchBinding::cursor(
                     executable,

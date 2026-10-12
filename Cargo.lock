@@ -184,6 +184,7 @@ dependencies = [
  "claude-code-peer-messaging",
  "codex-native-integration",
  "codex-router-host",
+ "codex-router-test-support",
  "collaboration-client",
  "collaboration-mcp",
  "collaboration-protocol",
