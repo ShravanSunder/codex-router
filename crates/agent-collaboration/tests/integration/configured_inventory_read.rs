@@ -8,6 +8,70 @@ mod source_api_fixture;
 pub(crate) use source_api_fixture::SourceApiFixture;
 
 #[tokio::test]
+async fn wire_observer_preserves_genuine_api_header_acceptance_and_rejection() {
+    let fixture =
+        SourceApiFixture::start("00000000-0000-4000-8000-000000000001", "source-model").await;
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap();
+    let payload=serde_json::json!({"jsonrpc":"2.0","id":41,"method":"tools/call","params":{"name":"endpoints_list","arguments":{}}}).to_string();
+    for (accept, content_type, protocol) in [
+        (
+            Some("application/json, text/event-stream"),
+            Some("application/json"),
+            Some("2025-11-25"),
+        ),
+        (None, Some("application/json"), Some("2025-11-25")),
+        (
+            Some("text/plain"),
+            Some("application/json"),
+            Some("2025-11-25"),
+        ),
+        (
+            Some("application/json, text/event-stream"),
+            None,
+            Some("2025-11-25"),
+        ),
+        (
+            Some("application/json, text/event-stream"),
+            Some("text/plain"),
+            Some("2025-11-25"),
+        ),
+        (
+            Some("application/json, text/event-stream"),
+            Some("application/json"),
+            Some("not-a-protocol"),
+        ),
+    ] {
+        let mut replies = Vec::new();
+        for url in [&fixture.direct_api_url, &fixture.url] {
+            let mut request = client.post(url).body(payload.clone());
+            for (header, value) in [
+                ("accept", accept),
+                ("content-type", content_type),
+                ("mcp-protocol-version", protocol),
+            ] {
+                if let Some(value) = value {
+                    request = request.header(header, value);
+                }
+            }
+            let response = request.send().await.unwrap();
+            let status = response.status();
+            let media = response.headers().get("content-type").cloned();
+            let body = response.bytes().await.unwrap();
+            replies.push((status, media, body));
+        }
+        assert_eq!(
+            replies[0], replies[1],
+            "observer must preserve the actual API response for {accept:?}/{content_type:?}/{protocol:?}"
+        );
+    }
+    fixture.finish().await;
+}
+
+#[tokio::test]
 async fn configured_dispatch_reads_two_real_mcp_sources_without_collapsing_equal_ids() {
     // Arrange: actual APIs own separate SQLite catalogs; neither native backend is running.
     let (first, second) = tokio::join!(
@@ -26,8 +90,8 @@ async fn configured_dispatch_reads_two_real_mcp_sources_without_collapsing_equal
     );
     // Act: call the production dispatcher callback, not a substitute source producer.
     let (first_result, second_result) = tokio::join!(
-        loader(first_request.clone()),
-        loader(second_request.clone())
+        read_complete_source(loader.clone(), first_request.clone()),
+        read_complete_source(loader.clone(), second_request.clone())
     );
     tokio::join!(first.finish(), second.finish());
     // Assert: independently fixed source/model/path facts survive the actual read path.
@@ -146,7 +210,7 @@ async fn configured_any_reads_real_native_and_provider_api_storage_without_equal
         discover_repository_identity(std::path::Path::new("/tmp")),
         None,
     );
-    let snapshot = loader(fixture.request("Mixed source"))
+    let snapshot = read_complete_source(loader, fixture.request("Mixed source"))
         .await
         .into_snapshot()
         .unwrap();
@@ -226,7 +290,10 @@ async fn native_only_source_keeps_supported_interactive_filter_and_no_provider_c
         SourceApiFixture::start("00000000-0000-4000-8000-000000000008", "interactive-model").await;
     let mut request = fixture.request("Native source");
     request.query.source = SessionsSource::Interactive;
-    let snapshot = fixture.loader()(request).await.into_snapshot().unwrap();
+    let snapshot = read_complete_source(fixture.loader(), request)
+        .await
+        .into_snapshot()
+        .unwrap();
     assert_eq!(snapshot.records.len(), 1);
     assert_eq!(snapshot.records[0].session_id, "shared-source-id");
     assert_eq!(
@@ -235,4 +302,52 @@ async fn native_only_source_keeps_supported_interactive_filter_and_no_provider_c
     );
     assert_eq!(fixture.api_call_count("provider_sessions_list"), 0);
     fixture.finish().await;
+}
+
+/// A test consumer exhausts real page continuations to preserve terminal scan oracles.
+/// Production progressive publication is separately exercised through the actual worker/UI.
+pub(crate) async fn read_complete_source(
+    loader: SessionsPickerRecordLoader,
+    initial: crate::presentation::session_picker::SourceInventoryRequest,
+) -> crate::presentation::session_picker::SourceInventoryResult {
+    use crate::presentation::session_picker::{InventoryPageProgress, SourceInventoryResult};
+    let mut request = initial.clone();
+    let mut rows = Vec::new();
+    loop {
+        match loader(request.clone()).await {
+            SourceInventoryResult::Qualified { continuation, .. } => {
+                request.continuation = Some(continuation);
+            }
+            SourceInventoryResult::Rejected { reason, .. } => {
+                return SourceInventoryResult::Rejected {
+                    request: initial,
+                    reason,
+                };
+            }
+            SourceInventoryResult::Ready {
+                binding,
+                snapshot,
+                progress,
+                ..
+            } => {
+                rows.extend(snapshot.records);
+                match progress {
+                    InventoryPageProgress::Complete => {
+                        return SourceInventoryResult::Ready {
+                            request: initial,
+                            binding,
+                            snapshot: crate::picker_runtime_status::PickerRecordsSnapshot {
+                                records: rows,
+                                runtime_coverage: snapshot.runtime_coverage,
+                            },
+                            progress: InventoryPageProgress::Complete,
+                        };
+                    }
+                    InventoryPageProgress::MoreAvailable { continuation } => {
+                        request.continuation = Some(continuation)
+                    }
+                }
+            }
+        }
+    }
 }

@@ -81,7 +81,7 @@ pub(crate) use router_connection_registry::{RouterRegistryError, RouterRegistryR
 mod picker_runtime_inventory;
 
 #[path = "session_commands/configured_inventory_loader.rs"]
-mod configured_inventory_loader;
+pub(crate) mod configured_inventory_loader;
 #[path = "session_commands/configured_inventory_query.rs"]
 mod configured_inventory_query;
 #[path = "session_commands/configured_inventory_transport.rs"]
@@ -333,10 +333,12 @@ fn run_interactive_session(
     match outcome {
         SessionsPickerOutcome::ResumeSession(selection) => {
             validate_resume_session_id(&selection.session_id())?;
+            selection.emit_model_diagnostic();
             runner.run_codex_resume(&command.codex_args, &selection)
         }
         SessionsPickerOutcome::ForkSession(selection) => {
             validate_resume_session_id(&selection.session_id())?;
+            selection.emit_model_diagnostic();
             runner.run_codex_fork(&command.codex_args, &selection)
         }
         SessionsPickerOutcome::StartNewSession => runner.run_codex_new(&command.codex_args),
@@ -406,6 +408,7 @@ fn session_picker_record_loader(
                 .refresh(service_directory.as_deref(), stored, include_empty_sessions)
                 .await;
             SourceInventoryResult::Ready {
+                progress: crate::presentation::session_picker::InventoryPageProgress::Complete,
                 binding: None,
                 request,
                 snapshot,
@@ -685,3 +688,9 @@ fn validate_resume_session_id(session_id: &str) -> Result<(), SessionsCommandErr
 #[cfg(test)]
 #[path = "session_commands/session_projection_tests.rs"]
 mod tests;
+
+#[cfg(feature = "quota-reset-test-harness")]
+#[path = "session_commands/stored_model_terminal_fixture.rs"]
+mod stored_model_terminal_fixture;
+#[cfg(feature = "quota-reset-test-harness")]
+pub(crate) use stored_model_terminal_fixture::run_stored_model_terminal_fixture;

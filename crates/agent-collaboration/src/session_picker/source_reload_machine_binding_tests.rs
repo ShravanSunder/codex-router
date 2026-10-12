@@ -55,6 +55,7 @@ async fn configured_machine_keeps_native_and_provider_rows_on_their_own_endpoint
         let rows = vec![native_row.clone(), provider_row.clone()];
         Box::pin(async move {
             SourceInventoryResult::Ready {
+                progress: crate::presentation::session_picker::InventoryPageProgress::Complete,
                 request,
                 binding: Some(binding),
                 snapshot: observed_records(rows),

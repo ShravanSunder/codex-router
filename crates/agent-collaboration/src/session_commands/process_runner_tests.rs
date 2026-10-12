@@ -86,6 +86,7 @@ fn hosted_selection_cannot_fall_back_to_a_local_process_for_resume_or_fork() {
         source_context: None,
         provenance: crate::sessions::SessionRowProvenance::ObservedHosted,
         model_choice: ResumeModelChoice::default(),
+        model_diagnostic: None,
     };
     let mut runner = ProcessSessionsCommandRunner {
         launch_target: SessionsLaunchTarget::Local {

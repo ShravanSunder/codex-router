@@ -19,12 +19,15 @@ pub(crate) use source_inventory_binding::{InventoryEndpointKind, SourceInventory
 mod source_reload_progress;
 mod source_reload_worker;
 pub(crate) use source_inventory_request::{
-    PickerSourceContext, SourceInventoryRejection, SourceInventoryRequest, SourceInventoryResult,
+    InventoryPageProgress, PickerSourceContext, SourceContinuation, SourceInventoryRejection,
+    SourceInventoryRequest, SourceInventoryResult,
 };
 #[cfg(test)]
 mod picker_source_identity_tests;
 #[cfg(any(test, feature = "quota-reset-test-harness"))]
 mod test_support;
+#[cfg(feature = "quota-reset-test-harness")]
+pub(crate) use test_support::picker_request as terminal_fixture_request;
 
 pub(crate) use picker_actions::SessionsPickerOutcome;
 pub(crate) use picker_component::run_sessions_picker;

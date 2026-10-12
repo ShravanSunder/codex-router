@@ -61,6 +61,7 @@ async fn individual_machine_switch_reads_and_publishes_only_its_bound_source() {
             row.provenance = crate::sessions::SessionRowProvenance::ObservedHosted;
             row.normalized_cwd = None;
             SourceInventoryResult::Ready {
+                progress: crate::presentation::session_picker::InventoryPageProgress::Complete,
                 request,
                 binding: Some(
                     crate::presentation::session_picker::SourceInventoryBinding::native_fixture(
@@ -184,6 +185,7 @@ async fn all_view_renders_qualified_alias_labels_from_simulated_bound_source_rep
         Box::pin(async move {
             let PickerSourceContext::ConfiguredHosted(profile) = &request.source_context else {
                 return SourceInventoryResult::Ready {
+                    progress: crate::presentation::session_picker::InventoryPageProgress::Complete,
                     binding: None,
                     request,
                     snapshot: observed_records(vec![]),
@@ -208,6 +210,7 @@ async fn all_view_renders_qualified_alias_labels_from_simulated_bound_source_rep
                 vec![row]
             };
             SourceInventoryResult::Ready {
+                progress: crate::presentation::session_picker::InventoryPageProgress::Complete,
                 binding: Some(
                     crate::presentation::session_picker::SourceInventoryBinding::native_fixture(
                         endpoint,
@@ -421,19 +424,29 @@ async fn named_new_uses_configured_remote_cwd_and_cannot_create_before_route_qua
 
 #[tokio::test]
 async fn tab_and_enter_open_machine_control_while_plain_enter_still_resumes() {
-    let (frames, outcome) = render_events(
-        picker_request(),
-        vec![
-            key(KeyCode::Tab),
-            key(KeyCode::Enter),
-            key(KeyCode::Esc),
-            control_key('c'),
-        ],
-    )
-    .await
-    .unwrap();
+    let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+    sender.send(key(KeyCode::Tab)).unwrap();
+    sender.send(key(KeyCode::Enter)).unwrap();
+    let input = futures_util::stream::unfold(receiver, |mut receiver| async {
+        receiver.recv().await.map(|event| (event, receiver))
+    });
+    let mut outcome: Option<SessionsPickerOutcome> = None;
+    let observed=tokio::time::timeout(Duration::from_secs(2),async {
+        let mut picker=element! {SessionsPickerComponent(request:picker_request(),width:130usize,height:40usize,selected_outcome_out:&mut outcome)};
+        let frames=picker.mock_terminal_render_loop(MockTerminalConfig::with_events(input));tokio::pin!(frames);
+        let mut observed=false;
+        while let Some(canvas)=frames.next().await {
+            if !observed&&canvas.to_string().contains("Choose machine") {
+                observed=true;sender.send(key(KeyCode::Esc)).unwrap();sender.send(control_key('c')).unwrap();
+            }
+        }
+        observed
+    }).await.unwrap();
+    assert!(
+        observed,
+        "Tab then Enter must display the control before cancellation"
+    );
     assert_eq!(outcome, None);
-    assert!(frames.iter().any(|frame| frame.contains("Choose machine")));
     let (_, outcome) = render_events(picker_request(), vec![key(KeyCode::Enter)])
         .await
         .unwrap();
@@ -504,3 +517,12 @@ async fn configured_machine_renderer_reads_real_mcp_sqlite_rows_without_launchin
     );
     source.finish().await;
 }
+
+#[path = "picker_progressive_read_tests.rs"]
+mod progressive;
+
+#[path = "picker_all_status_tests.rs"]
+mod all_status_tests;
+
+#[path = "picker_restoration_tests.rs"]
+mod restoration_tests;

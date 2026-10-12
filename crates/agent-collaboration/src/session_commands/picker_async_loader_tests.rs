@@ -78,6 +78,7 @@ async fn configured_picker_loader_rejects_unqualified_credentials_and_unsupporte
             source_context: source_context.clone(),
             query,
             request_generation: 17,
+            continuation: None,
         };
         let result = loader(request.clone()).await;
         assert_eq!(
@@ -154,6 +155,7 @@ async fn default_picker_loader_uses_the_existing_async_runtime() {
             source_context: crate::presentation::session_picker::PickerSourceContext::LocalCodex,
             query,
             request_generation: 7,
+            continuation: None,
         },
     )
     .await

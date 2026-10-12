@@ -6,14 +6,49 @@ use super::{
     source_reload_worker::SessionRecordsReloadRequest,
 };
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct SourceSwitchCheckpoint {
+    switch_request: SessionRecordsReloadRequest,
+    prior_model: Box<SessionsPickerModel>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum SourceReloadAcceptance {
+    Ignored,
+    Applied,
+    RestoredIndependentView,
+    RestoredRetiredView,
+}
+
 impl SessionsPickerModel {
+    pub(super) fn prepare_source_reload(&mut self, generation: u64) -> SessionRecordsReloadRequest {
+        self.source_switch_checkpoint = None;
+        let request = SessionRecordsReloadRequest {
+            generation,
+            query: self.data_query(),
+            sources: self.source_contexts(),
+        };
+        if matches!(
+            self.machine_controls.stage,
+            PickerMachineStage::Loading { .. }
+        ) {
+            let mut previous = self.clone();
+            previous.machine_controls.cancel_choice();
+            self.source_switch_checkpoint = Some(SourceSwitchCheckpoint {
+                switch_request: request.clone(),
+                prior_model: Box::new(previous),
+            });
+        }
+        request
+    }
+
     pub(super) fn accept_source_reload(
         &mut self,
         request: &SessionRecordsReloadRequest,
         update: SourceReloadUpdate,
-    ) {
+    ) -> SourceReloadAcceptance {
         if self.data_query() != request.query || self.source_contexts() != request.sources {
-            return;
+            return SourceReloadAcceptance::Ignored;
         }
         if matches!(
             self.machine_controls.stage,
@@ -22,21 +57,62 @@ impl SessionsPickerModel {
             match update.records_update {
                 SourceRecordsUpdate::Pending => {}
                 SourceRecordsUpdate::Ready(records) => {
+                    let complete = update.source_progress.iter().all(|progress| {
+                        matches!(progress.read_state, SourceReadState::Complete { .. })
+                    });
+                    if !complete && self.source_switch_checkpoint.is_none() {
+                        let mut previous = self.clone();
+                        previous.source_switch_checkpoint = None;
+                        previous.machine_controls.cancel_choice();
+                        self.source_switch_checkpoint = Some(SourceSwitchCheckpoint {
+                            switch_request: request.clone(),
+                            prior_model: Box::new(previous),
+                        });
+                    }
+                    if complete {
+                        self.source_switch_checkpoint = None;
+                    }
                     self.machine_controls.complete_source_switch(Ok(()));
                     self.source_progress = update.source_progress;
                     self.replace_records(records);
                 }
                 SourceRecordsUpdate::Rejected(reason) => {
                     self.machine_controls.complete_source_switch(Err(reason));
+                    let failed_choice = self.machine_controls.stage.clone();
+                    if let Some(acceptance) = self.restore_switch_checkpoint(request, reason) {
+                        self.machine_controls.stage = failed_choice;
+                        return acceptance;
+                    }
                 }
             }
-            return;
+            return SourceReloadAcceptance::Applied;
         }
         self.source_progress = update.source_progress;
         match update.records_update {
             SourceRecordsUpdate::Pending => {}
-            SourceRecordsUpdate::Ready(records) => self.replace_records(records),
+            SourceRecordsUpdate::Ready(records) => {
+                if self
+                    .source_progress
+                    .iter()
+                    .all(|progress| matches!(progress.read_state, SourceReadState::Complete { .. }))
+                {
+                    self.source_switch_checkpoint = None;
+                }
+                self.replace_records(records);
+            }
             SourceRecordsUpdate::Rejected(reason) => {
+                if let Some(acceptance) = self.restore_switch_checkpoint(request, reason) {
+                    return acceptance;
+                }
+                if self.machine_controls.filter
+                    != super::picker_machine_controls::PickerMachineFilter::Default
+                {
+                    self.replace_records(crate::picker_runtime_status::PickerRecordsSnapshot {
+                        records: vec![],
+                        runtime_coverage:
+                            crate::picker_runtime_status::PickerRuntimeCoverage::Unavailable,
+                    });
+                }
                 for progress in &mut self.source_progress {
                     if matches!(progress.read_state, SourceReadState::Loading) {
                         progress.read_state = SourceReadState::Rejected { reason };
@@ -45,6 +121,104 @@ impl SessionsPickerModel {
                 self.invalidate_runtime_statuses();
             }
         }
+        SourceReloadAcceptance::Applied
+    }
+
+    fn restore_switch_checkpoint(
+        &mut self,
+        request: &SessionRecordsReloadRequest,
+        reason: super::SourceInventoryRejection,
+    ) -> Option<SourceReloadAcceptance> {
+        let checkpoint = self.source_switch_checkpoint.take()?;
+        if checkpoint.switch_request != *request {
+            return None;
+        }
+        let mut previous = *checkpoint.prior_model;
+        let contains_failed = request.sources.iter().any(|failed| {
+            previous
+                .source_contexts()
+                .iter()
+                .any(|source| same_inventory_source(source, failed))
+        });
+        if contains_failed {
+            previous.retire_restored_work(&request.sources, reason);
+        }
+        *self = previous;
+        Some(if contains_failed {
+            SourceReloadAcceptance::RestoredRetiredView
+        } else {
+            SourceReloadAcceptance::RestoredIndependentView
+        })
+    }
+
+    fn retire_restored_work(
+        &mut self,
+        failed: &[super::PickerSourceContext],
+        reason: super::SourceInventoryRejection,
+    ) {
+        for source in self.source_contexts() {
+            if !self
+                .source_progress
+                .iter()
+                .any(|progress| progress.source_context == source)
+            {
+                self.source_progress
+                    .push(super::source_reload_progress::SourceReadProgress {
+                        source_context: source,
+                        read_state: SourceReadState::Rejected {
+                            reason: super::SourceInventoryRejection::StaleSnapshot,
+                        },
+                    });
+            }
+        }
+        for progress in &mut self.source_progress {
+            if failed
+                .iter()
+                .any(|failed| same_inventory_source(&progress.source_context, failed))
+            {
+                progress.read_state = SourceReadState::Rejected { reason };
+            } else if matches!(
+                progress.read_state,
+                SourceReadState::Loading
+                    | SourceReadState::LoadingMore { .. }
+                    | SourceReadState::Suspended { .. }
+            ) {
+                progress.read_state = SourceReadState::Rejected {
+                    reason: super::SourceInventoryRejection::StaleSnapshot,
+                };
+            }
+        }
+        let records = self
+            .request
+            .records
+            .iter()
+            .filter(|record| {
+                record.source_context.as_ref().is_some_and(|source| {
+                    self.source_progress.iter().any(|progress| {
+                        progress.source_context == *source
+                            && matches!(progress.read_state, SourceReadState::Complete { .. })
+                    })
+                })
+            })
+            .cloned()
+            .collect();
+        self.replace_records(crate::picker_runtime_status::PickerRecordsSnapshot {
+            records,
+            runtime_coverage: self.runtime_coverage,
+        });
+    }
+}
+
+fn same_inventory_source(
+    first: &super::PickerSourceContext,
+    second: &super::PickerSourceContext,
+) -> bool {
+    match (first, second) {
+        (
+            super::PickerSourceContext::ConfiguredHosted(first),
+            super::PickerSourceContext::ConfiguredHosted(second),
+        ) => first.service_id == second.service_id,
+        _ => first == second,
     }
 }
 

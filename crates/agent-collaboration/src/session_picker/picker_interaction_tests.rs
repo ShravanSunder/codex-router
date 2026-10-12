@@ -254,12 +254,12 @@ async fn sessions_picker_non_left_row_events_do_not_focus_or_activate() {
             TerminalEvent::FullscreenMouse(FullscreenMouseEvent::new(
                 MouseEventKind::Down(MouseButton::Right),
                 10,
-                14,
+                15,
             )),
             TerminalEvent::FullscreenMouse(FullscreenMouseEvent::new(
                 MouseEventKind::Up(MouseButton::Left),
                 10,
-                14,
+                15,
             )),
             TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Enter)),
         ],

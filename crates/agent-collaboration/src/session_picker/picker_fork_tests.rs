@@ -5,6 +5,76 @@ use crate::sessions::{RouterRegistryRead, SessionActionSelection, SessionPickerI
 use collaboration_client::protocol::SessionRef;
 use serde_json::json;
 
+#[test]
+fn review_fork_destination_aliases_use_captured_service_not_display_label() {
+    use crate::presentation::session_picker::picker_fork_confirmation::{
+        ForkAvailability, ForkConfirmation,
+    };
+    let mut request = picker_request();
+    let registry=crate::sessions::router_connection_registry::RouterConnectionRegistry::parse(&json!({"version":1,"routers":[
+        {"name":"Chosen alias","connection":{"kind":"remote","serviceId":"00000000-0000-4000-8000-000000000001","mcpUrl":"https://fixture.invalid/mcp"}},
+        {"name":"Also same source","connection":{"kind":"remote","serviceId":"00000000-0000-4000-8000-000000000001","mcpUrl":"https://fixture.invalid/alias"}},
+        {"name":"Decorated source","connection":{"kind":"remote","serviceId":"00000000-0000-4000-8000-000000000002","mcpUrl":"https://fixture.invalid/other"}}
+    ]}).to_string()).unwrap();
+    let profile = registry.routers[0].clone();
+    request.router_registry = RouterRegistryRead::Ready(registry);
+    let target:SessionRef=serde_json::from_value(json!({"endpoint":{"serviceId":"00000000-0000-4000-8000-000000000001","endpointId":"source-native"},"sessionId":"thread-a"})).unwrap();
+    let record = &mut request.records[0];
+    record.identity = SessionPickerIdentity::HostedCodex(target.clone());
+    record.source_context = Some(PickerSourceContext::ConfiguredHosted(profile));
+    record.machine_display_label = Some("Decorated source".to_owned());
+    let mut captured = ForkConfirmation::capture(&request.records[0], &request);
+    assert_eq!(
+        captured.destinations.len(),
+        2,
+        "same-source aliases are not foreign destinations; a same-label foreign service remains distinct"
+    );
+    assert_eq!(
+        captured.destinations[0].availability,
+        ForkAvailability::SourceUnqualified
+    );
+    assert_eq!(captured.destinations[1].label, "Decorated source");
+    assert_eq!(
+        captured.destinations[1].availability,
+        ForkAvailability::HistoryRemainsOnSource
+    );
+    assert_eq!(
+        captured.selection.identity,
+        SessionPickerIdentity::HostedCodex(target)
+    );
+    assert!(captured.confirm().is_none());
+    captured.move_destination(1);
+    assert!(captured.confirm().is_none());
+}
+
+#[test]
+fn review_local_fork_source_cannot_infer_a_hosting_service_from_a_name() {
+    use crate::presentation::session_picker::picker_fork_confirmation::{
+        ForkAvailability, ForkConfirmation,
+    };
+    let mut request = named_request();
+    if let RouterRegistryRead::Ready(registry) = &mut request.router_registry {
+        registry.routers[0].name = "Local Codex".to_owned().try_into().unwrap();
+    }
+    request.records[0].source_context = Some(PickerSourceContext::LocalCodex);
+    let mut captured = ForkConfirmation::capture(&request.records[0], &request);
+    assert_eq!(
+        captured.destinations.len(),
+        2,
+        "a local label is not evidence of a hosting service"
+    );
+    assert_eq!(
+        captured.destinations[0].availability,
+        ForkAvailability::Eligible
+    );
+    assert_eq!(
+        captured.destinations[1].availability,
+        ForkAvailability::HistoryRemainsOnSource
+    );
+    captured.move_destination(1);
+    assert!(captured.confirm().is_none());
+}
+
 fn key(code: KeyCode) -> TerminalEvent {
     TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, code))
 }

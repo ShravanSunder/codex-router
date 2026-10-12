@@ -22,6 +22,11 @@ pub(crate) enum ReplyScenario {
     RepeatedCursor,
     ProviderRows,
     HoldPage,
+    HoldInventory,
+    RepeatedPartialThenFault,
+    HoldSecondPage,
+    HoldSecondWrongEndpoint,
+    HoldSecondChangedEpoch,
     PageBudget { complete: bool },
     RowBudget(usize),
     SparsePages,
@@ -30,6 +35,8 @@ pub(crate) enum ReplyScenario {
 
 struct PeerState {
     scenario: ReplyScenario,
+    service: String,
+    epoch: String,
     calls: Mutex<Vec<(String, Value)>>,
     native_started: tokio::sync::Semaphore,
     release_page: tokio::sync::Semaphore,
@@ -45,12 +52,26 @@ pub(crate) struct ReadPeer {
 
 impl ReadPeer {
     pub(crate) async fn start(scenario: ReplyScenario) -> Self {
+        Self::start_bound(scenario, SERVICE).await
+    }
+
+    pub(crate) async fn start_bound(scenario: ReplyScenario, service: &str) -> Self {
+        Self::start_bound_at(scenario, service, EPOCH).await
+    }
+
+    pub(crate) async fn start_bound_at(
+        scenario: ReplyScenario,
+        service: &str,
+        epoch: &str,
+    ) -> Self {
         let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
             .await
             .unwrap();
         let address = listener.local_addr().unwrap();
         let state = Arc::new(PeerState {
             scenario,
+            service: service.to_owned(),
+            epoch: epoch.to_owned(),
             calls: Mutex::new(Vec::new()),
             native_started: tokio::sync::Semaphore::new(0),
             release_page: tokio::sync::Semaphore::new(0),
@@ -76,7 +97,7 @@ impl ReadPeer {
 
     pub(crate) fn request(&self) -> SourceInventoryRequest {
         let registry = router_connection_registry::RouterConnectionRegistry::parse(&json!({"version":1,"routers":[{
-            "name":"Source peer","connection":{"kind":"remote","serviceId":SERVICE,"mcpUrl":self.url}
+            "name":"Source peer","connection":{"kind":"remote","serviceId":self.state.service,"mcpUrl":self.url}
         }]}).to_string()).unwrap();
         SourceInventoryRequest {
             source_context: PickerSourceContext::ConfiguredHosted(registry.routers[0].clone()),
@@ -89,6 +110,7 @@ impl ReadPeer {
                 include_empty_sessions: false,
             },
             request_generation: 9,
+            continuation: None,
         }
     }
 
@@ -117,6 +139,16 @@ impl ReadPeer {
             .forget();
     }
 
+    pub(crate) fn page_calls(&self) -> usize {
+        self.state
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(method, _)| method == "sessions_list" || method == "provider_sessions_list")
+            .count()
+    }
+
     pub(crate) fn inventory_calls(&self) -> usize {
         self.state
             .calls
@@ -127,8 +159,12 @@ impl ReadPeer {
             .count()
     }
 
+    pub(crate) fn release_all_held_pages(&self) {
+        self.state.release_page.add_permits(4);
+    }
+
     pub(crate) async fn finish(self) {
-        self.state.release_page.add_permits(1);
+        self.state.release_page.add_permits(4);
         self.shutdown.cancel();
         tokio::time::timeout(Duration::from_secs(2), self.task)
             .await
@@ -152,6 +188,9 @@ async fn reply(State(state): State<Arc<PeerState>>, Json(request): Json<Value>) 
         .unwrap()
         .to_owned();
     let arguments = request.pointer("/params/arguments").unwrap().clone();
+    let continuation_request = arguments
+        .get("cursor")
+        .is_some_and(|cursor| !cursor.is_null());
     let (inventory_calls, native_calls) = {
         let mut calls = state.calls.lock().unwrap();
         calls.push((method.clone(), arguments));
@@ -166,10 +205,15 @@ async fn reply(State(state): State<Arc<PeerState>>, Json(request): Json<Value>) 
                 .count(),
         )
     };
-    let native_endpoint = json!({"serviceId":SERVICE,"endpointId":"codex-local"});
-    let provider_endpoint = json!({"serviceId":SERVICE,"endpointId":"claude-local"});
+    let native_endpoint = json!({"serviceId":state.service,"endpointId":"codex-local"});
+    let provider_endpoint = json!({"serviceId":state.service,"endpointId":"claude-local"});
     let result = match method.as_str() {
         "endpoints_list" => {
+            if matches!(state.scenario, ReplyScenario::HoldInventory) && inventory_calls == 1 {
+                let _settled = HeldReplyGuard(Arc::clone(&state));
+                state.native_started.add_permits(1);
+                state.release_page.acquire().await.unwrap().forget();
+            }
             let mut endpoints = vec![
                 json!({"endpoint":native_endpoint,"label":"Native","availability":{"state":"unprobed"},
                 "channels":[{"kind":"nativeCodex","transport":"unixWebSocket","path":"native.sock","schemaDigest":null,"generation":null}]}),
@@ -182,26 +226,61 @@ async fn reply(State(state): State<Arc<PeerState>>, Json(request): Json<Value>) 
                     "channels":[{"kind":"externalProvider","transport":"stdioAcp","bindingId":"00000000-0000-4000-8000-000000000003","bindingGeneration":1,
                         "runtime":{"provider":"claudeCode","runtimeName":"claude"},"capabilities":[{"name":"create","status":"supported","evidence":"advertised"}]}]}));
             }
-            let epoch =
-                if matches!(state.scenario, ReplyScenario::ChangedEpoch) && inventory_calls > 1 {
-                    "00000000-0000-4000-8000-000000000004"
-                } else {
-                    EPOCH
-                };
+            let epoch = if (matches!(state.scenario, ReplyScenario::ChangedEpoch)
+                && inventory_calls > 1)
+                || (matches!(state.scenario, ReplyScenario::HoldSecondChangedEpoch)
+                    && native_calls > 1)
+            {
+                "00000000-0000-4000-8000-000000000004"
+            } else {
+                state.epoch.as_str()
+            };
             json!({"serviceEpoch":epoch,"sequence":1,"endpoints":endpoints})
         }
         "sessions_list" => {
-            if matches!(state.scenario, ReplyScenario::HoldPage) && native_calls == 1 {
+            if matches!(state.scenario, ReplyScenario::RepeatedPartialThenFault)
+                && continuation_request
+            {
                 let _settled = HeldReplyGuard(Arc::clone(&state));
                 state.native_started.add_permits(1);
                 state.release_page.acquire().await.unwrap().forget();
             }
-            let endpoint = if matches!(state.scenario, ReplyScenario::WrongPageEndpoint) {
+            if matches!(
+                (state.scenario, native_calls),
+                (ReplyScenario::HoldPage, 1)
+                    | (
+                        ReplyScenario::HoldSecondPage
+                            | ReplyScenario::HoldSecondWrongEndpoint
+                            | ReplyScenario::HoldSecondChangedEpoch,
+                        2
+                    )
+            ) {
+                let _settled = HeldReplyGuard(Arc::clone(&state));
+                state.native_started.add_permits(1);
+                state.release_page.acquire().await.unwrap().forget();
+            }
+            let endpoint = if (matches!(state.scenario, ReplyScenario::RepeatedPartialThenFault)
+                && continuation_request)
+                || matches!(state.scenario, ReplyScenario::WrongPageEndpoint)
+                || matches!(
+                    (state.scenario, native_calls),
+                    (ReplyScenario::HoldSecondWrongEndpoint, 2)
+                ) {
                 json!({"serviceId":SERVICE,"endpointId":"wrong-endpoint"})
             } else {
                 native_endpoint.clone()
             };
             let cursor = match state.scenario {
+                ReplyScenario::RepeatedPartialThenFault if !continuation_request => {
+                    Some("opaque-repeat-source-page".to_owned())
+                }
+                ReplyScenario::HoldSecondPage
+                | ReplyScenario::HoldSecondWrongEndpoint
+                | ReplyScenario::HoldSecondChangedEpoch
+                    if native_calls == 1 =>
+                {
+                    Some("opaque-held-second".to_owned())
+                }
                 ReplyScenario::RepeatedCursor => Some("repeated".to_owned()),
                 ReplyScenario::PageBudget { complete } if !complete || native_calls < 65 => {
                     Some(format!("opaque +/=?☀ {native_calls}"))
@@ -214,12 +293,25 @@ async fn reply(State(state): State<Arc<PeerState>>, Json(request): Json<Value>) 
                 }
                 _ => None,
             };
-            let sessions = if let ReplyScenario::RowBudget(total) = state.scenario {
+            let sessions = if matches!(state.scenario, ReplyScenario::RepeatedPartialThenFault)
+                && !continuation_request
+            {
+                vec![native_row(&native_endpoint, 0)]
+            } else if let ReplyScenario::RowBudget(total) = state.scenario {
                 let first = (native_calls - 1) * 100;
                 (first..total.min(first + 100))
                     .map(|index| native_row(&native_endpoint, index))
                     .collect::<Vec<_>>()
-            } else if matches!(state.scenario, ReplyScenario::SparsePages) && native_calls == 3 {
+            } else if matches!(
+                (state.scenario, native_calls),
+                (ReplyScenario::SparsePages, 3)
+                    | (
+                        ReplyScenario::HoldSecondPage
+                            | ReplyScenario::HoldSecondWrongEndpoint
+                            | ReplyScenario::HoldSecondChangedEpoch,
+                        1
+                    )
+            ) {
                 vec![native_row(&native_endpoint, 0)]
             } else {
                 Vec::new()
@@ -285,7 +377,11 @@ async fn protocol_faults_and_epoch_change_reject_without_empty_success_or_replay
     ] {
         let peer = ReadPeer::start(scenario).await;
         let request = peer.request();
-        let result = peer.loader()(request.clone()).await;
+        let result = super::configured_inventory_read_tests::read_complete_source(
+            peer.loader(),
+            request.clone(),
+        )
+        .await;
         assert_eq!(result.request(), &request);
         assert_eq!(result.into_snapshot().unwrap_err(), expected);
         assert_eq!(
@@ -305,7 +401,11 @@ async fn protocol_faults_and_epoch_change_reject_without_empty_success_or_replay
 #[tokio::test]
 async fn any_reads_provider_pages_without_inventing_native_model_or_path_metadata() {
     let peer = ReadPeer::start(ReplyScenario::ProviderRows).await;
-    let snapshot = peer.loader()(peer.request()).await.into_snapshot().unwrap();
+    let snapshot =
+        super::configured_inventory_read_tests::read_complete_source(peer.loader(), peer.request())
+            .await
+            .into_snapshot()
+            .unwrap();
     let methods = peer
         .state
         .calls
@@ -331,7 +431,9 @@ async fn any_reads_provider_pages_without_inventing_native_model_or_path_metadat
 #[tokio::test]
 async fn canceling_the_actual_dispatch_read_prevents_a_late_reply_or_final_epoch_probe() {
     let peer = ReadPeer::start(ReplyScenario::HoldPage).await;
-    let read = tokio::spawn(peer.loader()(peer.request()));
+    let read = tokio::spawn(
+        super::configured_inventory_read_tests::read_complete_source(peer.loader(), peer.request()),
+    );
     tokio::time::timeout(Duration::from_secs(2), peer.state.native_started.acquire())
         .await
         .unwrap()
@@ -365,7 +467,13 @@ async fn complete_limits_and_sparse_opaque_pages_preserve_every_row_and_request_
         (ReplyScenario::SparsePages, 1, 3),
     ] {
         let peer = ReadPeer::start(scenario).await;
-        let snapshot = peer.loader()(peer.request()).await.into_snapshot().unwrap();
+        let snapshot = super::configured_inventory_read_tests::read_complete_source(
+            peer.loader(),
+            peer.request(),
+        )
+        .await
+        .into_snapshot()
+        .unwrap();
         assert_eq!(snapshot.records.len(), row_count);
         {
             let calls = peer.state.calls.lock().unwrap();
@@ -381,7 +489,10 @@ async fn complete_limits_and_sparse_opaque_pages_preserve_every_row_and_request_
                 assert_eq!(page.1["view"], "stored");
             }
         }
-        assert_eq!(peer.inventory_calls(), 2);
+        assert_eq!(peer.inventory_calls(), page_count + 1);
         peer.finish().await;
     }
 }
+
+#[path = "configured_inventory_continuation_tests.rs"]
+mod continuation_tests;

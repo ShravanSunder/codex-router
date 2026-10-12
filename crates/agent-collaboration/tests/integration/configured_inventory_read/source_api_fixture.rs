@@ -19,6 +19,7 @@ mod recorded_api_listener;
 pub(crate) struct SourceApiFixture {
     _root: tempfile::TempDir,
     pub(super) url: String,
+    pub(super) direct_api_url: String,
     pub(super) endpoint: EndpointRef,
     shutdown: CancellationToken,
     task: tokio::task::JoinHandle<std::io::Result<()>>,
@@ -157,6 +158,7 @@ impl SourceApiFixture {
         Self {
             _root: root,
             url: recorder.url.clone(),
+            direct_api_url: format!("http://{address}/mcp"),
             endpoint,
             shutdown,
             task,
@@ -182,6 +184,7 @@ impl SourceApiFixture {
                 include_empty_sessions: false,
             },
             request_generation: 17,
+            continuation: None,
         }
     }
 

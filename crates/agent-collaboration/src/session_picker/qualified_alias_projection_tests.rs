@@ -3,6 +3,47 @@ use super::*;
 use crate::presentation::session_picker::test_support::{observed_records, picker_record};
 use crate::sessions::router_connection_registry::RouterConnectionRegistry;
 
+#[test]
+fn default_rows_are_not_promoted_into_configured_alias_labels() {
+    let service = "00000000-0000-4000-8000-000000000001";
+    let first = source("First", service);
+    let second = source("Alias", service);
+    let bound = endpoint(service, "native-one");
+    let (_, _, mut default_rows) = snapshot(&first, &bound, true);
+    default_rows.records[0].provenance = SessionRowProvenance::DefaultAttributed;
+    let default = PickerSourceContext::DefaultHosted;
+    let snapshots = vec![
+        (default.clone(), None, default_rows),
+        snapshot(&first, &bound, true),
+        snapshot(&second, &bound, true),
+    ];
+    let merged = merge_source_snapshots(&[default.clone(), first, second], &snapshots);
+    assert_eq!(merged.records.len(), 1);
+    assert_eq!(merged.records[0].source_context, Some(default));
+    assert_eq!(merged.records[0].machine_label(), "This machine");
+}
+
+#[test]
+fn matching_endpoints_at_conflicting_epochs_never_produce_an_alias_label() {
+    let service = "00000000-0000-4000-8000-000000000001";
+    let first = source("First", service);
+    let second = source("Alias", service);
+    let bound = endpoint(service, "native-one");
+    let mut other = snapshot(&second, &bound, true);
+    other.1.as_mut().unwrap().service_epoch = "00000000-0000-4000-8000-000000000005"
+        .to_owned()
+        .try_into()
+        .unwrap();
+    let labels = qualified_alias_labels(
+        &[first.clone(), second],
+        &[snapshot(&first, &bound, true), other],
+    );
+    assert!(
+        labels.is_empty(),
+        "endpoint equality alone cannot establish an alias group"
+    );
+}
+
 fn source(name: &str, service_id: &str) -> PickerSourceContext {
     let registry = RouterConnectionRegistry::parse(&serde_json::json!({
         "version":1,"routers":[{"name":name,"connection":{"kind":"remote", "serviceId":service_id,

@@ -2,6 +2,7 @@ mod quota_reset_pty_test {
     mod credit_refresh_feedback_test;
     mod isolated_fixture_test;
     mod loopback_provider_test;
+    mod stored_model_diagnostic_test;
     mod terminal_interaction_test;
 
     use std::collections::BTreeSet;

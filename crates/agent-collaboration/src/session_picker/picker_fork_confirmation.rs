@@ -1,6 +1,8 @@
 //! Frozen fork source and destination choices; confirmation never re-reads focus.
 use super::{PickerSourceContext, SessionsPickerOutcome, SessionsPickerRequest};
-use crate::sessions::{RouterRegistryRead, SessionActionSelection, SessionPickerRecord};
+use crate::sessions::{
+    RouterRegistryRead, SessionActionSelection, SessionPickerIdentity, SessionPickerRecord,
+};
 use codex_native_integration::{NativeWorkingDirectoryMetadata, native_working_directory_metadata};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -91,7 +93,13 @@ impl ForkConfirmation {
                 registry
                     .routers
                     .iter()
-                    .filter(|profile| profile.name.as_str() != source_label)
+                    .filter(|profile| match &record.identity {
+                        SessionPickerIdentity::HostedCodex(target)
+                        | SessionPickerIdentity::HostedProvider(target) => {
+                            profile.service_id != target.endpoint.service_id
+                        }
+                        SessionPickerIdentity::LocalCodex(_) => true,
+                    })
                     .map(|profile| ForkDestination {
                         label: profile.name.as_str().to_owned(),
                         availability: ForkAvailability::HistoryRemainsOnSource,

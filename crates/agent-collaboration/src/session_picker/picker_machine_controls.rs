@@ -293,9 +293,16 @@ impl PickerMachineControls {
         }
     }
 
-    pub(super) fn all_notice(&self, registry: &RouterRegistryRead) -> Option<String> {
+    pub(super) fn all_notice(
+        &self,
+        registry: &RouterRegistryRead,
+        progress: &[super::source_reload_progress::SourceReadProgress],
+    ) -> Option<String> {
         if self.filter != PickerMachineFilter::All {
             return None;
+        }
+        if !progress.is_empty() {
+            return super::source_reload_progress::all_read_notice(progress);
         }
         let RouterRegistryRead::Ready(registry) = registry else {
             return None;
@@ -307,7 +314,7 @@ impl PickerMachineControls {
             .collect::<Vec<_>>();
         (!names.is_empty()).then(|| {
             format!(
-                "Partial view — unavailable: {} (connections need verification)",
+                "Partial view — unqualified: {} (connections need verification)",
                 names.join(", ")
             )
         })

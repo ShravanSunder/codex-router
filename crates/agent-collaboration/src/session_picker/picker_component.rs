@@ -21,8 +21,6 @@ use crate::sessions::SessionConversationPreview;
 use crate::sessions::SessionConversationSource;
 use crate::sessions::SessionPickerRecord;
 use crate::sessions::SessionsSort;
-#[cfg(feature = "quota-reset-test-harness")]
-use crate::sessions::SessionsSource;
 
 #[path = "picker_frame_view.rs"]
 mod picker_frame_view;
@@ -151,6 +149,9 @@ pub(crate) fn SessionsPickerComponent<'a>(
         let receiver = reload_port.take_receiver();
         let record_loader = props.record_loader.clone();
         let mut model = model;
+        let reload_port = reload_port.clone();
+        let mut reload_generation = reload_generation;
+        let mut conversation_cache = conversation_cache;
         async move {
             let (Some(receiver), Some(loader)) = (receiver, record_loader) else {
                 return;
@@ -159,7 +160,21 @@ pub(crate) fn SessionsPickerComponent<'a>(
                 if reload_generation.get() != request.generation {
                     return;
                 }
-                model.write().accept_source_reload(&request, update);
+                let acceptance = model.write().accept_source_reload(&request, update);
+                if matches!(
+                    acceptance,
+                    super::picker_source_view::SourceReloadAcceptance::RestoredIndependentView
+                        | super::picker_source_view::SourceReloadAcceptance::RestoredRetiredView
+                ) {
+                    conversation_cache.write().invalidate();
+                    let generation = reload_generation.get().saturating_add(1);
+                    reload_generation.set(generation);
+                    if acceptance
+                        == super::picker_source_view::SourceReloadAcceptance::RestoredIndependentView
+                    {
+                        reload_port.send(model.write().prepare_source_reload(generation));
+                    }
+                }
             })
             .await;
         }
@@ -167,11 +182,7 @@ pub(crate) fn SessionsPickerComponent<'a>(
     hooks.use_future({
         let reload_port = reload_port.clone();
         async move {
-            reload_port.send(SessionRecordsReloadRequest {
-                generation: reload_generation.get(),
-                query: model.read().data_query(),
-                sources: model.read().source_contexts(),
-            });
+            reload_port.send(model.write().prepare_source_reload(reload_generation.get()));
             let mut refresh_interval = tokio::time::interval(Duration::from_secs(3));
             refresh_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             refresh_interval.tick().await;
@@ -186,11 +197,7 @@ pub(crate) fn SessionsPickerComponent<'a>(
                 {
                     continue;
                 }
-                reload_port.send(SessionRecordsReloadRequest {
-                    generation: reload_generation.get(),
-                    query: model.read().data_query(),
-                    sources: model.read().source_contexts(),
-                });
+                reload_port.send(model.write().prepare_source_reload(reload_generation.get()));
             }
         }
     });
@@ -275,11 +282,7 @@ pub(crate) fn SessionsPickerComponent<'a>(
                     conversation_cache.write().invalidate();
                     let generation = reload_generation.get().saturating_add(1);
                     reload_generation.set(generation);
-                    reload_port.send(SessionRecordsReloadRequest {
-                        generation,
-                        query: model_value.data_query(),
-                        sources: model_value.source_contexts(),
-                    });
+                    reload_port.send(model_value.prepare_source_reload(generation));
                 }
                 return;
             }
@@ -316,11 +319,7 @@ pub(crate) fn SessionsPickerComponent<'a>(
                         {
                             let generation = reload_generation.get().saturating_add(1);
                             reload_generation.set(generation);
-                            reload_port.send(SessionRecordsReloadRequest {
-                                generation,
-                                query: model_value.data_query(),
-                                sources: model_value.source_contexts(),
-                            });
+                            reload_port.send(model_value.prepare_source_reload(generation));
                         }
                     }
                     _ => {}
@@ -379,11 +378,9 @@ pub(crate) fn SessionsPickerComponent<'a>(
                 }
                 KeyCode::Char('r') if modifiers.contains(KeyModifiers::CONTROL) => {
                     conversation_cache.write().invalidate();
-                    reload_port.send(SessionRecordsReloadRequest {
-                        generation: reload_generation.get(),
-                        query: model_value.data_query(),
-                        sources: model_value.source_contexts(),
-                    });
+                    let generation = reload_generation.get().saturating_add(1);
+                    reload_generation.set(generation);
+                    reload_port.send(model_value.prepare_source_reload(generation));
                 }
                 KeyCode::F(1) | KeyCode::Char('\u{1f}') => {
                     model_value.handle_key(SessionsPickerKey::ToggleHelp);
@@ -430,11 +427,7 @@ pub(crate) fn SessionsPickerComponent<'a>(
                         conversation_cache.write().invalidate();
                         let generation = reload_generation.get().saturating_add(1);
                         reload_generation.set(generation);
-                        reload_port.send(SessionRecordsReloadRequest {
-                            generation,
-                            query: model_value.data_query(),
-                            sources: model_value.source_contexts(),
-                        });
+                        reload_port.send(model_value.prepare_source_reload(generation));
                     } else if model_value.search.is_empty() {
                         should_cancel.set(true);
                     } else {
@@ -450,11 +443,7 @@ pub(crate) fn SessionsPickerComponent<'a>(
                 conversation_cache.write().invalidate();
                 let generation = reload_generation.get().saturating_add(1);
                 reload_generation.set(generation);
-                reload_port.send(SessionRecordsReloadRequest {
-                    generation,
-                    query: next_query,
-                    sources: model.read().source_contexts(),
-                });
+                reload_port.send(model.write().prepare_source_reload(generation));
             }
         }
     });
@@ -553,40 +542,7 @@ pub(crate) fn run_sessions_picker(
 
 #[cfg(feature = "quota-reset-test-harness")]
 pub(crate) fn run_sessions_picker_test_harness() -> io::Result<()> {
-    use std::io::Write;
-
-    use crate::presentation::session_picker::test_support::picker_request;
-
-    let mut request = picker_request();
-    request.root = SessionsPickerRoot::Any;
-    request.source = SessionsSource::All;
-    if let Some(pointer_focus_record) = request
-        .records
-        .iter_mut()
-        .find(|record| record.session_id == "thread-b")
-    {
-        pointer_focus_record.title = "Pointer focus beta".to_owned();
-        pointer_focus_record.preview = Some("BETA_PREVIEW_ACTIVE".to_owned());
-        pointer_focus_record.conversation.snippets = vec!["BETA_CONVERSATION_ACTIVE".to_owned()];
-    }
-
-    let outcome = run_sessions_picker(request, None)?;
-    let marker = match outcome {
-        Some(SessionsPickerOutcome::ResumeSession(selection)) => {
-            format!("SESSION_PICKER_OUTCOME resume:{}", selection.session_id())
-        }
-        Some(SessionsPickerOutcome::ForkSession(selection)) => {
-            format!("SESSION_PICKER_OUTCOME fork:{}", selection.session_id())
-        }
-        Some(SessionsPickerOutcome::StartNewSession) => {
-            "SESSION_PICKER_OUTCOME start-new".to_owned()
-        }
-        Some(SessionsPickerOutcome::TerminalTooNarrow) => {
-            "SESSION_PICKER_OUTCOME terminal-too-narrow".to_owned()
-        }
-        None => "SESSION_PICKER_OUTCOME canceled".to_owned(),
-    };
-    writeln!(io::stdout(), "{marker}")
+    crate::sessions::run_stored_model_terminal_fixture()
 }
 
 #[cfg(test)]

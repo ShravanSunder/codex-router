@@ -14,6 +14,12 @@ use std::{
 #[path = "source_reload_machine_binding_tests.rs"]
 mod machine_binding_tests;
 
+#[path = "source_reload_progressive_tests.rs"]
+mod progressive_tests;
+
+#[path = "source_reload_alias_tests.rs"]
+mod alias_tests;
+
 fn sources(count: usize) -> Result<Vec<PickerSourceContext>, RouterRegistryError> {
     let profiles = (1..=count).map(|index| serde_json::json!({
         "name":format!("Machine{index}"),
@@ -50,6 +56,7 @@ async fn configured_empty_inventory_requires_explicit_source_binding() {
     let loader: SessionsPickerRecordLoader = Arc::new(|request| {
         Box::pin(async move {
             SourceInventoryResult::Ready {
+                progress: crate::presentation::session_picker::InventoryPageProgress::Complete,
                 binding: None,
                 request,
                 snapshot: observed_records(vec![]),
@@ -112,6 +119,8 @@ async fn rejected_source_progress_keeps_rows_from_the_successful_source() {
                     }
                 } else {
                     SourceInventoryResult::Ready {
+                        progress:
+                            crate::presentation::session_picker::InventoryPageProgress::Complete,
                         binding: None,
                         request,
                         snapshot: observed_records(vec![picker_record(
@@ -157,7 +166,7 @@ async fn rejected_source_progress_keeps_rows_from_the_successful_source() {
                 retained_rows = snapshot.records;
                 assert!(update.source_progress.iter().any(|progress| matches!(
                     progress.read_state,
-                    SourceReadState::Ready { record_count: 1 }
+                    SourceReadState::Complete { record_count: 1 }
                 )));
                 permit.add_permits(1);
             }
@@ -220,6 +229,7 @@ async fn all_source_reads_do_not_overwrite_each_other_and_run_at_most_four_at_on
                     "sessionId":"same-native-id",
                 })).unwrap());
                 SourceInventoryResult::Ready {
+                    progress: crate::presentation::session_picker::InventoryPageProgress::Complete,
                     binding: Some(
                         crate::presentation::session_picker::SourceInventoryBinding::native_fixture(
                             match &row.identity {
@@ -317,6 +327,7 @@ async fn stale_request_and_foreign_service_rows_are_rejected_before_publication(
                     request.request_generation += 1;
                 }
                 SourceInventoryResult::Ready {
+                    progress: crate::presentation::session_picker::InventoryPageProgress::Complete,
                     binding: Some(
                         crate::presentation::session_picker::SourceInventoryBinding::native_fixture(
                             match &row.identity {
@@ -394,6 +405,7 @@ async fn default_attribution_is_not_remote_observation_even_when_service_and_id_
                 crate::sessions::SessionRowProvenance::DefaultAttributed
             );
             SourceInventoryResult::Ready {
+                progress: crate::presentation::session_picker::InventoryPageProgress::Complete,
                 binding: Some(
                     crate::presentation::session_picker::SourceInventoryBinding::native_fixture(
                         endpoint,
@@ -457,6 +469,7 @@ async fn superseded_view_cancels_owned_reads_and_publishes_only_the_new_generati
                     futures_util::future::pending::<()>().await;
                 }
                 SourceInventoryResult::Ready {
+                    progress: crate::presentation::session_picker::InventoryPageProgress::Complete,
                     binding: None,
                     request,
                     snapshot: observed_records(vec![]),

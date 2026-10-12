@@ -40,7 +40,7 @@ where
         Box::pin(async move {
             let query = request.query.clone();
             match tokio::task::spawn_blocking(move || procedure(query)).await {
-                Ok(Ok(snapshot)) => crate::presentation::session_picker::SourceInventoryResult::Ready { binding: None, request, snapshot },
+                Ok(Ok(snapshot)) => crate::presentation::session_picker::SourceInventoryResult::Ready { progress: crate::presentation::session_picker::InventoryPageProgress::Complete, binding: None, request, snapshot },
                 Ok(Err(_)) | Err(_) => crate::presentation::session_picker::SourceInventoryResult::Rejected {
                     request, reason: crate::presentation::session_picker::SourceInventoryRejection::SourceUnavailable,
                 },

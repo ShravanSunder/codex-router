@@ -221,6 +221,7 @@ fn control_footer_lines(width: usize, show_help: bool) -> Vec<String> {
         "Search: id:<id>".to_owned(),
         "b:<branch> | repo:<name>".to_owned(),
         "enter resume | opt-enter fork".to_owned(),
+        "ctrl-g/F2 Machine".to_owned(),
         "ctrl-n new | ctrl-s scope".to_owned(),
         "ctrl-t view | ctrl-o sort".to_owned(),
         "ctrl-r refresh".to_owned(),

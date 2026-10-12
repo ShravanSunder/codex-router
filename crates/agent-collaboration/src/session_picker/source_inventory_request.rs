@@ -1,6 +1,7 @@
 //! Source-scoped read requests and closed outcomes for one picker query generation.
 use super::SessionsPickerDataQuery;
 use super::source_inventory_binding::SourceInventoryBinding;
+use crate::sessions::configured_inventory_loader::StoredSourceContinuation;
 use crate::{
     picker_runtime_status::PickerRecordsSnapshot,
     sessions::router_connection_registry::RouterConnectionProfile,
@@ -20,6 +21,7 @@ pub(crate) struct SourceInventoryRequest {
     pub(crate) source_context: PickerSourceContext,
     pub(crate) query: SessionsPickerDataQuery,
     pub(crate) request_generation: u64,
+    pub(crate) continuation: Option<SourceContinuation>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
@@ -42,10 +44,16 @@ pub(crate) enum SourceInventoryRejection {
 
 #[derive(Clone, Debug)]
 pub(crate) enum SourceInventoryResult {
+    Qualified {
+        request: SourceInventoryRequest,
+        binding: SourceInventoryBinding,
+        continuation: SourceContinuation,
+    },
     Ready {
         request: SourceInventoryRequest,
         binding: Option<SourceInventoryBinding>,
         snapshot: PickerRecordsSnapshot,
+        progress: InventoryPageProgress,
     },
     Rejected {
         request: SourceInventoryRequest,
@@ -54,25 +62,52 @@ pub(crate) enum SourceInventoryResult {
 }
 
 impl SourceInventoryResult {
-    pub(crate) fn binding(&self) -> Option<&SourceInventoryBinding> {
-        match self {
-            Self::Ready { binding, .. } => binding.as_ref(),
-            Self::Rejected { .. } => None,
-        }
-    }
     pub(crate) fn request(&self) -> &SourceInventoryRequest {
         match self {
-            Self::Ready { request, .. } | Self::Rejected { request, .. } => request,
+            Self::Ready { request, .. }
+            | Self::Rejected { request, .. }
+            | Self::Qualified { request, .. } => request,
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn into_snapshot(self) -> Result<PickerRecordsSnapshot, SourceInventoryRejection> {
         match self {
             Self::Ready { snapshot, .. } => Ok(snapshot),
             Self::Rejected { reason, .. } => Err(reason),
+            Self::Qualified { .. } => Err(SourceInventoryRejection::InvalidInventory),
         }
     }
 }
 
 pub(crate) type SourceInventoryLoader =
     Arc<dyn Fn(SourceInventoryRequest) -> BoxFuture<'static, SourceInventoryResult> + Send + Sync>;
+
+/// An invocation-owned, source-bound Stored cursor; cloning cannot replay a consumed read.
+#[derive(Clone)]
+pub(crate) struct SourceContinuation(Arc<tokio::sync::Mutex<Option<StoredSourceContinuation>>>);
+impl SourceContinuation {
+    pub(crate) fn stored(state: StoredSourceContinuation) -> Self {
+        Self(Arc::new(tokio::sync::Mutex::new(Some(state))))
+    }
+    pub(crate) async fn take(&self) -> Option<StoredSourceContinuation> {
+        self.0.lock().await.take()
+    }
+}
+impl std::fmt::Debug for SourceContinuation {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("StoredSourceContinuation")
+    }
+}
+impl PartialEq for SourceContinuation {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+impl Eq for SourceContinuation {}
+
+#[derive(Clone, Debug)]
+pub(crate) enum InventoryPageProgress {
+    Complete,
+    MoreAvailable { continuation: SourceContinuation },
+}

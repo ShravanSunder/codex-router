@@ -32,10 +32,24 @@ impl ConfiguredInventoryClient {
                 "configured read credential presentation is unqualified",
             ));
         }
-        let client = reqwest::Client::builder()
+        let address = url::Url::parse(profile.mcp_address.as_str())
+            .map_err(|_| ClientError::InvalidRequest("invalid configured source address"))?;
+        let mut client_builder = reqwest::Client::builder()
             .no_proxy()
             .redirect(reqwest::redirect::Policy::none())
-            .timeout(READ_TIMEOUT)
+            .timeout(READ_TIMEOUT);
+        match address.scheme() {
+            // This private client only posts to its fixed URL and never follows redirects.
+            // Plain HTTP cannot use TLS roots; avoid native certificate-store IO here.
+            "http" => client_builder = client_builder.tls_built_in_root_certs(false),
+            "https" => {}
+            _ => {
+                return Err(ClientError::InvalidRequest(
+                    "invalid configured source scheme",
+                ));
+            }
+        }
+        let client = client_builder
             .build()
             .map_err(|_| ClientError::Protocol("configured read transport unavailable"))?;
         Ok(Self {
@@ -170,3 +184,7 @@ impl NativeInventoryReadClient for ConfiguredInventoryClient {
         self.call("sessions_list", &request).await
     }
 }
+
+#[cfg(test)]
+#[path = "configured_inventory_transport_tests.rs"]
+mod tests;

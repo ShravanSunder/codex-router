@@ -73,8 +73,9 @@ async fn record_read(
     State(state): State<Arc<RecorderState>>,
     request: axum::extract::Request,
 ) -> Response {
+    let (parts, body) = request.into_parts();
     let bytes = axum::body::to_bytes(
-        request.into_body(),
+        body,
         collaboration_client::protocol::MAX_CONTROL_FRAME_BYTES,
     )
     .await
@@ -86,29 +87,26 @@ async fn record_read(
     {
         state.methods.lock().unwrap().push(method.to_owned());
     }
-    let response = state
-        .client
-        .post(&state.api_url)
-        .header(reqwest::header::CONTENT_TYPE, "application/json")
-        .header(
-            reqwest::header::ACCEPT,
-            "application/json, text/event-stream",
-        )
-        .header("mcp-protocol-version", "2025-11-25")
-        .body(bytes)
-        .send()
-        .await
-        .unwrap();
+    let mut forwarded = state.client.post(&state.api_url);
+    for header in [
+        reqwest::header::CONTENT_TYPE,
+        reqwest::header::ACCEPT,
+        reqwest::header::HeaderName::from_static("mcp-protocol-version"),
+    ] {
+        if let Some(value) = parts.headers.get(&header) {
+            forwarded = forwarded.header(header, value);
+        }
+    }
+    let response = forwarded.body(bytes).send().await.unwrap();
     let status = response.status();
     let content_type = response
         .headers()
         .get(reqwest::header::CONTENT_TYPE)
-        .unwrap()
-        .clone();
+        .cloned();
     let body = response.bytes().await.unwrap();
-    Response::builder()
-        .status(status)
-        .header(reqwest::header::CONTENT_TYPE, content_type)
-        .body(Body::from(body))
-        .unwrap()
+    let mut response = Response::builder().status(status);
+    if let Some(content_type) = content_type {
+        response = response.header(reqwest::header::CONTENT_TYPE, content_type);
+    }
+    response.body(Body::from(body)).unwrap()
 }

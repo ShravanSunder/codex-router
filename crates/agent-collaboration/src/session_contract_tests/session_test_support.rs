@@ -354,7 +354,7 @@ impl crate::sessions::SessionsPicker for FakeSessionsPicker {
                     source_context: match request.machine_mode {
                         crate::presentation::session_picker::PickerMachineSourceMode::HostedDefault => crate::presentation::session_picker::PickerSourceContext::DefaultHosted,
                         crate::presentation::session_picker::PickerMachineSourceMode::LocalCodex => crate::presentation::session_picker::PickerSourceContext::LocalCodex,
-                    }, query, request_generation: 0,
+                    }, query, request_generation: 0, continuation: None,
                 })).into_snapshot().map_err(|error| {
                     crate::sessions::SessionsCommandError::Picker(std::io::Error::other(error))
                 })?;

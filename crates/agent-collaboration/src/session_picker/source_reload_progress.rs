@@ -5,7 +5,9 @@ use crate::picker_runtime_status::PickerRecordsSnapshot;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) enum SourceReadState {
     Loading,
-    Ready { record_count: usize },
+    Complete { record_count: usize },
+    Suspended { record_count: usize },
+    LoadingMore { record_count: usize },
     Rejected { reason: SourceInventoryRejection },
 }
 
@@ -27,9 +29,58 @@ impl SourceReadProgress {
         let name = self.source_name();
         match self.read_state {
             SourceReadState::Loading => format!("{name}: Loading"),
-            SourceReadState::Ready { record_count } => format!("{name}: {record_count} sessions"),
+            SourceReadState::Complete { record_count } => {
+                format!("{name}: {record_count} sessions")
+            }
+            SourceReadState::LoadingMore { record_count } => {
+                format!("{name}: Loading ({record_count} fetched; unfinished)")
+            }
+            SourceReadState::Suspended { record_count } => {
+                format!("{name}: Suspended ({record_count} fetched; unfinished)")
+            }
             SourceReadState::Rejected { reason } => format!("{name}: Unavailable ({reason})"),
         }
+    }
+}
+
+/// Aggregate only observed read states; a registry name is never an availability result.
+pub(super) fn all_read_notice(progress: &[SourceReadProgress]) -> Option<String> {
+    let mut loading = Vec::new();
+    let mut unavailable = Vec::new();
+    let mut unfinished = Vec::new();
+    for source in progress {
+        match source.read_state {
+            SourceReadState::Loading => loading.push(source.source_name()),
+            SourceReadState::Rejected { .. } => unavailable.push(source.source_name()),
+            SourceReadState::LoadingMore { .. } | SourceReadState::Suspended { .. } => {
+                unfinished.push(source.source_name())
+            }
+            SourceReadState::Complete { .. } => {}
+        }
+    }
+    let partial = !unavailable.is_empty() || !unfinished.is_empty();
+    let mut details = Vec::new();
+    for (kind, names) in [
+        ("unavailable", unavailable),
+        ("unfinished", unfinished),
+        ("loading", loading),
+    ] {
+        if !names.is_empty() {
+            details.push(format!("{kind}: {}", names.join(", ")));
+        }
+    }
+    if details.is_empty() {
+        None
+    } else {
+        Some(format!(
+            "{} — {}",
+            if partial {
+                "Partial view"
+            } else {
+                "Loading view"
+            },
+            details.join("; ")
+        ))
     }
 }
 

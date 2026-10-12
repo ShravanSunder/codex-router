@@ -79,6 +79,7 @@ async fn assert_held_switch(result: SwitchResult) {
                 row.provenance = crate::sessions::SessionRowProvenance::ObservedHosted;
                 row.normalized_cwd = None;
                 SourceInventoryResult::Ready {
+                    progress: crate::presentation::session_picker::InventoryPageProgress::Complete,
                     request,
                     binding: Some(
                         crate::presentation::session_picker::SourceInventoryBinding::native_fixture(

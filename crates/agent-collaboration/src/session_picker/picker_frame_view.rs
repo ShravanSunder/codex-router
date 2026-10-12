@@ -24,7 +24,7 @@ pub(super) fn render_picker_view(
     )];
     filter_controls.extend(render_filter_controls(model, content_width));
     if model.machine_controls.filter
-        == super::super::picker_machine_controls::PickerMachineFilter::All
+        != super::super::picker_machine_controls::PickerMachineFilter::Default
         && !model.source_progress.is_empty()
     {
         let status = model
@@ -37,7 +37,7 @@ pub(super) fn render_picker_view(
     }
     if let Some(notice) = model
         .machine_controls
-        .all_notice(&model.request.router_registry)
+        .all_notice(&model.request.router_registry, &model.source_progress)
     {
         filter_controls.push(element! { Text(content: fit_line(&notice, content_width), color: Color::Yellow, wrap: TextWrap::NoWrap) }.into_any());
     }
