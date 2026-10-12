@@ -72,5 +72,6 @@ codex-router-state = { path = "../codex-router-state", version = "0.1.4", featur
 futures-util.workspace = true
 rustix.workspace = true
 tokio-tungstenite.workspace = true
+toml = "1.1.2"
 tungstenite = "0.28.0"
 tokio = { workspace = true, features = ["test-util"] }

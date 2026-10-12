@@ -1,5 +1,8 @@
 //! Single-source router profile projections for upstream Codex.
 
+/// Production loopback port shared by the Router's inbound proxy and generated clients.
+pub const DEFAULT_ROUTER_PORT: u16 = 19741;
+
 /// Permission profiles Router selects for its own threads, with the native parent each extends.
 const ROUTER_PERMISSION_PROFILES: [(&str, &str); 2] = [
     ("router-write-restricted", ":read-only"),

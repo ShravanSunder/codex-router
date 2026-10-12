@@ -1,5 +1,6 @@
 use super::board_cli_runner::{require_record_message_ids, result, run_board_cli};
 use crate::proof_context::ProofResult;
+use codex_native_integration::DEFAULT_ROUTER_PORT;
 use serde_json::Value;
 use std::{os::unix::fs::PermissionsExt, path::PathBuf, time::Duration};
 
@@ -168,7 +169,7 @@ async fn validate_restarted_host(
         || marker
             .get("port")
             .and_then(Value::as_u64)
-            .is_none_or(|port| port == 0 || port == 8787)
+            .is_none_or(|port| port == 0 || port == u64::from(DEFAULT_ROUTER_PORT))
         || std::path::Path::new(marker_run_directory).canonicalize()? != root
     {
         return Err("resumed Host marker does not identify the isolated Luna proof root".into());
