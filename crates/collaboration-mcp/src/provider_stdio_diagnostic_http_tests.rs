@@ -18,7 +18,8 @@ const CANCEL_OPERATION: &str = "019f0000-0000-7000-8000-000000000303";
 const FULL_INPUT: &str = "Complete the SQLite proof.\nKeep this exact second line PRIVATE_CANARY.";
 const PROVIDER_SCRIPT: &str = r#"
 import json,os,sys
-kind,receipt=sys.argv[1:]
+kind,receipt,expected_native_executable=sys.argv[1:]
+assert os.environ.get('CLAUDE_CODE_EXECUTABLE')==expected_native_executable
 def read(): return json.loads(sys.stdin.readline())
 def send(value): print(json.dumps(value),flush=True)
 sys.stderr.write('PRIVATE_CANARY:'+('x'*131072));sys.stderr.flush()
@@ -111,6 +112,11 @@ async fn exercise_public_stdio(message_kind: &str, interaction_kind: &str) {
     std::fs::create_dir_all(root.path().join("service")).expect("service directory");
     std::fs::create_dir_all(root.path().join("unused-codex-home"))
         .expect("fixture metadata directory");
+    let global_directory = root.path().join("fixture-global-bin");
+    std::fs::create_dir(&global_directory).expect("owned global executable directory");
+    let global_executable = global_directory.join("claude");
+    std::fs::write(&global_executable, "#!/bin/sh\nexit 99\n")
+        .expect("explicit scripted provider's native binding");
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -118,13 +124,19 @@ async fn exercise_public_stdio(message_kind: &str, interaction_kind: &str) {
             root.path().to_path_buf(),
             root.path().join("service"),
             root.path().join("unused-codex-home"),
+            global_directory.clone(),
         ] {
             std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700))
                 .expect("private fixture directory");
         }
+        std::fs::set_permissions(&global_executable, std::fs::Permissions::from_mode(0o700))
+            .expect("executable fixture native binding");
     }
+    let expected_native_executable = global_executable
+        .canonicalize()
+        .expect("canonical fixture executable");
     let receipt_path = root.path().join("wire-receipt.json");
-    let binding = ExternalProviderLaunchBinding::claude(
+    let mut binding = ExternalProviderLaunchBinding::claude(
         PathBuf::from("/usr/bin/python3"),
         vec![
             "-u".into(),
@@ -132,9 +144,23 @@ async fn exercise_public_stdio(message_kind: &str, interaction_kind: &str) {
             PROVIDER_SCRIPT.into(),
             interaction_kind.into(),
             receipt_path.to_string_lossy().into_owned(),
+            expected_native_executable
+                .to_str()
+                .expect("UTF-8 fixture executable")
+                .to_owned(),
         ],
     )
     .expect("fixture binding");
+    binding.launch.environment = vec![
+        (
+            "PATH".to_owned(),
+            global_directory
+                .to_str()
+                .expect("UTF-8 fixture launch path")
+                .to_owned(),
+        ),
+        ("CLAUDE_CODE_EXECUTABLE".to_owned(), String::new()),
+    ];
     let runtime = CollaborationRuntime::start_with_external_providers(
         CollaborationRuntimeInputs {
             directory: root.path().join("service"),
