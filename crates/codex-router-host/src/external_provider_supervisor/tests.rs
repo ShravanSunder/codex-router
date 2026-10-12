@@ -322,6 +322,7 @@ async fn router_queue_drains_provider_prompts_in_fifo_order() {
             .expect("hub endpoint");
     let runtime = ExternalProviderRuntime::initialize_with_mcp_http_and_hub(
         ordered_prompt_fixture(&socket_path),
+        acp_client_runtime::ProviderModelPicker::Standard,
         "fixture",
         "http://127.0.0.1:1/mcp",
         Arc::clone(&hub),

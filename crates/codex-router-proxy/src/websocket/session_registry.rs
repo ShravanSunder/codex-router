@@ -2,7 +2,6 @@ use super::*;
 
 /// Tracks active local WebSocket streams by local token generation.
 const MAX_WEBSOCKET_REGISTRY_SAMPLE_COUNTS: usize = 1024;
-const MAX_CAPACITY_RETRY_SESSION_IDENTITIES: usize = 1024;
 
 /// Tracks active local WebSocket streams by local token generation.
 #[derive(Clone, Debug, Default)]
@@ -20,8 +19,6 @@ pub struct WebSocketRevocationRegistry {
     final_session_forwarded_upstream_message_counts: Arc<Mutex<Vec<usize>>>,
     quota_reconnect_signal_count: Arc<Mutex<usize>>,
     quota_reconnect_signal_unix_ms: Arc<Mutex<Option<u128>>>,
-    capacity_retry_tracker: CapacityRetryTracker,
-    capacity_retry_thread_ids: Arc<Mutex<HashMap<u64, String>>>,
 }
 
 /// Narrow runtime handle for reconnecting sessions pinned to a floor-blocked account.
@@ -131,35 +128,6 @@ impl WebSocketRevocationRegistry {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
-    }
-
-    pub(super) fn set_capacity_retry_thread_id(&self, session_id: u64, thread_id: Option<String>) {
-        if let Some(thread_id) = thread_id
-            && let Ok(mut thread_ids) = self.capacity_retry_thread_ids.lock()
-            && thread_ids.len() < MAX_CAPACITY_RETRY_SESSION_IDENTITIES
-        {
-            thread_ids.insert(session_id, thread_id);
-        }
-    }
-
-    pub(super) fn record_capacity_retry(&self, session_id: u64) -> Option<CapacityRetryOutcome> {
-        let thread_id = self
-            .capacity_retry_thread_ids
-            .lock()
-            .ok()
-            .and_then(|thread_ids| thread_ids.get(&session_id).cloned())?;
-        Some(self.capacity_retry_tracker.record_or_exhaust(&thread_id))
-    }
-
-    pub(super) fn clear_capacity_retry(&self, session_id: u64) {
-        let thread_id = self
-            .capacity_retry_thread_ids
-            .lock()
-            .ok()
-            .and_then(|thread_ids| thread_ids.get(&session_id).cloned());
-        if let Some(thread_id) = thread_id {
-            self.capacity_retry_tracker.clear(&thread_id);
-        }
     }
 
     #[cfg(test)]
@@ -356,9 +324,6 @@ impl WebSocketRevocationRegistry {
         }
         if let Ok(mut forwarded_by_session) = self.forwarded_upstream_messages_by_session.lock() {
             forwarded_by_session.remove(&session_id);
-        }
-        if let Ok(mut thread_ids) = self.capacity_retry_thread_ids.lock() {
-            thread_ids.remove(&session_id);
         }
     }
 

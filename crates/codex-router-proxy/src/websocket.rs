@@ -74,12 +74,9 @@ use crate::account_selection::AsyncAccountDecisionSelector;
 use crate::account_selection::LiveAccountAdmissionAssessor;
 use crate::account_selection::PostExhaustionRouteBandOutcome;
 use crate::account_selection::QuotaAwareAccountSelectorError;
-use crate::capacity_retry::CapacityRetryOutcome;
-use crate::capacity_retry::CapacityRetryTracker;
 
 #[path = "websocket/account_turn_admission.rs"]
 mod account_turn_admission;
-use crate::capacity_retry::MAX_THREAD_ID_BYTES;
 use crate::db_write_actor::DbWriteEnqueueResult;
 use crate::headers::Header;
 use crate::headers::HeaderCollection;

@@ -222,7 +222,7 @@ pub enum ExternalProviderRuntimeError {
     TransportFailure,
     #[error("session event consumer closed")]
     SinkClosed,
-    #[error("invalidSetting: provider setting was not advertised")]
+    #[error("invalidSetting: value requires an unambiguous advertised provider setting option")]
     InvalidSetting {
         setting: crate::ProviderSettingKind,
         value: String,
