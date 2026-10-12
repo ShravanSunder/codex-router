@@ -214,7 +214,10 @@ async fn inbox_and_history_use_literal_short_preview_while_show_keeps_full_body(
         .and_then(Value::as_str)
         .expect("message send returns full link")
         .to_owned();
-    let expected_preview = format!("\"{}…\" (+1240 more chars)", "🪿".repeat(100));
+    let expected_tail = format!(
+        "\"{}…\" (+1240) 📖 Load full message → {link}",
+        "🪿".repeat(100)
+    );
 
     let inbox = notices(
         fixture
@@ -226,7 +229,7 @@ async fn inbox_and_history_use_literal_short_preview_while_show_keeps_full_body(
         .iter()
         .find(|record| record.push_id == push_id)
         .expect("inbox retains the push notice");
-    assert!(inbox_notice.line.contains(&expected_preview));
+    assert!(inbox_notice.line.ends_with(&expected_tail));
     assert!(inbox_notice.line.ends_with(&link));
 
     let history = notices(
@@ -243,7 +246,7 @@ async fn inbox_and_history_use_literal_short_preview_while_show_keeps_full_body(
         .find(|record| record.push_id == push_id)
         .expect("history retains the same push notice");
     assert_eq!(history_notice.line, inbox_notice.line);
-    assert!(history_notice.line.contains(&expected_preview));
+    assert!(history_notice.line.ends_with(&expected_tail));
 
     let shown = fixture
         .control

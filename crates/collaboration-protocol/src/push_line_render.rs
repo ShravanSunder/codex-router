@@ -172,7 +172,9 @@ impl DisplayLimits {
             header.push('\"');
             let omitted_scalars = total_scalars.saturating_sub(shown_scalars);
             if omitted_scalars > 0 {
-                header.push_str(&format!(" (+{omitted_scalars} more chars)"));
+                header.push_str(&format!(" (+{omitted_scalars}) 📖 Load full message → "));
+                header.push_str(&input.link.to_string());
+                return header;
             }
         }
         header.push_str(" · ");

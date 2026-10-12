@@ -36,20 +36,21 @@ const OBSERVATION_TIMEOUT: Duration = Duration::from_secs(120);
 const ACP_TARGET_EXPECTED_PROMPTS: usize = 9;
 const SUBSCRIPTION_NOTICE_LABEL: &str = "🧵 Router: new thread activity";
 
-fn assert_long_preview_literal(observed: &str, body: &str) -> ProofResult<()> {
+fn assert_long_preview_literal(observed: &str, body: &str, link: &str) -> ProofResult<()> {
     let source_scalars = body.chars().count();
     if source_scalars <= 100 || body.contains(['"', '\\', '\n', '\r']) {
         return Err("matrix preview oracle requires a long body without escaped fields".into());
     }
     let source_prefix = body.chars().take(100).collect::<String>();
-    let expected_preview = format!(
-        "\"{source_prefix}…\" (+{} more chars)",
+    let expected_tail = format!(
+        "\"{source_prefix}…\" (+{}) 📖 Load full message → {link}",
         source_scalars - 100
     );
-    if !observed.contains(&expected_preview) {
-        return Err(
-            format!("recipient output omitted literal preview {expected_preview:?}").into(),
-        );
+    if !observed.ends_with(&expected_tail) {
+        return Err(format!(
+            "recipient output omitted literal preview/link tail {expected_tail:?}"
+        )
+        .into());
     }
     Ok(())
 }
@@ -137,8 +138,8 @@ async fn exercise_push_delivery_matrix(
     .await?;
     let s1_long_observed = user_message_text(&s1_long_item)?;
     assert_exact_notice_line(&s1_long_observed, &s1_long_expected)?;
-    assert_long_preview_literal(&s1_long_expected, &s1_long_body)?;
-    assert_long_preview_literal(&s1_long_observed, &s1_long_body)?;
+    assert_long_preview_literal(&s1_long_expected, &s1_long_body, &s1_long_show.link)?;
+    assert_long_preview_literal(&s1_long_observed, &s1_long_body, &s1_long_show.link)?;
     let s1_long_fetched = cli_show(&proof, &codex_recipient, &s1_long_show.link).await?;
     assert_eq!(
         s1_long_fetched.pointer("/result/record/body"),
@@ -162,8 +163,8 @@ async fn exercise_push_delivery_matrix(
         .expect_text_with_timeout(&s2_prefix, OBSERVATION_TIMEOUT)
         .await?;
     assert_exact_notice_line(&s2_observed, &s2_expected)?;
-    assert_long_preview_literal(&s2_expected, &s2_body)?;
-    assert_long_preview_literal(&s2_observed, &s2_body)?;
+    assert_long_preview_literal(&s2_expected, &s2_body, &s2_show.link)?;
+    assert_long_preview_literal(&s2_observed, &s2_body, &s2_show.link)?;
     let s2_fetched = cli_show(&proof, &peer.target, &s2_show.link).await?;
     assert_eq!(
         s2_fetched.pointer("/result/record/body"),
@@ -337,7 +338,7 @@ async fn exercise_scripted_acp_target(
         .find(|notice| notice.line.contains(&marker))
         .cloned()
         .ok_or("ACP target push is missing from the recipient inbox")?;
-    assert_long_preview_literal(&notice.line, &body)?;
+    assert_long_preview_literal(&notice.line, &body, &notice.link)?;
     let show = proof
         .client
         .router_show(PushRecordShowParams {
@@ -361,7 +362,7 @@ async fn exercise_scripted_acp_target(
     )
     .await?;
     assert_exact_notice_line(&observed, &expected)?;
-    assert_long_preview_literal(&observed, &body)?;
+    assert_long_preview_literal(&observed, &body, &show.link)?;
     proof.record(
         "pushDeliveryMatrixAcp",
         json!({"pushId":show.record.push_id,"target":target,"firstLine":observed}),
