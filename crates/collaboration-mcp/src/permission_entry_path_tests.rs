@@ -419,7 +419,7 @@ async fn serve_approval_deliveries(
                     let text = request["params"]["input"][0]["text"]
                         .as_str()
                         .expect("push delivery line");
-                    let (_, link_text) = text.rsplit_once(" · ").expect("push link suffix");
+                    let link_text = text.split_whitespace().last().expect("push link suffix");
                     let link = RouterLink::parse(link_text).expect("valid router push link");
                     assert_eq!(
                         link.machine_id(),

@@ -385,16 +385,8 @@ impl SessionDeliveryRoute for CodexAppServerDeliveryRoute {
             let expected_link =
                 RouterLink::new(MachineId::from(self.service_id.clone()), push_id.clone())
                     .to_string();
-            let prepared_header = request
-                .payload
-                .line
-                .as_str()
-                .lines()
-                .next()
-                .unwrap_or_default();
-            let line_has_expected_link = prepared_header
-                .rsplit_once(" · ")
-                .is_some_and(|(_, link)| link == expected_link);
+            let line_has_expected_link =
+                prepared_line_has_expected_link(request.payload.line.as_str(), &expected_link);
             if request.correlation.as_str() != push_id.as_str() || !line_has_expected_link {
                 return Err(DeliveryContractError::InvalidEvidence);
             }
@@ -422,6 +414,47 @@ impl SessionDeliveryRoute for CodexAppServerDeliveryRoute {
             Ok(crate::codex_queue_reconciliation::reconcile(&self.backend, context).await)
         })
     }
+}
+
+fn prepared_line_has_expected_link(line: &str, expected_link: &str) -> bool {
+    if line.contains(['\n', '\r']) {
+        return false;
+    }
+    let Some(prefix) = line.strip_suffix(expected_link) else {
+        return false;
+    };
+    let Some((_, preview_suffix)) = prefix.split_once(" · \"") else {
+        return prefix.strip_suffix(" · ").is_some();
+    };
+    if let Some(preview) = preview_suffix.strip_suffix("\" · ") {
+        return preview_has_only_escaped_quotes(preview);
+    }
+    let Some(truncated) = preview_suffix.strip_suffix(") 📖 Load full message → ") else {
+        return false;
+    };
+    let Some((preview, omitted_scalars)) = truncated.rsplit_once("…\" (+") else {
+        return false;
+    };
+    // The formatter owns the count's source-body semantics. This route only admits
+    // its exact positive decimal grammar before the exact service/push link.
+    omitted_scalars
+        .parse::<usize>()
+        .is_ok_and(|count| count > 0 && count.to_string() == omitted_scalars)
+        && preview_has_only_escaped_quotes(preview)
+}
+
+fn preview_has_only_escaped_quotes(preview: &str) -> bool {
+    let mut escaped = false;
+    for character in preview.chars() {
+        if escaped {
+            escaped = false;
+        } else if character == '\\' {
+            escaped = true;
+        } else if character == '"' {
+            return false;
+        }
+    }
+    !escaped
 }
 
 fn not_submitted(reason: &str, retryable: bool) -> DeliveryReceipt {

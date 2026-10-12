@@ -63,7 +63,7 @@ pub(crate) async fn prompt_and_approve_from_peer_provider(
             .kind,
         collaboration_protocol::PushKind::Approval,
     );
-    let notice_link = notice_line.rsplit_once(" · ").expect("notice link").1;
+    let notice_link = notice_line.split_whitespace().last().expect("notice link");
     let locator =
         collaboration_protocol::RouterLink::parse(notice_link).expect("validated stored push link");
     let stored_notice = client

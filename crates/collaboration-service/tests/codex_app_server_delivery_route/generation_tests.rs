@@ -50,17 +50,82 @@ async fn stale_strict_generation_stops_before_evidence_or_native_io()
 #[tokio::test]
 async fn prepared_push_reconciles_only_on_matching_codex_route_identity_and_line()
 -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    exercise_prepared_push_route(Some("preview")).await
+}
+
+#[tokio::test]
+async fn truncated_prepared_push_delivers_exact_cue_and_link_through_native_route()
+-> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    exercise_prepared_push_route(Some(&"N".repeat(1_340))).await
+}
+
+#[tokio::test]
+async fn bodyless_prepared_push_delivers_through_native_route()
+-> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    exercise_prepared_push_route(None).await
+}
+
+#[tokio::test]
+async fn escaped_short_and_truncated_previews_deliver_through_native_route()
+-> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    exercise_prepared_push_route(Some("\"\\λ")).await?;
+    exercise_prepared_push_route(Some(&"\"\\λ".repeat(34))).await
+}
+
+async fn exercise_prepared_push_route(
+    body: Option<&str>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let root = tempfile::tempdir()?;
     let socket_path = root.path().join("native.sock");
     let service_id = UuidIdentity::try_from("00000000-0000-4000-8000-000000000001".to_owned())?;
     let push_id = PushId::try_from("018f47d2-24d5-7a68-b9ec-6f759c39458f".to_owned())?;
     let mismatched_push_id = PushId::try_from("018f47d2-24d5-7a68-b9ec-6f759c39458e".to_owned())?;
-    let line: MessageText = format!(
-        "✉️ sender · \"preview\" · router://{}/push/{}",
-        String::from(service_id.clone()),
-        push_id.as_str()
-    )
-    .try_into()?;
+    let link = collaboration_protocol::RouterLink::new(
+        collaboration_protocol::MachineId::from(service_id.clone()),
+        push_id.clone(),
+    );
+    let line: MessageText =
+        collaboration_protocol::render_push_line(&collaboration_protocol::PushLineInput {
+            link: link.clone(),
+            machine_label: "Fixture".to_owned().try_into()?,
+            origin: if body.is_some() {
+                collaboration_protocol::PushOrigin::OwnerUnverified
+            } else {
+                collaboration_protocol::PushOrigin::Router(
+                    collaboration_protocol::PushKind::SubscriptionExpiry,
+                )
+            },
+            header_facts: if body.is_some() {
+                collaboration_protocol::PushHeaderFacts::DirectMessage {
+                    sender_display_name: None,
+                }
+            } else {
+                collaboration_protocol::PushHeaderFacts::SubscriptionExpiry {
+                    scope: "fixture".to_owned(),
+                }
+            },
+            body: body.map(str::to_owned),
+        })?
+        .try_into()?;
+    if body.is_some_and(|text| text.chars().count() == 1_340) {
+        let expected_line = format!(
+            "🧑 Owner (unverified) @Fixture → you · \"{}…\" (+1240) 📖 Load full message → {link}",
+            "N".repeat(100)
+        );
+        if line.as_str() != expected_line {
+            return Err("renderer did not preserve the independent literal cue/count/link".into());
+        }
+    } else if body.is_some_and(|text| text.chars().count() == 102) {
+        let expected_line = format!(
+            "🧑 Owner (unverified) @Fixture → you · \"{}\\\"…\" (+2) 📖 Load full message → {link}",
+            "\\\"\\\\λ".repeat(33)
+        );
+        if line.as_str() != expected_line {
+            return Err(
+                "renderer changed the independent escaped scalar preview/count/link".into(),
+            );
+        }
+    }
     let target: SessionRef = serde_json::from_value(json!({
         "endpoint":{"serviceId":service_id,"endpointId":"codex-local"},
         "sessionId":"thread-one"
@@ -169,7 +234,7 @@ async fn prepared_push_reconciles_only_on_matching_codex_route_identity_and_line
         )?;
         socket
             .send(Message::Text(
-                json!({"id":initialize["id"],"result":{}})
+                json!({"id":initialize.get("id").ok_or("native initialize omitted request id")?,"result":{}})
                     .to_string()
                     .into(),
             ))
@@ -186,29 +251,36 @@ async fn prepared_push_reconciles_only_on_matching_codex_route_identity_and_line
         let pre_effect_valid = {
             let pre_effect = observed.0.lock().map_err(|_| "evidence lock unavailable")?;
             pre_effect.len() == 1
-                && matches!(&pre_effect[0], RouteEffectEvidence::CodexAppServer(native) if native.submission == SubmissionEffect::Dispatching && native.target.as_ref() == Some(&native_target) && native.client_user_message_id.as_deref() == Some(native_push_id.as_str()))
+                && matches!(pre_effect.first(), Some(RouteEffectEvidence::CodexAppServer(native)) if native.submission == SubmissionEffect::Dispatching && native.target.as_ref() == Some(&native_target) && native.client_user_message_id.as_deref() == Some(native_push_id.as_str()))
         };
         if !pre_effect_valid {
             return Err::<(), Box<dyn std::error::Error + Send + Sync>>(
                 "dispatch evidence was not recorded before native I/O".into(),
             );
         }
-        if read["method"] != "thread/read" {
+        if read.get("method").and_then(Value::as_str) != Some("thread/read") {
             return Err("unexpected native inspection".into());
         }
-        socket.send(Message::Text(json!({"id":read["id"],"result":{"thread":{"id":"thread-one","name":"🤖 Codex Main","status":{"type":"idle"}}}}).to_string().into())).await?;
+        socket.send(Message::Text(json!({"id":read.get("id").ok_or("native read omitted request id")?,"result":{"thread":{"id":"thread-one","name":"🤖 Codex Main","status":{"type":"idle"}}}}).to_string().into())).await?;
         let queued: Value =
             serde_json::from_str(socket.next().await.ok_or("missing queue add")??.to_text()?)?;
-        if queued["method"] != "thread/queue/add"
-            || queued["params"]["threadId"] != native_target_session_id
-            || queued["params"]["clientUserMessageId"] != native_push_id
-            || queued["params"]["input"][0]["text"] != native_line
+        if queued.get("method").and_then(Value::as_str) != Some("thread/queue/add")
+            || queued.pointer("/params/threadId").and_then(Value::as_str)
+                != Some(native_target_session_id.as_str())
+            || queued
+                .pointer("/params/clientUserMessageId")
+                .and_then(Value::as_str)
+                != Some(native_push_id.as_str())
+            || queued
+                .pointer("/params/input/0/text")
+                .and_then(Value::as_str)
+                != Some(native_line.as_str())
         {
             return Err("Codex route changed the prepared push id, target, or line".into());
         }
         socket
             .send(Message::Text(
-                json!({"id":queued["id"],"result":{"queuedSubmission":{"id":"queued-one"}}})
+                json!({"id":queued.get("id").ok_or("native queue add omitted request id")?,"result":{"queuedSubmission":{"id":"queued-one"}}})
                     .to_string()
                     .into(),
             ))
@@ -226,7 +298,7 @@ async fn prepared_push_reconciles_only_on_matching_codex_route_identity_and_line
         )?;
         socket
             .send(Message::Text(
-                json!({"id":initialize["id"],"result":{}})
+                json!({"id":initialize.get("id").ok_or("native initialize omitted request id")?,"result":{}})
                     .to_string()
                     .into(),
             ))
@@ -245,15 +317,16 @@ async fn prepared_push_reconciles_only_on_matching_codex_route_identity_and_line
                 .ok_or("missing queue list")??
                 .to_text()?,
         )?;
-        if listing["method"] != "thread/queue/list"
-            || listing["params"]["threadId"] != native_target_session_id
+        if listing.get("method").and_then(Value::as_str) != Some("thread/queue/list")
+            || listing.pointer("/params/threadId").and_then(Value::as_str)
+                != Some(native_target_session_id.as_str())
         {
             return Err("Codex reconciliation used a different selected target".into());
         }
         socket
             .send(Message::Text(
                 json!({
-                    "id":listing["id"],
+                    "id":listing.get("id").ok_or("native queue list omitted request id")?,
                     "result":{"data":[{
                         "id":"queued-one",
                         "clientUserMessageId":native_push_id,
@@ -283,7 +356,7 @@ async fn prepared_push_reconciles_only_on_matching_codex_route_identity_and_line
             )?;
             socket
                 .send(Message::Text(
-                    json!({"id":initialize["id"],"result":{}})
+                    json!({"id":initialize.get("id").ok_or("native initialize omitted request id")?,"result":{}})
                         .to_string()
                         .into(),
                 ))
@@ -302,15 +375,16 @@ async fn prepared_push_reconciles_only_on_matching_codex_route_identity_and_line
                     .ok_or("missing mismatched-id queue list")??
                     .to_text()?,
             )?;
-            if listing["method"] != "thread/queue/list"
-                || listing["params"]["threadId"] != native_target_session_id
+            if listing.get("method").and_then(Value::as_str) != Some("thread/queue/list")
+                || listing.pointer("/params/threadId").and_then(Value::as_str)
+                    != Some(native_target_session_id.as_str())
             {
                 return Err("mismatched-ID reconciliation used an unexpected queue query".into());
             }
             socket
                 .send(Message::Text(
                     json!({
-                        "id":listing["id"],
+                        "id":listing.get("id").ok_or("native queue list omitted request id")?,
                         "result":{"data":[{
                             "id":"queued-mismatched-id",
                             "clientUserMessageId":mismatched_native_push_id,
@@ -358,11 +432,14 @@ async fn prepared_push_reconciles_only_on_matching_codex_route_identity_and_line
     let recorded = {
         let records = sink.0.lock().map_err(|_| "evidence lock unavailable")?;
         if records.len() != 2
-            || !matches!(&records[1], RouteEffectEvidence::CodexAppServer(native) if native.submission == SubmissionEffect::Accepted && native.target.as_ref() == Some(&target) && native.client_user_message_id.as_deref() == Some(push_id.as_str()) && native.native_submission_id.as_deref() == Some("queued-one"))
+            || !matches!(records.get(1), Some(RouteEffectEvidence::CodexAppServer(native)) if native.submission == SubmissionEffect::Accepted && native.target.as_ref() == Some(&target) && native.client_user_message_id.as_deref() == Some(push_id.as_str()) && native.native_submission_id.as_deref() == Some("queued-one"))
         {
             return Err("prepared push did not retain its Codex route evidence and receipt".into());
         }
-        records[1].clone()
+        records
+            .get(1)
+            .cloned()
+            .ok_or("accepted route evidence missing")?
     };
 
     let accepted = delivery
@@ -566,6 +643,110 @@ async fn retiring_during_thread_read_returns_retryable_unavailable()
         } if reason == "unavailable"
     ) {
         return Err("retirement during thread/read was not retryable unavailable".into());
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn malformed_prepared_push_suffixes_stop_before_evidence_or_native_io()
+-> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    use futures_util::FutureExt as _;
+
+    let root = tempfile::tempdir()?;
+    let socket_path = root.path().join("native.sock");
+    let listener = tokio::net::UnixListener::bind(&socket_path)?;
+    let service_id = UuidIdentity::try_from("00000000-0000-4000-8000-000000000001".to_owned())?;
+    let target: SessionRef = serde_json::from_value(json!({
+        "endpoint":{"serviceId":service_id,"endpointId":"codex-local"},"sessionId":"thread-one"
+    }))?;
+    let push_id = PushId::try_from("018f47d2-24d5-7a68-b9ec-6f759c39458f".to_owned())?;
+    let expected_link = format!(
+        "router://{}/push/{}",
+        String::from(service_id.clone()),
+        push_id.as_str()
+    );
+    let generation = serde_json::from_value(json!({"serviceEpoch":service_id,"generation":1}))?;
+    let gate = NativeGenerationGate::default();
+    gate.activate(generation, socket_path, None)?;
+    let route = CodexAppServerDeliveryRoute::new(
+        service_id.clone(),
+        EndpointDirectory::new(service_id),
+        NativeControlBackend {
+            endpoint: target.endpoint.clone(),
+            gate,
+            codex_home: root.path().to_owned(),
+        },
+        Arc::new(collaboration_service::UnmaterializedThreadHolder::new()),
+    );
+    let invalid_lines = [
+        "✉️ sender · \"preview\"".to_owned(),
+        format!("✉️ sender · \"preview\" {expected_link}"),
+        format!("✉️ sender · \"preview\" → {expected_link}"),
+        format!("✉️ sender · \"preview\" · {expected_link} trailing"),
+        format!("✉️ sender · \"preview\" · {expected_link}\ntrailing"),
+        format!("✉️ sender · \"preview\" · {expected_link}\n"),
+        format!("✉️ sender · \"preview\" · {expected_link}/extra"),
+        format!("✉️ sender · \"preview\" · {expected_link}partial"),
+        format!(
+            "✉️ sender · \"preview\" · {}",
+            expected_link.replace("000000000001", "000000000002")
+        ),
+        format!(
+            "✉️ sender · \"preview\" · {}",
+            expected_link.replace("39458f", "39458e")
+        ),
+        format!("✉️ sender · \"preview…\" (+2) → {expected_link}"),
+        format!("✉️ sender · \"preview…\" (+2) 📖 Load full message -> {expected_link}"),
+        format!("✉️ sender · \"preview…\" (+2) 📖 Load Full message → {expected_link}"),
+        format!("✉️ sender · \"preview…\" (+0) 📖 Load full message → {expected_link}"),
+        format!("✉️ sender · \"preview…\" (+02) 📖 Load full message → {expected_link}"),
+        format!("✉️ sender · \"preview…\" (+-2) 📖 Load full message → {expected_link}"),
+        format!("✉️ sender · \"preview…\" (+２) 📖 Load full message → {expected_link}"),
+        format!("✉️ sender · \"preview…\" (+2 ) 📖 Load full message → {expected_link}"),
+        format!("✉️ sender · \"preview…\" (+2) 📖 Load full message → {expected_link} trailing"),
+        format!(
+            "✉️ sender · \"preview…\" (+2) 📖 Load full message → {}",
+            expected_link.replace("39458f", "39458e")
+        ),
+        format!("✉️ sender · \"preview\" (+2) 📖 Load full message → {expected_link}"),
+        format!("✉️ sender · \"preview… (+2) 📖 Load full message → {expected_link}"),
+        format!("✉️ sender · \"preview…\" (+2) 📖 Load full message → · {expected_link}"),
+        format!("✉️ sender · \"preview\" forged…\" (+2) 📖 Load full message → {expected_link}"),
+        format!("✉️ sender · \"preview\" (+0) 📖 Load full message → · {expected_link}"),
+        format!("✉️ sender · \"preview\" trailing · {expected_link}"),
+        format!("✉️ sender · \"preview\\\" · {expected_link}"),
+    ];
+    for line in invalid_lines {
+        let sink = CountingEvidenceSink(AtomicUsize::new(0));
+        let delivery = route.deliver(
+            PreparedDeliveryRequest {
+                payload: PreparedPush {
+                    push_id: push_id.clone(),
+                    line: line.clone().try_into()?,
+                    load_policy: LoadPolicy::LoadedOnly,
+                },
+                target: target.clone(),
+                mode: MessageDelivery::Auto,
+                precondition: DeliveryPrecondition::Unpinned,
+                correlation: DeliveryCorrelationId::try_from(push_id.as_str().to_owned())?,
+                attempt: agent_automation::AttemptId::generate(),
+            },
+            &sink,
+        );
+        let result = tokio::select! {
+            biased;
+            accepted = listener.accept() => {
+                let _connection = accepted?;
+                return Err(format!("malformed push reached native I/O: {line}").into());
+            }
+            result = delivery => result,
+        };
+        if !matches!(result, Err(DeliveryContractError::InvalidEvidence))
+            || sink.0.load(Ordering::SeqCst) != 0
+            || listener.accept().now_or_never().is_some()
+        {
+            return Err(format!("malformed push crossed the effect boundary: {line}").into());
+        }
     }
     Ok(())
 }
