@@ -3,6 +3,16 @@
 Date: 2026-10-07. Status: draft for review. Requirements: [requirements.md](requirements.md).
 Structure: [program-design.md](program-design.md).
 
+## 2026-10-11: Turso Sync removed
+
+Router replication moved to Turso change capture and Cloudflare. The owner approved removing
+Turso Sync from the SQLx driver: the `sync` feature, Sync connection options and operations,
+Sync-only tests, sync-server installer and its tests, and Sync server CI setup were removed.
+The Turso engine and the driver's non-Sync behavior remain unchanged. Earlier Sync requirements,
+contracts, test plans and findings below are retained as historical context and no longer apply
+to the removed surface.
+
+
 ## S1. Entities
 
 | Entity | Meaning |

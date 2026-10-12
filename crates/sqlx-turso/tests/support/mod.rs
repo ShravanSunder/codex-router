@@ -4,8 +4,6 @@
 
 pub mod project_admission;
 pub mod scratch_store;
-#[cfg(feature = "sync")]
-pub mod sync_server;
 
 /// Result type for tests and helpers: any error fails the test with its message
 pub type TestResult<T = ()> = Result<T, Box<dyn std::error::Error + Send + Sync>>;

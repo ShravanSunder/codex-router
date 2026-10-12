@@ -9,12 +9,10 @@ use crate::{
     error::map_turso_error,
 };
 
-/// One owned Turso engine connection, with the Sync handle when the store is synced
+/// One owned Turso engine connection
 pub struct TursoConnection {
     options: TursoConnectOptions,
     raw: turso::Connection,
-    #[cfg(feature = "sync")]
-    sync: Option<turso::sync::Database>,
     statements: StatementCache<TursoStatement>,
     /// The schema cookie the cached statements were prepared against
     statements_schema_version: Option<i64>,
@@ -83,8 +81,6 @@ impl TursoConnection {
             statements: StatementCache::new(options.get_statement_cache_capacity()),
             options,
             raw: connection.raw,
-            #[cfg(feature = "sync")]
-            sync: connection.sync,
             statements_schema_version: None,
             schema_version_statement: None,
             transaction_state: TransactionState::default(),
@@ -137,47 +133,6 @@ impl TursoConnection {
         &self.raw
     }
 
-    /// Pushes local changes to the Sync remote
-    ///
-    /// Bound the wait with a timeout. A push that times out or is dropped may still have been
-    /// applied remotely, so callers retry with the same request identity rather than assume it
-    /// failed.
-    #[cfg(feature = "sync")]
-    pub async fn sync_push(&self) -> Result<(), Error> {
-        self.sync_database()?.push().await.map_err(map_turso_error)
-    }
-
-    /// Pulls remote changes into this connection's database
-    ///
-    /// Returns whether any change was applied. The same connection and its cached statements
-    /// read the pulled rows.
-    #[cfg(feature = "sync")]
-    pub async fn sync_pull(&self) -> Result<bool, Error> {
-        self.sync_database()?.pull().await.map_err(map_turso_error)
-    }
-
-    /// Checkpoints the synced database's write-ahead log
-    #[cfg(feature = "sync")]
-    pub async fn sync_checkpoint(&self) -> Result<(), Error> {
-        self.sync_database()?
-            .checkpoint()
-            .await
-            .map_err(map_turso_error)
-    }
-
-    /// Returns Sync statistics for this connection's database
-    #[cfg(feature = "sync")]
-    pub async fn sync_stats(&self) -> Result<turso::sync::DatabaseSyncStats, Error> {
-        self.sync_database()?.stats().await.map_err(map_turso_error)
-    }
-
-    #[cfg(feature = "sync")]
-    fn sync_database(&self) -> Result<&turso::sync::Database, Error> {
-        self.sync
-            .as_ref()
-            .ok_or_else(|| crate::TursoAdapterError::NotSyncConnection.into())
-    }
-
     pub(crate) fn cached_statement(&mut self, sql: &str) -> Option<TursoStatement> {
         self.statements.get_mut(sql).cloned()
     }
@@ -186,7 +141,7 @@ impl TursoConnection {
     ///
     /// The engine reprepares a stale statement only when it first steps, after the driver and
     /// the SDK have already taken its column list, so a statement cached before a schema change
-    /// (a local migration, a pulled one, another connection's) would keep returning the old
+    /// (a local migration or another connection's) would keep returning the old
     /// result shape. The schema cookie changes with every schema change, so it is compared
     /// before every single statement this driver prepares, cached or not.
     ///
@@ -310,71 +265,5 @@ impl Connection for TursoConnection {
 impl AsRef<TursoConnectOptions> for TursoConnection {
     fn as_ref(&self) -> &TursoConnectOptions {
         &self.options
-    }
-}
-
-#[cfg(all(test, feature = "sync"))]
-mod tests {
-    use sqlx_core::{
-        connection::{ConnectOptions, Connection},
-        error::Error,
-        executor::Executor,
-        row::Row,
-    };
-
-    use crate::{TursoAdapterError, TursoConnectOptions, TursoSyncOptions};
-
-    #[tokio::test]
-    async fn sync_operations_on_a_local_connection_are_rejected() -> sqlx_core::Result<()> {
-        // Arrange
-        let connection = TursoConnectOptions::new().connect().await?;
-
-        // Act
-        let error = connection
-            .sync_push()
-            .await
-            .expect_err("not a synced store");
-
-        // Assert
-        assert!(matches!(
-            error,
-            Error::Configuration(ref source)
-                if source.downcast_ref::<TursoAdapterError>()
-                    == Some(&TursoAdapterError::NotSyncConnection)
-        ));
-        connection.close().await
-    }
-
-    #[tokio::test]
-    async fn synced_store_executes_locally_without_bootstrap() -> sqlx_core::Result<()> {
-        // Arrange: an unreachable remote, so every step below is local-only
-        let directory = tempfile::tempdir()?;
-        let mut connection = TursoConnectOptions::new()
-            .filename(directory.path().join("synced.db"))
-            .create_if_missing(true)
-            .with_sync_options(
-                TursoSyncOptions::new("http://127.0.0.1:9")
-                    .with_bootstrap_if_empty(false)
-                    .with_client_name("sqlx-turso-test"),
-            )
-            .connect()
-            .await?;
-
-        // Act
-        (&mut connection)
-            .execute("CREATE TABLE local_rows (id INTEGER PRIMARY KEY)")
-            .await?;
-        (&mut connection)
-            .execute("INSERT INTO local_rows (id) VALUES (1)")
-            .await?;
-        let row = (&mut connection)
-            .fetch_one("SELECT COUNT(*) AS count FROM local_rows")
-            .await?;
-        let _stats = connection.sync_stats().await?;
-        connection.sync_checkpoint().await?;
-
-        // Assert
-        assert_eq!(row.try_get::<i64, _>("count")?, 1);
-        Ok(())
     }
 }

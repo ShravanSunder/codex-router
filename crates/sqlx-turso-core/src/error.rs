@@ -34,12 +34,6 @@ pub enum TursoAdapterError {
     /// Read-only opens need the lower Turso SDK, which this driver does not use
     #[error("read-only Turso connections are not supported")]
     ReadOnlyUnsupported,
-    /// Sync options were given to a build without the `sync` feature
-    #[error("Turso Sync connections require the `sync` feature")]
-    SyncFeatureDisabled,
-    /// A Sync operation was called on a connection opened without Sync options
-    #[error("this Turso connection was not opened with Sync options")]
-    NotSyncConnection,
     /// Arguments were bound to SQL that contains more than one statement
     #[error("arguments cannot be bound to multi-statement Turso SQL")]
     BatchArgumentsUnsupported,

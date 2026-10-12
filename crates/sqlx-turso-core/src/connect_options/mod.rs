@@ -1,8 +1,7 @@
-//! How to open one Turso store: target, open mode, engine settings and optional Sync
+//! How to open one Turso store: target, open mode and engine settings
 
 mod connection_url;
 mod database_target;
-mod sync_options;
 
 use std::{path::Path, sync::Arc, time::Duration};
 
@@ -14,7 +13,6 @@ use url::Url;
 
 pub(crate) use database_target::OpenMode;
 pub use database_target::TursoDatabaseTarget;
-pub use sync_options::TursoSyncOptions;
 
 use crate::{connection::TursoConnection, engine_connection::EngineConnection};
 
@@ -35,7 +33,6 @@ struct ConnectOptionsInner {
     busy_timeout: Duration,
     statement_cache_capacity: usize,
     foreign_keys: bool,
-    sync: Option<TursoSyncOptions>,
     log_settings: LogSettings,
 }
 
@@ -81,11 +78,6 @@ impl TursoConnectOptions {
     /// Returns whether connections enforce foreign keys
     pub fn get_foreign_keys(&self) -> bool {
         self.0.foreign_keys
-    }
-
-    /// Returns the Sync settings, if this is a synced store
-    pub fn sync_options(&self) -> Option<&TursoSyncOptions> {
-        self.0.sync.as_ref()
     }
 
     /// Returns SQLx statement logging settings
@@ -139,18 +131,6 @@ impl TursoConnectOptions {
         Arc::make_mut(&mut self.0).foreign_keys = foreign_keys;
         self
     }
-
-    /// Makes this a synced store with these Sync settings
-    pub fn with_sync_options(mut self, sync: TursoSyncOptions) -> Self {
-        Arc::make_mut(&mut self.0).sync = Some(sync);
-        self
-    }
-
-    /// Makes this a local-only store
-    pub fn clear_sync_options(mut self) -> Self {
-        Arc::make_mut(&mut self.0).sync = None;
-        self
-    }
 }
 
 impl Default for TursoConnectOptions {
@@ -161,7 +141,6 @@ impl Default for TursoConnectOptions {
             busy_timeout: DEFAULT_BUSY_TIMEOUT,
             statement_cache_capacity: DEFAULT_STATEMENT_CACHE_CAPACITY,
             foreign_keys: true,
-            sync: None,
             log_settings: LogSettings::default(),
         }))
     }
@@ -212,7 +191,7 @@ mod tests {
         query_scalar::query_scalar,
     };
 
-    use super::{TursoConnectOptions, TursoSyncOptions};
+    use super::TursoConnectOptions;
     use crate::TursoAdapterError;
 
     #[test]
@@ -226,7 +205,6 @@ mod tests {
         assert_eq!(options.get_statement_cache_capacity(), 100);
         assert_eq!(options.get_busy_timeout(), Duration::from_secs(5));
         assert!(options.get_foreign_keys());
-        assert!(options.sync_options().is_none());
     }
 
     #[tokio::test]
@@ -320,47 +298,6 @@ mod tests {
         assert_eq!(enforcing_flag, 1);
         assert_eq!(relaxed_flag, 0);
         Ok(())
-    }
-
-    #[cfg(feature = "sync")]
-    #[tokio::test]
-    async fn sync_read_write_mode_rejects_a_missing_file() -> sqlx_core::Result<()> {
-        // Arrange
-        let directory = tempfile::tempdir()?;
-        let options = TursoConnectOptions::new()
-            .filename(directory.path().join("missing-sync.db"))
-            .with_sync_options(
-                TursoSyncOptions::new("http://127.0.0.1:9").with_bootstrap_if_empty(false),
-            );
-
-        // Act
-        let error = options.connect().await.expect_err("file does not exist");
-
-        // Assert
-        assert!(matches!(
-            error,
-            Error::Io(ref io_error) if io_error.kind() == std::io::ErrorKind::NotFound
-        ));
-        Ok(())
-    }
-
-    #[cfg(not(feature = "sync"))]
-    #[tokio::test]
-    async fn sync_options_require_the_sync_feature() {
-        // Arrange
-        let options = TursoConnectOptions::new()
-            .with_sync_options(TursoSyncOptions::new("http://127.0.0.1:9"));
-
-        // Act
-        let error = options.connect().await.expect_err("sync feature is off");
-
-        // Assert
-        assert!(matches!(
-            error,
-            Error::Configuration(ref source)
-                if source.downcast_ref::<TursoAdapterError>()
-                    == Some(&TursoAdapterError::SyncFeatureDisabled)
-        ));
     }
 
     #[test]
