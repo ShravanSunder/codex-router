@@ -82,7 +82,7 @@ async fn exercise_push_delivery_matrix(
     proof.record(
         "pushDeliveryMatrixRun",
         json!({"runId":uuid::Uuid::now_v7().to_string(),
-        "cells":["S1","S2","S3","S4","S5","S6","S7","S8","S9","S10"]}),
+        "cells":["S1","S1-long","S2","S3","S4","S5","S6","S7","S8","S9","S10"]}),
     )?;
     let mut peer = delivery_matrix_support::PeerFixture::start(&proof).await?;
     let mut automation = AutomationStore::open(&proof.root.join("automation.sqlite")).await?;
@@ -91,27 +91,16 @@ async fn exercise_push_delivery_matrix(
 
     // S1: an agent DM reaches a real Codex app-server and matches its inbox line.
     let codex_recipient = proof.start_thread("S1 Codex recipient").await?;
-    let s1_prefix = matrix_marker("native-long");
-    let s1_body = format!(
-        "{s1_prefix} {}",
-        "N".repeat(1_339 - s1_prefix.chars().count())
-    );
-    assert_eq!(s1_body.chars().count(), 1_340);
-    let s1_receipt = cli_send(&proof, Some(&sender), &codex_recipient, &s1_body, false).await?;
+    let s1_body = "S1 is green";
+    let s1_receipt = cli_send(&proof, Some(&sender), &codex_recipient, s1_body, false).await?;
     let s1_push_id = receipt_push_id(&s1_receipt)?;
     let (s1_show, s1_expected) =
         dm_notice_and_show(&mut proof, &codex_recipient, &s1_push_id).await?;
-    let s1_item = wait_for_codex_input(
-        &mut proof,
-        &codex_recipient,
-        &s1_prefix,
-        OBSERVATION_TIMEOUT,
-    )
-    .await?;
+    let s1_item =
+        wait_for_codex_input(&mut proof, &codex_recipient, s1_body, OBSERVATION_TIMEOUT).await?;
     let s1_observed = user_message_text(&s1_item)?;
     assert_exact_notice_line(&s1_observed, &s1_expected)?;
-    assert_long_preview_literal(&s1_expected, &s1_body)?;
-    assert_long_preview_literal(&s1_observed, &s1_body)?;
+    assert!(s1_observed.contains("\"S1 is green\" · router://"));
     let s1_fetched = cli_show(&proof, &codex_recipient, &s1_show.link).await?;
     assert_eq!(
         s1_fetched.pointer("/result/record/body"),
@@ -119,7 +108,45 @@ async fn exercise_push_delivery_matrix(
     );
     assert!(s1_fetched.pointer("/result/record/preview").is_none());
     record_passed_matrix_cell(&proof, config_guard, "S1", &[s1_observed])?;
-    covered_cells.push("S1 Codex app-server");
+    covered_cells.push("S1 Codex app-server short message");
+
+    // S1-long: native delivery also retains the independently checked truncation grammar.
+    let s1_long_prefix = matrix_marker("native-long");
+    let s1_long_body = format!(
+        "{s1_long_prefix} {}",
+        "N".repeat(1_339 - s1_long_prefix.chars().count())
+    );
+    assert_eq!(s1_long_body.chars().count(), 1_340);
+    let s1_long_receipt = cli_send(
+        &proof,
+        Some(&sender),
+        &codex_recipient,
+        &s1_long_body,
+        false,
+    )
+    .await?;
+    let s1_long_push_id = receipt_push_id(&s1_long_receipt)?;
+    let (s1_long_show, s1_long_expected) =
+        dm_notice_and_show(&mut proof, &codex_recipient, &s1_long_push_id).await?;
+    let s1_long_item = wait_for_codex_input(
+        &mut proof,
+        &codex_recipient,
+        &s1_long_prefix,
+        OBSERVATION_TIMEOUT,
+    )
+    .await?;
+    let s1_long_observed = user_message_text(&s1_long_item)?;
+    assert_exact_notice_line(&s1_long_observed, &s1_long_expected)?;
+    assert_long_preview_literal(&s1_long_expected, &s1_long_body)?;
+    assert_long_preview_literal(&s1_long_observed, &s1_long_body)?;
+    let s1_long_fetched = cli_show(&proof, &codex_recipient, &s1_long_show.link).await?;
+    assert_eq!(
+        s1_long_fetched.pointer("/result/record/body"),
+        Some(&json!(s1_long_body))
+    );
+    assert!(s1_long_fetched.pointer("/result/record/preview").is_none());
+    record_passed_matrix_cell(&proof, config_guard, "S1-long", &[s1_long_observed])?;
+    covered_cells.push("S1-long Codex app-server truncation");
 
     // S2: a long receipt is shortened to 100 Unicode scalars, linked, and fetchable in full.
     let s2_prefix = matrix_marker("long-receipt");
