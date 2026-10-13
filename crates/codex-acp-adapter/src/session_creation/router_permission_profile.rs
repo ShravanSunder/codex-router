@@ -120,6 +120,31 @@ async fn has_symlinked_component(home: &Path, location: &str) -> bool {
     false
 }
 
+/// Native resolves macOS system aliases, but preserves nested logical symlinks.
+/// Missing or unreadable recorded scratch paths keep their existing spelling.
+async fn scratch_root_for_native(scratch: &Path) -> PathBuf {
+    #[cfg(target_os = "macos")]
+    if ["/tmp", "/var", "/etc"]
+        .iter()
+        .any(|alias| scratch.starts_with(alias))
+    {
+        for ancestor in scratch.ancestors() {
+            let Ok(metadata) = tokio::fs::symlink_metadata(ancestor).await else {
+                return scratch.to_path_buf();
+            };
+            if metadata.file_type().is_symlink()
+                && ancestor.parent().and_then(Path::parent).is_some()
+            {
+                return scratch.to_path_buf();
+            }
+        }
+        if let Ok(canonical) = tokio::fs::canonicalize(scratch).await {
+            return canonical;
+        }
+    }
+    scratch.to_path_buf()
+}
+
 impl RouterSessionProfile {
     /// Resolves the profile for a session against the host's home and temporary directories.
     pub(super) async fn for_session(
@@ -128,7 +153,8 @@ impl RouterSessionProfile {
         scratch: &Path,
     ) -> Result<Self, SessionSetupError> {
         let host = HostLocations::resolve(access).await?;
-        Ok(Self::with_host(access, cwd, scratch, &host))
+        let scratch_root = scratch_root_for_native(scratch).await;
+        Ok(Self::with_host(access, cwd, &scratch_root, &host))
     }
 
     fn with_host(access: RouterAccess, cwd: &Path, scratch: &Path, host: &HostLocations) -> Self {
@@ -464,5 +490,76 @@ mod tests {
                 ))
                 .is_err()
         );
+    }
+
+    #[test]
+    fn canonical_scratch_keeps_strict_permission_equality_and_read_exceptions() {
+        // Arrange: the canonical owned scratch spelling is already selected.
+        let restricted = RouterSessionProfile::with_host(
+            RouterAccess::WriteRestricted,
+            Path::new("/repo"),
+            Path::new("/private/tmp/owned/scratch/session-root"),
+            &host(BTreeSet::new()),
+        );
+        let mut granted = under_home(&RESTRICTED_TOOL_LOCATIONS);
+        granted.extend(
+            [
+                "/private/tmp/owned/scratch/session-root",
+                "/repo/tmp",
+                "/repo/docs/wip",
+            ]
+            .into_iter()
+            .chain(TEMPORARY_DIRECTORIES)
+            .map(str::to_owned),
+        );
+        let accepted = native_response("router-write-restricted", &granted, true);
+        let mut missing_scratch = granted.clone();
+        missing_scratch.retain(|root| root != "/private/tmp/owned/scratch/session-root");
+        let mut extra_root = granted.clone();
+        extra_root.push("/other/write-root".to_owned());
+        let mut missing_network = accepted.clone();
+        missing_network["sandbox"]
+            .as_object_mut()
+            .unwrap()
+            .remove("networkAccess");
+
+        // Act & assert: alias handling must not turn exact policy into subset matching.
+        assert!(restricted.validate_observed(&accepted).is_ok());
+        for rejected in [
+            native_response("router-write-restricted", &missing_scratch, true),
+            native_response("router-write-restricted", &extra_root, true),
+            native_response("router-workspace-write", &granted, true),
+            native_response("router-write-restricted", &granted, false),
+            missing_network,
+        ] {
+            assert!(matches!(
+                restricted.validate_observed(&rejected),
+                Err(SessionSetupError::AccessMismatch { .. })
+            ));
+        }
+        let filesystem = filesystem(&restricted.native_config(), "router-write-restricted");
+        assert_eq!(
+            filesystem["/private/tmp/owned/scratch/session-root"],
+            "write"
+        );
+        assert!(!filesystem.contains_key("/tmp/owned/scratch/session-root"));
+        assert_eq!(
+            filesystem[&format!("{HOME}/Library/Caches/pnpm/dlx")],
+            "read"
+        );
+        assert_eq!(filesystem[&format!("{HOME}/.cargo/env")], "read");
+    }
+
+    #[tokio::test]
+    async fn absent_recorded_scratch_keeps_its_original_grant_spelling() {
+        // Arrange: a recorded path whose owned directory no longer exists.
+        let identity = String::from(collaboration_protocol::OperationId::generate());
+        let scratch = PathBuf::from(format!(
+            "/tmp/router-absent-scratch-{identity}/scratch/root"
+        ));
+        assert!(tokio::fs::symlink_metadata(&scratch).await.is_err());
+
+        // Act & assert: do not invent a new canonical grant on a failed lookup.
+        assert_eq!(scratch_root_for_native(&scratch).await, scratch);
     }
 }

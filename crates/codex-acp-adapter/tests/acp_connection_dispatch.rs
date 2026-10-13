@@ -205,9 +205,13 @@ async fn public_connection_routes_discovery_and_receipt_guarded_loads_to_native_
                     request["params"]["config"]["permissions.router-workspace-write.extends"],
                     ":workspace"
                 );
+                let canonical_scratch = std::fs::canonicalize(TEST_SCRATCH)
+                    .unwrap_or_else(|error| panic!("canonical scratch: {error}"))
+                    .to_string_lossy()
+                    .into_owned();
                 assert_eq!(
                     request["params"]["config"]["permissions.router-workspace-write.filesystem"]
-                        [TEST_SCRATCH],
+                        [&canonical_scratch],
                     "write"
                 );
                 assert!(
