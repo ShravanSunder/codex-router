@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use crate::sessions::RepositoryIdentity;
 use crate::sessions::SessionPickerRecord;
@@ -17,11 +18,8 @@ pub(crate) struct SessionsPickerRequest {
     pub(crate) repository_identity: RepositoryIdentity,
     pub(crate) current_provider: Option<String>,
     pub(crate) new_session_args_display: String,
-    pub(crate) native_arguments: Vec<std::ffi::OsString>,
     pub(crate) include_empty_sessions: bool,
     pub(crate) records: Vec<SessionPickerRecord>,
-    pub(crate) router_registry: crate::sessions::RouterRegistryRead,
-    pub(crate) machine_mode: super::PickerMachineSourceMode,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -34,7 +32,13 @@ pub(crate) struct SessionsPickerDataQuery {
     pub(crate) include_empty_sessions: bool,
 }
 
-pub(crate) type SessionsPickerRecordLoader = super::source_inventory_request::SourceInventoryLoader;
+pub(crate) type SessionsPickerRecordLoader = Arc<
+    dyn Fn(
+            SessionsPickerDataQuery,
+        ) -> Result<crate::picker_runtime_status::PickerRecordsSnapshot, String>
+        + Send
+        + Sync,
+>;
 
 impl Default for SessionsPickerRequest {
     fn default() -> Self {
@@ -52,11 +56,8 @@ impl Default for SessionsPickerRequest {
             },
             current_provider: None,
             new_session_args_display: String::new(),
-            native_arguments: Vec::new(),
             include_empty_sessions: false,
             records: Vec::new(),
-            router_registry: crate::sessions::RouterRegistryRead::Missing,
-            machine_mode: super::PickerMachineSourceMode::HostedDefault,
         }
     }
 }

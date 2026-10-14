@@ -15,8 +15,6 @@ mod cli_message_proof;
 mod lifecycle_reader_proof;
 #[path = "debug_host_acceptance/native_delivery_proof.rs"]
 mod native_delivery_proof;
-#[path = "debug_host_acceptance/native_fork_proof.rs"]
-mod native_fork_proof;
 #[path = "debug_host_acceptance/owned_thread_registry.rs"]
 mod owned_thread_registry;
 #[path = "debug_host_acceptance/owned_turn_error_diagnostic.rs"]
@@ -32,7 +30,6 @@ enum MessageProof {
     LifecycleReaders,
     None,
     Native,
-    NativeFork,
     Cli(PathBuf),
     Agents(PathBuf),
     Acp(PathBuf),
@@ -77,7 +74,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 .ok_or("--acp-replacement requires pinned SDK module path")?,
         )?),
         Some("--messages") => MessageProof::Native,
-        Some("--native-fork") => MessageProof::NativeFork,
         Some("--delivery") => MessageProof::Delivery(std::fs::canonicalize(
             std::env::args_os()
                 .nth(3)
@@ -357,10 +353,6 @@ async fn probe(
         owned.create(&mut peer, &cwd).await?
     };
     owned.inspect(&mut peer, &second).await?;
-    if matches!(messages, MessageProof::NativeFork) {
-        return native_fork_proof::run_owned_fork_proof(&mut native, &mut owned, &first, &cwd)
-            .await;
-    }
     for id in [&first, &second] {
         println!(
             "{}",

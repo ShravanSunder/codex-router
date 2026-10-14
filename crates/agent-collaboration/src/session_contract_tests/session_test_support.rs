@@ -217,23 +217,24 @@ impl crate::sessions::SessionsCommandRunner for FakeSessionsCommandRunner {
     fn run_codex_resume(
         &mut self,
         codex_args: &[OsString],
-        selection: &crate::sessions::SessionActionSelection,
+        session_id: &str,
+        model_choice: &codex_native_integration::ResumeModelChoice,
     ) -> Result<(), crate::sessions::SessionsCommandError> {
         self.resume_codex_args.push(codex_args.to_vec());
-        self.resumed_session_ids.push(selection.session_id());
-        self.resume_model_choices
-            .push(selection.model_choice.clone());
+        self.resumed_session_ids.push(session_id.to_owned());
+        self.resume_model_choices.push(model_choice.clone());
         Ok(())
     }
 
     fn run_codex_fork(
         &mut self,
         codex_args: &[OsString],
-        selection: &crate::sessions::SessionActionSelection,
+        session_id: &str,
+        model_choice: &codex_native_integration::ResumeModelChoice,
     ) -> Result<(), crate::sessions::SessionsCommandError> {
         self.fork_codex_args.push(codex_args.to_vec());
-        self.forked_session_ids.push(selection.session_id());
-        self.fork_model_choices.push(selection.model_choice.clone());
+        self.forked_session_ids.push(session_id.to_owned());
+        self.fork_model_choices.push(model_choice.clone());
         Ok(())
     }
 }
@@ -252,10 +253,7 @@ impl FakeSessionsPicker {
         Self {
             selected_outcome:
                 crate::presentation::session_picker::SessionsPickerOutcome::ResumeSession(
-                    crate::sessions::SessionActionSelection::default_catalog(
-                        selected_session_id.to_owned(),
-                        codex_native_integration::ResumeModelChoice::default(),
-                    ),
+                    selected_session_id.to_owned(),
                 ),
             offered_session_ids: Vec::new(),
             offered_labels: Vec::new(),
@@ -281,10 +279,7 @@ impl FakeSessionsPicker {
         Self {
             selected_outcome:
                 crate::presentation::session_picker::SessionsPickerOutcome::ForkSession(
-                    crate::sessions::SessionActionSelection::default_catalog(
-                        session_id.to_owned(),
-                        codex_native_integration::ResumeModelChoice::default(),
-                    ),
+                    session_id.to_owned(),
                 ),
             offered_session_ids: Vec::new(),
             offered_labels: Vec::new(),
@@ -292,26 +287,6 @@ impl FakeSessionsPicker {
             loader_queries: Vec::new(),
             loaded_session_ids: Vec::new(),
         }
-    }
-
-    fn capture_selected_record(&mut self, records: &[crate::sessions::SessionPickerRecord]) {
-        use crate::presentation::session_picker::SessionsPickerOutcome;
-        let selected_id = match &self.selected_outcome {
-            SessionsPickerOutcome::ResumeSession(selection)
-            | SessionsPickerOutcome::ForkSession(selection) => selection.session_id(),
-            _ => return,
-        };
-        let Some(record) = records
-            .iter()
-            .find(|record| record.session_id == selected_id)
-        else {
-            return;
-        };
-        let selection = crate::sessions::SessionActionSelection::from_picker_record(record);
-        self.selected_outcome = match &self.selected_outcome {
-            SessionsPickerOutcome::ForkSession(_) => SessionsPickerOutcome::ForkSession(selection),
-            _ => SessionsPickerOutcome::ResumeSession(selection),
-        };
     }
 
     pub(super) fn with_loader_query(
@@ -332,7 +307,6 @@ impl crate::sessions::SessionsPicker for FakeSessionsPicker {
         Option<crate::presentation::session_picker::SessionsPickerOutcome>,
         crate::sessions::SessionsCommandError,
     > {
-        self.capture_selected_record(&request.records);
         self.new_session_args_display = Some(request.new_session_args_display.clone());
         self.offered_session_ids = request
             .records
@@ -346,19 +320,9 @@ impl crate::sessions::SessionsPicker for FakeSessionsPicker {
             .collect();
         if let Some(record_loader) = record_loader {
             for query in self.loader_queries.clone() {
-                let runtime = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .map_err(crate::sessions::SessionsCommandError::Runtime)?;
-                let records = runtime.block_on(record_loader(crate::presentation::session_picker::SourceInventoryRequest {
-                    source_context: match request.machine_mode {
-                        crate::presentation::session_picker::PickerMachineSourceMode::HostedDefault => crate::presentation::session_picker::PickerSourceContext::DefaultHosted,
-                        crate::presentation::session_picker::PickerMachineSourceMode::LocalCodex => crate::presentation::session_picker::PickerSourceContext::LocalCodex,
-                    }, query, request_generation: 0, continuation: None,
-                })).into_snapshot().map_err(|error| {
+                let records = record_loader(query).map_err(|error| {
                     crate::sessions::SessionsCommandError::Picker(std::io::Error::other(error))
                 })?;
-                self.capture_selected_record(&records.records);
                 self.loaded_session_ids.push(
                     records
                         .records

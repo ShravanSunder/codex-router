@@ -4,7 +4,6 @@ use crate::presentation::session_picker::picker_actions::SessionsPickerOutcome;
 use crate::presentation::session_picker::picker_model::SessionsPickerModel;
 use crate::presentation::session_picker::picker_model::SessionsPickerRuntimeView;
 use crate::presentation::session_picker::test_support::observed_records;
-use crate::presentation::session_picker::test_support::picker_action_selection;
 use crate::presentation::session_picker::test_support::picker_record;
 use crate::presentation::session_picker::test_support::picker_request;
 use crate::sessions::SessionPickerIdentity;
@@ -30,9 +29,6 @@ fn hosted_picker_keeps_equal_codex_and_provider_ids_distinct_and_provider_read_o
     .expect("provider row");
     let mut codex = request.records.remove(0);
     codex.identity = SessionPickerIdentity::HostedCodex(codex_target.clone());
-    codex.source_context =
-        Some(crate::presentation::session_picker::PickerSourceContext::DefaultHosted);
-    let codex_selection = crate::sessions::SessionActionSelection::from_picker_record(&codex);
     request.records = vec![
         codex,
         crate::sessions::SessionPickerRecord::from_provider_summary(&provider, "Claude fixture"),
@@ -50,13 +46,11 @@ fn hosted_picker_keeps_equal_codex_and_provider_ids_distinct_and_provider_read_o
     assert!(model.focus_visible_identity(&SessionPickerIdentity::HostedCodex(codex_target)));
     assert_eq!(
         model.activation_outcome_for_focus(),
-        Some(SessionsPickerOutcome::ResumeSession(
-            codex_selection.clone()
-        ))
+        Some(SessionsPickerOutcome::ResumeSession("thread-a".to_owned()))
     );
     assert_eq!(
         model.fork_outcome_for_focus(),
-        Some(SessionsPickerOutcome::ForkSession(codex_selection))
+        Some(SessionsPickerOutcome::ForkSession("thread-a".to_owned()))
     );
 
     request.source = crate::sessions::SessionsSource::Subagents;
@@ -497,9 +491,7 @@ fn sessions_picker_pointer_focus_resolves_stable_visible_session_identity() {
     assert_eq!(model.focused_session_id(), Some("thread-b"));
     assert_eq!(
         model.activation_outcome_for_focus(),
-        Some(SessionsPickerOutcome::ResumeSession(
-            picker_action_selection("thread-b")
-        ))
+        Some(SessionsPickerOutcome::ResumeSession("thread-b".to_owned()))
     );
 
     let mut replacement_records = model.request.records.clone();

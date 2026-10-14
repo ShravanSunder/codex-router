@@ -1,4 +1,4 @@
-//! Acceptance targets are fresh starts or children of this run's owned native parents.
+//! Acceptance targets originate only from this run's successful native thread/start calls.
 use codex_native_integration::NativeProtocolConnection;
 use serde_json::{Value, json};
 use std::{collections::BTreeSet, error::Error, path::Path};
@@ -16,41 +16,6 @@ pub struct OwnedThreadRegistry {
     threads: BTreeSet<String>,
 }
 impl OwnedThreadRegistry {
-    pub async fn fork_owned_thread(
-        &mut self,
-        client: &mut NativeProtocolConnection,
-        parent: &str,
-        cwd: &Path,
-    ) -> Result<String, Box<dyn Error>> {
-        self.require_owned(parent)?;
-        // No policy/config/model override: the native fork inherits its owned parent.
-        let response = client
-            .request(
-                "thread/fork",
-                json!({"threadId":parent,"cwd":cwd,"deferGoalContinuation":true}),
-            )
-            .await?;
-        let child = response
-            .pointer("/thread/id")
-            .and_then(Value::as_str)
-            .filter(|id| !id.is_empty())
-            .ok_or("native fork returned no child identity; effect is unknown")?
-            .to_owned();
-        if child == parent || !self.threads.insert(child.clone()) {
-            return Err("native fork did not return a distinct owned child".into());
-        }
-        if response.get("modelProvider").and_then(Value::as_str) != Some("codex-router-debug")
-            || response.get("model").and_then(Value::as_str) != Some(PROOF_MODEL)
-            || response.get("reasoningEffort").and_then(Value::as_str) != Some(PROOF_EFFORT)
-            || response.pointer("/sandbox/type").and_then(Value::as_str) != Some("readOnly")
-            || response.get("approvalPolicy").and_then(Value::as_str) != Some("never")
-            || response.get("approvalsReviewer").and_then(Value::as_str) != Some("user")
-            || response.get("cwd").and_then(Value::as_str) != cwd.to_str()
-        {
-            return Err("owned fork did not preserve source cwd/model/read-only policy".into());
-        }
-        Ok(child)
-    }
     pub async fn create(
         &mut self,
         client: &mut NativeProtocolConnection,
