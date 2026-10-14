@@ -10,7 +10,9 @@ const AGE_COLUMN_WIDTH: usize = 6;
 
 fn session_column_widths(width: usize) -> (usize, usize, usize) {
     let inner_width = width.saturating_sub(2);
-    let status_width = STATUS_COLUMN_WIDTH;
+    // Compact rows show a status icon, so preserve identity space instead of
+    // reserving the full desktop heading width for that one-cell value.
+    let status_width = if width < 43 { 2 } else { STATUS_COLUMN_WIDTH };
     let age_width = if width < 43 { 3 } else { AGE_COLUMN_WIDTH };
     let fixed_width = 2 + status_width + (age_width * 2) + 3;
     let title_width = inner_width.saturating_sub(fixed_width).max(2);
@@ -171,7 +173,7 @@ pub(super) fn render_start_new_row(
         ) {
             View(width: 100pct) {
                 View(width: 2) { Text(content: title_prefix, color: if selected { Color::Yellow } else { foreground }, weight: Weight::Bold, wrap: TextWrap::NoWrap) }
-                View(width: title_width as u32, overflow: Overflow::Hidden) { Text(content: truncate_end("Start new session", title_width), color: if selected { Color::Yellow } else { foreground }, weight: Weight::Bold, wrap: TextWrap::NoWrap) }
+                View(width: title_width as u32, overflow: Overflow::Hidden) { Text(content: truncate_end("New Codex session", title_width), color: if selected { Color::Yellow } else { foreground }, weight: Weight::Bold, wrap: TextWrap::NoWrap) }
                 Text(content: " ")
                 View(width: status_width as u32, overflow: Overflow::Hidden) { Text(content: "-", color: foreground, weight: Weight::Bold, wrap: TextWrap::NoWrap) }
                 Text(content: " ")
@@ -215,7 +217,7 @@ pub(super) fn render_session_header(width: usize) -> AnyElement<'static> {
             View(width: 2) { Text(content: "  ", color: Color::Cyan, weight: Weight::Bold) }
             View(width: title_width as u32) { Text(content: "Session", color: Color::Cyan, weight: Weight::Bold) }
             Text(content: " ")
-            View(width: status_width as u32, overflow: Overflow::Hidden) { Text(content: "Status", color: Color::Cyan, weight: Weight::Bold) }
+            View(width: status_width as u32, overflow: Overflow::Hidden) { Text(content: if width < 43 { "St" } else { "Status" }, color: Color::Cyan, weight: Weight::Bold) }
             Text(content: " ")
             View(width: age_width as u32, overflow: Overflow::Hidden, justify_content: JustifyContent::FlexEnd) { Text(content: "Upd", color: Color::Cyan, weight: Weight::Bold) }
             Text(content: " ")
@@ -277,6 +279,7 @@ pub(super) fn render_record_row(
                 View(width: age_width as u32, overflow: Overflow::Hidden, justify_content: JustifyContent::FlexEnd) { Text(content: compact_age(&record.created), color: foreground, weight: Weight::Bold, wrap: TextWrap::NoWrap) }
             }
             View(width: 100pct, column_gap: 1, overflow: Overflow::Hidden) {
+                Text(content: record.client_provider_family().label(), color: metadata, weight: Weight::Light, wrap: TextWrap::NoWrap)
                 Text(content: record.machine_label(), color: metadata, weight: Weight::Light, wrap: TextWrap::NoWrap)
                 Text(content: "·", color: metadata)
                 Text(content: second_line, color: metadata, weight: Weight::Light, wrap: TextWrap::NoWrap)

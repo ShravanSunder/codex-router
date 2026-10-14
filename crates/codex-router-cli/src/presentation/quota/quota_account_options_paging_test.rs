@@ -130,7 +130,7 @@ async fn account_options_page_keys_use_rendered_capacity_and_ack_and_reinspectio
         QuotaStatusComponent(
             view_model: quota_two_account_view_model(),
             width: 100usize,
-            height: 19usize,
+            height: 18usize,
             reset_intent_sender: Some(ports.intent_sender),
             reset_snapshot_receiver: Some(ports.snapshot_receiver),
         )

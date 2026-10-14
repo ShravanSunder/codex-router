@@ -756,26 +756,36 @@ async fn render_account_options_component_frames(
     credit_policy_saver: Option<CreditUsagePolicySaver>,
 ) -> Vec<String> {
     let (acknowledged_events, acknowledgement_sender) = acknowledged_event_stream(ordered_events);
-    element! {
+    let last_frame = Arc::new(std::sync::Mutex::new(String::new()));
+    let observed_frame = last_frame.clone();
+    let mut component = element! {
         QuotaStatusComponent(view_model, width, height, credit_policy_saver)
-    }
-    .mock_terminal_render_loop(MockTerminalConfig::with_events(acknowledged_events))
-    .map(|canvas| canvas.to_string())
-    .inspect(move |frame| {
-        for marker in [
-            "Reset credits",
-            "Resets are unavailable",
-            "Credit usage",
-            "enter save",
-            "credit preference save failed",
-        ] {
-            if frame.contains(marker) {
-                let _ = acknowledgement_sender.send(marker);
+    };
+    let rendering = component
+        .mock_terminal_render_loop(MockTerminalConfig::with_events(acknowledged_events))
+        .map(|canvas| canvas.to_string())
+        .inspect(move |frame| {
+            *observed_frame.lock().expect("frame trace lock") = frame.clone();
+            for marker in [
+                "Reset credits",
+                "Resets are unavailable",
+                "Credit usage",
+                "enter save",
+                "credit preference save failed",
+            ] {
+                if frame.contains(marker) {
+                    let _ = acknowledgement_sender.send(marker);
+                }
             }
-        }
-    })
-    .collect::<Vec<_>>()
-    .await
+        })
+        .collect::<Vec<_>>();
+    match tokio::time::timeout(Duration::from_secs(2), rendering).await {
+        Ok(frames) => frames,
+        Err(error) => panic!(
+            "credit dialog event acknowledgement failed: {error}; last frame:\n{}",
+            last_frame.lock().expect("frame trace lock")
+        ),
+    }
 }
 
 fn acknowledged_event_stream(

@@ -82,8 +82,7 @@ fn quota_status_ansi_colors_selected_reset_pace() {
 
 #[tokio::test]
 async fn quota_pool_headers_survive_preference_focus_and_scroll_changes() {
-    let route_summary =
-        "responses · degraded · 5 accounts · usable 1 · reserve 1 · blocked 1 · unknown 1 · excluded 1";
+    let route_summary = "responses · degraded · 5 accounts · usable 1 · reserve 1 · blocked 1 · unknown 1 · excluded 1";
     let freshness_summary = "fresh 2 · stale 2 · unknown 1";
     let mut observed_headers = Vec::new();
 
@@ -139,10 +138,7 @@ async fn quota_pool_headers_survive_preference_focus_and_scroll_changes() {
                 .find(|line| line.contains("responses · degraded"))
                 .unwrap_or_else(|| panic!("pool route summary should render:\n{frame}"));
             assert!(route_line.contains(route_summary), "{frame}");
-            observed_headers.push((
-                route_line.trim().to_owned(),
-                freshness_summary.to_owned(),
-            ));
+            observed_headers.push((route_line.trim().to_owned(), freshness_summary.to_owned()));
         }
 
         let expected_detail = if preferred_index == 0 {
@@ -184,7 +180,7 @@ async fn quota_status_down_arrow_focuses_next_account_details() {
     let frames = element! {
         QuotaStatusComponent(
             view_model: quota_two_account_view_model(),
-            width: 120usize,
+            width: 160usize,
             height: 48usize,
         )
     }
@@ -222,7 +218,7 @@ async fn quota_status_left_click_focuses_account_details_without_opening_an_acti
             TerminalEvent::FullscreenMouse(FullscreenMouseEvent::new(
                 MouseEventKind::Down(MouseButton::Left),
                 10,
-                9,
+                10,
             )),
             TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Esc)),
         ],
@@ -338,9 +334,7 @@ async fn quota_status_reloads_view_model_on_timer() {
         "quota status should render the reloaded route line: {frames:?}"
     );
     assert!(
-        frames
-            .iter()
-            .any(|frame| frame.contains("stale 1")),
+        frames.iter().any(|frame| frame.contains("stale 1")),
         "quota status title should render reloaded report-wide stale count: {frames:?}"
     );
 }
@@ -350,7 +344,7 @@ async fn quota_status_up_arrow_focuses_previous_account_details() {
     let frames = element! {
         QuotaStatusComponent(
             view_model: quota_two_account_view_model(),
-            width: 120usize,
+            width: 160usize,
             height: 48usize,
         )
     }
@@ -429,6 +423,7 @@ async fn quota_status_renderer_uses_reset_pace_fields_without_parsing_strings() 
         selection_projection_degraded: false,
         serving_clients: None,
         rows: vec![QuotaStatusAccountViewModel {
+            provider: codex_router_core::provider::Provider::Openai,
             account_id: test_account_id("ssdev"),
             account_tag: "test-tag".to_owned(),
             active_credential_generation: Some(1),
@@ -454,7 +449,7 @@ async fn quota_status_renderer_uses_reset_pace_fields_without_parsing_strings() 
     };
 
     let frames = element! {
-        QuotaStatusComponent(view_model: view_model, width: 120usize, height: 48usize)
+        QuotaStatusComponent(view_model: view_model, width: 160usize, height: 48usize)
     }
     .mock_terminal_render_loop(MockTerminalConfig::with_events(futures_util::stream::iter(
         vec![TerminalEvent::Key(KeyEvent::new(

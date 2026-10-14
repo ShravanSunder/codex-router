@@ -227,13 +227,12 @@ impl StoredSourceContinuation {
                 {
                     return Err(SourceInventoryRejection::InvalidInventory);
                 }
-                let label = self
+                let description = self
                     .inventory
                     .endpoints
                     .iter()
                     .find(|entry| entry.endpoint == endpoint)
                     .ok_or(SourceInventoryRejection::InvalidInventory)?
-                    .label
                     .clone();
                 let mut rows = Vec::new();
                 for summary in page.sessions {
@@ -241,10 +240,13 @@ impl StoredSourceContinuation {
                         return Err(SourceInventoryRejection::InvalidInventory);
                     }
                     self.accept_target(summary.target().clone())?;
-                    rows.push(SessionPickerRecord::from_source_provider_summary(
-                        &summary,
-                        &String::from(label.clone()),
-                    ));
+                    rows.push(
+                        SessionPickerRecord::from_source_provider_summary(
+                            &summary,
+                            &String::from(description.label.clone()),
+                        )
+                        .with_provider_endpoint(&summary, &description),
+                    );
                 }
                 let complete = match page.next_cursor {
                     None => true,

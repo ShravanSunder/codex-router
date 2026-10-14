@@ -319,8 +319,13 @@ async fn account_options_reset_inspection_resize_and_cancel_restore_resets_tab()
                     .position(|line| line.contains("esc/ctrl-r back"))
                     .expect("reset footer should be visible");
                 assert!(
-                    footer_index >= lines.len().saturating_sub(3),
-                    "reset footer must remain bottom-aligned: {frame}"
+                    footer_index >= lines.len().saturating_sub(3)
+                        || lines
+                            .iter()
+                            .skip(footer_index + 1)
+                            .take(3)
+                            .any(|line| line.contains('╰') && line.contains('╯')),
+                    "reset footer must remain bottom-aligned within its terminal or dialog frame: {frame}"
                 );
             }
         }

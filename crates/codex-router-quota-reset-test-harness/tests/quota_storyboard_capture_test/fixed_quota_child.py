@@ -4,13 +4,25 @@ import os
 import pathlib
 import signal
 import subprocess
+from enum import Enum
+
+class CapturedTuiSurface(Enum):
+    QUOTA = "quota"
+    SESSIONS = "sessions"
 
 configuration = json.loads(pathlib.Path(os.environ["QUOTA_STORYBOARD_FIXTURE_COMMAND"]).read_text())
 output = pathlib.Path(configuration["output"])
 (output / "quota-wrapper.pid").write_text(str(os.getpid()))
-arguments = [configuration["binary"], "--router-root", configuration["root"],
-    "--fixture-capability", configuration["capability"],
-    "--provider-listener", configuration["provider"]]
+surface = CapturedTuiSurface(configuration["surface"])
+if surface is CapturedTuiSurface.QUOTA:
+    arguments = [configuration["binary"], "--router-root", configuration["root"],
+        "--fixture-capability", configuration["capability"],
+        "--provider-listener", configuration["provider"]]
+else:
+    # Closed, feature-only fixture entry. Capability binds cleanup identity;
+    # this path calls no account, inventory, native launcher or model service.
+    arguments = [configuration["binary"], "--sessions-picker", "--provider-filter-storyboard",
+        "--fixture-capability", configuration["capability"]]
 environment = {"HOME": configuration["temporary_directory"], "TERM": "xterm-256color",
     "LANG": "C.UTF-8", "TMPDIR": configuration["temporary_directory"]}
 child = subprocess.Popen(arguments, env=environment)

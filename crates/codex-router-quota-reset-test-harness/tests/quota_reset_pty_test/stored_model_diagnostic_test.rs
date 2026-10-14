@@ -11,9 +11,9 @@ fn focused_malformed_model_picker() -> TestResult<TerminalDriver> {
         Path::new(env!("CARGO_MANIFEST_DIR")),
     )?;
     terminal.resize(24, 160)?;
-    terminal.wait_for_text("Start new session", SEMANTIC_WAIT)?;
+    terminal.wait_for_text("New Codex session", SEMANTIC_WAIT)?;
     let focus_start = terminal.transcript_len();
-    terminal.send_sgr_mouse_left_down(10, 15)?;
+    terminal.send_sgr_mouse_left_down(10, 14)?;
     terminal.wait_for_text_after("BETA_CONVERSATION_ACTIVE", focus_start, SEMANTIC_WAIT)?;
     ensure(
         terminal.child_is_running()?,

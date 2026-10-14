@@ -1,0 +1,16 @@
+[package]
+name = "codex-router-tui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+iocraft.workspace = true
+
+[dev-dependencies]
+futures-util.workspace = true
+tokio.workspace = true

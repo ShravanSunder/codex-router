@@ -117,7 +117,7 @@ fn sessions_picker_model_shows_and_switches_scope_view_and_sort() {
     assert!(!initial.contains("type search"));
     assert!(!initial.contains("enter resume"));
     assert!(!initial.contains("esc exit"));
-    assert!(initial.contains("Start new session"));
+    assert!(initial.contains("New Codex session"));
     assert!(initial.contains("Feature design session"));
     assert!(!initial.contains("Subagent planning"));
 
@@ -459,7 +459,7 @@ fn sessions_picker_model_keeps_start_new_choice_with_existing_sessions() {
     let mut model = SessionsPickerModel::new(request, 120);
 
     let initial = model.render_snapshot();
-    assert!(initial.contains("Start new session"));
+    assert!(initial.contains("New Codex session"));
     assert!(initial.contains("args: --yolo --model gpt-5-codex"));
     assert_eq!(model.focused_session_id(), Some("thread-a"));
 
@@ -478,7 +478,7 @@ fn sessions_picker_empty_filter_offers_start_new_session() {
 
     let snapshot = model.render_snapshot();
 
-    assert!(snapshot.contains("Start new session"));
+    assert!(snapshot.contains("New Codex session"));
     assert!(!snapshot.contains("No sessions match these filters"));
     assert_eq!(
         model.activation_outcome_for_focus(),

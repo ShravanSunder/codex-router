@@ -1,7 +1,7 @@
 //! Shared mock-terminal fixtures; actual behavior cases live in focused modules.
 
-use crossterm::event::MouseButton;
 use futures_util::StreamExt;
+use iocraft::MouseButton;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc;
@@ -21,6 +21,9 @@ use crate::sessions::SessionsSource;
 
 #[path = "picker_fork_tests.rs"]
 mod picker_fork_tests;
+
+#[path = "picker_performance_tests.rs"]
+mod picker_performance_tests;
 
 // Blocking external fixture procedures run off the executor; production loaders are async.
 fn fixture_record_loader<FixtureProcedure>(
@@ -146,6 +149,7 @@ fn capture_record(
 ) -> SessionPickerRecord {
     SessionPickerRecord {
         identity: crate::sessions::SessionPickerIdentity::LocalCodex(session_id.to_owned()),
+        provider_family: crate::presentation::session_picker::SessionProviderFamily::Codex,
         source_context: None,
         machine_display_label: None,
         provenance: crate::sessions::SessionRowProvenance::LocalHomeCatalog,
@@ -248,6 +252,9 @@ fn must_ok<T, E: std::fmt::Display>(result: Result<T, E>) -> T {
 #[path = "picker_interaction_tests.rs"]
 mod picker_interaction_tests;
 
+#[path = "provider_filter_component_tests.rs"]
+mod provider_filter_component_tests;
+
 #[path = "picker_layout_tests.rs"]
 mod picker_layout_tests;
 
@@ -265,3 +272,6 @@ mod picker_machine_control_tests;
 
 #[path = "picker_single_view_tests.rs"]
 mod picker_single_view_tests;
+
+#[path = "picker_compact_header_tests.rs"]
+mod picker_compact_header_tests;

@@ -60,7 +60,7 @@ pub(super) fn render_model_snapshot(model: &SessionsPickerModel) -> String {
             };
             if visible_index == 0 {
                 lines.push(fit_line(
-                    &format!("{marker} Start new session"),
+                    &format!("{marker} New Codex session"),
                     model.width,
                 ));
                 lines.push(fit_line(

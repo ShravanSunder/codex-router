@@ -28,7 +28,7 @@ use picker_frame_view::render_picker_view;
 
 #[path = "picker_layout_budget.rs"]
 mod picker_layout_budget;
-use picker_layout_budget::{picker_body_budget, session_visible_row_budget, stacked_panel_heights};
+use picker_layout_budget::{picker_body_budget, session_visible_row_budget};
 
 #[path = "picker_list_view.rs"]
 mod picker_list_view;
@@ -40,15 +40,13 @@ use picker_detail_view::{render_details, render_start_new_details};
 
 #[path = "picker_display_text.rs"]
 mod picker_display_text;
-use picker_display_text::{
-    compact_age, fit_line, root_label, runtime_view_label, sort_label, truncate_end,
-};
+use picker_display_text::{compact_age, root_label, runtime_view_label, sort_label, truncate_end};
+
+pub(super) use picker_display_text::fit_line;
 
 const MIN_RENDER_HEIGHT: usize = 24;
 const SIDECAR_PICKER_WIDTH: usize = 140;
 const NARROW_PICKER_WIDTH: usize = 72;
-const COMPACT_PICKER_WIDTH: usize = 56;
-const MIN_STACKED_DETAILS_HEIGHT: usize = 6;
 const START_NEW_DETAILS_HEIGHT: usize = 6;
 
 #[path = "conversation_preview_state.rs"]
@@ -130,7 +128,7 @@ pub(crate) fn SessionsPickerComponent<'a>(
         } else if props.height == 0 {
             MIN_RENDER_HEIGHT
         } else {
-            props.height.max(MIN_RENDER_HEIGHT)
+            props.height.max(1)
         }
     });
     let width = observed_width.get();
@@ -326,6 +324,23 @@ pub(crate) fn SessionsPickerComponent<'a>(
                 }
                 return;
             }
+            if super::provider_filter_input::handle_provider_filter_key(
+                &mut model_value,
+                code,
+                modifiers,
+            ) {
+                return;
+            }
+            if model_value.details_dialog.is_some() {
+                if code == KeyCode::Esc {
+                    model_value.details_dialog = None;
+                }
+                return;
+            }
+            if code == KeyCode::F(4) {
+                model_value.open_details_dialog();
+                return;
+            }
             if matches!(code, KeyCode::F(2))
                 || code == KeyCode::Char('g') && modifiers.contains(KeyModifiers::CONTROL)
             {
@@ -488,23 +503,27 @@ pub(crate) fn SessionsPickerComponent<'a>(
 
     let selected_conversation = {
         let model_value = model.read();
-        model_value.focused_record().map(|record| {
-            let selected_preview = {
-                let cache = conversation_cache.read();
-                cache.select_record(record)
-            };
-            if let Some(load_request) = selected_preview.load_request.clone() {
-                conversation_cache.write().start_loading(&load_request);
-                load_conversation(load_request);
-            }
-            selected_preview.preview
-        })
+        model_value
+            .details_dialog
+            .as_ref()
+            .or_else(|| model_value.focused_record())
+            .map(|record| {
+                let selected_preview = {
+                    let cache = conversation_cache.read();
+                    cache.select_record(record)
+                };
+                if let Some(load_request) = selected_preview.load_request.clone() {
+                    conversation_cache.write().start_loading(&load_request);
+                    load_conversation(load_request);
+                }
+                selected_preview.preview
+            })
     };
 
     let minimum_render_height = if live_terminal_height {
         1
     } else {
-        MIN_RENDER_HEIGHT
+        MIN_RENDER_HEIGHT.min(height)
     };
     render_picker_view(
         &model.read(),
@@ -542,7 +561,30 @@ pub(crate) fn run_sessions_picker(
 
 #[cfg(feature = "quota-reset-test-harness")]
 pub(crate) fn run_sessions_picker_test_harness() -> io::Result<()> {
-    crate::sessions::run_stored_model_terminal_fixture()
+    if std::env::args().nth(2).as_deref() != Some("--provider-filter-storyboard") {
+        return crate::sessions::run_stored_model_terminal_fixture();
+    }
+    use std::io::Write;
+
+    let request = super::provider_filter_storyboard_fixture::provider_filter_storyboard_request()?;
+
+    let outcome = run_sessions_picker(request, None)?;
+    let marker = match outcome {
+        Some(SessionsPickerOutcome::ResumeSession(selection)) => {
+            format!("SESSION_PICKER_OUTCOME resume:{}", selection.session_id())
+        }
+        Some(SessionsPickerOutcome::ForkSession(selection)) => {
+            format!("SESSION_PICKER_OUTCOME fork:{}", selection.session_id())
+        }
+        Some(SessionsPickerOutcome::StartNewSession) => {
+            "SESSION_PICKER_OUTCOME start-new".to_owned()
+        }
+        Some(SessionsPickerOutcome::TerminalTooNarrow) => {
+            "SESSION_PICKER_OUTCOME terminal-too-narrow".to_owned()
+        }
+        None => "SESSION_PICKER_OUTCOME canceled".to_owned(),
+    };
+    writeln!(io::stdout(), "{marker}")
 }
 
 #[cfg(test)]

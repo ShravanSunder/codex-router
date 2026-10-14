@@ -37,3 +37,18 @@ async fn compiled_quota_storyboard_rejects_an_impossible_screen() -> TestResult<
 async fn compiled_quota_storyboard_cleans_an_interrupted_live_capture() -> TestResult<()> {
     capture_support::run_interrupted_capture_cleanup().await
 }
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires nominated private capture tools and fresh owned output directory"]
+async fn compiled_provider_filter_storyboards_export_both_real_tuis() -> TestResult<()> {
+    for (columns, rows) in [(120, 36), (76, 30), (48, 24)] {
+        for journey in [
+            capture_support::ProviderFilterJourney::QuotaMixed,
+            capture_support::ProviderFilterJourney::Sessions,
+            capture_support::ProviderFilterJourney::QuotaEmpty,
+        ] {
+            capture_support::run_provider_filter_storyboard(columns, rows, journey).await?;
+        }
+    }
+    Ok(())
+}

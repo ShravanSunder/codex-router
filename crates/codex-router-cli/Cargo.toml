@@ -44,6 +44,7 @@ comfy-table.workspace = true
 crossterm.workspace = true
 indicatif.workspace = true
 iocraft.workspace = true
+codex-router-tui.workspace = true
 nix.workspace = true
 opentelemetry.workspace = true
 opentelemetry-appender-tracing.workspace = true

@@ -1,3 +1,4 @@
+use codex_router_tui::UseDialogInteraction;
 use iocraft::prelude::*;
 
 use super::quota_status_view_model::*;
@@ -5,17 +6,35 @@ use super::responsive_quota_layout::visible_account_window_start;
 
 const DETAIL_LABEL_WIDTH: usize = 10;
 
-pub(super) fn render_account_list(
-    rows: &[QuotaStatusAccountViewModel],
-    width: usize,
-    height: usize,
-    focused_row_index: Option<usize>,
-    visible_rows: usize,
-    mut focused_account_id: State<Option<codex_router_core::ids::AccountId>>,
-    interaction_enabled: bool,
-) -> AnyElement<'static> {
+pub(super) struct QuotaAccountListProps<'a> {
+    pub(super) rows: &'a [QuotaStatusAccountViewModel],
+    pub(super) width: usize,
+    pub(super) height: usize,
+    pub(super) focused_row_index: Option<usize>,
+    pub(super) visible_rows: usize,
+    pub(super) focused_account_id: State<Option<codex_router_core::ids::AccountId>>,
+    pub(super) interaction_enabled: bool,
+    pub(super) empty_notice: Option<&'a str>,
+}
+
+pub(super) fn render_account_list(props: QuotaAccountListProps<'_>) -> AnyElement<'static> {
+    let QuotaAccountListProps {
+        rows,
+        width,
+        height,
+        focused_row_index,
+        visible_rows,
+        mut focused_account_id,
+        interaction_enabled,
+        empty_notice,
+    } = props;
     let row_width = width.saturating_sub(4).max(32);
     let mut children = Vec::new();
+    if rows.is_empty()
+        && let Some(notice) = empty_notice
+    {
+        return element!(View(width: width as u32, height: height as u32) { Text(content: notice.to_owned(), color: Color::Grey) }).into_any();
+    }
     let window_start = visible_account_window_start(focused_row_index, rows.len(), visible_rows);
     let compact_overflow_markers = super::responsive_quota_layout::quota_account_list_height(
         rows.len(),
@@ -94,7 +113,7 @@ fn InteractiveQuotaAccountRow(
     props: &mut InteractiveQuotaAccountRowProps,
     mut hooks: Hooks,
 ) -> impl Into<AnyElement<'static>> {
-    hooks.use_local_terminal_events({
+    hooks.use_dialog_local_events({
         let interaction_enabled = props.interaction_enabled;
         let mut click_handler = props.click_handler.take();
         move |event| {
@@ -102,7 +121,7 @@ fn InteractiveQuotaAccountRow(
                 return;
             }
             if let TerminalEvent::FullscreenMouse(FullscreenMouseEvent {
-                kind: MouseEventKind::Down(crossterm::event::MouseButton::Left),
+                kind: MouseEventKind::Down(MouseButton::Left),
                 ..
             }) = event
             {
@@ -146,7 +165,10 @@ pub(super) fn render_account_row(
     let inner_width = width.saturating_sub(2);
     let (account_width, status_width, pace_width) = quota_list_columns(inner_width);
     let marker = if focused { "❯" } else { " " };
-    let account = fit_column(&format!("{marker} {}", row.account), account_width);
+    // Identity has its own primary-row allocation. Keep metadata columns below
+    // unchanged so making names readable does not hide quota percentages.
+    let primary_account_width = account_width.max(17);
+    let primary_reason_width = inner_width.saturating_sub(primary_account_width + status_width);
     let status_color = if focused { Color::Yellow } else { Color::White };
     let metadata_color = if focused { Color::Yellow } else { Color::Grey };
     let reset_sample_pace = reset_pace_row_line(&row.reset_pace, pace_width);
@@ -159,9 +181,15 @@ pub(super) fn render_account_row(
             padding_right: 1,
         ) {
             View(width: inner_width as u32) {
-                Text(content: account, color: if focused { Color::Yellow } else { Color::White }, weight: Weight::Bold, wrap: TextWrap::NoWrap)
-                Text(content: fit_column(&row.status, status_width), color: status_color, wrap: TextWrap::NoWrap)
-                Text(content: fit_line(&row.reason, pace_width), color: metadata_color, wrap: TextWrap::NoWrap)
+                View(width:primary_account_width as u32,flex_shrink:0.0_f32) {
+                    Text(content:fit_line(&format!("{marker} {}",row.account),primary_account_width.saturating_sub(1)),color:if focused {Color::Yellow} else {Color::White},weight:Weight::Bold,wrap:TextWrap::NoWrap)
+                }
+                View(width:status_width as u32,flex_shrink:0.0_f32) {
+                    Text(content:fit_line(&row.status,status_width.saturating_sub(1)),color:status_color,wrap:TextWrap::NoWrap)
+                }
+                View(width:primary_reason_width as u32,flex_shrink:0.0_f32) {
+                    Text(content:fit_line(&row.reason,primary_reason_width),color:metadata_color,wrap:TextWrap::NoWrap)
+                }
             }
             View(width: inner_width as u32) {
                 Text(content: " ".repeat(account_width), wrap: TextWrap::NoWrap)

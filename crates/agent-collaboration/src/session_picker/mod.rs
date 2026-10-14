@@ -7,6 +7,14 @@ mod picker_fork_view;
 mod picker_machine_controls;
 mod picker_machine_view;
 mod picker_model;
+mod provider_filter_input;
+mod provider_filter_model;
+#[cfg(feature = "quota-reset-test-harness")]
+mod provider_filter_storyboard_fixture;
+#[cfg(test)]
+mod provider_filter_tests;
+mod provider_filter_view;
+pub(crate) use provider_filter_model::SessionProviderFamily;
 mod picker_source_view;
 pub(crate) use picker_machine_controls::PickerMachineSourceMode;
 #[cfg(test)]

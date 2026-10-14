@@ -165,6 +165,24 @@ fn quota_status_view_model_reports_serving_clients_from_active_mirror() {
 }
 
 #[test]
+fn quota_provider_filters_projection_preserves_typed_provider_independent_of_labels() {
+    use codex_router_core::provider::Provider;
+
+    let mut report = quota_capture_report();
+    report.rows[0].provider = Provider::Claude;
+    report.rows[0].account_label = "OpenAI named account".to_owned();
+    report.rows[1].provider = Provider::Openai;
+    report.rows[1].account_label = "Claude named account".to_owned();
+
+    let model = quota_status_view_model(&report, report.rows(), 120);
+
+    assert_eq!(model.rows[0].provider, Provider::Claude);
+    assert_eq!(model.rows[1].provider, Provider::Openai);
+    assert_eq!(model.rows[0].account_id, report.rows[0].account_id);
+    assert_eq!(model.rows[1].account_id, report.rows[1].account_id);
+}
+
+#[test]
 fn quota_status_headers_summarize_every_report_row_independent_of_preference_or_visibility() {
     let mut report = quota_capture_report();
     let template = report

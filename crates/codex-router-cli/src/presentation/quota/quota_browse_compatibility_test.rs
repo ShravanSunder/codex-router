@@ -6,7 +6,7 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use codex_router_core::ids::AccountId;
-use crossterm::event::MouseButton;
+use iocraft::MouseButton;
 use futures_util::StreamExt;
 use iocraft::prelude::*;
 
@@ -292,9 +292,9 @@ async fn quota_browse_empty_and_error_states_are_structurally_explicit() {
     let error = render_quota_capture_model_at(quota_error_view_model(), 100, 24, exit).await;
 
     assert!(empty.contains("responses -> none    [empty]"), "{empty}");
-    assert!(empty.contains("No selectable account"), "{empty}");
+    assert!(empty.contains("No accounts match these filters"), "{empty}");
     assert!(error.contains("responses -> unavailable    [error]"), "{error}");
-    assert!(error.contains("No selectable account"), "{error}");
+    assert!(error.contains("No accounts match these filters"), "{error}");
 }
 
 #[tokio::test]
@@ -406,7 +406,7 @@ async fn quota_status_keeps_focused_account_visible_when_height_clips_list() {
 }
 
 #[tokio::test]
-async fn quota_status_preserves_selected_panel_at_stacked_minimum_height() {
+async fn quota_status_vertical_browse_preserves_list_without_automatic_details() {
     let text = render_quota_capture_model_at(
         quota_many_account_view_model(),
         100,
@@ -419,8 +419,8 @@ async fn quota_status_preserves_selected_panel_at_stacked_minimum_height() {
     .await;
 
     assert!(
-        text.contains("Selected account"),
-        "stacked 100x24 quota view should preserve the selected panel:\n{text}"
+        !text.contains("Selected account") && text.contains("Details F4"),
+        "vertical 100x24 quota view should expose explicit details without consuming the list:\n{text}"
     );
     assert!(
         text.contains("❯ acct00"),
@@ -501,16 +501,15 @@ fn quota_status_without_authoritative_selection_shows_focused_account_details() 
 
 #[tokio::test]
 async fn quota_status_stacked_without_authoritative_selection_shows_focused_account_details() {
-    let text = render_quota_capture_model_at(
+    let frames = render_quota_filter_phases(
         quota_no_authoritative_selection_view_model(),
         100,
         24,
-        vec![TerminalEvent::Key(KeyEvent::new(
-            KeyEventKind::Press,
-            KeyCode::Esc,
-        ))],
+        vec![("Details F4",vec![provider_filter_key(KeyCode::F(4))]),("Account details",vec![TerminalEvent::Key({let mut key=KeyEvent::new(KeyEventKind::Press,KeyCode::Char('d'));key.modifiers=KeyModifiers::CONTROL;key})])],
+        None,
     )
     .await;
+    let text=frames.iter().find(|frame|frame.contains("Account details")).expect("explicit details dialog");
 
     assert!(text.contains("Selected account"), "{text}");
     assert!(
@@ -550,23 +549,22 @@ fn quota_status_static_output_uses_natural_height_without_tui_padding() {
 
 #[tokio::test]
 async fn quota_status_narrow_rows_preserve_quota_windows_and_forecast() {
-    let text = render_quota_capture_model_at(
+    let frames = render_quota_filter_phases(
         quota_view_model(),
         48,
         48,
-        vec![TerminalEvent::Key(KeyEvent::new(
-            KeyEventKind::Press,
-            KeyCode::Esc,
-        ))],
+        vec![("Details F4",vec![provider_filter_key(KeyCode::F(4))]),("Account details",vec![TerminalEvent::Key({let mut key=KeyEvent::new(KeyEventKind::Press,KeyCode::Char('d'));key.modifiers=KeyModifiers::CONTROL;key})])],
+        None,
     )
     .await;
+    let text=frames.iter().find(|frame|frame.contains("Account details")).expect("explicit narrow details dialog");
 
     assert!(text.contains("weekly"), "{text}");
     assert!(text.contains("5h"), "{text}");
     assert!(text.contains("□□□□□□□│"), "{text}");
     assert!(
-        text.contains("1 client") && text.contains("2 resets"),
-        "{text}"
+        frames.iter().any(|frame| !frame.contains("Account details") && frame.contains("1 client") && frame.contains("2 resets")),
+        "the narrow browse row must preserve client/reset counts before details: {frames:?}"
     );
 }
 

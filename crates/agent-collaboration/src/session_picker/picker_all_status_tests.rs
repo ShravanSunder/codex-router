@@ -211,7 +211,11 @@ async fn review_machine_help_is_visible_in_collapsed_and_expanded_responsive_fra
             .await
             .unwrap();
             assert!(
-                frame.contains("ctrl-g/F2 Machine"),
+                if expanded {
+                    frame.contains("ctrl-g/F2 Machine")
+                } else {
+                    frame.contains("▾ F2")
+                },
                 "width{width}/expanded{expanded}: {frame}"
             );
         }

@@ -18,29 +18,63 @@ async fn provider_selection_shows_read_only_details_without_a_codex_outcome() {
         "Claude fixture",
     )];
     let mut selected_outcome = Option::<SessionsPickerOutcome>::None;
-    let frames = element! {
-        SessionsPickerComponent(
-            request: request,
-            width: 100usize,
-            selected_outcome_out: &mut selected_outcome,
-        )
+    {
+        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        let events = futures_util::stream::unfold(receiver, |mut receiver| async {
+            receiver.recv().await.map(|event| (event, receiver))
+        });
+        let mut ui = element!(SessionsPickerComponent(request,width:100usize,selected_outcome_out:&mut selected_outcome));
+        let frames = ui.mock_terminal_render_loop(MockTerminalConfig::with_events(events));
+        tokio::pin!(frames);
+        let mut phase = 0;
+        let mut last = String::new();
+        let journey = async {
+            while let Some(canvas) = frames.next().await {
+                let frame = canvas.to_string();
+                if phase == 0 && frame.contains("Claude fixture") {
+                    sender
+                        .send(TerminalEvent::Key(KeyEvent::new(
+                            KeyEventKind::Press,
+                            KeyCode::F(4),
+                        )))
+                        .unwrap();
+                    phase = 1;
+                } else if phase == 1
+                    && frame.contains("Session details")
+                    && frame.contains("Read-only")
+                {
+                    assert!(
+                        frame.contains("Claude fixture"),
+                        "dialog must identify its provider session: {frame}"
+                    );
+                    sender.send(alt_enter_key()).unwrap();
+                    sender
+                        .send(TerminalEvent::Key(KeyEvent::new(
+                            KeyEventKind::Press,
+                            KeyCode::Enter,
+                        )))
+                        .unwrap();
+                    sender
+                        .send(TerminalEvent::Key(KeyEvent::new(
+                            KeyEventKind::Press,
+                            KeyCode::Esc,
+                        )))
+                        .unwrap();
+                    phase = 2;
+                } else if phase == 2 && !frame.contains("Session details") {
+                    sender.send(ctrl_key('c')).unwrap();
+                    phase = 3;
+                }
+                last = frame;
+            }
+        };
+        let result = tokio::time::timeout(Duration::from_secs(2), journey).await;
+        assert!(result.is_ok(), "provider details phase={phase}: {last}");
+        assert_eq!(phase, 3, "{last}");
     }
-    .mock_terminal_render_loop(MockTerminalConfig::with_events(futures_util::stream::iter(
-        vec![
-            alt_enter_key(),
-            TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Enter)),
-            TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Esc)),
-            ctrl_key('c'),
-        ],
-    )))
-    .map(|canvas| canvas.to_string())
-    .collect::<Vec<_>>()
-    .await;
-    assert_eq!(selected_outcome, None);
-    assert!(
-        frames
-            .iter()
-            .any(|frame| frame.contains("Claude fixture") && frame.contains("Read-only"))
+    assert_eq!(
+        selected_outcome, None,
+        "provider details keys cannot create a Codex outcome"
     );
 }
 
@@ -124,12 +158,12 @@ async fn sessions_picker_existing_row_pointer_focus_updates_conversation_without
             TerminalEvent::FullscreenMouse(FullscreenMouseEvent::new(
                 MouseEventKind::Moved,
                 10,
-                15,
+                14,
             )),
             TerminalEvent::FullscreenMouse(FullscreenMouseEvent::new(
                 MouseEventKind::Down(MouseButton::Left),
                 10,
-                15,
+                14,
             )),
             TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Esc)),
         ],
@@ -162,7 +196,7 @@ async fn sessions_picker_start_new_hover_focuses_preview_without_activation() {
     }
     .mock_terminal_render_loop(MockTerminalConfig::with_events(futures_util::stream::iter(
         vec![
-            TerminalEvent::FullscreenMouse(FullscreenMouseEvent::new(MouseEventKind::Moved, 10, 7)),
+            TerminalEvent::FullscreenMouse(FullscreenMouseEvent::new(MouseEventKind::Moved, 10, 8)),
             TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Esc)),
         ],
     )))
@@ -173,7 +207,7 @@ async fn sessions_picker_start_new_hover_focuses_preview_without_activation() {
     assert_eq!(selected_outcome, None);
     assert!(
         frames.iter().any(|frame| {
-            frame.contains("❯ Start new session") && frame.contains("no extra args")
+            frame.contains("❯ New Codex session") && frame.contains("no extra args")
         }),
         "Start New hover should focus its preview without activation: {frames:?}"
     );
@@ -195,7 +229,7 @@ async fn sessions_picker_enter_resumes_pointer_focused_existing_session() {
             TerminalEvent::FullscreenMouse(FullscreenMouseEvent::new(
                 MouseEventKind::Down(MouseButton::Left),
                 10,
-                15,
+                14,
             )),
             TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Enter)),
         ],
@@ -226,7 +260,7 @@ async fn sessions_picker_start_new_click_activates_immediately() {
         vec![TerminalEvent::FullscreenMouse(FullscreenMouseEvent::new(
             MouseEventKind::Down(MouseButton::Left),
             10,
-            7,
+            8,
         ))],
     )))
     .collect::<Vec<_>>()
@@ -254,12 +288,12 @@ async fn sessions_picker_non_left_row_events_do_not_focus_or_activate() {
             TerminalEvent::FullscreenMouse(FullscreenMouseEvent::new(
                 MouseEventKind::Down(MouseButton::Right),
                 10,
-                15,
+                14,
             )),
             TerminalEvent::FullscreenMouse(FullscreenMouseEvent::new(
                 MouseEventKind::Up(MouseButton::Left),
                 10,
-                15,
+                14,
             )),
             TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Enter)),
         ],
@@ -279,45 +313,82 @@ async fn sessions_picker_non_left_row_events_do_not_focus_or_activate() {
 #[tokio::test]
 async fn sessions_picker_hover_keeps_scrolled_row_under_pointer_until_click_and_enter() {
     let mut selected_outcome = Option::<SessionsPickerOutcome>::None;
-    let events = futures_util::stream::iter(vec![
-        TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::End)),
-        TerminalEvent::FullscreenMouse(FullscreenMouseEvent::new(MouseEventKind::Moved, 10, 9)),
-        TerminalEvent::FullscreenMouse(FullscreenMouseEvent::new(
-            MouseEventKind::Down(MouseButton::Left),
-            10,
-            9,
-        )),
-        TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Enter)),
-    ])
-    .then(|event| async move {
-        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-        event
+    let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+    let events = futures_util::stream::unfold(receiver, |mut receiver| async {
+        receiver.recv().await.map(|event| (event, receiver))
     });
-    let frames = element! {
-        SessionsPickerComponent(
-            request: capture_picker_request(),
-            width: 160usize,
-            height: 24usize,
-            selected_outcome_out: &mut selected_outcome,
-        )
+    let mut phase = 0;
+    let mut pointer_row = 0;
+    {
+        let mut picker = element! { SessionsPickerComponent(request: capture_picker_request(), width: 160usize, height: 24usize, selected_outcome_out: &mut selected_outcome) };
+        let frames = picker.mock_terminal_render_loop(MockTerminalConfig::with_events(events));
+        tokio::pin!(frames);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while let Some(canvas) = frames.next().await {
+                let frame = canvas.to_string();
+                match phase {
+                    0 => {
+                        sender
+                            .send(TerminalEvent::Key(KeyEvent::new(
+                                KeyEventKind::Press,
+                                KeyCode::End,
+                            )))
+                            .unwrap();
+                        phase = 1;
+                    }
+                    1 if frame.contains("+8 more above") => {
+                        pointer_row = frame
+                            .lines()
+                            .position(|line| line.contains("Follow-up implementation lane 5"))
+                            .expect("literal row must be visible after End")
+                            as u16;
+                        sender
+                            .send(TerminalEvent::FullscreenMouse(FullscreenMouseEvent::new(
+                                MouseEventKind::Moved,
+                                10,
+                                pointer_row,
+                            )))
+                            .unwrap();
+                        phase = 2;
+                    }
+                    2 if frame.contains("❯ Follow-up implementation lane 5") => {
+                        assert!(
+                            frame
+                                .lines()
+                                .nth(pointer_row as usize)
+                                .unwrap()
+                                .contains("❯ Follow-up implementation lane 5"),
+                            "hover rewindowed the row: {frame}"
+                        );
+                        sender
+                            .send(TerminalEvent::FullscreenMouse(FullscreenMouseEvent::new(
+                                MouseEventKind::Down(MouseButton::Left),
+                                10,
+                                pointer_row,
+                            )))
+                            .unwrap();
+                        sender
+                            .send(TerminalEvent::Key(KeyEvent::new(
+                                KeyEventKind::Press,
+                                KeyCode::Enter,
+                            )))
+                            .unwrap();
+                        phase = 3;
+                    }
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .expect("real pointer journey must complete within the event bound");
     }
-    .mock_terminal_render_loop(MockTerminalConfig::with_events(events))
-    .map(|canvas| canvas.to_string())
-    .collect::<Vec<_>>()
-    .await;
-
-    assert!(
-        frames.iter().any(|frame| {
-            frame.contains("❯ Follow-up implementation lane 4") && frame.contains("+8 more above")
-        }),
-        "pointer focus should not rewindow a scrolled row before mouse-down: {frames:?}"
-    );
+    assert_eq!(phase, 3);
     assert_eq!(
         selected_outcome,
         Some(SessionsPickerOutcome::ResumeSession(
-            picker_action_selection("thread-extra-4")
+            picker_action_selection("thread-extra-5")
         )),
-        "Enter must resume the stable session that remained under the pointer"
+        "Enter must resume the literal row that stayed under the pointer"
     );
 }
 
@@ -342,9 +413,11 @@ async fn sessions_picker_iocraft_mock_terminal_ctrl_shortcuts_drive_filters() {
     .await;
 
     assert!(
-        actual
-            .iter()
-            .any(|snapshot| snapshot.contains("[repo]    View: [Blocked]    Sort: [created]")),
+        actual.iter().any(
+            |snapshot| snapshot.lines().any(|line| line.contains("[repo]")
+                && line.contains("View: [Blocked]")
+                && line.contains("Sort: [created]"))
+        ),
         "ctrl shortcuts should cycle scope, threads, and sort: {actual:?}"
     );
 }
@@ -451,8 +524,9 @@ async fn sessions_picker_iocraft_mock_terminal_esc_clears_search_before_exit() {
 
     assert!(
         actual
-            .iter()
-            .any(|snapshot| snapshot.contains("Search: []")),
+            .last()
+            .is_some_and(|snapshot| snapshot.contains("Feature design session")
+                && !snapshot.contains("Search: [rust]")),
         "first escape should clear search instead of exiting immediately: {actual:?}"
     );
     assert_eq!(selected_outcome, None);
@@ -503,9 +577,11 @@ async fn sessions_picker_iocraft_mock_terminal_search_keeps_plain_letters() {
     .await;
 
     assert!(
-        actual
-            .iter()
-            .any(|snapshot| snapshot.contains("[📂 cwd]    View: [All]")),
+        actual.iter().any(|snapshot| snapshot.contains("[📂 cwd]")
+            && !snapshot.contains("View: [Blocked]")
+            && !snapshot.contains("View: [Active]")
+            && !snapshot.contains("View: [Idle]")
+            && !snapshot.contains("Sort: [created]")),
         "plain search input should leave filters unchanged: {actual:?}"
     );
 }

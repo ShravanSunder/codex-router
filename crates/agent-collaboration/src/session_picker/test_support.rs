@@ -72,6 +72,7 @@ pub(crate) fn picker_record(
 ) -> SessionPickerRecord {
     SessionPickerRecord {
         identity: crate::sessions::SessionPickerIdentity::LocalCodex(session_id.to_owned()),
+        provider_family: crate::presentation::session_picker::SessionProviderFamily::Codex,
         source_context: None,
         machine_display_label: None,
         provenance: crate::sessions::SessionRowProvenance::LocalHomeCatalog,

@@ -323,7 +323,7 @@ fn WeeklyFloorMouseHarness(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 async fn real_iocraft_arrow_button_handles_mouse_click() {
     let events = vec![
         TerminalEvent::FullscreenMouse(FullscreenMouseEvent::new(
-            MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            MouseEventKind::Down(MouseButton::Left),
             12,
             5,
         )),

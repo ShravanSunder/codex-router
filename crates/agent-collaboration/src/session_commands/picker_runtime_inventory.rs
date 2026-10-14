@@ -144,7 +144,10 @@ async fn load_provider_records(
                     ));
                 }
                 let label = String::from(provider.label.clone());
-                rows.push(SessionPickerRecord::from_provider_summary(&summary, &label));
+                rows.push(
+                    SessionPickerRecord::from_provider_summary(&summary, &label)
+                        .with_provider_endpoint(&summary, &provider),
+                );
             }
             match page.next_cursor {
                 Some(next) if seen_cursors.insert(next.clone()) && seen_cursors.len() <= 64 => {

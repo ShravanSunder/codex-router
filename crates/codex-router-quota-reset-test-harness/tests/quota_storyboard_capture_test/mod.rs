@@ -3,11 +3,8 @@ use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::path::PathBuf;
-use std::process::Child;
 use std::process::Command;
-use std::process::ExitStatus;
 use std::time::Duration;
-use std::time::Instant;
 
 use codex_router_core::credit_usage::CreditAvailability;
 use codex_router_core::credit_usage::CreditBalance;
@@ -22,7 +19,30 @@ use super::isolated_fixture_test::TestResult;
 use super::isolated_fixture_test::ensure;
 use super::loopback_provider_test::HeldLoopbackProvider;
 
+mod capture_receipt;
 mod cleanup_test;
+mod failure_evidence;
+mod owned_capture;
+use capture_receipt::write_receipt;
+use owned_capture::{OwnedCapture, create_browser_temporary_directory, ensure_owned_child_stopped};
+mod provider_filter_capture;
+pub(super) use provider_filter_capture::ProviderFilterJourney;
+pub(super) use provider_filter_capture::run_provider_filter_storyboard;
+
+#[derive(Clone, Copy)]
+enum CapturedTuiSurface {
+    Quota,
+    Sessions,
+}
+
+impl CapturedTuiSurface {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Quota => "quota",
+            Self::Sessions => "sessions",
+        }
+    }
+}
 
 pub(super) async fn run_interrupted_capture_cleanup() -> TestResult<()> {
     cleanup_test::run_interrupted_capture_cleanup().await
@@ -69,7 +89,13 @@ pub(super) async fn run_storyboard(
     let provider = HeldLoopbackProvider::bind()?;
     provider.release_get_responses()?;
     let binary = fs::canonicalize(env!("CARGO_BIN_EXE_codex-router-quota-reset-test-harness"))?;
-    tools.write_fixed_child_adapter(&output, &binary, &fixture, provider.address())?;
+    tools.write_fixed_child_adapter(
+        &output,
+        &binary,
+        &fixture,
+        provider.address(),
+        CapturedTuiSurface::Quota,
+    )?;
     let tape = build_tape(columns, rows, expected_timeout);
     fs::write(output.join("quota.tape"), tape)?;
     let mut capture = tools.start_capture(&output, fixture.capability())?;
@@ -86,6 +112,8 @@ pub(super) async fn run_storyboard(
             "negative proof must fail for the exact impossible screen, not a launch error",
         )?;
     } else if !capture_status.success() {
+        let requests = provider.finish()?;
+        failure_evidence::write_failure_evidence(&output, &fixture, &requests).await?;
         return Err(std::io::Error::other(format!(
             "VHS capture exited {capture_status}; inspect owned vhs.stdout/vhs.stderr"
         ))
@@ -238,9 +266,10 @@ impl CaptureTools {
         binary: &Path,
         fixture: &QuotaResetFixture,
         provider_address: std::net::SocketAddr,
+        surface: CapturedTuiSurface,
     ) -> TestResult<()> {
         let configuration = format!(
-            "{{\"binary\":{},\"root\":{},\"capability\":{},\"provider\":{},\"output\":{},\"ttyd\":{},\"temporary_directory\":{},\"dynamic_library_path\":{}}}\n",
+            "{{\"binary\":{},\"root\":{},\"capability\":{},\"provider\":{},\"output\":{},\"ttyd\":{},\"temporary_directory\":{},\"dynamic_library_path\":{},\"surface\":{}}}\n",
             encode_json_string(&binary.to_string_lossy()),
             encode_json_string(&fixture.root().to_string_lossy()),
             encode_json_string(fixture.capability()),
@@ -249,6 +278,7 @@ impl CaptureTools {
             encode_json_string(&self.ttyd.to_string_lossy()),
             encode_json_string(&std::env::temp_dir().to_string_lossy()),
             encode_json_string(&self.dynamic_library_path),
+            encode_json_string(surface.label()),
         );
         fs::write(output.join("fixture-command.json"), configuration)?;
         // The extracted Homebrew library retains an installed plugin directory.
@@ -273,6 +303,9 @@ impl CaptureTools {
     }
 
     fn start_capture(&self, output: &Path, capability: &str) -> TestResult<OwnedCapture> {
+        let stdout = fs::File::create(output.join("vhs.stdout"))?;
+        let stderr = fs::File::create(output.join("vhs.stderr"))?;
+        let browser_temporary_directory = create_browser_temporary_directory(output)?;
         let child = Command::new(&self.vhs)
             .arg("quota.tape")
             .current_dir(output)
@@ -285,7 +318,7 @@ impl CaptureTools {
                 ),
             )
             .env("HOME", output)
-            .env("TMPDIR", std::env::temp_dir())
+            .env("TMPDIR", &browser_temporary_directory)
             .env("LANG", "C.UTF-8")
             .env("TERM", "xterm-256color")
             .env("DYLD_LIBRARY_PATH", &self.dynamic_library_path)
@@ -293,15 +326,24 @@ impl CaptureTools {
                 "QUOTA_STORYBOARD_FIXTURE_COMMAND",
                 output.join("fixture-command.json"),
             )
-            .stdout(fs::File::create(output.join("vhs.stdout"))?)
-            .stderr(fs::File::create(output.join("vhs.stderr"))?)
+            .stdout(stdout)
+            .stderr(stderr)
             .process_group(0)
-            .spawn()?;
+            .spawn();
+        let child = match child {
+            Ok(child) => child,
+            Err(error) => {
+                // No child exists yet to own this directory's cleanup.
+                fs::remove_dir_all(&browser_temporary_directory)?;
+                return Err(error.into());
+            }
+        };
         Ok(OwnedCapture {
             child,
             group_released: false,
             output: output.to_path_buf(),
             capability: capability.to_owned(),
+            browser_temporary_directory,
         })
     }
 
@@ -348,116 +390,6 @@ impl CaptureTools {
             )
         }
     }
-}
-
-struct OwnedCapture {
-    child: Child,
-    group_released: bool,
-    output: PathBuf,
-    capability: String,
-}
-
-impl OwnedCapture {
-    fn wait(&mut self, timeout: Duration) -> TestResult<ExitStatus> {
-        let deadline = Instant::now() + timeout;
-        loop {
-            if let Some(status) = self.child.try_wait()? {
-                return Ok(status);
-            }
-            if Instant::now() >= deadline {
-                self.release_process_group()?;
-                return Err(
-                    std::io::Error::other("owned VHS run exceeded its lifecycle deadline").into(),
-                );
-            }
-            std::thread::sleep(Duration::from_millis(25));
-        }
-    }
-
-    fn release_process_group(&mut self) -> TestResult<()> {
-        if !self.group_released {
-            // ttyd's PTY child may have a separate session. A signal to VHS's
-            // group alone cannot establish its cleanup on an early error.
-            terminate_owned_pid(&self.output.join("quota-child.pid"), &self.capability)?;
-            terminate_owned_pid(
-                &self.output.join("quota-wrapper.pid"),
-                &self.output.join("fixed_quota_child.py").to_string_lossy(),
-            )?;
-            terminate_owned_pid(
-                &self.output.join("ttyd.pid"),
-                &self.output.join("fixed_quota_child.py").to_string_lossy(),
-            )?;
-            let _ = Command::new("/bin/kill")
-                .args(["-TERM", &format!("-{}", self.child.id())])
-                .output()?;
-            self.group_released = true;
-        }
-        Ok(())
-    }
-}
-
-impl Drop for OwnedCapture {
-    fn drop(&mut self) {
-        let _ = self.release_process_group();
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}
-
-fn ensure_owned_child_stopped(output: &Path) -> TestResult<()> {
-    for record_name in ["quota-child.pid", "ttyd.pid"] {
-        let pid: u32 = fs::read_to_string(output.join(record_name))?
-            .trim()
-            .parse()?;
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while Command::new("/bin/kill")
-            .args(["-0", &pid.to_string()])
-            .output()?
-            .status
-            .success()
-        {
-            ensure(
-                Instant::now() < deadline,
-                "owned storyboard process survived cleanup",
-            )?;
-            std::thread::sleep(Duration::from_millis(25));
-        }
-    }
-    Ok(())
-}
-
-fn terminate_owned_pid(record: &Path, expected_command_marker: &str) -> TestResult<()> {
-    if !record.exists() {
-        return Ok(());
-    }
-    let pid: u32 = fs::read_to_string(record)?.trim().parse()?;
-    let snapshot = Command::new("/bin/ps")
-        .args(["-p", &pid.to_string(), "-o", "command="])
-        .output()?;
-    if !snapshot.status.success() {
-        return Ok(());
-    }
-    ensure(
-        String::from_utf8_lossy(&snapshot.stdout).contains(expected_command_marker),
-        "refusing to signal a PID whose command does not match this owned capture",
-    )?;
-    let _ = Command::new("/bin/kill")
-        .args(["-TERM", &pid.to_string()])
-        .output()?;
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while Command::new("/bin/kill")
-        .args(["-0", &pid.to_string()])
-        .output()?
-        .status
-        .success()
-    {
-        ensure(
-            Instant::now() < deadline,
-            "owned process did not stop after TERM",
-        )?;
-        std::thread::sleep(Duration::from_millis(25));
-    }
-    Ok(())
 }
 
 fn required_executable(name: &str) -> TestResult<PathBuf> {
@@ -539,51 +471,5 @@ fn fixture_command_strings_round_trip_through_the_actual_python_json_reader() ->
             "fixture JSON must round trip through Python's actual reader",
         )?;
     }
-    Ok(())
-}
-
-fn write_receipt(
-    output: &Path,
-    binary: &Path,
-    tools: &CaptureTools,
-    columns: u16,
-    rows: u16,
-    expected_timeout: bool,
-    request_count: usize,
-) -> TestResult<()> {
-    let binary_digest = digest_file(binary)?;
-    let vhs_digest = digest_file(&tools.vhs)?;
-    let ttyd_digest = digest_file(&tools.ttyd)?;
-    let image_verifier_digest = digest_file(&tools.image_verifier)?;
-    let driver_source_digest = format!("{:x}", Sha256::digest(include_bytes!("mod.rs")));
-    let image_verifier_source_digest = format!(
-        "{:x}",
-        Sha256::digest(include_bytes!("verify_screen_image.swift"))
-    );
-    let font_digest = digest_file(Path::new("/System/Library/Fonts/Menlo.ttc"))?;
-    let source_digest = digest_file(Path::new(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/src/main.rs"
-    )))?;
-    let image_records = if expected_timeout {
-        String::new()
-    } else {
-        CHECKPOINTS
-            .into_iter()
-            .map(|name| {
-                let digest = digest_file(&output.join(format!("{name}.png")))?;
-                Ok(format!(
-                    "{{\"checkpoint\":\"{name}\",\"png_sha256\":\"{digest}\"}}"
-                ))
-            })
-            .collect::<TestResult<Vec<_>>>()?
-            .join(",")
-    };
-    fs::write(
-        output.join("receipt.json"),
-        format!(
-            "{{\"binary_sha256\":\"{binary_digest}\",\"entrypoint_source_sha256\":\"{source_digest}\",\"driver_source_sha256\":\"{driver_source_digest}\",\"image_verifier_source_sha256\":\"{image_verifier_source_digest}\",\"image_verifier_binary_sha256\":\"{image_verifier_digest}\",\"vhs_sha256\":\"{vhs_digest}\",\"ttyd_sha256\":\"{ttyd_digest}\",\"columns\":{columns},\"rows\":{rows},\"configured_font_family\":\"{FONT_FAMILY}\",\"candidate_font_file_sha256\":\"{font_digest}\",\"fixture\":\"sealed synthetic loopback data; actual quota TUI\",\"expected_timeout\":{expected_timeout},\"get_requests\":{request_count},\"post_requests\":0,\"saved_policies\":\"Disallow\",\"secret_manifest_unchanged\":true,\"owned_children_stopped\":true,\"images\":[{image_records}],\"pixel_semantics\":\"Vision checks independent scene text in every positive PNG and rejects blank/wrong images; no full styled-cell, native Ghostty or synchronized paint claim\"}}\n"
-        ),
-    )?;
     Ok(())
 }

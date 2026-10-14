@@ -3,8 +3,8 @@ use super::*;
 use crate::presentation::session_picker::{
     PickerSourceContext, SourceInventoryRejection, SourceInventoryResult,
 };
-use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
 use futures_util::StreamExt;
+use iocraft::{KeyCode, KeyEventKind, KeyModifiers};
 use std::{
     sync::{
         Mutex,

@@ -27,6 +27,7 @@ clap.workspace = true
 comfy-table.workspace = true
 crossterm.workspace = true
 iocraft.workspace = true
+codex-router-tui.workspace = true
 jsonc-parser.workspace = true
 reqwest = { workspace = true, features = ["json"] }
 rmcp = { workspace = true, features = ["client"] }

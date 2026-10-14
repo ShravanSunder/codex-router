@@ -1,6 +1,41 @@
 use super::*;
 
 #[tokio::test]
+async fn sessions_picker_phone_row_keeps_identity_with_status_and_ages() {
+    let mut request = picker_request();
+    request.records.truncate(1);
+    request.records[0].title = "Claude-lookalike Zeta · 0000-session".to_owned();
+    request.records[0].full_title = "Claude-lookalike Zeta".to_owned();
+    request.records[0].runtime_status = crate::picker_runtime_status::PickerRuntimeStatus::Idle;
+    request.records[0].recency = "now".to_owned();
+    request.records[0].created = "-".to_owned();
+
+    let text = render_picker_capture_at(
+        request,
+        48,
+        24,
+        vec![
+            TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Down)),
+            TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Esc)),
+        ],
+    )
+    .await;
+    let identity_row = text
+        .lines()
+        .find(|line| line.contains("Claude-lookalike"))
+        .expect("selected record must be visible");
+    assert!(identity_row.contains("Claude-lookalike Zeta"), "{text}");
+    assert!(
+        identity_row.contains('○') && identity_row.contains("now"),
+        "{text}"
+    );
+    assert!(
+        text.lines().all(|line| line.chars().count() <= 48),
+        "{text}"
+    );
+}
+
+#[tokio::test]
 async fn sessions_picker_selected_row_uses_contract_marker_and_metadata() {
     let actual = element! {
         SessionsPickerComponent(
@@ -51,7 +86,7 @@ async fn sessions_picker_start_new_row_uses_outline_instead_of_filled_background
     let lines = text.lines().collect::<Vec<_>>();
     let start_index = lines
         .iter()
-        .position(|line| line.contains("Start new session"))
+        .position(|line| line.contains("New Codex session"))
         .unwrap_or_else(|| panic!("start-new row should render:\n{text}"));
 
     assert!(
@@ -128,14 +163,19 @@ async fn sessions_picker_width_contract_preserves_layout() {
             text.contains("+"),
             "capture should show the more-below affordance:\n{text}"
         );
+        let help_label = if width == 48 {
+            "F1 Help"
+        } else {
+            "ctrl-/ Help"
+        };
         assert!(
-            text.contains("ctrl-/ Help"),
+            text.contains(help_label),
             "capture should expose help:\n{text}"
         );
         let lines = text.lines().collect::<Vec<_>>();
         let footer_index = lines
             .iter()
-            .rposition(|line| line.contains("ctrl-/ Help"))
+            .rposition(|line| line.contains(help_label))
             .unwrap_or_else(|| panic!("capture should render footer:\n{text}"));
         let bottom_border_index = lines
             .iter()
@@ -160,7 +200,7 @@ async fn sessions_picker_width_contract_preserves_layout() {
     )
     .await;
     assert!(
-        empty_text.contains("Start new session"),
+        empty_text.contains("New Codex session"),
         "empty state should offer a new session:\n{empty_text}"
     );
 }
@@ -182,10 +222,10 @@ async fn sessions_picker_stacked_details_wraps_conversation_without_preview_or_m
     let text = render_picker_capture(
         request,
         width,
-        vec![TerminalEvent::Key(KeyEvent::new(
-            KeyEventKind::Press,
-            KeyCode::Esc,
-        ))],
+        vec![
+            TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::F(4))),
+            ctrl_key('d'),
+        ],
     )
     .await;
 
@@ -223,10 +263,10 @@ async fn sessions_picker_stacked_details_clip_long_conversation_without_hiding_t
         request,
         120,
         40,
-        vec![TerminalEvent::Key(KeyEvent::new(
-            KeyEventKind::Press,
-            KeyCode::Esc,
-        ))],
+        vec![
+            TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::F(4))),
+            ctrl_key('d'),
+        ],
     )
     .await;
 
@@ -235,14 +275,13 @@ async fn sessions_picker_stacked_details_clip_long_conversation_without_hiding_t
         "stacked details should remain visible and clip overflow:\n{text}"
     );
     assert!(
-        text.contains("Feature design session")
-            && text.contains("Provider migration with very very long provider metadata"),
-        "stacked details should leave room for multiple session rows:\n{text}"
+        text.contains("Session details") && text.contains("Close · Esc"),
+        "dialog should retain its title and close action:\n{text}"
     );
 }
 
 #[tokio::test]
-async fn sessions_picker_renders_minimum_height_from_short_resize() {
+async fn sessions_picker_respects_short_viewport_height() {
     let text = render_picker_capture_at(
         capture_picker_request(),
         160,
@@ -256,8 +295,8 @@ async fn sessions_picker_renders_minimum_height_from_short_resize() {
 
     assert_eq!(
         meaningful_line_count(&text),
-        24,
-        "short terminals should still render the 24-row minimum:\n{text}"
+        12,
+        "short terminals should respect the actual viewport:\n{text}"
     );
 }
 
@@ -407,10 +446,7 @@ async fn sessions_picker_renders_one_line_controls_when_width_allows() {
 
     assert!(
         text.lines().any(|line| {
-            line.contains("Search: []")
-                && line.contains("[all]")
-                && line.contains("View:")
-                && line.contains("Sort:")
+            line.contains("Machine: This machine") && line.contains("Filters · All providers")
         }),
         "wide sessions controls should fit on one line:\n{text}"
     );
@@ -475,7 +511,7 @@ async fn sessions_picker_stacked_layout_removes_top_padding_and_keeps_panels_adj
     let lines = text.lines().collect::<Vec<_>>();
     let title_index = lines
         .iter()
-        .position(|line| line.contains("Resume a previous session"))
+        .position(|line| line.contains("Sessions ·"))
         .unwrap_or_else(|| panic!("sessions title should render:\n{text}"));
     let top_border_index = lines
         .iter()
@@ -515,9 +551,9 @@ async fn sessions_picker_stacked_layout_removes_top_padding_and_keeps_panels_adj
         .unwrap_or_else(|| panic!("sessions list bottom border should render:\n{text}"));
     assert!(
         lines
-            .get(list_bottom_border_index + 1)
-            .is_some_and(|line| { line.chars().nth(panel_border_column) == Some('┌') }),
-        "stacked detail panel should begin directly below the fixed list panel:\n{text}"
+            .get(list_bottom_border_index + 2)
+            .is_some_and(|line| line.contains("Details F4")),
+        "details must be an explicit control instead of a second stacked pane: {text}"
     );
 }
 
@@ -534,7 +570,7 @@ async fn sessions_picker_uses_sidecar_only_at_140_columns() {
     .await;
     assert!(
         !has_sidecar_details(&stacked_text),
-        "session picker should stack details below 140 columns:\n{stacked_text}"
+        "session picker should reserve vertical space for the list below 140 columns:\n{stacked_text}"
     );
 
     let sidecar_text = render_picker_capture(

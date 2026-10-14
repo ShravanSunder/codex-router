@@ -22,7 +22,7 @@ pub(super) fn render_start_new_details(
             padding_right: 1,
             overflow: Overflow::Hidden,
         ) {
-            Text(content: "Start new session", color: Color::Cyan, weight: Weight::Bold)
+            Text(content: "New Codex session", color: Color::Cyan, weight: Weight::Bold)
             Text(content: fit_line(&start_new_args_label(model), detail_width), color: Color::Yellow, weight: Weight::Bold, wrap: TextWrap::NoWrap)
             #(if model.visible_record_len() == 0 {
                 Some(detail_text(no_matching_sessions_label(model), detail_width, Color::Grey))
@@ -38,10 +38,22 @@ pub(super) fn render_details(
     record: &SessionPickerRecord,
     width: usize,
     selected_conversation: Option<&SessionConversationPreview>,
-    height: usize,
+    height: Size,
 ) -> AnyElement<'static> {
+    let wrap = if height == Size::Auto {
+        TextWrap::Wrap
+    } else {
+        TextWrap::NoWrap
+    };
     if record.identity.is_provider() {
         let detail_width = width.saturating_sub(4);
+        let display_line = |value: String| {
+            if height == Size::Auto {
+                value
+            } else {
+                fit_line(&value, detail_width)
+            }
+        };
         let endpoint = record.endpoint_label.as_deref().unwrap_or("Provider");
         let state = match record.provider_state {
             Some(collaboration_client::protocol::ProviderSessionState::Unloaded) => "Unloaded",
@@ -59,25 +71,25 @@ pub(super) fn render_details(
         return element! {
             View(
                 width: width as u32,
-                height: height.max(1) as u32,
+                height,
                 flex_direction: FlexDirection::Column,
+                flex_shrink: 0.0_f32,
                 border_style: BorderStyle::Single,
                 border_color: Color::DarkGrey,
-                overflow: Overflow::Hidden,
+                overflow: if height == Size::Auto { Overflow::Visible } else { Overflow::Hidden },
                 padding_left: 1,
                 padding_right: 1,
             ) {
-                Text(content: fit_line(&format!("Session ID: {}", record.session_id), detail_width), color: Color::Grey, wrap: TextWrap::NoWrap)
-                Text(content: fit_line(&format!("Endpoint: {endpoint}"), detail_width), color: Color::Grey, wrap: TextWrap::NoWrap)
-                Text(content: fit_line(&format!("State: {state}"), detail_width), color: Color::Grey, wrap: TextWrap::NoWrap)
-                Text(content: fit_line(&format!("Working directory: {}", record.cwd.as_deref().unwrap_or("-")), detail_width), color: Color::Grey, wrap: TextWrap::NoWrap)
+                Text(content: display_line(format!("Session ID: {}", record.session_id)), color: Color::Grey, wrap)
+                Text(content: display_line(format!("Endpoint: {endpoint}")), color: Color::Grey, wrap)
+                Text(content: display_line(format!("State: {state}")), color: Color::Grey, wrap)
+                Text(content: display_line(format!("Working directory: {}", record.cwd.as_deref().unwrap_or("-"))), color: Color::Grey, wrap)
                 Text(content: "Read-only here; provider resume is unavailable.", color: Color::Yellow, wrap: TextWrap::Wrap)
             }
         }
         .into_any();
     }
     let conversation = selected_conversation.unwrap_or(&record.conversation);
-    let panel_height = height.max(1);
     let conversation_rows = if conversation.snippets.is_empty() {
         vec![conversation_text(
             conversation
@@ -97,15 +109,16 @@ pub(super) fn render_details(
     element! {
         View(
             width: width as u32,
-            height: panel_height as u32,
+            height,
+            flex_shrink: 0.0_f32,
             flex_direction: FlexDirection::Column,
             border_style: BorderStyle::Single,
             border_color: Color::DarkGrey,
-            overflow: Overflow::Hidden,
+            overflow: if height == Size::Auto { Overflow::Visible } else { Overflow::Hidden },
             padding_left: 1,
             padding_right: 1,
         ) {
-            Text(content: format!("Session ID: {}", record.session_id), color: Color::Grey, weight: Weight::Normal, wrap: TextWrap::NoWrap)
+            Text(content: format!("Session ID: {}", record.session_id), color: Color::Grey, weight: Weight::Normal, wrap)
             View(height: 1) { Text(content: "") }
             Text(content: "Conversation", color: Color::Cyan, weight: Weight::Bold)
             #(conversation_rows)

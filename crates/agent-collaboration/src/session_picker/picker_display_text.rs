@@ -26,7 +26,7 @@ pub(super) fn sort_label(sort: SessionsSort) -> &'static str {
     }
 }
 
-pub(super) fn fit_line(line: &str, width: usize) -> String {
+pub(in crate::session_picker) fn fit_line(line: &str, width: usize) -> String {
     truncate_middle(&line.replace('\n', " "), width)
 }
 

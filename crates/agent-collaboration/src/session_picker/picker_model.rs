@@ -65,6 +65,9 @@ pub(crate) struct SessionsPickerModel {
     pub(super) sort: SessionsSort,
     pub(super) search: String,
     pub(super) show_help: bool,
+    pub(super) provider_filter: super::provider_filter_model::SessionProviderFilter,
+    pub(super) provider_filter_draft: Option<super::provider_filter_model::ProviderFilterDraft>,
+    pub(super) details_dialog: Option<crate::sessions::SessionPickerRecord>,
     pub(super) runtime_coverage: PickerRuntimeCoverage,
     focus: SessionsPickerFocus,
     pointer_window_start: Option<usize>,
@@ -99,6 +102,9 @@ impl SessionsPickerModel {
             source_switch_checkpoint: None,
             search: String::new(),
             show_help: false,
+            provider_filter: super::provider_filter_model::SessionProviderFilter::All,
+            provider_filter_draft: None,
+            details_dialog: None,
             runtime_coverage: PickerRuntimeCoverage::Unobserved,
             focus: SessionsPickerFocus::StartNew,
             pointer_window_start: None,
@@ -193,6 +199,49 @@ impl SessionsPickerModel {
         self.width = width;
     }
 
+    pub(super) fn open_provider_filters(&mut self) {
+        if self.fork_confirmation.is_none()
+            && matches!(
+                self.machine_controls.stage,
+                super::picker_machine_controls::PickerMachineStage::Browsing
+            )
+            && self.provider_filter_draft.is_none()
+            && self.details_dialog.is_none()
+        {
+            self.provider_filter_draft = Some(
+                super::provider_filter_model::ProviderFilterDraft::new(self.provider_filter),
+            );
+        }
+    }
+
+    pub(super) fn apply_provider_filters(&mut self) {
+        let Some(draft) = self.provider_filter_draft.take() else {
+            return;
+        };
+        self.provider_filter = draft.selection;
+        self.pointer_window_start = None;
+        self.rebuild_visible_rows();
+        if self
+            .focused_identity()
+            .is_some_and(|identity| self.visible_index_for_identity(identity).is_none())
+        {
+            self.focus_start_new();
+            self.focus_first_record_when_available();
+        }
+    }
+
+    pub(super) fn open_details_dialog(&mut self) {
+        if self.provider_filter_draft.is_none()
+            && self.fork_confirmation.is_none()
+            && matches!(
+                self.machine_controls.stage,
+                super::picker_machine_controls::PickerMachineStage::Browsing
+            )
+        {
+            self.details_dialog = self.focused_record().cloned();
+        }
+    }
+
     pub(crate) fn data_query(&self) -> SessionsPickerDataQuery {
         SessionsPickerDataQuery {
             root: self.root,
@@ -275,6 +324,9 @@ impl SessionsPickerModel {
         identity: &SessionPickerIdentity,
         window_start: Option<usize>,
     ) -> bool {
+        if self.provider_filter_draft.is_some() || self.details_dialog.is_some() {
+            return false;
+        }
         if self.visible_index_for_identity(identity).is_none() {
             return false;
         }
@@ -291,6 +343,9 @@ impl SessionsPickerModel {
     }
 
     pub(crate) fn focus_start_new_in_window(&mut self, window_start: usize) {
+        if self.provider_filter_draft.is_some() || self.details_dialog.is_some() {
+            return;
+        }
         self.pointer_window_start = Some(window_start);
         self.focus = SessionsPickerFocus::StartNew;
     }
@@ -341,6 +396,9 @@ impl SessionsPickerModel {
     }
 
     pub(super) fn start_new_action(&mut self) -> Option<SessionsPickerOutcome> {
+        if self.provider_filter_draft.is_some() || self.details_dialog.is_some() {
+            return None;
+        }
         if self
             .machine_controls
             .open_new(&self.request.router_registry)
@@ -446,6 +504,10 @@ impl SessionsPickerModel {
             .filter(|(_index, record)| provider_matches(&self.provider, &self.request, record))
             .filter(|(_index, record)| source_matches(self.source, record))
             .filter(|(_index, record)| runtime_view_matches(self.runtime_view, record))
+            .filter(|(_index, record)| {
+                self.provider_filter
+                    .matches(record.client_provider_family())
+            })
             .filter(|(_index, record)| search.is_empty() || record.matches_search(&search))
             .map(|(index, _record)| index)
             .collect::<Vec<_>>();

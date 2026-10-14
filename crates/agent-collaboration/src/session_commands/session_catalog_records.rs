@@ -5,8 +5,8 @@ use super::{
     format_recency_at_ms, normalize_path, session_context_from_cwd, truncate_end,
 };
 use collaboration_client::protocol::{
-    ClaudeCodeInteractiveStatus, EndpointRef, NativeSessionSource, ProviderSessionState,
-    ProviderSessionSummary, SessionRef,
+    ChannelDescription, ClaudeCodeInteractiveStatus, EndpointDescription, EndpointRef,
+    NativeSessionSource, ProviderKind, ProviderSessionState, ProviderSessionSummary, SessionRef,
 };
 use collaboration_client::session_catalog::{
     SessionHistorySource, StoredSessionRecord, read_session_conversation_history,
@@ -14,6 +14,7 @@ use collaboration_client::session_catalog::{
 use std::path::Path;
 
 use crate::picker_runtime_status::PickerRuntimeStatus;
+use crate::presentation::session_picker::SessionProviderFamily;
 
 pub(super) type SessionRecord = StoredSessionRecord;
 pub(crate) type SessionConversationSource = SessionHistorySource;
@@ -42,6 +43,7 @@ pub(crate) enum SessionRowProvenance {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct SessionPickerRecord {
     pub(crate) identity: SessionPickerIdentity,
+    pub(crate) provider_family: SessionProviderFamily,
     pub(crate) provenance: SessionRowProvenance,
     pub(crate) source_context: Option<crate::presentation::session_picker::PickerSourceContext>,
     pub(crate) machine_display_label: Option<String>,
@@ -86,6 +88,53 @@ pub(crate) struct SessionConversationPreview {
 }
 
 impl SessionPickerRecord {
+    pub(crate) fn client_provider_family(&self) -> SessionProviderFamily {
+        match self.identity {
+            SessionPickerIdentity::LocalCodex(_) | SessionPickerIdentity::HostedCodex(_) => {
+                SessionProviderFamily::Codex
+            }
+            SessionPickerIdentity::HostedProvider(_) => self.provider_family,
+        }
+    }
+
+    /// Classification uses typed, uniquely attributable endpoint evidence; it never changes inventory admission.
+    pub(crate) fn with_provider_endpoint(
+        mut self,
+        summary: &ProviderSessionSummary,
+        endpoint: &EndpointDescription,
+    ) -> Self {
+        if !self.identity.is_provider() {
+            return self;
+        }
+        let mut kinds = endpoint
+            .channels
+            .iter()
+            .filter_map(|channel| match channel {
+                ChannelDescription::ExternalProvider { runtime, .. } => Some(runtime.provider),
+                _ => None,
+            });
+        let kind = kinds.next();
+        let consistent = summary.target().endpoint == endpoint.endpoint
+            && matches!(&self.identity, SessionPickerIdentity::HostedProvider(target) if target == summary.target())
+            && kinds.next().is_none()
+            && !endpoint
+                .channels
+                .iter()
+                .any(|channel| matches!(channel, ChannelDescription::NativeCodex { .. }))
+            && !matches!(
+                (summary, kind),
+                (
+                    ProviderSessionSummary::ClaudeCodeInteractive { .. },
+                    Some(ProviderKind::Cursor)
+                )
+            );
+        self.provider_family = match (consistent, kind) {
+            (true, Some(kind)) => SessionProviderFamily::External(kind),
+            _ => SessionProviderFamily::Unclassified,
+        };
+        self
+    }
+
     pub(crate) fn machine_label(&self) -> &str {
         if let Some(label) = &self.machine_display_label {
             return label;
@@ -138,6 +187,7 @@ impl SessionPickerRecord {
         .unwrap_or_else(|| "Untitled session".to_owned());
         Self {
             identity: SessionPickerIdentity::LocalCodex(record.session_id.clone()),
+            provider_family: SessionProviderFamily::Codex,
             source_context: None,
             machine_display_label: None,
             provenance: SessionRowProvenance::LocalHomeCatalog,
@@ -279,6 +329,14 @@ impl SessionPickerRecord {
         let context = session_context_from_cwd(&cwd);
         Self {
             identity: SessionPickerIdentity::HostedProvider(target.clone()),
+            provider_family: match summary {
+                ProviderSessionSummary::ClaudeCodeInteractive { .. } => {
+                    SessionProviderFamily::External(ProviderKind::ClaudeCode)
+                }
+                ProviderSessionSummary::HostedProvider { .. } => {
+                    SessionProviderFamily::Unclassified
+                }
+            },
             source_context: None,
             machine_display_label: None,
             provenance: SessionRowProvenance::ObservedProvider,

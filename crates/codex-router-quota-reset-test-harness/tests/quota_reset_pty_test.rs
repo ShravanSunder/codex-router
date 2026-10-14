@@ -2,6 +2,7 @@ mod quota_reset_pty_test {
     mod credit_refresh_feedback_test;
     mod isolated_fixture_test;
     mod loopback_provider_test;
+    mod provider_filter_pty_test;
     mod stored_model_diagnostic_test;
     mod terminal_interaction_test;
 
@@ -642,12 +643,12 @@ mod quota_reset_pty_test {
         terminal.resize(24, 160)?;
 
         stage(
-            terminal.wait_for_text("Start new session", SEMANTIC_WAIT),
+            terminal.wait_for_text("New Codex session", SEMANTIC_WAIT),
             "initial sessions picker",
         )?;
         let pointer_focus_start = terminal.transcript_len();
-        // The Machine control puts the beta row at zero-based row 15 in this viewport.
-        terminal.send_sgr_mouse_left_down(10, 15)?;
+        // The compact shared control row puts beta at zero-based row 14.
+        terminal.send_sgr_mouse_left_down(10, 14)?;
         stage(
             terminal.wait_for_text_after(
                 "BETA_CONVERSATION_ACTIVE",
@@ -694,10 +695,10 @@ mod quota_reset_pty_test {
         terminal.resize(24, 160)?;
 
         stage(
-            terminal.wait_for_text("Start new session", SEMANTIC_WAIT),
+            terminal.wait_for_text("New Codex session", SEMANTIC_WAIT),
             "initial sessions picker",
         )?;
-        terminal.send_sgr_mouse_left_down(10, 7)?;
+        terminal.send_sgr_mouse_left_down(10, 8)?;
 
         let transcript = terminal.finish(SEMANTIC_WAIT)?;
         let transcript = String::from_utf8_lossy(&transcript);

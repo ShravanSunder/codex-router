@@ -156,10 +156,18 @@ pub(crate) fn interactive_credit_usage_refresher(
                 current_unix_seconds(),
             )
             .await
-            .map_err(|_| CreditUsageRefreshError::Failed)?;
+            .map_err(|_error| {
+                #[cfg(feature = "quota-reset-test-harness")]
+                record_storyboard_quota_error("refresh_service", &_error);
+                CreditUsageRefreshError::Failed
+            })?;
             if report.responses_observation_committed_for(&account_id, credential_generation) {
+                #[cfg(feature = "quota-reset-test-harness")]
+                tracing::warn!(target: "quota_storyboard_diagnostic", stage = "refresh_committed");
                 Ok(())
             } else {
+                #[cfg(feature = "quota-reset-test-harness")]
+                tracing::warn!(target: "quota_storyboard_diagnostic", stage = "refresh_not_committed");
                 Err(CreditUsageRefreshError::Failed)
             }
         })
@@ -272,11 +280,40 @@ pub(super) fn quota_status_view_model_loader(
                 unicode_bars,
                 credential_store_availability,
             )
-            .await
-            .ok()?;
+            .await;
+            let report = match report {
+                Ok(report) => report,
+                Err(_error) => {
+                    #[cfg(feature = "quota-reset-test-harness")]
+                    record_storyboard_quota_error("report_reload", &_error);
+                    return None;
+                }
+            };
             Some(quota_status_view_model(&report, report.rows(), width))
         })
     })
+}
+
+#[cfg(feature = "quota-reset-test-harness")]
+fn record_storyboard_quota_error(stage: &'static str, error: &QuotaCommandError) {
+    // Discriminants contain no payload. Their interpretation is bound to the
+    // captured source, unlike raw error messages containing account/SQL data.
+    let state_variant = match error {
+        QuotaCommandError::StateStore(error) => Some(std::mem::discriminant(error)),
+        _ => None,
+    };
+    let sqlite_busy = matches!(
+        error,
+        QuotaCommandError::StateStore(StateStoreError::Sqlite { message })
+            if message.contains("database is locked") || message.contains("database is busy")
+    );
+    tracing::warn!(
+        target: "quota_storyboard_diagnostic",
+        stage,
+        quota_error_variant = ?std::mem::discriminant(error),
+        state_error_variant = ?state_variant,
+        sqlite_busy,
+    );
 }
 
 pub(super) fn effective_human_quota_format(
@@ -293,6 +330,40 @@ pub(super) fn effective_human_quota_format(
 #[cfg(test)]
 mod weekly_floor_save_error_tests {
     use super::*;
+
+    #[cfg(feature = "quota-reset-test-harness")]
+    #[test]
+    fn storyboard_quota_diagnostics_omit_error_payloads() {
+        let path =
+            std::env::temp_dir().join(format!("quota-diagnostic-{}.log", std::process::id()));
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .expect("fresh diagnostic fixture file");
+        let subscriber = tracing_subscriber::fmt()
+            .with_env_filter("off,quota_storyboard_diagnostic=warn")
+            .with_writer(file)
+            .without_time()
+            .with_ansi(false)
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            record_storyboard_quota_error(
+                "report_reload",
+                &QuotaCommandError::StateStore(StateStoreError::CorruptQuotaSnapshot {
+                    account_id: "private-account-sentinel".to_owned(),
+                    field: "private-field-sentinel",
+                }),
+            );
+        });
+        let evidence = std::fs::read_to_string(&path).expect("retained diagnostic");
+        std::fs::remove_file(path).expect("diagnostic fixture cleanup");
+        assert!(evidence.contains("report_reload"));
+        assert!(evidence.contains("quota_error_variant"));
+        assert!(evidence.contains("state_error_variant"));
+        assert!(!evidence.contains("private-account-sentinel"));
+        assert!(!evidence.contains("private-field-sentinel"));
+    }
 
     #[test]
     fn tui_weekly_floor_errors_are_closed_and_redacted() {

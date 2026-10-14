@@ -1,6 +1,7 @@
 ╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
 │ Quota status                                                                                                                                       ◌ fresh 1 │
-│ responses -> ssdev    [preferred]                                                                                                                            │
+│ Pool-wide: responses -> ssdev    [preferred]                                                                                                                 │
+│ Filters Ctrl+F/F3  Details F4  Provider: All · Disabled: Shown · 1/1 accounts                                                                                │
 │ ┌──────────────────────────────────────────────────────────────────────────────────────────┐  ┌────────────────────────────────────────────────────────────┐ │
 │ │  ❯ ssdev          [usable]          safest quota                                         │  │ Selected account                                           │ │
 │ │                   1 client          █████ 83% left, reset 7d                             │  │ ssdev    [usable]    safest quota                          │ │
@@ -18,7 +19,6 @@
 │                                                                                               │ Activity                                                   │ │
 │                                                                                               │ clients   1 client                                         │ │
 │                                                                                               │ guards    5h 0% / weekly 8%                                │ │
-│                                                                                               │ reset     2 available                                      │ │
 │                                                                                               └────────────────────────────────────────────────────────────┘ │
 │ ↑/↓ focus  ctrl-r account options  esc/q exit  ctrl-c exit                                                                                                   │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯

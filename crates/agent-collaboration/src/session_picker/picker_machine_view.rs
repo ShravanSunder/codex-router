@@ -7,11 +7,16 @@ use iocraft::prelude::*;
 pub(super) fn render_machine_control(
     model: &SessionsPickerModel,
     mut model_state: State<SessionsPickerModel>,
-    _width: usize,
+    width: usize,
 ) -> AnyElement<'static> {
-    let label = format!(
-        "Machine: {}",
-        model.machine_controls.label(model.request.machine_mode)
+    let machine = model.machine_controls.label(model.request.machine_mode);
+    let label = super::picker_component::fit_line(
+        &if width >= 32 {
+            format!("Machine: {machine}")
+        } else {
+            machine.to_owned()
+        },
+        width.saturating_sub(5),
     );
     let focused = model.machine_controls.control_focused;
     element! {
@@ -19,6 +24,7 @@ pub(super) fn render_machine_control(
             focus_handler: move |_| { model_state.write().machine_controls.control_focused = true; },
             activation_handler: move |_| {
                 let mut model = model_state.write();
+                if model.provider_filter_draft.is_some() { return; }
                 let registry = model.request.router_registry.clone();
                 model.machine_controls.open_browse(&registry);
             },
@@ -26,7 +32,7 @@ pub(super) fn render_machine_control(
         ) {
             View(width: 100pct, column_gap: 1) {
                 Text(content: label, color: if focused { Color::Yellow } else { Color::Grey }, weight: Weight::Bold, wrap: TextWrap::NoWrap)
-                Text(content: "Ctrl+G / F2", color: Color::DarkGrey, wrap: TextWrap::NoWrap)
+                Text(content: "▾ F2", color: Color::DarkGrey, wrap: TextWrap::NoWrap)
             }
         }
     }.into_any()

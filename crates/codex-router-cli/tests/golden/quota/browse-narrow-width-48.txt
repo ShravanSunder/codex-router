@@ -1,48 +1,48 @@
 ╭──────────────────────────────────────────────╮
 │ Quota status                       ◌ fresh 1 │
-│ responses -> ssdev    [preferred]            │
+│ Pool-wide: responses -> ssdev    [preferred] │
+│ Filters Ctrl+F/F3  Details F4                │
+│ All · Disabled: Shown · 1/1 accounts         │
 │ ┌──────────────────────────────────────────┐ │
-│ │  ❯ ssdev      [usable]     safest quota  │ │
+│ │  ❯ ssdev          [usable]     safest …  │ │
 │ │               1 client     █████ 83% l…  │ │
 │ │               2 resets     █████ 99% l…  │ │
 │ │               unknown      □□□□□□□│□□□…  │ │
 │ └──────────────────────────────────────────┘ │
-│ ┌──────────────────────────────────────────┐ │
-│ │ Selected account                         │ │
-│ │ ssdev    [usable]    safest quota        │ │
-│ │ Quota windows                            │ │
-│ │ weekly    ████ 83% left, reset 7d        │ │
-│ │ 5h        █████ 99% left, reset 5h       │ │
-│ │                                          │ │
-│ │ Reset pace                               │ │
-│ │ weekly    □□□□□□□│□□□□□□□  1.00x reset … │ │
-│ │ sample    sample fresh 14s               │ │
-│ │ rate      0.10%/h                        │ │
-│ │ conn      0.05%/h/conn                   │ │
-│ │ 5h        □□□□□□□│■■■■■■■  runs out 2d … │ │
-│ │                                          │ │
-│ │ Activity                                 │ │
-│ │ clients   1 client                       │ │
-│ │ guards    5h 0% / weekly 8%              │ │
-│ │ reset     2 available                    │ │
-│ │ note      safest quota                   │ │
-│ │                                          │ │
-│ │                                          │ │
-│ │                                          │ │
-│ │                                          │ │
-│ │                                          │ │
-│ │                                          │ │
-│ │                                          │ │
-│ │                                          │ │
-│ │                                          │ │
-│ │                                          │ │
-│ │                                          │ │
-│ │                                          │ │
-│ │                                          │ │
-│ │                                          │ │
-│ │                                          │ │
-│ │                                          │ │
-│ │                                          │ │
-│ └──────────────────────────────────────────┘ │
+│                                              │
+│                                              │
+│                                              │
+│                                              │
+│                                              │
+│                                              │
+│                                              │
+│                                              │
+│                                              │
+│                                              │
+│                                              │
+│                                              │
+│                                              │
+│                                              │
+│                                              │
+│                                              │
+│                                              │
+│                                              │
+│                                              │
+│                                              │
+│                                              │
+│                                              │
+│                                              │
+│                                              │
+│                                              │
+│                                              │
+│                                              │
+│                                              │
+│                                              │
+│                                              │
+│                                              │
+│                                              │
+│                                              │
+│                                              │
+│                                              │
 │ ↑/↓ focus  ctrl-r account options  esc/q ex… │
 ╰──────────────────────────────────────────────╯

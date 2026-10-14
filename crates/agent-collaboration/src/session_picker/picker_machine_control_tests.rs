@@ -1,8 +1,8 @@
 //! Actual renderer/event proof for machine choices and modal input ownership.
 use super::*;
 use crate::sessions::RouterRegistryRead;
-use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
 use futures_util::StreamExt;
+use iocraft::{KeyCode, KeyEventKind, KeyModifiers};
 use std::time::Duration;
 
 fn control_key(character: char) -> TerminalEvent {
