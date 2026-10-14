@@ -100,7 +100,8 @@ DROP TABLE latest_agent_senders;
 ## 4. The line (R1–R3)
 
 - **Preview, in this order:** take up to the first 100 source scalars, escape them, add `…` before the
-  closing quote whenever body text is omitted, then append ` (+N more chars)`. N counts omitted original
+  closing quote whenever body text is omitted, then append ` (+N) 📖 Load full message → ` followed by the
+  complete Router link. N counts omitted original
   source scalars before escaping; the added display marker is excluded. Intact bodies have no added marker
   or count suffix.
 - **Budget:** assemble the line; while it is over 1024 bytes, trim the machine label, then the name, then the

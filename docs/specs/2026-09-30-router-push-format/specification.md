@@ -48,10 +48,11 @@ runs, and the summary worker's read-only thread. Task input is delivered in full
 
 - **R1 — shape.**
   ```
-  <kind emoji> <header facts> · "<preview>"[ (+N more chars)] · router://<machine-id>/push/<push-id>
+  <kind emoji> <header facts> · "<preview>" · router://<machine-id>/push/<push-id>
+  <kind emoji> <header facts> · "<preview>…" (+N) 📖 Load full message → router://<machine-id>/push/<push-id>
   ```
   - The preview is the first 100 Unicode scalar values of the body, **counted before escaping**.
-  - Any omitted body text adds `…` immediately before the closing quote and ` (+N more chars)` after it; N counts original body scalars not shown, before escaping, and excludes the display ellipsis.
+  - Any omitted body text adds `…` immediately before the closing quote and ` (+N) 📖 Load full message → ` after it, followed by the complete Router link. N counts original body scalars not shown, before escaping, and excludes the display ellipsis.
   - An intact body has no added ellipsis or suffix; content already ending in an ellipsis remains intact.
   - Subscription kinds have **no preview** (neutral, U8).
 - **R2 — header facts** (emoji by default):
@@ -185,7 +186,7 @@ runs, and the summary worker's read-only thread. Task input is delivered in full
 | # | Given | When | Then |
 | --- | --- | --- | --- |
 | S1 | Main sends a Sidekick "S1 is green" | it arrives | one line: `✉️ ✳️ Main (claude-local/8d47f947) @Sunbook-Pro-M4 → you · "S1 is green" · router://…/push/…` |
-| S2 | a 1,340-char receipt | it arrives | 100 source scalars plus `…`, `(+1240 more chars)`, the complete link; `show` returns everything |
+| S2 | a 1,340-char receipt | it arrives | 100 source scalars plus `…`, `(+1240) 📖 Load full message → `, the complete link; `show` returns everything |
 | S3 | the recipient's terminal is closed | a DM is sent | the result says `held`; the DM arrives on resume |
 | S4 | the Sidekick got DMs from A then B | `message reply <A's id> "done"` | A receives it; `message reply "done"` with no id is rejected |
 | S5 | a subscription batch covers 2 threads, held | the owner resumes the session | one 🧵 line, 2 threads, `held since …`; one `show` returns both ranges |

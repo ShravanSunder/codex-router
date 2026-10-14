@@ -69,6 +69,7 @@ fn target() -> SessionRef {
 /// Literal independent policy oracle, never obtained from the production projector or RPC input.
 fn expected_filesystem(scratch: &Path) -> Result<serde_json::Map<String, Value>, TestError> {
     let home = std::env::var("HOME")?;
+    let scratch = std::fs::canonicalize(scratch)?;
     let mut filesystem =
         serde_json::Map::from_iter([(scratch.to_string_lossy().into_owned(), json!("write"))]);
     for location in [

@@ -228,9 +228,8 @@ impl CollaborationClient {
         params: collaboration_protocol::SessionMessageSendParams,
     ) -> Result<collaboration_protocol::PushMessageSendResult, ClientError> {
         use collaboration_protocol::{
-            AcceptedResumeEffect, DeliveryClientReceipt, DeliveryOutcome, MessageDelivery,
-            MessageInputKind, MessageRepresentation, NativeInputOperation, NativeSendAcceptance,
-            SessionReachability,
+            DeliveryClientReceipt, DeliveryOutcome, MessageDelivery, MessageInputKind,
+            MessageRepresentation, NativeInputOperation, NativeSendAcceptance, SessionReachability,
         };
         let message = crate::PublicMessageContent::try_from(params.message.clone())?;
         let value = self
@@ -304,8 +303,6 @@ impl CollaborationClient {
                         && native.input_kind == kind
                         && native.representation == representation
                         && acceptance_matches
-                        && (params.mode == MessageDelivery::Auto
-                            || native.resume_effect == AcceptedResumeEffect::NotRequested)
                         && String::from(native.client_user_message_id.clone())
                             == receipt.push_id.as_str()
                 }
