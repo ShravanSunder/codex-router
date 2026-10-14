@@ -55,6 +55,7 @@ pub struct HostConfig {
     owner_human_id: Option<message_board::HumanId>,
     collaboration_directory: Option<PathBuf>,
     collaboration_codex_home: Option<PathBuf>,
+    collaboration_peer_registry_directory: Option<PathBuf>,
     coordination_paths: HostCoordinationPaths,
     router_endpoint: SocketAddr,
     mcp_bind: SocketAddr,
@@ -88,6 +89,7 @@ impl HostConfig {
             owner_human_id: None,
             collaboration_directory: None,
             collaboration_codex_home: None,
+            collaboration_peer_registry_directory: None,
             coordination_paths: inputs.coordination_paths,
             router_endpoint: inputs.router_endpoint,
             mcp_bind: inputs.mcp_bind,
@@ -134,6 +136,19 @@ impl HostConfig {
         self.collaboration_directory = Some(directory);
         self
     }
+    /// Selects the existing private peer-registry fixture at Host composition.
+    /// Ordinary callers retain the default registry when no override is supplied.
+    #[must_use]
+    pub fn with_collaboration_peer_registry_directory(mut self, directory: PathBuf) -> Self {
+        self.collaboration_peer_registry_directory = Some(directory);
+        self
+    }
+
+    #[must_use]
+    pub fn collaboration_peer_registry_directory(&self) -> Option<&Path> {
+        self.collaboration_peer_registry_directory.as_deref()
+    }
+
     #[must_use]
     pub fn collaboration_codex_home(&self) -> Option<&Path> {
         self.collaboration_codex_home.as_deref()

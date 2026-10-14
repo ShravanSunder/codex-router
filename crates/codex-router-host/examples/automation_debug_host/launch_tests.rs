@@ -93,6 +93,8 @@ impl TestRunDirectory {
             host_pid: process_id,
             router_root: None,
             claude_provider: None,
+            cursor_provider: None,
+            peer_registry_directory: None,
         })
     }
 }
@@ -193,6 +195,8 @@ fn resume_replaces_marker_without_changing_service_data() -> Result<(), Box<dyn 
         host_pid: 4242,
         router_root: None,
         claude_provider: None,
+        cursor_provider: None,
+        peer_registry_directory: None,
     };
 
     replace_resumed_context(&resumed_context)?;
@@ -550,3 +554,9 @@ fn full_native_argument_order_preserves_owned_hooks_and_merged_profile_controls(
     assert_eq!(broken.network_proxy_enabled, None);
     Ok(())
 }
+
+#[path = "cursor_launch_tests.rs"]
+mod cursor_launch_tests;
+
+#[path = "peer_registry_launch_tests.rs"]
+mod peer_registry_launch_tests;

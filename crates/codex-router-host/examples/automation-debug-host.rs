@@ -42,6 +42,8 @@ struct DebugHostContext {
     host_pid: u32,
     router_root: Option<PathBuf>,
     claude_provider: Option<ProviderCommand>,
+    cursor_provider: Option<ProviderCommand>,
+    peer_registry_directory: Option<PathBuf>,
 }
 
 #[tokio::main]
@@ -106,6 +108,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .create(&native_directory)?;
         std::fs::DirBuilder::new().mode(0o700).create(&workspace)?;
     }
+    prepare_peer_registry(&options)?;
     let socket = native_directory.join("app-server.sock");
     let paths = CodexPaths::from_codex_home(codex_home.clone());
     let spec = AppServerCommandSpec::new(&paths, &CodexRouterProfile::new(options.port), &socket)
@@ -140,6 +143,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         deadlines: HostDeadlines::production(),
     })
     .with_collaboration_directory(collaboration.clone(), codex_home);
+    let config = match &options.peer_registry_directory {
+        Some(directory) => config.with_collaboration_peer_registry_directory(directory.clone()),
+        None => config,
+    };
     let config = options.attach_provider(
         config,
         std::env::var_os("CLAUDE_CODE_EXECUTABLE").map(PathBuf::from),
@@ -155,6 +162,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         host_pid: std::process::id(),
         router_root: options.router_root.clone(),
         claude_provider: options.claude_provider.clone(),
+        cursor_provider: options.cursor_provider.clone(),
+        peer_registry_directory: options.peer_registry_directory.clone(),
     };
     let instance =
         host_replacement::acquire_acceptance_host_instance(config.coordination_paths().clone())?;
@@ -333,17 +342,19 @@ fn confirm_process_absent(process_id: u32) -> Result<(), Box<dyn std::error::Err
 }
 
 fn write_fresh_context(context: &DebugHostContext) -> Result<(), Box<dyn std::error::Error>> {
+    let bytes = serialize_context(context)?;
     let mut marker = OpenOptions::new()
         .write(true)
         .create_new(true)
         .mode(0o600)
         .open(context.run_directory.join("debug-host-context.json"))?;
-    marker.write_all(&serde_json::to_vec(context)?)?;
+    marker.write_all(&bytes)?;
     marker.sync_all()?;
     Ok(())
 }
 
 fn replace_resumed_context(context: &DebugHostContext) -> Result<(), Box<dyn std::error::Error>> {
+    let bytes = serialize_context(context)?;
     let marker_path = context.run_directory.join("debug-host-context.json");
     let temporary_path = context
         .run_directory
@@ -359,7 +370,7 @@ fn replace_resumed_context(context: &DebugHostContext) -> Result<(), Box<dyn std
     )?;
     let result = (|| {
         let mut marker = File::from(descriptor);
-        marker.write_all(&serde_json::to_vec(context)?)?;
+        marker.write_all(&bytes)?;
         marker.sync_all()?;
         std::fs::rename(&temporary_path, &marker_path)?;
         let run_directory = rustix::fs::open(
@@ -385,8 +396,38 @@ fn validate_resume_binding(
 ) -> Result<(), &'static str> {
     if context.router_root != options.router_root
         || context.claude_provider != options.claude_provider
+        || context.cursor_provider != options.cursor_provider
+        || context.peer_registry_directory != options.peer_registry_directory
     {
         return Err("resume refused: Router root or ACP command changed");
+    }
+    Ok(())
+}
+
+fn serialize_context(context: &DebugHostContext) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let bytes = serde_json::to_vec(context)?;
+    if bytes.len() > 4096 {
+        return Err("debug Host context marker is too large".into());
+    }
+    Ok(bytes)
+}
+
+fn prepare_peer_registry(
+    options: &launch_options::DebugHostOptions,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if let Some(directory) = &options.peer_registry_directory {
+        if directory != &options.run_directory.join("peer-registry") {
+            return Err("peer registry does not match the admitted run directory".into());
+        }
+        if options.run_directory_admission == RunDirectoryAdmission::Fresh {
+            std::fs::DirBuilder::new().mode(0o700).create(directory)?;
+        }
+        validate_private_owned_directory(directory, "peer registry directory")?;
+        if directory.canonicalize()?.parent()
+            != Some(options.run_directory.canonicalize()?.as_path())
+        {
+            return Err("peer registry must remain inside the admitted run directory".into());
+        }
     }
     Ok(())
 }

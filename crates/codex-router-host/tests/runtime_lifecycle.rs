@@ -483,3 +483,6 @@ impl Drop for TestDirectory {
         let _cleanup_result = std::fs::remove_dir_all(&self.path);
     }
 }
+
+#[path = "support/runtime_peer_registry.rs"]
+mod runtime_peer_registry;

@@ -9,6 +9,7 @@ pub(super) struct CollaborationLifecycle {
     owner_human_id: Option<message_board::HumanId>,
     directory: PathBuf,
     codex_home: PathBuf,
+    peer_registry_directory: Option<PathBuf>,
     backend_socket: PathBuf,
     mcp_bind: std::net::SocketAddr,
     router_proxy_endpoint: std::net::SocketAddr,
@@ -48,6 +49,9 @@ impl CollaborationLifecycle {
                 .collaboration_codex_home()
                 .ok_or_else(|| io::Error::other("collaboration requires explicit Codex home"))?
                 .to_owned(),
+            peer_registry_directory: config
+                .collaboration_peer_registry_directory()
+                .map(PathBuf::from),
             backend_socket: config.app_server_socket().to_owned(),
             mcp_bind: config.mcp_bind(),
             router_proxy_endpoint: config.router_endpoint(),
@@ -107,7 +111,7 @@ impl CollaborationLifecycle {
                         backend_socket: self.backend_socket.clone(),
                         mcp_bind: self.mcp_bind,
                         native_schema: export.clone(),
-                        peer_registry_directory: None,
+                        peer_registry_directory: self.peer_registry_directory.clone(),
                         remote_control_server_name: self.remote_control_server_name.clone(),
                         owner_human_id: self.owner_human_id.clone(),
                     },

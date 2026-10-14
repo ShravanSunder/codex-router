@@ -13,6 +13,9 @@ use tokio::io::{AsyncBufReadExt as _, BufReader};
 
 const PEER_TOKEN: &str = "0123456789abcdef0123456789abcdef";
 
+#[path = "peer_registry.rs"]
+mod peer_registry;
+
 const DELIVERY_MATRIX_DEBUG_PROFILE: &str = "model = \"gpt-5.6-luna\"\nmodel_reasoning_effort = \"high\"\nmodel_provider = \"codex-router-debug\"\n\n[features]\nenable_request_compression = false\n\n[model_providers.codex-router-debug]\nname = \"OpenAI\"\nbase_url = \"http://127.0.0.1:43127/v1\"\nwire_api = \"responses\"\nrequires_openai_auth = false\nsupports_websockets = true\n";
 
 enum ProviderFixtureMode {
@@ -289,7 +292,7 @@ pub(super) struct PeerFixture {
 
 impl PeerFixture {
     pub(super) async fn start(proof: &ProofContext) -> ProofResult<Self> {
-        let registry = proof.root.join("home/.claude/sessions");
+        let registry = peer_registry::selected_directory(&proof.root)?;
         if !registry.is_dir() || std::fs::metadata(&registry)?.permissions().mode() & 0o077 != 0 {
             return Err("Debug Host did not enable a private fixture peer registry".into());
         }

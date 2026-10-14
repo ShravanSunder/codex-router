@@ -30,6 +30,8 @@ pub(super) struct DebugHostOptions {
     pub(super) port: u16,
     pub(super) router_root: Option<PathBuf>,
     pub(super) claude_provider: Option<ProviderCommand>,
+    pub(super) cursor_provider: Option<ProviderCommand>,
+    pub(super) peer_registry_directory: Option<PathBuf>,
 }
 
 pub(super) fn parse_options() -> Result<Option<DebugHostOptions>, Box<dyn std::error::Error>> {
@@ -46,10 +48,13 @@ pub(super) fn parse_options_from(
     let mut router_root = None;
     let mut claude_executable = None;
     let mut claude_arguments = Vec::new();
+    let mut cursor_executable = None;
+    let mut cursor_arguments = Vec::new();
+    let mut peer_registry_directory = None;
     while let Some(flag) = arguments.next() {
         if flag == "--help" || flag == "-h" {
             println!(
-                "automation-debug-host (--run-directory /tmp/NEW-DIRECTORY | --resume-run-directory /tmp/OWNED-DIRECTORY) --router-binary /ABSOLUTE/target/debug/codex-router [--port 18787] [--router-root /ABSOLUTE/ISOLATED-ROOT] [--claude-acp-executable /ABSOLUTE/ACP --claude-acp-arguments ARG ...]\n\nOpt-in real acceptance Host. Uses the existing codex-router-debug profile with an in-memory Luna override. Fresh mode creates runtime/workspace directories. Resume mode reopens only a stopped Host's validated private directory. Starts only its own debug router and app-server and shuts its children down on SIGTERM. Never use production paths or ports. Keep this process running while the acceptance runner connects."
+                "automation-debug-host (--run-directory /tmp/NEW-DIRECTORY | --resume-run-directory /tmp/OWNED-DIRECTORY) --router-binary /ABSOLUTE/target/debug/codex-router [--port 18787] [--router-root /ABSOLUTE/ISOLATED-ROOT] [--claude-acp-executable /ABSOLUTE/ACP --claude-acp-arguments ARG ...] [--cursor-acp-executable /ABSOLUTE/ACP --cursor-acp-arguments ARG ...] [--peer-registry-directory /tmp/NEW-DIRECTORY/peer-registry]\n\nOpt-in real acceptance Host. Uses the existing codex-router-debug profile with an in-memory Luna override. Fresh mode creates runtime/workspace directories. Resume mode reopens only a stopped Host's validated private directory. Starts only its own debug router and app-server and shuts its children down on SIGTERM. Never use production paths or ports. Keep this process running while the acceptance runner connects."
             );
             return Ok(None);
         }
@@ -67,8 +72,17 @@ pub(super) fn parse_options_from(
             )?,
             Some("--router-binary") => router_binary = Some(PathBuf::from(value)),
             Some("--router-root") => router_root = Some(PathBuf::from(value)),
+            Some("--peer-registry-directory") => {
+                peer_registry_directory = Some(PathBuf::from(value))
+            }
             Some("--claude-acp-executable") => claude_executable = Some(PathBuf::from(value)),
             Some("--claude-acp-arguments") => claude_arguments.push(
+                value
+                    .into_string()
+                    .map_err(|_| "ACP argument is not UTF-8")?,
+            ),
+            Some("--cursor-acp-executable") => cursor_executable = Some(PathBuf::from(value)),
+            Some("--cursor-acp-arguments") => cursor_arguments.push(
                 value
                     .into_string()
                     .map_err(|_| "ACP argument is not UTF-8")?,
@@ -80,6 +94,16 @@ pub(super) fn parse_options_from(
     let (run_directory, run_directory_admission) = run_directory.ok_or(
         "exactly one of --run-directory or --resume-run-directory is required; use --help",
     )?;
+    if peer_registry_directory
+        .as_ref()
+        .is_some_and(|directory: &PathBuf| {
+            !directory.is_absolute() || *directory != run_directory.join("peer-registry")
+        })
+    {
+        return Err(
+            "peer registry must be exactly the selected run directory's peer-registry child".into(),
+        );
+    }
     let claude_provider = match claude_executable {
         Some(executable) => {
             if !executable.is_absolute()
@@ -102,6 +126,28 @@ pub(super) fn parse_options_from(
         }
         None => None,
     };
+    let cursor_provider = match cursor_executable {
+        Some(executable) => {
+            if !executable.is_absolute()
+                || !router_root
+                    .as_ref()
+                    .is_some_and(|root: &PathBuf| root.is_absolute())
+            {
+                return Err(
+                    "ACP proof requires an absolute executable and explicit absolute --router-root"
+                        .into(),
+                );
+            }
+            Some(ProviderCommand {
+                executable,
+                arguments: cursor_arguments,
+            })
+        }
+        None if !cursor_arguments.is_empty() => {
+            return Err("--cursor-acp-arguments requires --cursor-acp-executable".into());
+        }
+        None => None,
+    };
     if router_root.as_ref().is_some_and(|root| !root.is_absolute()) {
         return Err("--router-root must be absolute".into());
     }
@@ -112,6 +158,8 @@ pub(super) fn parse_options_from(
         port,
         router_root,
         claude_provider,
+        cursor_provider,
+        peer_registry_directory,
     }))
 }
 
@@ -148,6 +196,12 @@ impl DebugHostOptions {
         if let Some(root) = &self.router_root {
             arguments.extend([OsString::from("--router-root"), root.as_os_str().to_owned()]);
         }
+        if let Some(directory) = &self.peer_registry_directory {
+            arguments.extend([
+                OsString::from("--peer-registry-directory"),
+                directory.as_os_str().to_owned(),
+            ]);
+        }
         if let Some(provider) = &self.claude_provider {
             arguments.extend([
                 OsString::from("--claude-acp-executable"),
@@ -156,6 +210,18 @@ impl DebugHostOptions {
             for argument in &provider.arguments {
                 arguments.extend([
                     OsString::from("--claude-acp-arguments"),
+                    OsString::from(argument),
+                ]);
+            }
+        }
+        if let Some(provider) = &self.cursor_provider {
+            arguments.extend([
+                OsString::from("--cursor-acp-executable"),
+                provider.executable.as_os_str().to_owned(),
+            ]);
+            for argument in &provider.arguments {
+                arguments.extend([
+                    OsString::from("--cursor-acp-arguments"),
                     OsString::from(argument),
                 ]);
             }
@@ -187,26 +253,36 @@ impl DebugHostOptions {
         config: HostConfig,
         global_claude_executable: Option<PathBuf>,
     ) -> Result<HostConfig, Box<dyn std::error::Error>> {
-        let Some(provider) = &self.claude_provider else {
-            return Ok(config);
-        };
-        let mut binding = ExternalProviderLaunchBinding::claude(
-            provider.executable.clone(),
-            provider.arguments.clone(),
-        )?;
-        let executable = global_claude_executable
-            .ok_or("ACP proof requires the existing global CLAUDE_CODE_EXECUTABLE selector")?;
-        if !executable.is_absolute() {
-            return Err("global Claude selector must be absolute".into());
+        let mut config = config;
+        if let Some(provider) = &self.claude_provider {
+            let mut binding = ExternalProviderLaunchBinding::claude(
+                provider.executable.clone(),
+                provider.arguments.clone(),
+            )?;
+            let executable = global_claude_executable
+                .ok_or("ACP proof requires the existing global CLAUDE_CODE_EXECUTABLE selector")?;
+            if !executable.is_absolute() {
+                return Err("global Claude selector must be absolute".into());
+            }
+            let executable = executable
+                .to_str()
+                .ok_or("global Claude selector is not UTF-8")?
+                .to_owned();
+            binding
+                .launch
+                .environment
+                .push(("CLAUDE_CODE_EXECUTABLE".to_owned(), executable));
+            config =
+                config.with_external_provider_startup(ExternalProviderStartup::Launch(binding));
         }
-        let executable = executable
-            .to_str()
-            .ok_or("global Claude selector is not UTF-8")?
-            .to_owned();
-        binding
-            .launch
-            .environment
-            .push(("CLAUDE_CODE_EXECUTABLE".to_owned(), executable));
-        Ok(config.with_external_provider_startup(ExternalProviderStartup::Launch(binding)))
+        if let Some(provider) = &self.cursor_provider {
+            let binding = ExternalProviderLaunchBinding::cursor(
+                provider.executable.clone(),
+                provider.arguments.clone(),
+            )?;
+            config =
+                config.with_external_provider_startup(ExternalProviderStartup::Launch(binding));
+        }
+        Ok(config)
     }
 }
