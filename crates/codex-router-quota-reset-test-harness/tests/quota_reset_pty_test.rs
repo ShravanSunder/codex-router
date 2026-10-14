@@ -2,6 +2,7 @@ mod quota_reset_pty_test {
     mod credit_refresh_feedback_test;
     mod isolated_fixture_test;
     mod loopback_provider_test;
+    mod stored_model_diagnostic_test;
     mod terminal_interaction_test;
 
     use std::collections::BTreeSet;
@@ -645,7 +646,8 @@ mod quota_reset_pty_test {
             "initial sessions picker",
         )?;
         let pointer_focus_start = terminal.transcript_len();
-        terminal.send_sgr_mouse_left_down(10, 14)?;
+        // The Machine control puts the beta row at zero-based row 15 in this viewport.
+        terminal.send_sgr_mouse_left_down(10, 15)?;
         stage(
             terminal.wait_for_text_after(
                 "BETA_CONVERSATION_ACTIVE",

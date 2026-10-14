@@ -180,6 +180,7 @@ version = "0.1.95"
 dependencies = [
  "agent-automation",
  "automation-storage",
+ "axum",
  "chrono",
  "clap",
  "claude-code-peer-messaging",
@@ -194,11 +195,14 @@ dependencies = [
  "crossterm",
  "futures-util",
  "iocraft",
+ "jsonc-parser",
  "jsonschema",
  "lifecycle-observation",
  "message-board",
  "message-board-storage",
  "reqwest 0.12.28",
+ "rmcp",
+ "rustls",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -206,10 +210,12 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-rustls",
  "tokio-tungstenite",
  "tokio-util",
  "tracing-subscriber",
  "unicode-width 0.2.2",
+ "url",
  "uuid",
 ]
 
@@ -561,6 +567,8 @@ dependencies = [
  "percent-encoding",
  "pin-project-lite",
  "serde_core",
+ "serde_json",
+ "serde_path_to_error",
  "sync_wrapper",
  "tokio",
  "tower",
@@ -3036,6 +3044,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "jsonc-parser"
+version = "0.34.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0ecded084f9b9a718d39668a42657c32253663d1f6afb3fbb9134f0305f73f48"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
 name = "jsonschema"
 version = "0.53.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4612,6 +4629,17 @@ dependencies = [
  "ryu-js",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "serde_path_to_error"
+version = "0.1.20"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "10a9ff822e371bb5403e391ecd83e182e0e77ba7f6fe0160b795797109d1b457"
+dependencies = [
+ "itoa",
+ "serde",
+ "serde_core",
 ]
 
 [[package]]
