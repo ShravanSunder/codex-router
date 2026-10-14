@@ -52,3 +52,17 @@ async fn compiled_provider_filter_storyboards_export_both_real_tuis() -> TestRes
     }
     Ok(())
 }
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires admitted private current-source tools, target and fresh output directory"]
+async fn compiled_compact_current_storyboard_exports_both_real_tuis() -> TestResult<()> {
+    for (columns, rows) in [(120, 36), (76, 30), (48, 24)] {
+        for journey in [
+            capture_support::ProviderFilterJourney::CompactSessions,
+            capture_support::ProviderFilterJourney::CompactQuota,
+        ] {
+            capture_support::run_provider_filter_storyboard(columns, rows, journey).await?;
+        }
+    }
+    Ok(())
+}

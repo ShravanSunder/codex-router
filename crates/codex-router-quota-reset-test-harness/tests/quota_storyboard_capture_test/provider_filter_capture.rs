@@ -7,6 +7,8 @@ pub(crate) enum ProviderFilterJourney {
     QuotaMixed,
     QuotaEmpty,
     Sessions,
+    CompactSessions,
+    CompactQuota,
 }
 
 pub(crate) async fn run_provider_filter_storyboard(
@@ -14,7 +16,14 @@ pub(crate) async fn run_provider_filter_storyboard(
     rows: u16,
     journey: ProviderFilterJourney,
 ) -> TestResult<()> {
-    let sessions = matches!(journey, ProviderFilterJourney::Sessions);
+    let sessions = matches!(
+        journey,
+        ProviderFilterJourney::Sessions | ProviderFilterJourney::CompactSessions
+    );
+    let compact = matches!(
+        journey,
+        ProviderFilterJourney::CompactSessions | ProviderFilterJourney::CompactQuota
+    );
     let empty_quota = matches!(journey, ProviderFilterJourney::QuotaEmpty);
     let surface = if sessions {
         CapturedTuiSurface::Sessions
@@ -30,7 +39,13 @@ pub(crate) async fn run_provider_filter_storyboard(
     let output = fs::canonicalize(output_root)?.join(format!(
         "{}-{}-{columns}x{rows}",
         surface.label(),
-        if empty_quota { "empty" } else { "filters" }
+        if compact {
+            "compact"
+        } else if empty_quota {
+            "empty"
+        } else {
+            "filters"
+        }
     ));
     fs::create_dir(&output)?;
     fs::set_permissions(&output, fs::Permissions::from_mode(0o700))?;
@@ -44,7 +59,17 @@ pub(crate) async fn run_provider_filter_storyboard(
     let provider = HeldLoopbackProvider::bind()?;
     let binary = fs::canonicalize(env!("CARGO_BIN_EXE_codex-router-quota-reset-test-harness"))?;
     tools.write_fixed_child_adapter(&output, &binary, &fixture, provider.address(), surface)?;
-    let (tape, checkpoints) = build_filter_tape(surface, columns, rows, empty_quota);
+    let (tape, checkpoints) = if compact {
+        build_compact_filter_tape(surface, columns, rows)
+    } else {
+        build_filter_tape(surface, columns, rows, empty_quota)
+    };
+    if compact {
+        ensure(
+            checkpoints.len() == 5,
+            "compact capture must contain exactly five checkpoints",
+        )?;
+    }
     fs::write(output.join("quota.tape"), tape)?;
     let mut capture = tools.start_capture(&output, fixture.capability())?;
     let status = capture.wait(Duration::from_secs(90))?;
@@ -93,22 +118,39 @@ pub(crate) async fn run_provider_filter_storyboard(
         env!("CARGO_MANIFEST_DIR"),
         "/tests/quota_storyboard_capture_test/fixtures/blank-startup.png"
     ));
-    tools.verify_image(
-        &output,
+    let (expected, wrong, committed, chooser) = if compact {
         if sessions {
-            "sessions-codex"
+            (
+                "compact-sessions-claude",
+                "compact-sessions-all",
+                "compact-sessions-cancelled",
+                "sessions-chooser",
+            )
         } else {
-            "quota-claude"
-        },
-        blank,
-        true,
-    )?;
+            (
+                "quota-claude",
+                "compact-quota-all",
+                "quota-hidden",
+                "quota-chooser",
+            )
+        }
+    } else if sessions {
+        (
+            "sessions-codex",
+            "sessions-claude",
+            "sessions-draft",
+            "sessions-chooser",
+        )
+    } else {
+        (
+            "quota-openai",
+            "quota-claude",
+            "quota-draft",
+            "quota-chooser",
+        )
+    };
+    tools.verify_image(&output, expected, blank, true)?;
     if !empty_quota {
-        let (expected, wrong) = if sessions {
-            ("sessions-codex", "sessions-claude")
-        } else {
-            ("quota-openai", "quota-claude")
-        };
         tools.verify_image(
             &output,
             expected,
@@ -117,16 +159,8 @@ pub(crate) async fn run_provider_filter_storyboard(
         )?;
         tools.verify_image(
             &output,
-            if sessions {
-                "sessions-draft"
-            } else {
-                "quota-draft"
-            },
-            &output.join(if sessions {
-                "sessions-chooser.png"
-            } else {
-                "quota-chooser.png"
-            }),
+            committed,
+            &output.join(format!("{chooser}.png")),
             true,
         )?;
     }
@@ -441,4 +475,62 @@ fn write_filter_receipt(
         ),
     )?;
     Ok(())
+}
+
+// The opt-in compact driver uses the same lifecycle and image verifier.
+// This initial adapter deliberately delegates to the old sequence so the
+// permanent five-checkpoint contract can demonstrate its causal failure.
+fn build_compact_filter_tape(
+    surface: CapturedTuiSurface,
+    columns: u16,
+    rows: u16,
+) -> (String, Vec<&'static str>) {
+    build_filter_tape(surface, columns, rows, false)
+}
+
+#[cfg(test)]
+mod compact_capture_contract_tests {
+    use super::*;
+
+    #[test]
+    fn compact_capture_preserves_five_literal_checkpoints_per_surface() {
+        for (surface, expected) in [
+            (
+                CapturedTuiSurface::Sessions,
+                [
+                    "compact-sessions-all",
+                    "sessions-chooser",
+                    "compact-sessions-claude",
+                    "compact-sessions-cancelled",
+                    "sessions-details",
+                ],
+            ),
+            (
+                CapturedTuiSurface::Quota,
+                [
+                    "compact-quota-all",
+                    "quota-chooser",
+                    "quota-claude",
+                    "quota-hidden",
+                    "quota-details",
+                ],
+            ),
+        ] {
+            let (tape, checkpoints) = build_compact_filter_tape(surface, 48, 24);
+            assert_eq!(
+                checkpoints, expected,
+                "only the accepted compact journey belongs in this capture"
+            );
+            assert_eq!(tape.matches("Screenshot ").count(), 5);
+            assert!(tape.contains("Wait+Screen /QUOTA_STORYBOARD_CHILD_EXIT=0/"));
+            for forbidden in [
+                "resets.png",
+                "credits.png",
+                "sessions-empty.png",
+                "quota-empty.png",
+            ] {
+                assert!(!tape.contains(forbidden), "unrelated scene: {tape}");
+            }
+        }
+    }
 }
