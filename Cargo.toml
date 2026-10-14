@@ -35,7 +35,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.95"
+version = "0.1.96"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 publish = false
@@ -50,7 +50,7 @@ fs2 = "=0.4.3"
 keyring-core = "1"
 uuid = { version = "1.26.0", features = ["v5", "v7"] }
 codex-router-core = { path = "crates/codex-router-core", version = "0.1.6" }
-codex-router-tui = { path = "crates/codex-router-tui" }
+codex-router-tui = { path = "crates/codex-router-tui", version = "0.1.96" }
 codex-native-integration = { path = "crates/codex-native-integration", version = "0.1.6" }
 codex-router-host = { path = "crates/codex-router-host", version = "0.1.6" }
 codex-router-quota = { path = "crates/codex-router-quota", version = "0.1.6" }
