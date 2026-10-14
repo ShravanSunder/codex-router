@@ -74,3 +74,17 @@ async fn compact_header_active_search_stays_visible_and_escape_restores_rows() {
         "{restored}"
     );
 }
+
+#[test]
+fn compact_header_text_respects_terminal_cell_width_for_wide_machine_names() {
+    use unicode_width::UnicodeWidthStr;
+    // CJK letters occupy two terminal columns; a character count is not a cell budget.
+    for width in [16, 7, 5, 1, 0] {
+        let rendered = fit_line("日本語の長いマシン名", width);
+        assert!(
+            UnicodeWidthStr::width(rendered.as_str()) <= width,
+            "wide alias consumes the shortcut's cells at width {width}: {rendered}"
+        );
+    }
+    assert_eq!(fit_line("This machine", 16), "This machine");
+}

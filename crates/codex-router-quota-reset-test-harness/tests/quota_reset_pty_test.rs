@@ -603,7 +603,9 @@ mod quota_reset_pty_test {
             "weekly-floor editor",
         )?;
         let click_start = terminal.transcript_len();
-        terminal.send_sgr_mouse_left_down(22, 19)?;
+        // The centered 100x28 dialog at 120x36 places the visible increment
+        // arrow at zero-based (32, 12), pinned by the composed component test.
+        terminal.send_sgr_mouse_left_down(32, 12)?;
         stage(
             terminal.wait_for_text_after("1%", click_start, SEMANTIC_WAIT),
             "pointer-incremented floor",
