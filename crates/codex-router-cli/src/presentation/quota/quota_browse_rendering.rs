@@ -215,9 +215,10 @@ pub(super) fn render_selected_panel(
     selected: Option<&QuotaSelectedAccountViewModel>,
     width: usize,
     height: usize,
+    interactive: bool,
 ) -> AnyElement<'static> {
     let details = selected
-        .map(|selected| render_selected_details(selected, width.saturating_sub(4)))
+        .map(|selected| render_selected_details(selected, width.saturating_sub(4), interactive))
         .unwrap_or_else(|| {
             element! {
                 Text(content: "No selectable account", color: Color::Grey)
@@ -247,6 +248,7 @@ pub(super) fn render_selected_panel(
 pub(super) fn render_selected_details(
     selected: &QuotaSelectedAccountViewModel,
     detail_width: usize,
+    interactive: bool,
 ) -> AnyElement<'static> {
     element! {
         View(
@@ -255,20 +257,20 @@ pub(super) fn render_selected_details(
             row_gap: 0,
             padding_top: 0,
         ) {
-            Text(content: "Selected account", color: Color::Cyan, weight: Weight::Bold)
+            #(if interactive { element!(codex_router_tui::UiHeading(content: "Selected account".to_owned(), level: codex_router_tui::UiHeadingLevel::Section)).into_any() } else { element!(Text(content: "Selected account", color: Color::Cyan, weight: Weight::Bold)).into_any() })
             Text(content: fit_line(&format!("{}    {}    {}", selected.account, selected.status, selected.reason), detail_width), color: Color::White, weight: Weight::Bold, wrap: TextWrap::NoWrap)
-            Text(content: "Quota windows", color: Color::Cyan, weight: Weight::Bold)
+            #(if interactive { element!(codex_router_tui::UiHeading(content: "Quota windows".to_owned(), level: codex_router_tui::UiHeadingLevel::Section)).into_any() } else { element!(Text(content: "Quota windows", color: Color::Cyan, weight: Weight::Bold)).into_any() })
             #(detail_line("weekly", &selected.weekly_window, detail_width, Color::White))
             #(detail_line("5h", &selected.short_window, detail_width, Color::White))
             #(quota_gap())
-            Text(content: "Reset pace", color: Color::Cyan, weight: Weight::Bold)
+            #(if interactive { element!(codex_router_tui::UiHeading(content: "Reset pace".to_owned(), level: codex_router_tui::UiHeadingLevel::Section)).into_any() } else { element!(Text(content: "Reset pace", color: Color::Cyan, weight: Weight::Bold)).into_any() })
             #(reset_pace_detail_line("weekly", &selected.reset_pace, detail_width))
             #(detail_line("sample", &sample_metadata_summary(&selected.sample_metadata), detail_width, Color::White))
             #(detail_line("rate", &selected.total_rate, detail_width, Color::White))
             #(detail_line("conn", &selected.connection_rate, detail_width, Color::White))
             #(reset_pace_detail_line("5h", &selected.short_reset_pace, detail_width))
             #(quota_gap())
-            Text(content: "Activity", color: Color::Cyan, weight: Weight::Bold)
+            #(if interactive { element!(codex_router_tui::UiHeading(content: "Activity".to_owned(), level: codex_router_tui::UiHeadingLevel::Section)).into_any() } else { element!(Text(content: "Activity", color: Color::Cyan, weight: Weight::Bold)).into_any() })
             #(detail_line("clients", &selected.active_clients, detail_width, Color::White))
             #(detail_line("guards", &selected.guards, detail_width, Color::White))
             #(detail_line("reset", &selected.reset, detail_width, Color::White))

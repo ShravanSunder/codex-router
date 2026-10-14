@@ -591,11 +591,7 @@ async fn ctrl_r_opens_disabled_credentialless_account_and_switches_to_credits() 
             .iter()
             .any(|frame| frame.contains("Resets are unavailable while this account is disabled."))
     );
-    assert!(
-        frames
-            .iter()
-            .any(|frame| frame.contains("tab credits  esc back"))
-    );
+    assert!(frames.iter().any(|frame| frame.contains("Close")));
     assert!(frames.iter().any(|frame| frame.contains("[ Credits ]")));
     assert!(frames.iter().any(|frame| frame.contains("Credit usage")));
 }
@@ -611,7 +607,7 @@ async fn short_quota_options_keeps_credit_policy_and_footer_visible() {
             ),
             (
                 TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Enter)),
-                Some("enter save"),
+                Some("Save"),
             ),
             (TerminalEvent::Key(control_key('c')), None),
         ];
@@ -630,8 +626,8 @@ async fn short_quota_options_keeps_credit_policy_and_footer_visible() {
                 frame.contains("Credit usage")
                     && frame.contains("Allow")
                     && frame.contains("Disallow")
-                    && frame.contains("enter save")
-                    && frame.contains("esc cancel")
+                    && frame.contains("Save")
+                    && frame.contains("Cancel")
             }),
             "a {width}x24 credits pane must keep the active setting and editor footer visible:\n{}",
             frames.join("\n--- frame ---\n")
@@ -664,7 +660,7 @@ async fn account_options_panel_keeps_spare_height_outside_its_border() {
     let lines = frame.lines().collect::<Vec<_>>();
     let footer_index = lines
         .iter()
-        .position(|line| line.contains("tab resets  enter edit  r refresh  esc back"))
+        .position(|line| line.contains("Edit") && line.contains("Close"))
         .expect("Credits pane footer should remain visible");
     let pane_bottom_index = lines
         .iter()
@@ -707,7 +703,7 @@ async fn short_credit_editor_keeps_save_error_with_floor_and_provider_notes_visi
             ),
             (
                 TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Enter)),
-                Some("enter save"),
+                Some("Save"),
             ),
             (
                 TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Enter)),
@@ -732,7 +728,7 @@ async fn short_credit_editor_keeps_save_error_with_floor_and_provider_notes_visi
             "Weekly floor",
             "blocks credit routing",
             "Provider spend-control",
-            "esc cancel",
+            "Cancel",
         ] {
             assert!(
                 failed_frame.contains(marker),
@@ -770,7 +766,7 @@ async fn render_account_options_component_frames(
                 "Reset credits",
                 "Resets are unavailable",
                 "Credit usage",
-                "enter save",
+                "Save",
                 "credit preference save failed",
             ] {
                 if frame.contains(marker) {
@@ -849,16 +845,12 @@ async fn assert_credit_control_c_exits_the_component(editing: bool) {
     if editing {
         ordered_events.push((
             TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Enter)),
-            Some("enter save"),
+            Some("Save"),
         ));
     }
     ordered_events.push((
         TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Char('\u{3}'))),
-        Some(if editing {
-            "enter save"
-        } else {
-            "Credit usage"
-        }),
+        Some(if editing { "Save" } else { "Credit usage" }),
     ));
 
     let (acknowledged_events, acknowledgement_sender) = acknowledged_event_stream(ordered_events);
@@ -874,7 +866,7 @@ async fn assert_credit_control_c_exits_the_component(editing: bool) {
         .mock_terminal_render_loop(MockTerminalConfig::with_events(events))
         .map(|canvas| canvas.to_string())
         .inspect(move |frame| {
-            for marker in ["Reset credits", "Credit usage", "enter save"] {
+            for marker in ["Reset credits", "Credit usage", "Save"] {
                 if frame.contains(marker) {
                     let _ = acknowledgement_sender.send(marker);
                 }

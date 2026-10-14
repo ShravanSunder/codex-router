@@ -105,20 +105,20 @@ async fn account_options_page_keys_use_rendered_capacity_and_ack_and_reinspectio
         ),
         (
             TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Esc)),
-            Some("enter inspect  tab credits  esc back"),
+            Some("Inspect"),
         ),
         (
             TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Esc)),
-            Some("ctrl-r account options"),
+            Some("Filters"),
         ),
         (TerminalEvent::Key(control_key('r')), Some("1-1 of 5")),
         (
             TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Esc)),
-            Some("enter inspect  tab credits  esc back"),
+            Some("Inspect"),
         ),
         (
             TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Esc)),
-            Some("ctrl-r account options"),
+            Some("Filters"),
         ),
         (
             TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Char('q'))),
@@ -146,8 +146,8 @@ async fn account_options_page_keys_use_rendered_capacity_and_ack_and_reinspectio
                 "4-4 of 5",
                 "5-5 of 5",
                 "Credit usage",
-                "enter inspect  tab credits  esc back",
-                "ctrl-r account options",
+                "Inspect",
+                "Filters",
             ] {
                 if frame.contains(marker) {
                     let _ = acknowledgement_sender.send(marker);
@@ -178,13 +178,7 @@ async fn account_options_page_keys_use_rendered_capacity_and_ack_and_reinspectio
     );
     assert_ordered_frame_markers(
         &frames,
-        &[
-            "Credit usage",
-            "enter inspect  tab credits  esc back",
-            "ctrl-r account options",
-            "enter inspect  tab credits  esc back",
-            "ctrl-r account options",
-        ],
+        &["Credit usage", "Inspect", "Filters", "Inspect", "Filters"],
     );
 }
 

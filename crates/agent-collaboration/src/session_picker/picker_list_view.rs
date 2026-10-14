@@ -214,14 +214,14 @@ pub(super) fn render_session_header(width: usize) -> AnyElement<'static> {
             padding_left: 1,
             padding_right: 1,
         ) {
-            View(width: 2) { Text(content: "  ", color: Color::Cyan, weight: Weight::Bold) }
-            View(width: title_width as u32) { Text(content: "Session", color: Color::Cyan, weight: Weight::Bold) }
+            View(width: 2) { Text(content: "  ", color: Color::White, weight: Weight::Bold) }
+            View(width: title_width as u32) { Text(content: "Session", color: Color::White, weight: Weight::Bold) }
             Text(content: " ")
-            View(width: status_width as u32, overflow: Overflow::Hidden) { Text(content: if width < 43 { "St" } else { "Status" }, color: Color::Cyan, weight: Weight::Bold) }
+            View(width: status_width as u32, overflow: Overflow::Hidden) { Text(content: if width < 43 { "St" } else { "Status" }, color: Color::White, weight: Weight::Bold) }
             Text(content: " ")
-            View(width: age_width as u32, overflow: Overflow::Hidden, justify_content: JustifyContent::FlexEnd) { Text(content: "Upd", color: Color::Cyan, weight: Weight::Bold) }
+            View(width: age_width as u32, overflow: Overflow::Hidden, justify_content: JustifyContent::FlexEnd) { Text(content: "Upd", color: Color::White, weight: Weight::Bold) }
             Text(content: " ")
-            View(width: age_width as u32, overflow: Overflow::Hidden, justify_content: JustifyContent::FlexEnd) { Text(content: "New", color: Color::Cyan, weight: Weight::Bold) }
+            View(width: age_width as u32, overflow: Overflow::Hidden, justify_content: JustifyContent::FlexEnd) { Text(content: "New", color: Color::White, weight: Weight::Bold) }
         }
     }
     .into_any()

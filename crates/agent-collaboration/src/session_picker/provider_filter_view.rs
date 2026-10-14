@@ -4,6 +4,7 @@ use super::{
     picker_model::SessionsPickerModel,
     provider_filter_model::{ProviderFilterFocus, SessionProviderFilter},
 };
+use codex_router_tui::{DialogAction, UiHeading, UiHeadingLevel, UiText, UiTextRole};
 use iocraft::prelude::*;
 
 pub(super) fn render_provider_controls(
@@ -18,7 +19,7 @@ pub(super) fn render_provider_controls(
         } else {
             provider.to_owned()
         },
-        width.saturating_sub(5),
+        width.saturating_sub(2),
     );
     element! {
         InteractiveSessionChoiceRow(
@@ -27,7 +28,7 @@ pub(super) fn render_provider_controls(
         ) {
             View(width: 100pct, column_gap: 1) {
                 Text(content: label, color: Color::Grey, weight: Weight::Bold, wrap: TextWrap::NoWrap)
-                Text(content: "▾ F3", color: Color::DarkGrey, wrap: TextWrap::NoWrap)
+                Text(content: "▾", color: Color::DarkGrey, wrap: TextWrap::NoWrap)
             }
         }
     }.into_any()
@@ -41,8 +42,8 @@ pub(super) fn render_provider_chooser(
         return Vec::new();
     };
     let mut controls = vec![
-        element!(Text(content: "Session client provider", color: Color::Cyan, weight: Weight::Bold)).into_any(),
-        element!(Text(content: format!("Draft: {}", draft.selection.label()), color: Color::Yellow)).into_any(),
+        element!(UiHeading(content: "Session client provider".to_owned(), level: UiHeadingLevel::Section)).into_any(),
+        element!(UiText(content: format!("Draft: {}", draft.selection.label()), role: UiTextRole::Selected)).into_any(),
         element!(Text(content: format!("Current: {} · {}/{} sessions", model.provider_filter.label(), model.visible_record_len(), model.request.records.len()), color: Color::Grey)).into_any(),
     ];
     for choice in SessionProviderFilter::CHOICES {
@@ -58,8 +59,8 @@ pub(super) fn render_provider_chooser(
                 activates_on_click: true,
             ) {
                 View(column_gap: 1) {
-                    Text(content: if selected { "●" } else { "○" }, color: if draft.focus == ProviderFilterFocus::Provider { Color::Yellow } else { Color::Grey })
-                    Text(content: choice.label(), color: if selected { Color::Yellow } else { Color::Grey })
+                    Text(content: if selected { "●" } else { "○" }, color: if selected { Color::Yellow } else { Color::Grey })
+                    UiText(content: choice.label().to_owned(), role: if selected { UiTextRole::Selected } else { UiTextRole::Body })
                 }
             }
         }.into_any());
@@ -74,30 +75,15 @@ pub(super) fn render_provider_actions(
     let Some(draft) = model.provider_filter_draft else {
         return Vec::new();
     };
-    let mut controls = Vec::new();
-    controls.push(element! {
-        View(column_gap: 3) {
-            InteractiveSessionChoiceRow(
-                focus_handler: move |_| {
-                    if let Some(draft) = model_state.write().provider_filter_draft.as_mut() { draft.focus = ProviderFilterFocus::Apply; }
-                },
-                activation_handler: move |_| model_state.write().apply_provider_filters(),
-                activates_on_click: true,
-            ) { Text(content: "Apply", weight: Weight::Bold, color: if draft.focus == ProviderFilterFocus::Apply { Color::Yellow } else { Color::Grey }) }
-            InteractiveSessionChoiceRow(
-                focus_handler: move |_| {
-                    if let Some(draft) = model_state.write().provider_filter_draft.as_mut() { draft.focus = ProviderFilterFocus::Cancel; }
-                },
-                activation_handler: move |_| model_state.write().provider_filter_draft = None,
-                activates_on_click: true,
-            ) { Text(content: "Cancel", weight: Weight::Bold, color: if draft.focus == ProviderFilterFocus::Cancel { Color::Yellow } else { Color::Grey }) }
+    vec![
+        element! {
+            View(column_gap: 3) {
+                DialogAction(label: "Apply", has_focus: draft.focus == ProviderFilterFocus::Apply,
+                    handler: move |_| model_state.write().apply_provider_filters())
+                DialogAction(label: "Cancel", has_focus: draft.focus == ProviderFilterFocus::Cancel,
+                    handler: move |_| model_state.write().provider_filter_draft = None)
+            }
         }
-    }.into_any());
-    controls.push(
-        element! { Text(content: "↑/↓ provider · tab focus", color: Color::DarkGrey) }.into_any(),
-    );
-    controls.push(
-        element! { Text(content: "enter apply · esc cancel", color: Color::DarkGrey) }.into_any(),
-    );
-    controls
+        .into_any(),
+    ]
 }

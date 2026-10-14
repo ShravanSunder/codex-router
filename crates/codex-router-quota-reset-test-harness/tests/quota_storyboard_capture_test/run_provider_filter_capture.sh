@@ -20,5 +20,5 @@ xcrun swiftc -parse-as-library -module-cache-path "$QUOTA_STORYBOARD_OUTPUT/swif
 env -u CC -u CXX -u LDFLAGS -u CPPFLAGS \
     PATH="/opt/homebrew/opt/rustup/bin:$PATH" CARGO_BUILD_JOBS=1 \
     cargo test -p codex-router-quota-reset-test-harness \
-    --test quota_storyboard_capture_test compiled_provider_filter_storyboards \
+    --test quota_storyboard_capture_test compiled_compact_current_storyboard_exports_both_real_tuis \
     --locked --offline -j 1 -- --include-ignored --nocapture --test-threads=1

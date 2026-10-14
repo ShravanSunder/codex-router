@@ -201,7 +201,7 @@ async fn review_machine_help_is_visible_in_collapsed_and_expanded_responsive_fra
                         sender.send(key(KeyCode::F(1))).unwrap();
                         continue;
                     }
-                    if captured.is_none() && (!expanded || text.contains("close help")) {
+                    if captured.is_none() && (!expanded || text.contains("Sessions Help")) {
                         captured = Some(text);
                         sender.send(control_key('c')).unwrap();
                     }
@@ -212,9 +212,9 @@ async fn review_machine_help_is_visible_in_collapsed_and_expanded_responsive_fra
             .unwrap();
             assert!(
                 if expanded {
-                    frame.contains("ctrl-g/F2 Machine")
+                    frame.contains("Choose machine")
                 } else {
-                    frame.contains("▾ F2")
+                    frame.contains("▾")
                 },
                 "width{width}/expanded{expanded}: {frame}"
             );

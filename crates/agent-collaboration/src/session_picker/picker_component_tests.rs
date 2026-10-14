@@ -275,3 +275,6 @@ mod picker_single_view_tests;
 
 #[path = "picker_compact_header_tests.rs"]
 mod picker_compact_header_tests;
+
+#[path = "picker_help_tests.rs"]
+mod picker_help_tests;

@@ -118,7 +118,7 @@ async fn quota_browse_matches_canonical_responsive_goldens() {
 }
 
 #[tokio::test]
-async fn quota_browse_footer_names_account_options() {
+async fn quota_browse_top_line_exposes_help_for_account_options() {
     let text = render_quota_capture_model_at(
         quota_view_model(),
         160,
@@ -130,7 +130,7 @@ async fn quota_browse_footer_names_account_options() {
     )
     .await;
 
-    assert!(text.contains("ctrl-r account options"), "{text}");
+    assert!(text.lines().any(|line| line.contains("Quota status") && line.contains("Help")), "{text}");
 }
 
 #[tokio::test]
@@ -419,7 +419,7 @@ async fn quota_status_vertical_browse_preserves_list_without_automatic_details()
     .await;
 
     assert!(
-        !text.contains("Selected account") && text.contains("Details F4"),
+        !text.contains("Selected account") && text.contains("Details"),
         "vertical 100x24 quota view should expose explicit details without consuming the list:\n{text}"
     );
     assert!(
@@ -505,7 +505,7 @@ async fn quota_status_stacked_without_authoritative_selection_shows_focused_acco
         quota_no_authoritative_selection_view_model(),
         100,
         24,
-        vec![("Details F4",vec![provider_filter_key(KeyCode::F(4))]),("Account details",vec![TerminalEvent::Key({let mut key=KeyEvent::new(KeyEventKind::Press,KeyCode::Char('d'));key.modifiers=KeyModifiers::CONTROL;key})])],
+        vec![("Details",vec![provider_filter_key(KeyCode::F(4))]),("Account details",vec![TerminalEvent::Key({let mut key=KeyEvent::new(KeyEventKind::Press,KeyCode::Char('d'));key.modifiers=KeyModifiers::CONTROL;key})])],
         None,
     )
     .await;
@@ -553,7 +553,7 @@ async fn quota_status_narrow_rows_preserve_quota_windows_and_forecast() {
         quota_view_model(),
         48,
         48,
-        vec![("Details F4",vec![provider_filter_key(KeyCode::F(4))]),("Account details",vec![TerminalEvent::Key({let mut key=KeyEvent::new(KeyEventKind::Press,KeyCode::Char('d'));key.modifiers=KeyModifiers::CONTROL;key})])],
+        vec![("Details",vec![provider_filter_key(KeyCode::F(4))]),("Account details",vec![TerminalEvent::Key({let mut key=KeyEvent::new(KeyEventKind::Press,KeyCode::Char('d'));key.modifiers=KeyModifiers::CONTROL;key})])],
         None,
     )
     .await;

@@ -2,6 +2,7 @@
 use super::interactive_row::InteractiveSessionChoiceRow;
 use super::picker_machine_controls::{MachineChoicePurpose, PickerMachineStage};
 use super::picker_model::SessionsPickerModel;
+use codex_router_tui::SurfaceHeader;
 use iocraft::prelude::*;
 
 pub(super) fn render_machine_control(
@@ -16,7 +17,7 @@ pub(super) fn render_machine_control(
         } else {
             machine.to_owned()
         },
-        width.saturating_sub(5),
+        width.saturating_sub(2),
     );
     let focused = model.machine_controls.control_focused;
     element! {
@@ -32,7 +33,7 @@ pub(super) fn render_machine_control(
         ) {
             View(width: 100pct, column_gap: 1) {
                 Text(content: label, color: if focused { Color::Yellow } else { Color::Grey }, weight: Weight::Bold, wrap: TextWrap::NoWrap)
-                Text(content: "▾ F2", color: Color::DarkGrey, wrap: TextWrap::NoWrap)
+                Text(content: "▾", color: Color::DarkGrey, wrap: TextWrap::NoWrap)
             }
         }
     }.into_any()
@@ -41,6 +42,7 @@ pub(super) fn render_machine_control(
 pub(super) fn render_machine_choices(
     model: &SessionsPickerModel,
     height: usize,
+    help_action: AnyElement<'static>,
 ) -> Element<'static, View> {
     if let PickerMachineStage::Loading { source, .. } = &model.machine_controls.stage {
         let name = match source.as_ref() {
@@ -51,10 +53,10 @@ pub(super) fn render_machine_choices(
         return element! {
             View(width: model.width as u32, height: height as u32, padding: 1,
                 flex_direction: FlexDirection::Column, border_style: BorderStyle::Round, border_color: Color::Cyan) {
-                Text(content: format!("Loading machine: {name}"), color: Color::Cyan, weight: Weight::Bold)
+                SurfaceHeader(title: format!("Loading machine: {name}"), inactive: model.show_help, help_action: Some(help_action))
                 Text(content: "Previous view retained until the selected source is verified", color: Color::Grey)
                 View(flex_grow: 1.0_f32) {}
-                Text(content: "Esc Back | Ctrl+C Exit", color: Color::Grey)
+
             }
         };
     }
@@ -125,7 +127,7 @@ pub(super) fn render_machine_choices(
         View(width: model.width as u32, height: height as u32, padding_left: 1, padding_right: 1,
             flex_direction: FlexDirection::Column, border_style: BorderStyle::Round,
             border_color: Color::Cyan, overflow: Overflow::Hidden) {
-            Text(content: title, color: Color::Cyan, weight: Weight::Bold, wrap: TextWrap::NoWrap)
+            SurfaceHeader(title: title.to_owned(), inactive: model.show_help, help_action: Some(help_action))
             View(border_style: BorderStyle::Single, border_color: Color::DarkGrey, padding: 1,
                 flex_direction: FlexDirection::Column, margin_top: 1) {
                 #(rows)
@@ -134,7 +136,7 @@ pub(super) fn render_machine_choices(
             #(source_status.map(|status| element! { Text(content: status, color: Color::Grey) }))
             #(explanation.map(|message| element! { Text(content: message, color: Color::Yellow) }))
             View(flex_grow: 1.0_f32) {}
-            Text(content: "↑↓ Choose | Enter Select | Esc Back | Ctrl+C Exit", color: Color::Grey)
+
         }
     }
 }

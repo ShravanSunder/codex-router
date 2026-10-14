@@ -3,8 +3,10 @@
 mod quota_account_options;
 mod quota_browse_rendering;
 mod quota_detail_panel;
+mod quota_dialog_actions;
 mod quota_dialog_rendering;
 mod quota_floor_editor;
+mod quota_help_rendering;
 mod quota_provider_filter_rendering;
 mod quota_provider_filters;
 mod quota_reset_component_input;

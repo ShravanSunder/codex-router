@@ -439,7 +439,7 @@ async fn sessions_picker_help_toggles_and_escape_closes_help_before_picker() {
         tokio::pin!(frames);
         tokio::time::timeout(Duration::from_secs(2), async {
             while let Some(canvas) = frames.next().await {
-                if canvas.to_string().contains("ctrl-r refresh") {
+                if canvas.to_string().contains("Sessions Help") {
                     return;
                 }
             }
@@ -472,7 +472,7 @@ async fn sessions_picker_help_toggles_and_escape_closes_help_before_picker() {
     assert!(
         actual
             .last()
-            .is_some_and(|canvas| canvas.to_string().contains("ctrl-/ Help"))
+            .is_some_and(|canvas| canvas.to_string().contains("Help"))
     );
 }
 

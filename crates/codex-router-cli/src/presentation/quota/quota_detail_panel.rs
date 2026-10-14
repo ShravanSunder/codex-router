@@ -8,6 +8,7 @@ use crate::quota_reset::reset_session_supervisor::ResetWorkflowSnapshot;
 use iocraft::prelude::*;
 
 pub(super) struct QuotaDetailPanelProps<'a> {
+    pub(super) interactive: bool,
     pub(super) focused_details: Option<&'a QuotaSelectedAccountViewModel>,
     pub(super) account_options: Option<&'a AccountOptionsState>,
     pub(super) reset_snapshot: Option<&'a ResetWorkflowSnapshot>,
@@ -53,5 +54,10 @@ pub(super) fn render_detail_panel(props: QuotaDetailPanelProps<'_>) -> AnyElemen
             props.spinner_tick,
         );
     }
-    render_selected_panel(props.focused_details, props.width, props.height)
+    render_selected_panel(
+        props.focused_details,
+        props.width,
+        props.height,
+        props.interactive,
+    )
 }

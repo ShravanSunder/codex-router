@@ -26,6 +26,7 @@ mod owned_capture;
 use capture_receipt::write_receipt;
 use owned_capture::{OwnedCapture, create_browser_temporary_directory, ensure_owned_child_stopped};
 mod provider_filter_capture;
+mod provider_filter_tape;
 pub(super) use provider_filter_capture::ProviderFilterJourney;
 pub(super) use provider_filter_capture::run_provider_filter_storyboard;
 

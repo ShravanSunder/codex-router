@@ -8,7 +8,7 @@ async fn quota_provider_filters_ctrl_f_and_f3_open_real_component_chooser() {
             120,
             36,
             vec![
-                ("Filters Ctrl+F/F3", vec![TerminalEvent::Key(opening_key)]),
+                ("Filters ▾", vec![TerminalEvent::Key(opening_key)]),
                 (
                     "Account provider · Draft: All",
                     vec![provider_filter_key(KeyCode::Esc)],
@@ -65,7 +65,7 @@ async fn quota_details_dialog_resizes_scrolls_and_blocks_background_navigation()
         while let Some(canvas)=frames.next().await {
             let frame=canvas.to_string();
             match phase {
-                0 if frame.contains("Details F4") => {
+                0 if frame.contains("Details") => {
                     sender.send(TerminalEvent::Resize(48,24)).unwrap();
                     phase=1;
                 },
@@ -79,7 +79,7 @@ async fn quota_details_dialog_resizes_scrolls_and_blocks_background_navigation()
                     phase=3;
                 },
                 3 if frame.lines().any(|line|line.contains("note") && line.contains("alpha detail")) => {
-                    assert!(frame.contains("Close · Esc"),"scroll must retain the close action: {frame}");
+                    assert!(frame.contains("Close"),"scroll must retain the close action: {frame}");
                     sender.send(TerminalEvent::Resize(160,40)).unwrap();
                     phase=4;
                 },
@@ -94,7 +94,7 @@ async fn quota_details_dialog_resizes_scrolls_and_blocks_background_navigation()
                     sender.send(provider_filter_key(KeyCode::Esc)).unwrap();
                     phase=6;
                 },
-                6 if !frame.contains("Account details") && frame.contains("Details F4") => {
+                6 if !frame.contains("Account details") && frame.contains("Details") => {
                     assert!(frame.contains("❯ alpha"),"background click changed focus: {frame}");
                     sender.send(provider_filter_key(KeyCode::Esc)).unwrap();
                     phase=7;
@@ -283,7 +283,7 @@ async fn quota_provider_filters_mouse_open_select_toggle_and_apply_match_keyboar
         while let Some(canvas) = canvases.next().await {
             let frame = canvas.to_string();
             let target = match phase {
-                0 if frame.contains("Filters Ctrl+F/F3") => Some("Filters Ctrl+F/F3"),
+                0 if frame.contains("Filters ▾") => Some("Filters ▾"),
                 1 if frame.contains("Account provider · Draft: All") => Some("○ Claude"),
                 2 if frame.contains("Account provider · Draft: Claude") => Some("Disabled accounts: Shown"),
                 3 if frame.contains("Disabled accounts: Hidden") => Some("Apply"),
@@ -336,7 +336,7 @@ async fn quota_provider_filters_real_component_preserves_account_options_and_flo
             160,
             60,
             vec![
-                ("Filters Ctrl+F/F3", vec![TerminalEvent::Key(opening_key)]),
+                ("Filters ▾", vec![TerminalEvent::Key(opening_key)]),
                 (
                     expected_modal,
                     vec![
@@ -369,7 +369,7 @@ async fn quota_provider_filters_real_component_preserves_account_options_and_flo
             frames
                 .iter()
                 .filter(|frame| frame.contains(expected_modal))
-                .all(|frame| !frame.contains("Filters Ctrl+F/F3")),
+                .all(|frame| !frame.contains("Filters ▾")),
             "modal input owners retain their viewport without unavailable filter controls: {frames:?}"
         );
     }
@@ -437,7 +437,7 @@ async fn quota_provider_filters_toolbar_chooser_and_footer_fit_owner_viewports()
             height,
             vec![
                 (
-                    "Filters Ctrl+F/F3",
+                    "Filters ▾",
                     vec![provider_filter_key(KeyCode::F(3))],
                 ),
                 (
@@ -455,7 +455,8 @@ async fn quota_provider_filters_toolbar_chooser_and_footer_fit_owner_viewports()
             .expect("chooser must render");
         assert!(chooser.lines().count() <= height, "{chooser}");
         for label in [
-            "Quota status · Filters",
+            "Account filters",
+            "Help",
             "Provider: All",
             "Disabled: Shown",
             "4/4 accounts",
@@ -463,11 +464,6 @@ async fn quota_provider_filters_toolbar_chooser_and_footer_fit_owner_viewports()
             "Claude",
             "Apply",
             "Cancel",
-            "↑/↓ provider",
-            "tab focus",
-            "space toggle",
-            "enter apply",
-            "esc cancel",
         ] {
             assert!(chooser.contains(label), "missing {label}:\n{chooser}");
         }
@@ -518,5 +514,5 @@ fn compact_header_quota_toolbar_uses_at_most_two_rows_and_preserves_filter_state
     let frame = render_quota_filter_toolbar(QuotaAccountFilters::default(), 4, 4, 44, true, |_| {}, |_| {}).render(None).to_string();
     assert!(frame.lines().count() <= 2, "phone toolbar must leave account space: {frame}");
     assert!(frame.lines().any(|line| line.contains("All") && line.contains("Shown") && line.contains("4/4 accounts")), "one compact committed summary: {frame}");
-    assert!(frame.contains("F3") && frame.contains("Details F4"), "actions stay discoverable: {frame}");
+    assert!(frame.contains("Filters ▾") && frame.contains("Details"), "actions stay discoverable without inline shortcuts: {frame}");
 }

@@ -11,7 +11,6 @@ use crate::presentation::session_picker::picker_actions::SessionsPickerKey;
 use crate::presentation::session_picker::picker_actions::SessionsPickerOutcome;
 use crate::presentation::session_picker::picker_model::SessionsPickerModel;
 use crate::presentation::session_picker::picker_rendering::MIN_PICKER_WIDTH;
-use crate::presentation::session_picker::picker_rendering::footer_lines;
 use crate::presentation::session_picker::picker_request::SessionsPickerDataQuery;
 use crate::presentation::session_picker::picker_request::SessionsPickerRecordLoader;
 use crate::presentation::session_picker::picker_request::SessionsPickerRequest;
@@ -255,6 +254,19 @@ pub(crate) fn SessionsPickerComponent<'a>(
                 selected_outcome.set(None);
                 return;
             }
+            let help_key = matches!(code, KeyCode::F(1) | KeyCode::Char('\u{1f}'))
+                || matches!(code, KeyCode::Char('/' | '_' | '7'))
+                    && modifiers.contains(KeyModifiers::CONTROL);
+            if help_key {
+                model_value.handle_key(SessionsPickerKey::ToggleHelp);
+                return;
+            }
+            if model_value.show_help {
+                if code == KeyCode::Esc {
+                    model_value.show_help = false;
+                }
+                return;
+            }
             if let Some(confirmation) = model_value.fork_confirmation.as_mut() {
                 match code {
                     KeyCode::Up => confirmation.move_destination(-1),
@@ -397,13 +409,6 @@ pub(crate) fn SessionsPickerComponent<'a>(
                     reload_generation.set(generation);
                     reload_port.send(model_value.prepare_source_reload(generation));
                 }
-                KeyCode::F(1) | KeyCode::Char('\u{1f}') => {
-                    model_value.handle_key(SessionsPickerKey::ToggleHelp);
-                }
-                // Crossterm 0.29 decodes legacy byte 0x1f (Ctrl+/ or Ctrl+_) as Ctrl+7.
-                KeyCode::Char('/' | '_' | '7') if modifiers.contains(KeyModifiers::CONTROL) => {
-                    model_value.handle_key(SessionsPickerKey::ToggleHelp);
-                }
                 KeyCode::Char('c' | 'd') if modifiers.contains(KeyModifiers::CONTROL) => {
                     should_cancel.set(true);
                 }
@@ -430,9 +435,7 @@ pub(crate) fn SessionsPickerComponent<'a>(
                     selected_outcome.set(outcome);
                 }
                 KeyCode::Esc => {
-                    if model_value.show_help {
-                        model_value.handle_key(SessionsPickerKey::ToggleHelp);
-                    } else if model_value.search.is_empty()
+                    if model_value.search.is_empty()
                         && model_value.machine_controls.filter != PickerMachineFilter::Default
                     {
                         let mode = model_value.request.machine_mode;
@@ -490,15 +493,10 @@ pub(crate) fn SessionsPickerComponent<'a>(
         };
     }
 
-    if let Some(confirmation) = &model.read().fork_confirmation {
-        return super::picker_fork_view::render_fork_confirmation(confirmation, width, height);
-    }
-
-    if !matches!(
-        model.read().machine_controls.stage,
-        PickerMachineStage::Browsing
-    ) {
-        return super::picker_machine_view::render_machine_choices(&model.read(), height);
+    if let Some(background) =
+        super::picker_help_view::render_choice_surface(&model.read(), model, height)
+    {
+        return background;
     }
 
     let selected_conversation = {

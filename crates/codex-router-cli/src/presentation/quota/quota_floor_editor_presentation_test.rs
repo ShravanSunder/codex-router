@@ -121,11 +121,7 @@ async fn ctrl_e_saves_the_focused_stable_account_and_reloads_immediately() {
         vec![(expected_account_id, 11)]
     );
     assert!(frames.iter().any(|frame| frame.contains("Weekly floor")));
-    assert!(
-        frames
-            .last()
-            .is_some_and(|frame| frame.contains("ctrl-e edit floor"))
-    );
+    assert!(frames.last().is_some_and(|frame| frame.contains("Filters")));
 }
 
 #[tokio::test]
@@ -372,7 +368,7 @@ async fn weekly_floor_dialog_pointer_changes_draft_without_saving_on_cancel() {
         while let Some(canvas) = frames.next().await {
             let frame = canvas.to_string();
             match phase {
-                0 if frame.contains("ctrl-e edit floor") => {
+                0 if frame.contains("Filters") => {
                     sender.send(TerminalEvent::Key(control_key('e'))).unwrap();
                     phase = 1;
                 }
@@ -419,7 +415,7 @@ async fn weekly_floor_dialog_pointer_changes_draft_without_saving_on_cancel() {
                         .unwrap();
                     phase = 3;
                 }
-                3 if !frame.contains("Weekly floor") && frame.contains("ctrl-e edit floor") => {
+                3 if !frame.contains("Weekly floor") && frame.contains("Filters") => {
                     sender
                         .send(TerminalEvent::Key(KeyEvent::new(
                             KeyEventKind::Press,

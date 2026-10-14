@@ -12,6 +12,7 @@ use crate::presentation::session_picker::picker_request::SessionsPickerRoot;
 #[cfg(test)]
 use crate::sessions::SessionsSort;
 pub(super) const MIN_PICKER_WIDTH: usize = 24;
+#[cfg(test)]
 const COMPACT_HELP: &str = "ctrl-g/F2 Machine | ctrl-/ Help";
 #[cfg(test)]
 const NARROW_PICKER_WIDTH: usize = 72;
@@ -170,6 +171,7 @@ fn render_controls_lines(model: &SessionsPickerModel) -> Vec<String> {
     ]
 }
 
+#[cfg(test)]
 pub(super) fn footer_lines(width: usize, show_help: bool) -> Vec<String> {
     let mut lines = control_footer_lines(width, show_help);
     if show_help {
@@ -192,6 +194,7 @@ pub(super) fn footer_lines(width: usize, show_help: bool) -> Vec<String> {
     lines
 }
 
+#[cfg(test)]
 fn control_footer_lines(width: usize, show_help: bool) -> Vec<String> {
     if !show_help {
         return if width >= 40 {

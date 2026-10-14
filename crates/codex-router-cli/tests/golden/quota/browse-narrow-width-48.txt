@@ -1,7 +1,7 @@
 ╭──────────────────────────────────────────────╮
-│ Quota status                       ◌ fresh 1 │
+│ Quota status                 ◌ fresh 1  Help │
 │ Pool-wide: responses -> ssdev    [preferred] │
-│ Filters Ctrl+F/F3  Details F4                │
+│ Filters ▾  Details                           │
 │ All · Disabled: Shown · 1/1 accounts         │
 │ ┌──────────────────────────────────────────┐ │
 │ │  ❯ ssdev          [usable]     safest …  │ │
@@ -44,5 +44,5 @@
 │                                              │
 │                                              │
 │                                              │
-│ ↑/↓ focus  ctrl-r account options  esc/q ex… │
+│                                              │
 ╰──────────────────────────────────────────────╯

@@ -1,11 +1,13 @@
 //! Picker frame view.
 use super::{
     MIN_PICKER_WIDTH, NARROW_PICKER_WIDTH, SIDECAR_PICKER_WIDTH, SessionConversationPreview,
-    SessionsPickerModel, SessionsPickerOutcome, fit_line, footer_lines, picker_body_budget,
-    render_details, render_session_list, render_start_new_details, root_label, runtime_view_label,
+    SessionsPickerModel, SessionsPickerOutcome, fit_line, picker_body_budget, render_details,
+    render_session_list, render_start_new_details, root_label, runtime_view_label,
     session_visible_row_budget, sort_label,
 };
-use codex_router_tui::{DialogAction, DialogFrame, DialogHost, DialogMargins, DialogPresentation};
+use codex_router_tui::{
+    DialogAction, DialogFrame, DialogHost, DialogMargins, DialogPresentation, SurfaceHeader,
+};
 use iocraft::prelude::*;
 use unicode_width::UnicodeWidthStr;
 
@@ -54,35 +56,13 @@ pub(super) fn render_picker_view(
         }.into_any());
     }
     let control_height = filter_controls.len();
-    let inline_details = content_width >= 40;
-    let footer_lines = if content_width < NARROW_PICKER_WIDTH && !model.show_help {
-        vec!["F1 Help".to_owned()]
-    } else {
-        footer_lines(
-            if inline_details {
-                content_width.saturating_sub(12)
-            } else {
-                content_width
-            },
-            model.show_help,
-        )
-    };
-    let body_budget = picker_body_budget(
-        height,
-        control_height,
-        footer_lines.len() + usize::from(!inline_details),
-        minimum_render_height,
-    );
-    let mut children = vec![
-        element! {
-            Text(
-                content: format!("Sessions · {}/{}", model.visible_record_len(), model.request.records.len()),
-                color: Color::Cyan,
-                weight: Weight::Bold,
-            )
-        }
-        .into_any(),
-    ];
+    let body_budget = picker_body_budget(height, control_height, 1, minimum_render_height);
+    let inactive =
+        model.show_help || model.provider_filter_draft.is_some() || model.details_dialog.is_some();
+    let mut children = vec![element! {
+        SurfaceHeader(title: format!("Sessions · {}/{}", model.visible_record_len(), model.request.records.len()), inactive,
+            help_action: Some(super::super::picker_help_view::help_action(model_state)))
+    }.into_any()];
     children.extend(filter_controls);
 
     let focused_record = model.focused_record();
@@ -116,7 +96,7 @@ pub(super) fn render_picker_view(
     }
 
     let mut details_model = model_state;
-    children.push(render_footer(content_width, footer_lines, move |_| {
+    children.push(render_footer(move |_| {
         details_model.write().open_details_dialog()
     }));
     let picker_height = height.max(minimum_render_height);
@@ -140,10 +120,16 @@ pub(super) fn render_picker_view(
     .into_any();
     let viewport_width = u16::try_from(model.width).unwrap_or(u16::MAX);
     let viewport_height = u16::try_from(picker_height).unwrap_or(u16::MAX);
-    let dialog = if model.provider_filter_draft.is_some() {
+    let dialog = if model.show_help {
+        Some(super::super::picker_help_view::render_help(
+            model,
+            model_state,
+            picker_height,
+        ))
+    } else if model.provider_filter_draft.is_some() {
         Some(element! {
             DialogFrame(width: viewport_width, height: viewport_height,
-                title: "Session filters".to_owned(),
+                title: "Session filters".to_owned(), help_action: Some(super::super::picker_help_view::help_action(model_state)),
                 presentation: if model.width < NARROW_PICKER_WIDTH { DialogPresentation::FullScreen } else { DialogPresentation::Framed { maximum_width: 72, maximum_height: 16 } },
                 margins: DialogMargins { top: 1, right: 2, bottom: 1, left: 2 },
                 actions: super::super::provider_filter_view::render_provider_actions(model, model_state)) {
@@ -153,10 +139,10 @@ pub(super) fn render_picker_view(
     } else if let Some(record) = model.details_dialog.as_ref() {
         let mut cancel_model = model_state;
         Some(element! {
-            DialogFrame(width: viewport_width, height: viewport_height, title: format!("Session details · {}", record.title),
+            DialogFrame(width: viewport_width, height: viewport_height, title: format!("Session details · {}", record.title), help_action: Some(super::super::picker_help_view::help_action(model_state)),
                 presentation: if model.width < NARROW_PICKER_WIDTH { DialogPresentation::FullScreen } else { DialogPresentation::Framed { maximum_width: 100, maximum_height: 28 } },
                 margins: DialogMargins { top: 1, right: 2, bottom: 1, left: 2 }, keyboard_scroll: true,
-                actions: vec![element!(DialogAction(label: "Close · Esc", handler: move |_| cancel_model.write().details_dialog = None)).into_any()]) {
+                actions: vec![element!(DialogAction(label: "Close", handler: move |_| cancel_model.write().details_dialog = None)).into_any()]) {
                 #(render_details(record, content_width.min(90).saturating_sub(4), selected_conversation, Size::Auto))
             }
         }.into_any())
@@ -236,47 +222,15 @@ pub(super) fn control_line(parts: Vec<String>) -> AnyElement<'static> {
 }
 
 pub(super) fn render_footer(
-    width: usize,
-    lines: Vec<String>,
     details_handler: impl FnMut(()) + Send + Sync + 'static,
 ) -> AnyElement<'static> {
-    let footer_text = lines
-        .into_iter()
-        .map(|line| {
-            element! {
-                Text(
-                    content: line,
-                    color: Color::Grey,
-                    weight: Weight::Light,
-                    wrap: TextWrap::NoWrap,
-                )
-            }
-            .into_any()
-        })
-        .collect::<Vec<_>>();
     element! {
-        View(
-            width: 100pct,
-            flex_grow: 1.0_f32,
-            flex_direction: FlexDirection::Column,
-            justify_content: JustifyContent::FlexEnd,
-        ) {
-            View(
-                width: 100pct,
-                flex_direction: FlexDirection::Column,
-                border_style: BorderStyle::Single,
-                border_edges: Edges::Top,
-                border_color: Color::DarkGrey,
-                padding_top: 0,
-            ) {
-                View(column_gap: 2, flex_direction: if width >= 40 { FlexDirection::Row } else { FlexDirection::Column }) {
-                    super::InteractiveSessionChoiceRow(activates_on_click: true, activation_handler: details_handler) {
-                        Text(content: "Details F4", color: Color::Cyan, wrap: TextWrap::NoWrap)
-                    }
-                    View(flex_direction: FlexDirection::Column, flex_shrink: 1.0_f32, min_width: 0) { #(footer_text) }
+        View(width: 100pct, flex_grow: 1.0_f32, flex_direction: FlexDirection::Column, justify_content: JustifyContent::FlexEnd) {
+            View(width: 100pct, border_style: BorderStyle::Single, border_edges: Edges::Top, border_color: Color::DarkGrey) {
+                super::InteractiveSessionChoiceRow(activates_on_click: true, activation_handler: details_handler) {
+                    Text(content: "Details", color: Color::White, weight: Weight::Bold, wrap: TextWrap::NoWrap)
                 }
             }
         }
-    }
-    .into_any()
+    }.into_any()
 }

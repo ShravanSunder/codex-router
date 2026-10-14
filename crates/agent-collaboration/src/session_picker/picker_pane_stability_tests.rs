@@ -26,7 +26,7 @@ async fn sessions_list_viewport_is_independent_of_hidden_conversation_height() {
     );
     assert!(!short_text.contains("SHORT_CONVERSATION_MARKER"));
     assert!(!long_text.contains("LONG_MESSAGE"));
-    assert!(short_text.contains("Details F4"));
+    assert!(short_text.contains("Details"));
     assert!(
         visible_followup_row_count(&short_text) > 1,
         "list must use reclaimed height: {short_text}"
@@ -54,7 +54,7 @@ async fn sessions_details_dialog_scrolls_without_launching_or_mutating_search() 
         let journey = async {
             while let Some(canvas) = frames.next().await {
                 let frame = canvas.to_string();
-                if phase == 0 && frame.contains("Details F4") {
+                if phase == 0 && frame.contains("Details") {
                     sender
                         .send(TerminalEvent::Key(KeyEvent::new(
                             KeyEventKind::Press,
@@ -80,7 +80,7 @@ async fn sessions_details_dialog_scrolls_without_launching_or_mutating_search() 
                     phase = 2;
                 } else if phase == 2 && frame.contains("MESSAGE 39") {
                     assert!(
-                        frame.contains("Close · Esc"),
+                        frame.contains("Close"),
                         "scroll must keep close action: {frame}"
                     );
                     assert!(!frame.contains("Search: [x]"));

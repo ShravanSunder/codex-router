@@ -25,17 +25,26 @@ The runner uses the pinned, already supplied VHS/ttyd libraries and builds the
 Swift Vision image checker. It installs nothing. Keep TMPDIR short because the
 existing Unix-socket test fixtures have the platform socket-path limit.
 
-Nine journeys cover both screens at 120x36, 76x30 and 48x24, including quota's empty
-provider/disabled intersection. Each full journey captures chooser, applied
-providers, complementary scrolled rows, changed/cancelled draft and restored All.
-Sessions additionally navigates to the explicit New Codex choice and captures an
-empty search without invoking that action. Both surfaces capture F4 details and
-Escape returning to the same filtered list. The chooser overlays the list;
-phone-sized dialogs show the committed filter alongside the draft. Session
-details retain the existing 140-column sidecar threshold, and quota retains
-160 columns; narrower interactive screens open details explicitly in a dialog.
-Image oracles require literal active
-values/results and reject wrong provider, wrong draft and blank PNGs.
+The current runner selects six compact journeys: sessions and quota at 120x36,
+76x30 and 48x24. Each captures browse, the provider dialog, contextual Help,
+the applied provider, a cancelled draft and details (36 images). Quota's applied
+scene also hides disabled accounts, preserving the provider/visibility intersection.
+Help sits on the title row; shortcut text appears only inside Help. The Help
+journey attempts background input, closes back to the unchanged draft and then
+applies it. Existing key bindings still drive the real UI.
+
+The compact tape contract is a permanent test with literal checkpoint identities.
+Image oracles require literal active values/results and reject blank, wrong-provider
+and chooser-as-applied PNGs. Literal iocraft Canvas tests separately prove heading,
+selection and focus styles. Text recognition alone cannot establish those styles.
+The earlier full capture entrypoints and their archived95 images are historical
+coverage; this runner does not relabel those pictures as current-source proof.
+
+Session details retain the existing140-column sidecar threshold, and quota retains
+160columns; narrower interactive screens open details explicitly in a dialog.
+Dialogs keep title/actions visible while their body scrolls. Provider session
+details show their actual ID/endpoint/state rather than inventing native conversation
+history or availability.
 
 Every run creates fresh directories. Receipts bind the compiled binary, driver,
 image-checker source/binary, tools, tape, viewport and PNG hashes. Filtering must

@@ -163,11 +163,7 @@ async fn sessions_picker_width_contract_preserves_layout() {
             text.contains("+"),
             "capture should show the more-below affordance:\n{text}"
         );
-        let help_label = if width == 48 {
-            "F1 Help"
-        } else {
-            "ctrl-/ Help"
-        };
+        let help_label = "Help";
         assert!(
             text.contains(help_label),
             "capture should expose help:\n{text}"
@@ -175,7 +171,7 @@ async fn sessions_picker_width_contract_preserves_layout() {
         let lines = text.lines().collect::<Vec<_>>();
         let footer_index = lines
             .iter()
-            .rposition(|line| line.contains(help_label))
+            .rposition(|line| line.contains("Details"))
             .unwrap_or_else(|| panic!("capture should render footer:\n{text}"));
         let bottom_border_index = lines
             .iter()
@@ -275,7 +271,7 @@ async fn sessions_picker_stacked_details_clip_long_conversation_without_hiding_t
         "stacked details should remain visible and clip overflow:\n{text}"
     );
     assert!(
-        text.contains("Session details") && text.contains("Close · Esc"),
+        text.contains("Session details") && text.contains("Close"),
         "dialog should retain its title and close action:\n{text}"
     );
 }
@@ -397,7 +393,7 @@ async fn sessions_picker_sidecar_clamps_tall_details_to_body_budget() {
         "sidecar details should stay within the 24-row frame:\n{text}"
     );
     assert!(
-        text.contains("ctrl-/ Help"),
+        text.contains("Details"),
         "sidecar details should not clip the footer at 160x24:\n{text}"
     );
 }
@@ -417,7 +413,7 @@ async fn sessions_picker_sidecar_panels_reach_footer_without_unframed_gap() {
     let lines = text.lines().collect::<Vec<_>>();
     let footer_index = lines
         .iter()
-        .position(|line| line.contains("ctrl-/ Help"))
+        .position(|line| line.contains("Details"))
         .unwrap_or_else(|| panic!("sidecar footer should render:\n{text}"));
     let panel_bottom_index = lines[..footer_index]
         .iter()
@@ -455,7 +451,7 @@ async fn sessions_picker_renders_one_line_controls_when_width_allows() {
         "{text}"
     );
     assert!(
-        text.contains("ctrl-/ Help"),
+        text.contains("Details"),
         "wide footer should keep only the compact help hint by default:\n{text}"
     );
     assert!(!text.contains("type search"), "{text}");
@@ -487,7 +483,7 @@ async fn sessions_picker_budgets_wrapped_controls_from_actual_search_text() {
         "long search controls should not grow the picker past the 24-row frame:\n{text}"
     );
     assert!(
-        text.contains("ctrl-/ Help"),
+        text.contains("Details"),
         "wrapped controls should not clip the footer at 100x24:\n{text}"
     );
     assert!(
@@ -552,7 +548,7 @@ async fn sessions_picker_stacked_layout_removes_top_padding_and_keeps_panels_adj
     assert!(
         lines
             .get(list_bottom_border_index + 2)
-            .is_some_and(|line| line.contains("Details F4")),
+            .is_some_and(|line| line.contains("Details")),
         "details must be an explicit control instead of a second stacked pane: {text}"
     );
 }

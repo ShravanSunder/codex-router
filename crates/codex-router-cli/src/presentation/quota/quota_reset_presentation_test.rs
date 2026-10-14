@@ -47,7 +47,7 @@ async fn ctrl_r_inspects_the_focused_stable_account_and_generation() {
         (TerminalEvent::Key(control_key('r')), Some("Reset credits")),
         (
             TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Esc)),
-            Some("ctrl-r account options"),
+            Some("Filters"),
         ),
         (
             TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Char('q'))),
@@ -246,11 +246,11 @@ async fn account_options_reset_inspection_resize_and_cancel_restore_resets_tab()
             ),
             (
                 TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Esc)),
-                Some("enter inspect"),
+                Some("Inspect"),
             ),
             (
                 TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Esc)),
-                Some("ctrl-r account options"),
+                Some("Filters"),
             ),
             (
                 TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Char('q'))),
@@ -316,7 +316,7 @@ async fn account_options_reset_inspection_resize_and_cancel_restore_resets_tab()
                 let lines = frame.lines().collect::<Vec<_>>();
                 let footer_index = lines
                     .iter()
-                    .position(|line| line.contains("esc/ctrl-r back"))
+                    .position(|line| line.contains("Cancel"))
                     .expect("reset footer should be visible");
                 assert!(
                     footer_index >= lines.len().saturating_sub(3)
@@ -332,13 +332,11 @@ async fn account_options_reset_inspection_resize_and_cancel_restore_resets_tab()
         assert!(
             frames
                 .iter()
-                .any(|frame| { frame.contains("[ Resets ]") && frame.contains("enter inspect") }),
+                .any(|frame| { frame.contains("[ Resets ]") && frame.contains("Inspect") }),
             "the account-options Resets tab should remain after inspection cancellation: {frames:?}"
         );
         assert!(
-            frames
-                .last()
-                .is_some_and(|frame| frame.contains("ctrl-r account options")),
+            frames.last().is_some_and(|frame| frame.contains("Filters")),
             "closing the Resets tab should restore the quota browse footer: {frames:?}"
         );
     }
@@ -757,15 +755,15 @@ fn acknowledged_quota_events(
             expected_marker,
         )| async move {
             if let Some(expected_marker) = expected_marker {
-                loop {
-                    match frame_acknowledgement_receiver.recv().await {
-                        Some(actual_marker) if actual_marker == expected_marker => break,
-                        Some(_) => {}
-                        None => panic!(
-                            "rendered-frame acknowledgement channel closed before marker {expected_marker:?}"
-                        ),
+                tokio::time::timeout(Duration::from_secs(2), async {
+                    loop {
+                        match frame_acknowledgement_receiver.recv().await {
+                            Some(actual_marker) if actual_marker == expected_marker => break,
+                            Some(_) => {}
+                            None => panic!("rendered-frame acknowledgement channel closed before marker {expected_marker:?}"),
+                        }
                     }
-                }
+                }).await.unwrap_or_else(|_| panic!("actual rendered frame did not acknowledge marker {expected_marker:?}"));
             }
             let (event, next_marker) = pending_events.next()?;
             expected_frame_sender.send_replace(next_marker);

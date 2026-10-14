@@ -6,7 +6,7 @@
 │ The credit may have been consumed. Refresh live credits before deciding what to do next.                                                                     │
 │                                                                                                                                                              │
 │ Saved quota may remain stale until the normal quota refresh updates it.                                                                                      │
-│ Enter, Esc, or Ctrl-R returns to quota status.                                                                                                               │
+│ Return to quota status.                                                                                                                                      │
 │                                                                                                                                                              │
 │                                                                                                                                                              │
 │                                                                                                                                                              │

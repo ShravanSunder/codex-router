@@ -49,7 +49,7 @@ mod quota_reset_pty_test {
         )?;
 
         stage(
-            terminal.wait_for_text("ctrl-r account options", SEMANTIC_WAIT),
+            terminal.wait_for_text("Filters", SEMANTIC_WAIT),
             "initial browse",
         )?;
         let inspection_start = terminal.transcript_len();
@@ -103,22 +103,18 @@ mod quota_reset_pty_test {
         )?;
 
         stage(
-            terminal.wait_for_text_after("esc/ctrl-r back", inspection_start, SEMANTIC_WAIT),
+            terminal.wait_for_text_after("Cancel", inspection_start, SEMANTIC_WAIT),
             "inspection cancel footer",
         )?;
         let resize_start = terminal.transcript_len();
         stage(terminal.resize(48, 170), "resize request")?;
         stage(
-            terminal.wait_for_text_after("esc/ctrl-r back", resize_start, SEMANTIC_WAIT),
+            terminal.wait_for_text_after("Cancel", resize_start, SEMANTIC_WAIT),
             "inspection after resize",
         )?;
         let cancel_start = terminal.transcript_len();
         terminal.send(&[0x12])?;
-        if let Err(error) = terminal.wait_for_text_after(
-            "enter inspect  tab credits  esc back",
-            cancel_start,
-            SEMANTIC_WAIT,
-        ) {
+        if let Err(error) = terminal.wait_for_text_after("Inspect", cancel_start, SEMANTIC_WAIT) {
             let diagnostics = terminal.safe_semantic_diagnostics(cancel_start);
             return Err(std::io::Error::other(format!(
                 "cancelled inspection browse restoration: {error}; {diagnostics}"
@@ -128,11 +124,7 @@ mod quota_reset_pty_test {
         let options_close_start = terminal.transcript_len();
         terminal.send(b"\x1b")?;
         stage(
-            terminal.wait_for_text_after(
-                "ctrl-r account options",
-                options_close_start,
-                SEMANTIC_WAIT,
-            ),
+            terminal.wait_for_text_after("Filters", options_close_start, SEMANTIC_WAIT),
             "options pane closes after inspection cancellation",
         )?;
         terminal.send(b"q")?;
@@ -215,7 +207,7 @@ mod quota_reset_pty_test {
         )?;
 
         stage(
-            terminal.wait_for_text("ctrl-r account options", SEMANTIC_WAIT),
+            terminal.wait_for_text("Filters", SEMANTIC_WAIT),
             "account-options initial browse",
         )?;
         let inspection_start = terminal.transcript_len();
@@ -266,7 +258,7 @@ mod quota_reset_pty_test {
         let cancel_draft_start = terminal.transcript_len();
         terminal.send(b"\x1b")?;
         stage(
-            terminal.wait_for_text_after("enter edit", cancel_draft_start, SEMANTIC_WAIT),
+            terminal.wait_for_text_after("Edit", cancel_draft_start, SEMANTIC_WAIT),
             "cancelled credit policy draft returns to saved Credits view",
         )?;
         let cancelled_state =
@@ -294,8 +286,7 @@ mod quota_reset_pty_test {
         )?;
         let saved_policy_start = terminal.transcript_len();
         terminal.send(b"\r")?;
-        if let Err(error) =
-            terminal.wait_for_text_after("r refresh", saved_policy_start, SEMANTIC_WAIT)
+        if let Err(error) = terminal.wait_for_text_after("Edit", saved_policy_start, SEMANTIC_WAIT)
         {
             let diagnostics = terminal.safe_semantic_diagnostics(saved_policy_start);
             return Err(std::io::Error::other(format!(
@@ -315,9 +306,7 @@ mod quota_reset_pty_test {
         saved_state.close().await?;
         let browse_start = terminal.transcript_len();
         terminal.send(b"\x1b")?;
-        if let Err(error) =
-            terminal.wait_for_text_after("ctrl-r account options", browse_start, SEMANTIC_WAIT)
-        {
+        if let Err(error) = terminal.wait_for_text_after("Filters", browse_start, SEMANTIC_WAIT) {
             let diagnostics = terminal.safe_semantic_diagnostics(browse_start);
             return Err(std::io::Error::other(format!(
                 "account-options returns to browse: {error}; {diagnostics}"
@@ -350,17 +339,13 @@ mod quota_reset_pty_test {
         let reopen_cancel_start = terminal.transcript_len();
         terminal.send(b"\x1b")?;
         stage(
-            terminal.wait_for_text_after("enter edit", reopen_cancel_start, SEMANTIC_WAIT),
+            terminal.wait_for_text_after("Edit", reopen_cancel_start, SEMANTIC_WAIT),
             "reopened policy editor cancels back to Credits",
         )?;
         let final_browse_start = terminal.transcript_len();
         terminal.send(b"\x1b")?;
         stage(
-            terminal.wait_for_text_after(
-                "ctrl-r account options",
-                final_browse_start,
-                SEMANTIC_WAIT,
-            ),
+            terminal.wait_for_text_after("Filters", final_browse_start, SEMANTIC_WAIT),
             "reopened account-options pane closes to Browse",
         )?;
         terminal.send(b"q")?;
@@ -454,7 +439,7 @@ mod quota_reset_pty_test {
             Path::new(env!("CARGO_MANIFEST_DIR")),
         )?;
 
-        if let Err(error) = terminal.wait_for_text("ctrl-r account options", SEMANTIC_WAIT) {
+        if let Err(error) = terminal.wait_for_text("Filters", SEMANTIC_WAIT) {
             let diagnostics = terminal.safe_semantic_diagnostics(0);
             return Err(std::io::Error::other(format!(
                 "committed path initial browse: {error}; {diagnostics}"
@@ -538,21 +523,13 @@ mod quota_reset_pty_test {
         let browse_restoration_start = terminal.transcript_len();
         terminal.send(b"\r")?;
         stage(
-            terminal.wait_for_text_after(
-                "enter inspect  tab credits  esc back",
-                browse_restoration_start,
-                SEMANTIC_WAIT,
-            ),
+            terminal.wait_for_text_after("Inspect", browse_restoration_start, SEMANTIC_WAIT),
             "Resets options restored after reset result",
         )?;
         let options_close_start = terminal.transcript_len();
         terminal.send(b"\x1b")?;
         stage(
-            terminal.wait_for_text_after(
-                "ctrl-r account options",
-                options_close_start,
-                SEMANTIC_WAIT,
-            ),
+            terminal.wait_for_text_after("Filters", options_close_start, SEMANTIC_WAIT),
             "browse restored after options close",
         )?;
         terminal.send(b"q")?;
@@ -594,7 +571,7 @@ mod quota_reset_pty_test {
         terminal.resize(36, 120)?;
 
         stage(
-            terminal.wait_for_text("ctrl-e edit floor", SEMANTIC_WAIT),
+            terminal.wait_for_text("Filters", SEMANTIC_WAIT),
             "initial floor browse",
         )?;
         terminal.send(&[0x05])?;
@@ -613,7 +590,7 @@ mod quota_reset_pty_test {
         let cancel_start = terminal.transcript_len();
         terminal.send(b"\x1b")?;
         stage(
-            terminal.wait_for_text_after("ctrl-e edit floor", cancel_start, SEMANTIC_WAIT),
+            terminal.wait_for_text_after("Filters", cancel_start, SEMANTIC_WAIT),
             "cancelled weekly-floor editor",
         )?;
         terminal.send(b"q")?;
@@ -823,7 +800,7 @@ mod quota_reset_pty_test {
             Path::new(env!("CARGO_MANIFEST_DIR")),
         )?;
 
-        terminal.wait_for_text("ctrl-r account options", SEMANTIC_WAIT)?;
+        terminal.wait_for_text("Filters", SEMANTIC_WAIT)?;
         terminal.send(b"\x1b[B")?;
         terminal.send(&[0x12])?;
         provider.wait_for_request_count(2, SEMANTIC_WAIT)?;

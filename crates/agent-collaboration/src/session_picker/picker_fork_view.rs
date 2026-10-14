@@ -1,11 +1,14 @@
 //! Content-sized fork confirmation using the picker's existing iocraft styling.
 use super::picker_fork_confirmation::ForkConfirmation;
+use codex_router_tui::{SurfaceHeader, UiHeading, UiHeadingLevel};
 use iocraft::prelude::*;
 
 pub(super) fn render_fork_confirmation(
     confirmation: &ForkConfirmation,
     width: usize,
     height: usize,
+    help_action: AnyElement<'static>,
+    inactive: bool,
 ) -> Element<'static, View> {
     let available_rows = height.saturating_sub(13).max(1);
     let window_start = confirmation
@@ -31,19 +34,19 @@ pub(super) fn render_fork_confirmation(
         View(width: width as u32, height: height as u32, padding_left: 1, padding_right: 1,
             flex_direction: FlexDirection::Column, border_style: BorderStyle::Round,
             border_color: Color::Cyan, overflow: Overflow::Hidden) {
-            Text(content: "Fork session", color: Color::Cyan, weight: Weight::Bold)
+            SurfaceHeader(title: "Fork session".to_owned(), inactive, help_action: Some(help_action))
             View(border_style: BorderStyle::Single, border_color: Color::DarkGrey, padding: 1,
                 margin_top: 1, flex_direction: FlexDirection::Column) {
-                Text(content: confirmation.title.clone(), weight: Weight::Bold)
+                UiHeading(content: confirmation.title.clone(), level: UiHeadingLevel::Section)
                 Text(content: format!("Source: {}", confirmation.source_label), color: Color::Grey)
                 Text(content: format!("Working directory: {}", confirmation.directory_label), color: Color::Grey)
                 Text(content: format!("Directory origin: {}", confirmation.directory_origin), color: Color::DarkGrey)
-                View(margin_top: 1) { Text(content: "Destination", weight: Weight::Bold) }
+                View(margin_top: 1) { UiHeading(content: "Destination".to_owned(), level: UiHeadingLevel::Group) }
                 #(rows)
             }
             #(explanation.map(|message| element! { Text(content: message, color: Color::Yellow) }))
             View(flex_grow: 1.0_f32) {}
-            Text(content: "↑↓ Choose | Enter Fork | Esc Back | Ctrl+C Exit", color: Color::Grey)
+
         }
     }
 }

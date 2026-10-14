@@ -40,9 +40,41 @@ enum ScreenCheckpoint: String {
     case sessionsDetailsClosed = "sessions-details-closed"
     case quotaDetails = "quota-details"
     case quotaDetailsClosed = "quota-details-closed"
+    case compactSessionsAll = "compact-sessions-all"
+    case compactSessionsChooser = "compact-sessions-chooser"
+    case compactSessionsHelp = "compact-sessions-help"
+    case compactSessionsClaude = "compact-sessions-claude"
+    case compactSessionsCancelled = "compact-sessions-cancelled"
+    case compactSessionsDetails = "compact-sessions-details"
+    case compactQuotaAll = "compact-quota-all"
+    case compactQuotaChooser = "compact-quota-chooser"
+    case compactQuotaHelp = "compact-quota-help"
+    case compactQuotaClaude = "compact-quota-claude"
+    case compactQuotaCancelled = "compact-quota-cancelled"
+    case compactQuotaDetails = "compact-quota-details"
 
     var requiredMarkers: [String] {
         switch self {
+        case .compactSessionsAll:
+            ["Sessions", "Help", "This machine", "All providers", "6/6", "Codex Alpha"]
+        case .compactSessionsChooser:
+            ["Session filters", "Help", "Session client provider", "Draft: Codex", "Current: All providers", "Claude Code", "Cursor", "Apply", "Cancel"]
+        case .compactSessionsHelp:
+            ["Sessions Help", "Session filters", "Choose provider draft", "Tab", "Close"]
+        case .compactSessionsClaude, .compactSessionsCancelled:
+            ["Sessions", "Help", "Claude Code", "2/6", "Claude Gamma", "Details"]
+        case .compactSessionsDetails:
+            ["Session details", "Help", "Claude Gamma", "Session ID", "Endpoint", "State", "Close"]
+        case .compactQuotaAll:
+            ["Quota status", "Help", "All", "Disabled: Shown", "4/4 accounts", "Claude Delta"]
+        case .compactQuotaChooser:
+            ["Account filters", "Help", "Account provider", "Draft: OpenAI", "Claude", "Disabled accounts: Shown", "Apply", "Cancel"]
+        case .compactQuotaHelp:
+            ["Quota Help", "Account filters", "Choose provider", "Space", "Apply draft", "Close"]
+        case .compactQuotaClaude, .compactQuotaCancelled:
+            ["Quota status", "Help", "Claude", "Disabled: Hidden", "1/4 accounts", "Claude Gamma", "Details"]
+        case .compactQuotaDetails:
+            ["Account details", "Help", "Selected account", "Claude Gamma", "Close"]
         case .sessionsDetails:
             ["Session details", "Codex Alpha", "Session ID", "Conversation", "Close"]
         case .sessionsDetailsClosed:
@@ -120,6 +152,26 @@ enum ScreenCheckpoint: String {
 
     var forbiddenMarkers: [String] {
         switch self {
+        case .compactSessionsAll:
+            hiddenShortcutMarkers + ["Session filters", "Search:", "View:", "Sort:"]
+        case .compactSessionsChooser:
+            hiddenShortcutMarkers + ["Sessions Help", "Quota Help"]
+        case .compactSessionsHelp:
+            ["Quota Help", "Apply  Cancel"]
+        case .compactSessionsClaude, .compactSessionsCancelled:
+            hiddenShortcutMarkers + ["Codex Alpha", "Codex Beta", "Cursor Echo", "Session client provider", "Draft:"]
+        case .compactSessionsDetails:
+            hiddenShortcutMarkers + ["Draft:", "Session client provider", "Sessions Help"]
+        case .compactQuotaAll:
+            hiddenShortcutMarkers + ["Account provider", "Quota Help"]
+        case .compactQuotaChooser:
+            hiddenShortcutMarkers + ["Quota Help", "Sessions Help"]
+        case .compactQuotaHelp:
+            ["Sessions Help", "Draft:"]
+        case .compactQuotaClaude, .compactQuotaCancelled:
+            hiddenShortcutMarkers + ["Claude Delta", "OpenAI Alpha", "OpenAI Beta", "Account provider", "Draft:"]
+        case .compactQuotaDetails:
+            hiddenShortcutMarkers + ["Draft:", "Account provider", "Quota Help"]
         case .sessionsDetails, .quotaDetails:
             ["Draft:", "Apply", "Cancel"]
         case .sessionsDetailsClosed, .quotaDetailsClosed:
@@ -183,6 +235,10 @@ enum ScreenCheckpoint: String {
         case .credits, .cancelled, .allowDraft, .disallowDraft:
             []
         }
+    }
+
+    private var hiddenShortcutMarkers: [String] {
+        ["Ctrl+", "ctrl-", "F1", "F2", "F3", "F4", "enter apply", "esc cancel"]
     }
 }
 

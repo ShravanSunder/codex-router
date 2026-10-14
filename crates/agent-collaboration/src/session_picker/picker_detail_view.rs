@@ -3,6 +3,7 @@ use super::{
     START_NEW_DETAILS_HEIGHT, SessionConversationPreview, SessionPickerRecord, SessionsPickerModel,
     fit_line, no_matching_sessions_label, start_new_args_label,
 };
+use codex_router_tui::{UiHeading, UiHeadingLevel};
 use iocraft::prelude::*;
 
 pub(super) fn render_start_new_details(
@@ -22,7 +23,7 @@ pub(super) fn render_start_new_details(
             padding_right: 1,
             overflow: Overflow::Hidden,
         ) {
-            Text(content: "New Codex session", color: Color::Cyan, weight: Weight::Bold)
+            UiHeading(content: "New Codex session".to_owned(), level: UiHeadingLevel::Section)
             Text(content: fit_line(&start_new_args_label(model), detail_width), color: Color::Yellow, weight: Weight::Bold, wrap: TextWrap::NoWrap)
             #(if model.visible_record_len() == 0 {
                 Some(detail_text(no_matching_sessions_label(model), detail_width, Color::Grey))
@@ -120,7 +121,7 @@ pub(super) fn render_details(
         ) {
             Text(content: format!("Session ID: {}", record.session_id), color: Color::Grey, weight: Weight::Normal, wrap)
             View(height: 1) { Text(content: "") }
-            Text(content: "Conversation", color: Color::Cyan, weight: Weight::Bold)
+            UiHeading(content: "Conversation".to_owned(), level: UiHeadingLevel::Section)
             #(conversation_rows)
         }
     }

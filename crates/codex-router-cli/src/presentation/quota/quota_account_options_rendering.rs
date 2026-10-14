@@ -1,3 +1,4 @@
+use codex_router_tui::{UiHeading, UiHeadingLevel};
 use iocraft::prelude::*;
 
 use crate::quota::CreditUsageFreshness;
@@ -30,7 +31,7 @@ pub(in crate::presentation::quota) fn render_account_options_panel(
 ) -> AnyElement<'static> {
     let width = props.width.max(32);
     let height = props.height.max(1);
-    let body_height = height.saturating_sub(7);
+    let body_height = height.saturating_sub(7 + usize::from(props.options.pending_tab.is_some()));
     let body = match props.options.tab {
         AccountOptionsTab::Resets => render_resets_tab_body(
             props.options,
@@ -67,6 +68,7 @@ pub(in crate::presentation::quota) fn render_account_options_panel(
                 #(resets_tab)
                 #(credits_tab)
             }
+            #(props.options.pending_tab.is_some().then(|| element!(Text(content: "Tab change pending", color: Color::Grey, wrap: TextWrap::NoWrap)).into_any()))
             View(width: 100pct, height: 1, border_style: BorderStyle::Single, border_edges: Edges::Bottom, border_color: Color::DarkGrey) {}
             View(height: 1) {}
             #(body)
@@ -81,17 +83,17 @@ pub(in crate::presentation::quota) fn account_options_content_height(
     reset_target: Option<&ResetPaneTarget>,
     inventory_page_start: usize,
 ) -> usize {
+    let options_header_rows = 7 + usize::from(options.pending_tab.is_some());
     if options.tab == AccountOptionsTab::Resets
         && let (Some(snapshot), Some(target)) = (reset_snapshot, reset_target)
         && snapshot.phase() != WorkflowPhase::Browse
     {
         return reset_options_content_height(snapshot, target, inventory_page_start)
-            .saturating_add(7);
+            .saturating_add(options_header_rows);
     }
-    const OPTIONS_HEADER_ROWS: usize = 7;
     match options.tab {
         AccountOptionsTab::Resets => {
-            OPTIONS_HEADER_ROWS + 3 + usize::from(options.message.is_some())
+            options_header_rows + 3 + usize::from(options.message.is_some())
         }
         AccountOptionsTab::Credits => {
             let base_body_rows = 9;
@@ -102,7 +104,7 @@ pub(in crate::presentation::quota) fn account_options_content_height(
                 usize::from(options.editor.as_ref().is_some_and(|editor| {
                     !matches!(editor.phase, CreditPolicyEditorPhase::Editing)
                 }));
-            OPTIONS_HEADER_ROWS
+            options_header_rows
                 + base_body_rows
                 + floor_row
                 + provider_control_row
@@ -187,11 +189,11 @@ pub(super) fn render_credit_usage_body(
         )
     });
     let balance_heading = element! {
-        Text(content: "Credit balance", color: Color::Cyan, weight: Weight::Bold, wrap: TextWrap::NoWrap)
+        UiHeading(content: "Credit balance".to_owned(), level: UiHeadingLevel::Section)
     }
     .into_any();
     let usage_heading = element! {
-        Text(content: "Credit usage", color: Color::Cyan, weight: Weight::Bold, wrap: TextWrap::NoWrap)
+        UiHeading(content: "Credit usage".to_owned(), level: UiHeadingLevel::Section)
     }
     .into_any();
     let policy_row = render_policy_row(policy, is_editing, width);
@@ -278,12 +280,12 @@ fn render_resets_tab_body(
     } else if reset_target.is_some() {
         "Checking reset eligibility…"
     } else {
-        "Press Enter to inspect reset eligibility."
+        "Inspect reset eligibility."
     };
     let text_width = width.saturating_sub(2);
     element! {
         View(width: width as u32, height: height as u32, flex_direction: FlexDirection::Column) {
-            Text(content: "Reset credits", color: Color::Cyan, weight: Weight::Bold, wrap: TextWrap::NoWrap)
+            UiHeading(content: "Reset credits".to_owned(), level: UiHeadingLevel::Section)
             Text(content: truncate_account_options_line(explanation, text_width), color: Color::Grey, wrap: TextWrap::NoWrap)
             Text(content: truncate_account_options_line("No reset is consumed without explicit confirmation.", text_width), color: Color::Grey, wrap: TextWrap::NoWrap)
             #(options.message.map(|message| element! { Text(content: truncate_account_options_line(account_options_message_text(message), text_width), color: Color::Yellow, wrap: TextWrap::NoWrap) }.into_any()))

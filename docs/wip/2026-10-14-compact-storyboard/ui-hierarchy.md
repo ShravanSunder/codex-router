@@ -1,0 +1,24 @@
+# Terminal hierarchy
+
+Sessions and interactive quota use the same visual roles from `codex-router-tui`. Heading level describes meaning; every terminal character keeps the same font size.
+
+| Role | Appearance | Used for |
+| --- | --- | --- |
+| H1 — surface | Cyan, bold | The active page or dialog title |
+| Inactive surface | Grey, bold | The page behind a modal |
+| H2 — section | White, bold | Conversation, account provider, selected account and Help sections |
+| H3 — group | Grey, bold | Smaller groups inside a section, such as Destination |
+| Body | White | Content and available choices |
+| Secondary | Grey | Metadata and explanatory text |
+| Disabled | Dark grey | Unavailable actions, with an explanation |
+| Outcome/status | Existing semantic color and explicit text | Success, failure, eligibility and refresh status |
+| Selected | Yellow, bold, with a marker | The selected session, account, radio choice or draft |
+| Focused action | Yellow, bold, underlined | Apply, Cancel or another action with keyboard focus |
+
+Selection and keyboard focus have different meanings. Moving focus from a provider to Apply must not remove the provider's selected appearance. Color accompanies a marker or text; it does not carry the meaning alone.
+
+Help is a plain action on the title row. Shortcut instructions appear inside Help, including the current dialog's instructions first. The normal page and dialog actions use plain labels. Existing keyboard bindings remain available.
+
+Dialogs use the shared iocraft frame and input scope. At narrow sizes they fill the available viewport within the configured margins; at wider sizes they are framed overlays. Their title and actions remain fixed while the body scrolls. Opening Help retains the underlying draft and focused identity, blocks background input, and closing it restores the prior screen.
+
+Static quota output retains its existing noninteractive presentation. The current HTML gallery contains historical compiled fixture pictures until the new source has passed validation and a fresh capture replaces it.

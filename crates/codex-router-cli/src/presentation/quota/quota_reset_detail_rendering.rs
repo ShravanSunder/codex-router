@@ -1,3 +1,4 @@
+use codex_router_tui::{UiHeading, UiHeadingLevel};
 use iocraft::prelude::*;
 
 use crate::quota_reset::reset_session_supervisor::ConfirmationSelection;
@@ -168,7 +169,9 @@ pub(super) fn render_reset_panel_content(
 }
 
 fn render_section(section: ResetDetailSection, width: usize) -> AnyElement<'static> {
-    let title = render_styled_text(section.title, width);
+    let title: AnyElement<'static> =
+        element!(UiHeading(content: section.title.content, level: UiHeadingLevel::Section))
+            .into_any();
     let rows = section
         .rows
         .into_iter()
@@ -585,7 +588,7 @@ fn result_document(result: Option<&WorkflowResult>) -> ResetDetailDocument {
                 muted_text(
                     "Saved quota may remain stale until the normal quota refresh updates it.",
                 ),
-                accent_text("Enter, Esc, or Ctrl-R returns to quota status."),
+                accent_text("Return to quota status."),
             ],
         }],
     }

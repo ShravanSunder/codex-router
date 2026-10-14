@@ -1,3 +1,4 @@
+use codex_router_tui::{DialogAction, UiHeading, UiHeadingLevel};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -294,37 +295,35 @@ pub(super) fn render_weekly_floor_editor(
             padding_right: 1,
         ) {
             View(width: detail_width as u32, flex_direction: FlexDirection::Column) {
-                Text(content: "Weekly floor", color: Color::Cyan, weight: Weight::Bold)
+                UiHeading(content: "Weekly floor".to_owned(), level: UiHeadingLevel::Section)
                 #(detail_line("account", &editor.account_label, detail_width, Color::White))
                 #(detail_line("current", &current_floor, detail_width, Color::White))
                 View(height: 1) {}
                 View(width: detail_width as u32, align_items: AlignItems::Center) {
                     View(width: 10) {
-                        Text(content: "floor", color: Color::Grey, wrap: TextWrap::NoWrap)
+                        UiHeading(content: "floor".to_owned(), level: UiHeadingLevel::Group)
                     }
-                    Button(
+                    DialogAction(
+                        label: "◀".to_owned(),
                         handler: move |_| {
                             let mut next = decrease_editor_state.read().clone();
                             step_weekly_floor_editor(&mut next, WeeklyFloorStep::Decrease);
                             editor_state.set(next);
                         },
                         has_focus: false,
-                    ) {
-                        Text(content: "◀", color: Color::Cyan, weight: Weight::Bold)
-                    }
+                    )
                     View(width: 7, justify_content: JustifyContent::Center) {
                         Text(content: format!("{}%", editor.draft_percent), color: Color::White, weight: Weight::Bold, wrap: TextWrap::NoWrap)
                     }
-                    Button(
+                    DialogAction(
+                        label: "▶".to_owned(),
                         handler: move |_| {
                             let mut next = increase_editor_state.read().clone();
                             step_weekly_floor_editor(&mut next, WeeklyFloorStep::Increase);
                             editor_state.set(next);
                         },
                         has_focus: false,
-                    ) {
-                        Text(content: "▶", color: Color::Cyan, weight: Weight::Bold)
-                    }
+                    )
                 }
                 Text(content: "0% disables protection · maximum 15%", color: Color::Grey)
                 #(status.map(|(message, color)| element! { Text(content: message, color) }.into_any()))

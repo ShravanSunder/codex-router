@@ -64,6 +64,7 @@ pub struct DialogFrameProps<'a> {
     pub border_color: Option<Color>,
     pub keyboard_scroll: bool,
     pub on_close: HandlerMut<'static, ()>,
+    pub help_action: Option<AnyElement<'a>>,
     pub children: Vec<AnyElement<'a>>,
     pub actions: Vec<AnyElement<'a>>,
 }
@@ -108,6 +109,7 @@ pub fn DialogFrame<'a>(
     };
     let children = std::mem::take(&mut props.children);
     let actions = std::mem::take(&mut props.actions);
+    let help_action = props.help_action.take();
     element! {
         View(
             position: Position::Absolute, top: 0, left: 0,
@@ -124,7 +126,7 @@ pub fn DialogFrame<'a>(
                 background_color: Color::Reset, padding: props.padding.unwrap_or(1),
                 flex_shrink: 0.0_f32,
             ) {
-                View(flex_shrink: 0.0_f32) { Text(content: props.title.clone(), weight: Weight::Bold, color: Color::Cyan, wrap: TextWrap::NoWrap) }
+                crate::SurfaceHeader(title: props.title.clone(), help_action)
                 View(flex_grow: 1.0_f32, flex_shrink: 1.0_f32, min_height: 0) {
                     ScrollView(keyboard_scroll: props.keyboard_scroll) {
                         View(width: 100pct, flex_direction: FlexDirection::Column, flex_shrink: 0.0_f32) { #(children) }

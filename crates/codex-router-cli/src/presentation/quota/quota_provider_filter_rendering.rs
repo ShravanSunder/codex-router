@@ -1,4 +1,4 @@
-use codex_router_tui::UseDialogInteraction;
+use codex_router_tui::{UiHeading, UiHeadingLevel, UseDialogInteraction};
 use iocraft::prelude::*;
 
 use super::quota_provider_filters::*;
@@ -29,6 +29,7 @@ pub(super) fn quota_filter_controls_height(
 struct QuotaFilterButtonProps {
     label: String,
     selected: bool,
+    has_focus: bool,
     enabled: bool,
     on_click: HandlerMut<'static, ()>,
 }
@@ -38,6 +39,7 @@ fn QuotaFilterButton(
     props: &mut QuotaFilterButtonProps,
     mut hooks: Hooks,
 ) -> impl Into<AnyElement<'static>> {
+    let effective_enabled = props.enabled && hooks.dialog_input_enabled();
     hooks.use_dialog_local_events({
         let enabled = props.enabled;
         let mut on_click = props.on_click.take();
@@ -57,7 +59,7 @@ fn QuotaFilterButton(
     });
     element! {
         View(flex_shrink: 0.0_f32) {
-            Text(content: props.label.clone(), color: if props.selected { Color::Yellow } else { Color::Cyan }, weight: if props.selected { Weight::Bold } else { Weight::Normal }, wrap: TextWrap::NoWrap)
+            Text(content: props.label.clone(), color: if !effective_enabled { Color::DarkGrey } else if props.selected || props.has_focus { Color::Yellow } else { Color::White }, weight: Weight::Bold, decoration: if effective_enabled && props.has_focus { TextDecoration::Underline } else { TextDecoration::None }, wrap: TextWrap::NoWrap)
         }
     }
 }
@@ -76,7 +78,7 @@ pub(super) fn render_quota_filter_toolbar(
     element! {
         View(width: width as u32, height: quota_filter_toolbar_height(width) as u32, flex_direction: if narrow { FlexDirection::Column } else { FlexDirection::Row }, column_gap: 2, flex_shrink: 0.0_f32) {
             View(column_gap:2,flex_shrink:0.0_f32) {
-                QuotaFilterButton(label: "Filters Ctrl+F/F3".to_owned(), enabled, on_click: on_open)
+                QuotaFilterButton(label: "Filters ▾".to_owned(), enabled, on_click: on_open)
                 #(render_quota_details_button(on_details))
             }
             Text(content: if width < 64 {
@@ -119,7 +121,8 @@ pub(super) fn render_quota_filter_chooser(
             element! {
                 QuotaFilterButton(
                     label: format!("{} {}", if selected { "●" } else { "○" }, provider.label()),
-                    selected: selected && draft.focus == QuotaFilterFocus::Provider,
+                    selected,
+                    has_focus: selected && draft.focus == QuotaFilterFocus::Provider,
                     enabled: true,
                     on_click: move |_| controller.dispatch(QuotaFilterAction::Provider(provider)),
                 )
@@ -129,7 +132,10 @@ pub(super) fn render_quota_filter_chooser(
         .collect::<Vec<_>>();
     element! {
         View(width: width as u32, flex_direction: FlexDirection::Column) {
-            Text(content: format!("Account provider · Draft: {}", draft.filters.provider.label()), color: Color::White, weight: Weight::Bold)
+            View(column_gap: 1) {
+                UiHeading(content: "Account provider".to_owned(), level: UiHeadingLevel::Section)
+                Text(content: format!("· Draft: {}", draft.filters.provider.label()), color: Color::Yellow, weight: Weight::Bold, wrap: TextWrap::NoWrap)
+            }
             #(if width < 64 {
                 element! {
                     View(flex_direction:FlexDirection::Column) {
@@ -141,7 +147,7 @@ pub(super) fn render_quota_filter_chooser(
                 element!(Text(content:format!("Current: {current_summary}"),color:Color::Grey,wrap:TextWrap::Wrap)).into_any()
             })
             #(provider_choices)
-            QuotaFilterButton(label: format!("Disabled accounts: {}", draft.filters.disabled.label()), selected: draft.focus == QuotaFilterFocus::Disabled, enabled: true, on_click: move |_| controller.dispatch(QuotaFilterAction::ToggleDisabled))
+            QuotaFilterButton(label: format!("Disabled accounts: {}", draft.filters.disabled.label()), has_focus: draft.focus == QuotaFilterFocus::Disabled, enabled: true, on_click: move |_| controller.dispatch(QuotaFilterAction::ToggleDisabled))
 
         }
     }.into_any()
@@ -150,7 +156,7 @@ pub(super) fn render_quota_filter_chooser(
 pub(super) fn render_quota_details_button(
     on_open: impl FnMut(()) + Send + Sync + 'static,
 ) -> AnyElement<'static> {
-    element!(QuotaFilterButton(label: "Details F4".to_owned(), enabled: true, on_click: on_open))
+    element!(QuotaFilterButton(label: "Details".to_owned(), enabled: true, on_click: on_open))
         .into_any()
 }
 
@@ -161,11 +167,9 @@ pub(super) fn render_quota_filter_actions(
     element! {
         View(flex_direction: FlexDirection::Column) {
 View(column_gap: 3, flex_direction: FlexDirection::Row) {
-                QuotaFilterButton(label: "Apply".to_owned(), selected: draft.focus == QuotaFilterFocus::Apply, enabled: true, on_click: move |_| controller.dispatch(QuotaFilterAction::Apply))
-                QuotaFilterButton(label: "Cancel".to_owned(), selected: draft.focus == QuotaFilterFocus::Cancel, enabled: true, on_click: move |_| controller.dispatch(QuotaFilterAction::Cancel))
+                QuotaFilterButton(label: "Apply".to_owned(), has_focus: draft.focus == QuotaFilterFocus::Apply, enabled: true, on_click: move |_| controller.dispatch(QuotaFilterAction::Apply))
+                QuotaFilterButton(label: "Cancel".to_owned(), has_focus: draft.focus == QuotaFilterFocus::Cancel, enabled: true, on_click: move |_| controller.dispatch(QuotaFilterAction::Cancel))
             }
-            Text(content: "↑/↓ provider · tab focus · space toggle", color: Color::Grey)
-            Text(content: "enter apply · esc cancel", color: Color::Grey)
         }
     }.into_any()
 }

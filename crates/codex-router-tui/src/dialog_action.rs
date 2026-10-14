@@ -18,7 +18,8 @@ pub fn DialogAction(props: &mut DialogActionProps, hooks: Hooks) -> impl Into<An
         Button(has_focus: enabled && props.has_focus, handler: move |_| {
             if enabled { handler(()); }
         }) {
-            Text(content: props.label.clone(), color: if props.has_focus { Color::Yellow } else { Color::Cyan }, weight: Weight::Bold)
+            Text(content: props.label.clone(), color: if !enabled { Color::DarkGrey } else if props.has_focus { Color::Yellow } else { Color::White }, weight: Weight::Bold,
+                decoration: if enabled && props.has_focus { TextDecoration::Underline } else { TextDecoration::None })
         }
     }
 }

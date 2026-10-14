@@ -45,3 +45,5 @@ pub(crate) use picker_request::SessionsPickerDataQuery;
 pub(crate) use picker_request::SessionsPickerRecordLoader;
 pub(crate) use picker_request::SessionsPickerRequest;
 pub(crate) use picker_request::SessionsPickerRoot;
+
+mod picker_help_view;

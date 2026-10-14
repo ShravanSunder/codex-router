@@ -18,7 +18,8 @@ pub(super) struct QuotaDialogViewProps<'a> {
     pub view_model: &'a QuotaStatusViewModel,
     pub sidecar: bool,
     pub filter_modal_owns_input: bool,
-    pub footer_line: String,
+    pub help_action: Option<AnyElement<'static>>,
+    pub actions: Vec<AnyElement<'static>>,
     pub panel: QuotaDetailPanelProps<'a>,
 }
 
@@ -43,7 +44,8 @@ pub(super) fn render_quota_dialog(props: QuotaDialogViewProps<'_>) -> Option<Any
         view_model,
         sidecar,
         filter_modal_owns_input,
-        footer_line,
+        help_action,
+        actions,
         mut panel,
     } = props;
     let short_editor = filter_modal_owns_input && height < 28;
@@ -67,7 +69,7 @@ pub(super) fn render_quota_dialog(props: QuotaDialogViewProps<'_>) -> Option<Any
     };
     if let Some(draft) = filter_state.draft.filter(|_| !filter_modal_owns_input) {
         return Some(element! {
-            DialogFrame(width,height,title:"Quota status · Filters".to_owned(),
+            DialogFrame(width,height,title:"Account filters".to_owned(),help_action,
                 presentation:if width<90 {DialogPresentation::FullScreen} else {DialogPresentation::Framed{maximum_width:72,maximum_height:16}},
                 margins,
                 actions:vec![render_quota_filter_actions(draft,filter_controller)]) {
@@ -103,20 +105,20 @@ pub(super) fn render_quota_dialog(props: QuotaDialogViewProps<'_>) -> Option<Any
         panel
             .focused_details
             .map(|details| {
-                render_selected_details(details, usize::from(frame_width).saturating_sub(4))
+                render_selected_details(details, usize::from(frame_width).saturating_sub(4), true)
             })
             .unwrap_or_else(|| {
                 element!(Text(content:"No selectable account",color:Color::Grey)).into_any()
             })
     };
     Some(element! {
-        DialogFrame(width,height,title:"Quota status · Account details".to_owned(),presentation,margins,
+        DialogFrame(width,height,title:"Account details".to_owned(),presentation,margins,help_action,
             padding: if short_editor { 0u16 } else { 1u16 },
             keyboard_scroll:!filter_modal_owns_input,
             actions:if filter_modal_owns_input {
-                vec![element!(Text(content:footer_line,color:Color::Grey)).into_any()]
+                actions
             } else {
-                vec![element!(DialogAction(label:"Close · Esc",handler:move |_|details_dialog.set(None))).into_any()]
+                vec![element!(DialogAction(label:"Close",handler:move |_|details_dialog.set(None))).into_any()]
             }) {
             #(content)
         }
