@@ -798,6 +798,9 @@ fn failure_class_from_proxy_error(error: &HttpProxyError) -> &'static str {
         HttpProxyError::Upstream { .. } => "upstream_failure",
         HttpProxyError::ProviderCredential { .. } => "credential_unavailable",
         HttpProxyError::Selection { reason } => match reason {
+            crate::account_selection::QuotaAwareAccountSelectorError::NoConfiguredOpenaiAccounts => {
+                "no_openai_accounts_configured"
+            }
             crate::account_selection::QuotaAwareAccountSelectorError::NoEligibleAccounts => {
                 "no_eligible_account"
             }

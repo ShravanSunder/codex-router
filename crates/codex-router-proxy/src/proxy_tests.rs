@@ -317,6 +317,9 @@ mod websocket_routing_tests;
 #[path = "proxy_tests/websocket_upgrade_tests.rs"]
 mod websocket_upgrade_tests;
 
+#[path = "proxy_tests/no_openai_accounts_tests.rs"]
+mod no_openai_accounts_tests;
+
 #[path = "tests/credit_affinity_transport.rs"]
 mod credit_affinity_transport;
 

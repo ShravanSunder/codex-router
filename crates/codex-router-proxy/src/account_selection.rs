@@ -138,7 +138,7 @@ use affinity_admission::{
 use assessment_selection::{
     assessment_has_unavailable_quota_authority, empty_assessment_selection_error,
     filter_selector_accounts_for_provider, projected_accounts_excluding_attempted,
-    select_from_burn_down_assessment,
+    require_configured_openai_accounts, select_from_burn_down_assessment,
 };
 use request_metadata::{
     previous_response_id, route_kind_for_request, route_profile_for_kind,
@@ -479,6 +479,9 @@ pub struct QuotaAwareAccountState {
 /// Selection adapter failure.
 #[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
 pub enum QuotaAwareAccountSelectorError {
+    /// The selected Router has no configured OpenAI account, including disabled accounts.
+    #[error("no OpenAI accounts are configured for this Router")]
+    NoConfiguredOpenaiAccounts,
     /// No account has usable headroom.
     #[error("no eligible accounts")]
     NoEligibleAccounts,

@@ -316,6 +316,9 @@ where
 fn pre_upstream_router_signal(close_reason: &WebSocketCloseReason) -> Option<String> {
     match close_reason {
         WebSocketCloseReason::Selection {
+            reason: QuotaAwareAccountSelectorError::NoConfiguredOpenaiAccounts,
+        } => Some(ROUTER_NO_OPENAI_ACCOUNTS_SIGNAL.to_owned()),
+        WebSocketCloseReason::Selection {
             reason: QuotaAwareAccountSelectorError::NoEligibleAccounts,
         } => Some(ROUTER_ALL_ACCOUNTS_EXHAUSTED_SIGNAL.to_owned()),
         WebSocketCloseReason::Selection {

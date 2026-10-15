@@ -309,7 +309,7 @@ async fn account_hold_lock_failure_is_separate_from_weighted_selector_failure() 
 }
 
 #[tokio::test]
-async fn empty_sqlite_selection_emits_no_eligible_assessment_class() {
+async fn empty_sqlite_selection_emits_no_openai_configuration_class() {
     let (_temporary_directory, store) = open_local_migrated_store().await;
     let selector = selector_with_runtime_state(&store, default_runtime_state());
 
@@ -321,11 +321,11 @@ async fn empty_sqlite_selection_emits_no_eligible_assessment_class() {
     .await;
 
     assert!(captured_logs.contains("selection.stage=\"assessment\""));
-    assert!(captured_logs.contains("error.class=\"no_eligible_accounts\""));
+    assert!(captured_logs.contains("error.class=\"no_openai_accounts_configured\""));
     assert!(matches!(
         result,
         Err(crate::http_sse::HttpProxyError::Selection {
-            reason: super::QuotaAwareAccountSelectorError::NoEligibleAccounts,
+            reason: super::QuotaAwareAccountSelectorError::NoConfiguredOpenaiAccounts,
         })
     ));
 }
