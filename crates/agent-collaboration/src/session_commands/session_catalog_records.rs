@@ -323,10 +323,14 @@ impl SessionPickerRecord {
         let session_id = String::from(target.session_id.clone());
         let cwd = String::from(working_directory.clone());
         let updated_at_ms = updated_at_seconds.saturating_mul(1_000);
+        let name = name.and_then(|name| {
+            let name = name.trim();
+            (!name.is_empty()).then(|| name.to_owned())
+        });
+        let context = session_context_from_cwd(&cwd);
         let title = name
             .clone()
-            .unwrap_or_else(|| format!("{endpoint_label} · {session_id}"));
-        let context = session_context_from_cwd(&cwd);
+            .unwrap_or_else(|| format!("{endpoint_label} session · {context}"));
         Self {
             identity: SessionPickerIdentity::HostedProvider(target.clone()),
             provider_family: match summary {

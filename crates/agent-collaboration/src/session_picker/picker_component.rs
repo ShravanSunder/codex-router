@@ -230,6 +230,37 @@ pub(crate) fn SessionsPickerComponent<'a>(
                 }
                 return;
             }
+            if let TerminalEvent::BracketedPaste(text) = event {
+                if width < MIN_PICKER_WIDTH
+                    || should_cancel.get()
+                    || selected_outcome.read().is_some()
+                {
+                    return;
+                }
+                let mut model_value = model.write();
+                if model_value.show_help
+                    || model_value.fork_confirmation.is_some()
+                    || model_value.provider_filter_draft.is_some()
+                    || model_value.details_dialog.is_some()
+                    || !matches!(
+                        model_value.machine_controls.stage,
+                        PickerMachineStage::Browsing
+                    )
+                {
+                    return;
+                }
+                let previous_query = model_value.data_query();
+                model_value.append_search_text(&text);
+                let changed = model_value.data_query() != previous_query;
+                drop(model_value);
+                if changed {
+                    conversation_cache.write().invalidate();
+                    let generation = reload_generation.get().saturating_add(1);
+                    reload_generation.set(generation);
+                    reload_port.send(model.write().prepare_source_reload(generation));
+                }
+                return;
+            }
             let TerminalEvent::Key(KeyEvent {
                 code,
                 kind,
@@ -551,6 +582,7 @@ pub(crate) fn run_sessions_picker(
             )
         }
         .render_loop()
+        .enable_bracketed_paste()
         .fullscreen()
         .ignore_ctrl_c(),
     )?;

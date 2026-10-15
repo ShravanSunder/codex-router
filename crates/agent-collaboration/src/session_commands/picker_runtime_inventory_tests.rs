@@ -436,6 +436,40 @@ fn claude_interactive_picker_timestamps_convert_seconds_to_milliseconds_once() {
     assert_eq!(row.title, "Interactive fixture");
 }
 
+#[test]
+fn owner_feedback_provider_names_are_readable_and_identity_stays_searchable() {
+    const SESSION_ID: &str = "00000000-0000-4000-8000-000000000042";
+    for (name, expected_title) in [
+        (
+            Some("  Investigate quota refresh  "),
+            "Investigate quota refresh",
+        ),
+        (Some(" \t "), "Claude session · project-a"),
+        (None, "Claude session · project-a"),
+    ] {
+        let summary: collaboration_client::protocol::ProviderSessionSummary = serde_json::from_value(json!({
+            "origin":"claudeCodeInteractive",
+            "target":{"endpoint":{"serviceId":SERVICE,"endpointId":"claude-local"},"sessionId":SESSION_ID},
+            "name":name,"workingDirectory":"/repo/project-a",
+            "status":"idle","startedAt":1,"updatedAt":3,
+            "statusUpdatedAt":3,"kind":"interactive","entrypoint":"cli"
+        })).expect("interactive source fields");
+        let row = SessionPickerRecord::from_provider_summary(&summary, "Claude");
+        assert_eq!(
+            row.title, expected_title,
+            "use available name or honest directory context"
+        );
+        assert!(
+            !row.title.contains(SESSION_ID),
+            "identity is not the primary title"
+        );
+        assert_eq!(row.session_id, SESSION_ID);
+        assert!(row.matches_search(
+            &collaboration_client::session_catalog::SessionSearchExpression::parse(SESSION_ID)
+        ));
+    }
+}
+
 #[tokio::test]
 async fn unavailable_service_clears_remembered_provider_state() {
     let summary: collaboration_client::protocol::ProviderSessionSummary =

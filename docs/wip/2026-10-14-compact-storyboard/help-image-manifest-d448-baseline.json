@@ -1,0 +1,639 @@
+{
+  "source_commit": "d448337c5908abd6f99f0a38404d9fac9dc6d815",
+  "version": "0.1.96",
+  "fixture": "Synthetic typed inventory; actual compiled TUI, input and rendering",
+  "images": [
+    {
+      "path": "images/120x36-compact-sessions-all.png",
+      "surface": "sessions",
+      "columns": 120,
+      "rows": 36,
+      "checkpoint": "compact-sessions-all",
+      "bytes": 120740,
+      "sha256": "46913222feaea906764352d11cea3122fe163784fe94684c4e438332c32db72e"
+    },
+    {
+      "path": "images/76x30-compact-sessions-all.png",
+      "surface": "sessions",
+      "columns": 76,
+      "rows": 30,
+      "checkpoint": "compact-sessions-all",
+      "bytes": 84810,
+      "sha256": "faad60c6ad39faecac3a324e5696db08319b8d702ffc5b208b4ca5be857682ff"
+    },
+    {
+      "path": "images/48x24-compact-sessions-all.png",
+      "surface": "sessions",
+      "columns": 48,
+      "rows": 24,
+      "checkpoint": "compact-sessions-all",
+      "bytes": 50337,
+      "sha256": "298dbe4ac453b9aca51280f378b7b7d7e83d4706d9125a32ede040f26dc431a9"
+    },
+    {
+      "path": "images/120x36-compact-sessions-chooser.png",
+      "surface": "sessions",
+      "columns": 120,
+      "rows": 36,
+      "checkpoint": "compact-sessions-chooser",
+      "bytes": 124379,
+      "sha256": "5654e2c7522b6df3093a436b15e0be3b94e28fdf7d7a0169f3bf29f70edf3594"
+    },
+    {
+      "path": "images/76x30-compact-sessions-chooser.png",
+      "surface": "sessions",
+      "columns": 76,
+      "rows": 30,
+      "checkpoint": "compact-sessions-chooser",
+      "bytes": 66861,
+      "sha256": "5de30b2d6d19698fed8d99245b8c93fdb1bc0d4f45a05fbacb9a69c3990e342c"
+    },
+    {
+      "path": "images/48x24-compact-sessions-chooser.png",
+      "surface": "sessions",
+      "columns": 48,
+      "rows": 24,
+      "checkpoint": "compact-sessions-chooser",
+      "bytes": 44015,
+      "sha256": "5c545db253eea5f77ac9042809aa72f33c3b6fc56453b45164152271ac897c7b"
+    },
+    {
+      "path": "images/120x36-compact-sessions-help.png",
+      "surface": "sessions",
+      "columns": 120,
+      "rows": 36,
+      "checkpoint": "compact-sessions-help",
+      "bytes": 190088,
+      "sha256": "1e0e6f1f92f30030a3fc3497e92e58486c33ee566f5498154214071bf5d1a12f"
+    },
+    {
+      "path": "images/76x30-compact-sessions-help.png",
+      "surface": "sessions",
+      "columns": 76,
+      "rows": 30,
+      "checkpoint": "compact-sessions-help",
+      "bytes": 126827,
+      "sha256": "e93103ff855cdbda7ed67b261597636bb2c6f7e360b49a86aaa04bc354ace161"
+    },
+    {
+      "path": "images/48x24-compact-sessions-help.png",
+      "surface": "sessions",
+      "columns": 48,
+      "rows": 24,
+      "checkpoint": "compact-sessions-help",
+      "bytes": 77694,
+      "sha256": "9d4a2047b811012f5a6a47133b19fcbe8cccb70df5e28541d16290e0f4bfbf72"
+    },
+    {
+      "path": "images/120x36-compact-sessions-claude.png",
+      "surface": "sessions",
+      "columns": 120,
+      "rows": 36,
+      "checkpoint": "compact-sessions-claude",
+      "bytes": 77170,
+      "sha256": "3cc78c99923c8cd120ed8d9eb064c2ff3fdfbaa02c9dafad934ba8c52fbbca93"
+    },
+    {
+      "path": "images/76x30-compact-sessions-claude.png",
+      "surface": "sessions",
+      "columns": 76,
+      "rows": 30,
+      "checkpoint": "compact-sessions-claude",
+      "bytes": 68287,
+      "sha256": "f757305fab59a54dcf08d2926bc817b792956b9d68a6169fe28169a7efc54ce2"
+    },
+    {
+      "path": "images/48x24-compact-sessions-claude.png",
+      "surface": "sessions",
+      "columns": 48,
+      "rows": 24,
+      "checkpoint": "compact-sessions-claude",
+      "bytes": 52648,
+      "sha256": "28525af43180b0b92f2471b2ba81358e33d87ad0676301b1669c00045d8f4dfc"
+    },
+    {
+      "path": "images/120x36-compact-sessions-cancelled.png",
+      "surface": "sessions",
+      "columns": 120,
+      "rows": 36,
+      "checkpoint": "compact-sessions-cancelled",
+      "bytes": 77170,
+      "sha256": "3cc78c99923c8cd120ed8d9eb064c2ff3fdfbaa02c9dafad934ba8c52fbbca93"
+    },
+    {
+      "path": "images/76x30-compact-sessions-cancelled.png",
+      "surface": "sessions",
+      "columns": 76,
+      "rows": 30,
+      "checkpoint": "compact-sessions-cancelled",
+      "bytes": 68287,
+      "sha256": "f757305fab59a54dcf08d2926bc817b792956b9d68a6169fe28169a7efc54ce2"
+    },
+    {
+      "path": "images/48x24-compact-sessions-cancelled.png",
+      "surface": "sessions",
+      "columns": 48,
+      "rows": 24,
+      "checkpoint": "compact-sessions-cancelled",
+      "bytes": 52648,
+      "sha256": "28525af43180b0b92f2471b2ba81358e33d87ad0676301b1669c00045d8f4dfc"
+    },
+    {
+      "path": "images/120x36-compact-sessions-details.png",
+      "surface": "sessions",
+      "columns": 120,
+      "rows": 36,
+      "checkpoint": "compact-sessions-details",
+      "bytes": 98150,
+      "sha256": "4ded30c5618b51e2daca06ea4091bd4b72e5a3ec784aadf90ee91da51a9bb7e9"
+    },
+    {
+      "path": "images/76x30-compact-sessions-details.png",
+      "surface": "sessions",
+      "columns": 76,
+      "rows": 30,
+      "checkpoint": "compact-sessions-details",
+      "bytes": 65576,
+      "sha256": "482b668ceb1a17c3d5b3f726f7d74652a1ef137d2babd3917017db34be456e01"
+    },
+    {
+      "path": "images/48x24-compact-sessions-details.png",
+      "surface": "sessions",
+      "columns": 48,
+      "rows": 24,
+      "checkpoint": "compact-sessions-details",
+      "bytes": 59725,
+      "sha256": "f80090c7c022bb43eae8de889ab4f0dea087f56c93d02f7cde8bde4be197012b"
+    },
+    {
+      "path": "images/120x36-compact-quota-all.png",
+      "surface": "quota",
+      "columns": 120,
+      "rows": 36,
+      "checkpoint": "compact-quota-all",
+      "bytes": 178025,
+      "sha256": "9a6735d984bbf681e9f61c5edb50cab0c78f41ba4c02e6cee72b69c085378117"
+    },
+    {
+      "path": "images/76x30-compact-quota-all.png",
+      "surface": "quota",
+      "columns": 76,
+      "rows": 30,
+      "checkpoint": "compact-quota-all",
+      "bytes": 172825,
+      "sha256": "656bd5ad563bbfeb02ba5454ae2656c00376ec186e2f85ee2ea8cd397ae298f6"
+    },
+    {
+      "path": "images/48x24-compact-quota-all.png",
+      "surface": "quota",
+      "columns": 48,
+      "rows": 24,
+      "checkpoint": "compact-quota-all",
+      "bytes": 102482,
+      "sha256": "a463228a08bb663144745070b44be2377946e7031af2043975d655383898a8ce"
+    },
+    {
+      "path": "images/120x36-compact-quota-chooser.png",
+      "surface": "quota",
+      "columns": 120,
+      "rows": 36,
+      "checkpoint": "compact-quota-chooser",
+      "bytes": 131819,
+      "sha256": "2905bb57db6e69dc9451e111de6d758ca75fee4db960fc9d847407c7b71a95bb"
+    },
+    {
+      "path": "images/76x30-compact-quota-chooser.png",
+      "surface": "quota",
+      "columns": 76,
+      "rows": 30,
+      "checkpoint": "compact-quota-chooser",
+      "bytes": 47201,
+      "sha256": "5c39888342439bab5c7329b25ddf74f621bbce4cb6f1b80a8eb86df2b0cc5749"
+    },
+    {
+      "path": "images/48x24-compact-quota-chooser.png",
+      "surface": "quota",
+      "columns": 48,
+      "rows": 24,
+      "checkpoint": "compact-quota-chooser",
+      "bytes": 46830,
+      "sha256": "19e642572f2a5ee25879e4aef2b392e1a4bc2f999b6572bd28c00218c83e19ef"
+    },
+    {
+      "path": "images/120x36-compact-quota-help.png",
+      "surface": "quota",
+      "columns": 120,
+      "rows": 36,
+      "checkpoint": "compact-quota-help",
+      "bytes": 105181,
+      "sha256": "304d513b67307cb8d7dd92e3ce4b9db3eaf5034ba47df4379c294cb423a4745e"
+    },
+    {
+      "path": "images/76x30-compact-quota-help.png",
+      "surface": "quota",
+      "columns": 76,
+      "rows": 30,
+      "checkpoint": "compact-quota-help",
+      "bytes": 63313,
+      "sha256": "2421abe5892b025732418d44692a2d3c793eca86db18f0ec20e8e0cac1597329"
+    },
+    {
+      "path": "images/48x24-compact-quota-help.png",
+      "surface": "quota",
+      "columns": 48,
+      "rows": 24,
+      "checkpoint": "compact-quota-help",
+      "bytes": 64655,
+      "sha256": "34c4a66cde112c55b88dd6ad4d177f590126d88699791ae07b6b80318e6bd7d3"
+    },
+    {
+      "path": "images/120x36-compact-quota-claude.png",
+      "surface": "quota",
+      "columns": 120,
+      "rows": 36,
+      "checkpoint": "compact-quota-claude",
+      "bytes": 79524,
+      "sha256": "5d16aa4558d143b2634fabc58e9ac86f385be955ba450df2edb6e5e4e9da1e1d"
+    },
+    {
+      "path": "images/76x30-compact-quota-claude.png",
+      "surface": "quota",
+      "columns": 76,
+      "rows": 30,
+      "checkpoint": "compact-quota-claude",
+      "bytes": 76827,
+      "sha256": "0947413f2920c94803ff0ade77aea753439c1ceb8817c3d8d4d95bede04242cc"
+    },
+    {
+      "path": "images/48x24-compact-quota-claude.png",
+      "surface": "quota",
+      "columns": 48,
+      "rows": 24,
+      "checkpoint": "compact-quota-claude",
+      "bytes": 59606,
+      "sha256": "13cd1292cf0b9a6942f5eb04bf034004f8a1c289e587ac92e8839881c07b9221"
+    },
+    {
+      "path": "images/120x36-compact-quota-cancelled.png",
+      "surface": "quota",
+      "columns": 120,
+      "rows": 36,
+      "checkpoint": "compact-quota-cancelled",
+      "bytes": 79500,
+      "sha256": "172a2e5089cdd5ef867784ec852abf02496307677e1de0361178f440c0f0655d"
+    },
+    {
+      "path": "images/76x30-compact-quota-cancelled.png",
+      "surface": "quota",
+      "columns": 76,
+      "rows": 30,
+      "checkpoint": "compact-quota-cancelled",
+      "bytes": 76800,
+      "sha256": "70c784991dfed73a7854a92a44e8323c49b6c5e00169ca5ad3a58527471bc510"
+    },
+    {
+      "path": "images/48x24-compact-quota-cancelled.png",
+      "surface": "quota",
+      "columns": 48,
+      "rows": 24,
+      "checkpoint": "compact-quota-cancelled",
+      "bytes": 59603,
+      "sha256": "c1ed4533b4059310def703dbe79fd42b69df6880f06dfbcf48a3d30a1fba9614"
+    },
+    {
+      "path": "images/120x36-compact-quota-details.png",
+      "surface": "quota",
+      "columns": 120,
+      "rows": 36,
+      "checkpoint": "compact-quota-details",
+      "bytes": 127663,
+      "sha256": "5455a94885b5c656f96b2348d08f1c8fbdbb574548d03541243149bc616da402"
+    },
+    {
+      "path": "images/76x30-compact-quota-details.png",
+      "surface": "quota",
+      "columns": 76,
+      "rows": 30,
+      "checkpoint": "compact-quota-details",
+      "bytes": 93996,
+      "sha256": "4291ee79f9adc3a52a24610550f81792a46f2bb31981a625488f8818e74d218e"
+    },
+    {
+      "path": "images/48x24-compact-quota-details.png",
+      "surface": "quota",
+      "columns": 48,
+      "rows": 24,
+      "checkpoint": "compact-quota-details",
+      "bytes": 78614,
+      "sha256": "3aafb6e703ae7e9a7b81793324cacc0fe2697675b3f1d31be6700cd0fe6f3438"
+    }
+  ],
+  "receipts": [
+    {
+      "surface": "sessions",
+      "columns": 120,
+      "rows": 36,
+      "sha256": "429d4043465aff1316497b7993dd0d33fb92baa814f3fd68b6615216b74f4a86",
+      "receipt": {
+        "surface": "sessions",
+        "columns": 120,
+        "rows": 36,
+        "binary_sha256": "eb0039cc5968f387907e5c31c63a8e0babb72ccbaccc85b51b8df6432bd63724",
+        "vhs_sha256": "abe4a8cb35f31364da680955d9b05b046b9b7eef571c653d7bd0c26ec24b3b5d",
+        "ttyd_sha256": "be2cc452a22260a2c29517526be0edbd2a296690d176ceaa289a26c4d4b4405e",
+        "verifier_sha256": "fbf24438503a20f87a0f0f908d68e880f5b69782dfe04344c6a19a7b7686c021",
+        "verifier_source_sha256": "be256521d2b1c6f7ebad3af7358346aafd89ac9847e1e7f8447d2bc316941267",
+        "driver_source_sha256": "77316155f3365c52ff7c36d272a82c93e4c2eb5cefcad31e05db2a7597d12553",
+        "tape_driver_source_sha256": "ac20b020d324920f568b0624df329d1bcea5497cfbebfed0bbb07ee39affaf31",
+        "fixed_child_sha256": "f1eb617dbda2729c46bbaff323e255486619661a7169589ba56f89bbac3e3517",
+        "tape_sha256": "1a3a0adc508937fc32e956e511650aae1825c1a51ef8a62cc8f0a37221918252",
+        "state_and_secrets_unchanged": true,
+        "provider_requests": 0,
+        "child_exit": 0,
+        "owned_processes_stopped": true,
+        "fixture": "synthetic typed inputs; actual compiled UI/input/rendering",
+        "images": [
+          {
+            "checkpoint": "compact-sessions-all",
+            "png_sha256": "46913222feaea906764352d11cea3122fe163784fe94684c4e438332c32db72e"
+          },
+          {
+            "checkpoint": "compact-sessions-chooser",
+            "png_sha256": "5654e2c7522b6df3093a436b15e0be3b94e28fdf7d7a0169f3bf29f70edf3594"
+          },
+          {
+            "checkpoint": "compact-sessions-help",
+            "png_sha256": "1e0e6f1f92f30030a3fc3497e92e58486c33ee566f5498154214071bf5d1a12f"
+          },
+          {
+            "checkpoint": "compact-sessions-claude",
+            "png_sha256": "3cc78c99923c8cd120ed8d9eb064c2ff3fdfbaa02c9dafad934ba8c52fbbca93"
+          },
+          {
+            "checkpoint": "compact-sessions-cancelled",
+            "png_sha256": "3cc78c99923c8cd120ed8d9eb064c2ff3fdfbaa02c9dafad934ba8c52fbbca93"
+          },
+          {
+            "checkpoint": "compact-sessions-details",
+            "png_sha256": "4ded30c5618b51e2daca06ea4091bd4b72e5a3ec784aadf90ee91da51a9bb7e9"
+          }
+        ]
+      }
+    },
+    {
+      "surface": "sessions",
+      "columns": 76,
+      "rows": 30,
+      "sha256": "c0148c871043174dbe115a44b8ca2cb264142b2c0ba046bd42bb704ace06f4b8",
+      "receipt": {
+        "surface": "sessions",
+        "columns": 76,
+        "rows": 30,
+        "binary_sha256": "eb0039cc5968f387907e5c31c63a8e0babb72ccbaccc85b51b8df6432bd63724",
+        "vhs_sha256": "abe4a8cb35f31364da680955d9b05b046b9b7eef571c653d7bd0c26ec24b3b5d",
+        "ttyd_sha256": "be2cc452a22260a2c29517526be0edbd2a296690d176ceaa289a26c4d4b4405e",
+        "verifier_sha256": "fbf24438503a20f87a0f0f908d68e880f5b69782dfe04344c6a19a7b7686c021",
+        "verifier_source_sha256": "be256521d2b1c6f7ebad3af7358346aafd89ac9847e1e7f8447d2bc316941267",
+        "driver_source_sha256": "77316155f3365c52ff7c36d272a82c93e4c2eb5cefcad31e05db2a7597d12553",
+        "tape_driver_source_sha256": "ac20b020d324920f568b0624df329d1bcea5497cfbebfed0bbb07ee39affaf31",
+        "fixed_child_sha256": "f1eb617dbda2729c46bbaff323e255486619661a7169589ba56f89bbac3e3517",
+        "tape_sha256": "e071cd7376a7b81dca64b78000a46c9fd2b01863eeb4cbfeaaf3f3b758bef34b",
+        "state_and_secrets_unchanged": true,
+        "provider_requests": 0,
+        "child_exit": 0,
+        "owned_processes_stopped": true,
+        "fixture": "synthetic typed inputs; actual compiled UI/input/rendering",
+        "images": [
+          {
+            "checkpoint": "compact-sessions-all",
+            "png_sha256": "faad60c6ad39faecac3a324e5696db08319b8d702ffc5b208b4ca5be857682ff"
+          },
+          {
+            "checkpoint": "compact-sessions-chooser",
+            "png_sha256": "5de30b2d6d19698fed8d99245b8c93fdb1bc0d4f45a05fbacb9a69c3990e342c"
+          },
+          {
+            "checkpoint": "compact-sessions-help",
+            "png_sha256": "e93103ff855cdbda7ed67b261597636bb2c6f7e360b49a86aaa04bc354ace161"
+          },
+          {
+            "checkpoint": "compact-sessions-claude",
+            "png_sha256": "f757305fab59a54dcf08d2926bc817b792956b9d68a6169fe28169a7efc54ce2"
+          },
+          {
+            "checkpoint": "compact-sessions-cancelled",
+            "png_sha256": "f757305fab59a54dcf08d2926bc817b792956b9d68a6169fe28169a7efc54ce2"
+          },
+          {
+            "checkpoint": "compact-sessions-details",
+            "png_sha256": "482b668ceb1a17c3d5b3f726f7d74652a1ef137d2babd3917017db34be456e01"
+          }
+        ]
+      }
+    },
+    {
+      "surface": "sessions",
+      "columns": 48,
+      "rows": 24,
+      "sha256": "eafc8cee9a8b66cb582d8c4b455e3d71a9df891e3b3238261066c6e750290551",
+      "receipt": {
+        "surface": "sessions",
+        "columns": 48,
+        "rows": 24,
+        "binary_sha256": "eb0039cc5968f387907e5c31c63a8e0babb72ccbaccc85b51b8df6432bd63724",
+        "vhs_sha256": "abe4a8cb35f31364da680955d9b05b046b9b7eef571c653d7bd0c26ec24b3b5d",
+        "ttyd_sha256": "be2cc452a22260a2c29517526be0edbd2a296690d176ceaa289a26c4d4b4405e",
+        "verifier_sha256": "fbf24438503a20f87a0f0f908d68e880f5b69782dfe04344c6a19a7b7686c021",
+        "verifier_source_sha256": "be256521d2b1c6f7ebad3af7358346aafd89ac9847e1e7f8447d2bc316941267",
+        "driver_source_sha256": "77316155f3365c52ff7c36d272a82c93e4c2eb5cefcad31e05db2a7597d12553",
+        "tape_driver_source_sha256": "ac20b020d324920f568b0624df329d1bcea5497cfbebfed0bbb07ee39affaf31",
+        "fixed_child_sha256": "f1eb617dbda2729c46bbaff323e255486619661a7169589ba56f89bbac3e3517",
+        "tape_sha256": "7c1ab2e2c8ae27869260c4daa51f492eb1c07b766f4e777bcbe1cd30e4be6c99",
+        "state_and_secrets_unchanged": true,
+        "provider_requests": 0,
+        "child_exit": 0,
+        "owned_processes_stopped": true,
+        "fixture": "synthetic typed inputs; actual compiled UI/input/rendering",
+        "images": [
+          {
+            "checkpoint": "compact-sessions-all",
+            "png_sha256": "298dbe4ac453b9aca51280f378b7b7d7e83d4706d9125a32ede040f26dc431a9"
+          },
+          {
+            "checkpoint": "compact-sessions-chooser",
+            "png_sha256": "5c545db253eea5f77ac9042809aa72f33c3b6fc56453b45164152271ac897c7b"
+          },
+          {
+            "checkpoint": "compact-sessions-help",
+            "png_sha256": "9d4a2047b811012f5a6a47133b19fcbe8cccb70df5e28541d16290e0f4bfbf72"
+          },
+          {
+            "checkpoint": "compact-sessions-claude",
+            "png_sha256": "28525af43180b0b92f2471b2ba81358e33d87ad0676301b1669c00045d8f4dfc"
+          },
+          {
+            "checkpoint": "compact-sessions-cancelled",
+            "png_sha256": "28525af43180b0b92f2471b2ba81358e33d87ad0676301b1669c00045d8f4dfc"
+          },
+          {
+            "checkpoint": "compact-sessions-details",
+            "png_sha256": "f80090c7c022bb43eae8de889ab4f0dea087f56c93d02f7cde8bde4be197012b"
+          }
+        ]
+      }
+    },
+    {
+      "surface": "quota",
+      "columns": 120,
+      "rows": 36,
+      "sha256": "00c7130d22bb6bf799653da0ddf2bc3d58680894015a7d76d0426a8507de4526",
+      "receipt": {
+        "surface": "quota",
+        "columns": 120,
+        "rows": 36,
+        "binary_sha256": "eb0039cc5968f387907e5c31c63a8e0babb72ccbaccc85b51b8df6432bd63724",
+        "vhs_sha256": "abe4a8cb35f31364da680955d9b05b046b9b7eef571c653d7bd0c26ec24b3b5d",
+        "ttyd_sha256": "be2cc452a22260a2c29517526be0edbd2a296690d176ceaa289a26c4d4b4405e",
+        "verifier_sha256": "fbf24438503a20f87a0f0f908d68e880f5b69782dfe04344c6a19a7b7686c021",
+        "verifier_source_sha256": "be256521d2b1c6f7ebad3af7358346aafd89ac9847e1e7f8447d2bc316941267",
+        "driver_source_sha256": "77316155f3365c52ff7c36d272a82c93e4c2eb5cefcad31e05db2a7597d12553",
+        "tape_driver_source_sha256": "ac20b020d324920f568b0624df329d1bcea5497cfbebfed0bbb07ee39affaf31",
+        "fixed_child_sha256": "f1eb617dbda2729c46bbaff323e255486619661a7169589ba56f89bbac3e3517",
+        "tape_sha256": "a93cd9db569556ffdc6f048ef4cb5f164897e79ae115ec98935841b158737644",
+        "state_and_secrets_unchanged": true,
+        "provider_requests": 0,
+        "child_exit": 0,
+        "owned_processes_stopped": true,
+        "fixture": "synthetic typed inputs; actual compiled UI/input/rendering",
+        "images": [
+          {
+            "checkpoint": "compact-quota-all",
+            "png_sha256": "9a6735d984bbf681e9f61c5edb50cab0c78f41ba4c02e6cee72b69c085378117"
+          },
+          {
+            "checkpoint": "compact-quota-chooser",
+            "png_sha256": "2905bb57db6e69dc9451e111de6d758ca75fee4db960fc9d847407c7b71a95bb"
+          },
+          {
+            "checkpoint": "compact-quota-help",
+            "png_sha256": "304d513b67307cb8d7dd92e3ce4b9db3eaf5034ba47df4379c294cb423a4745e"
+          },
+          {
+            "checkpoint": "compact-quota-claude",
+            "png_sha256": "5d16aa4558d143b2634fabc58e9ac86f385be955ba450df2edb6e5e4e9da1e1d"
+          },
+          {
+            "checkpoint": "compact-quota-cancelled",
+            "png_sha256": "172a2e5089cdd5ef867784ec852abf02496307677e1de0361178f440c0f0655d"
+          },
+          {
+            "checkpoint": "compact-quota-details",
+            "png_sha256": "5455a94885b5c656f96b2348d08f1c8fbdbb574548d03541243149bc616da402"
+          }
+        ]
+      }
+    },
+    {
+      "surface": "quota",
+      "columns": 76,
+      "rows": 30,
+      "sha256": "96c8450be99a4fb2d50cb5595664f629abf5abe94891ca480f580d5893b9c80a",
+      "receipt": {
+        "surface": "quota",
+        "columns": 76,
+        "rows": 30,
+        "binary_sha256": "eb0039cc5968f387907e5c31c63a8e0babb72ccbaccc85b51b8df6432bd63724",
+        "vhs_sha256": "abe4a8cb35f31364da680955d9b05b046b9b7eef571c653d7bd0c26ec24b3b5d",
+        "ttyd_sha256": "be2cc452a22260a2c29517526be0edbd2a296690d176ceaa289a26c4d4b4405e",
+        "verifier_sha256": "fbf24438503a20f87a0f0f908d68e880f5b69782dfe04344c6a19a7b7686c021",
+        "verifier_source_sha256": "be256521d2b1c6f7ebad3af7358346aafd89ac9847e1e7f8447d2bc316941267",
+        "driver_source_sha256": "77316155f3365c52ff7c36d272a82c93e4c2eb5cefcad31e05db2a7597d12553",
+        "tape_driver_source_sha256": "ac20b020d324920f568b0624df329d1bcea5497cfbebfed0bbb07ee39affaf31",
+        "fixed_child_sha256": "f1eb617dbda2729c46bbaff323e255486619661a7169589ba56f89bbac3e3517",
+        "tape_sha256": "1df2286751ce5a15b23692e84e7dca10583816d59c355d4ee7be0b7c031ece17",
+        "state_and_secrets_unchanged": true,
+        "provider_requests": 0,
+        "child_exit": 0,
+        "owned_processes_stopped": true,
+        "fixture": "synthetic typed inputs; actual compiled UI/input/rendering",
+        "images": [
+          {
+            "checkpoint": "compact-quota-all",
+            "png_sha256": "656bd5ad563bbfeb02ba5454ae2656c00376ec186e2f85ee2ea8cd397ae298f6"
+          },
+          {
+            "checkpoint": "compact-quota-chooser",
+            "png_sha256": "5c39888342439bab5c7329b25ddf74f621bbce4cb6f1b80a8eb86df2b0cc5749"
+          },
+          {
+            "checkpoint": "compact-quota-help",
+            "png_sha256": "2421abe5892b025732418d44692a2d3c793eca86db18f0ec20e8e0cac1597329"
+          },
+          {
+            "checkpoint": "compact-quota-claude",
+            "png_sha256": "0947413f2920c94803ff0ade77aea753439c1ceb8817c3d8d4d95bede04242cc"
+          },
+          {
+            "checkpoint": "compact-quota-cancelled",
+            "png_sha256": "70c784991dfed73a7854a92a44e8323c49b6c5e00169ca5ad3a58527471bc510"
+          },
+          {
+            "checkpoint": "compact-quota-details",
+            "png_sha256": "4291ee79f9adc3a52a24610550f81792a46f2bb31981a625488f8818e74d218e"
+          }
+        ]
+      }
+    },
+    {
+      "surface": "quota",
+      "columns": 48,
+      "rows": 24,
+      "sha256": "8185c2e91375473f45791b8f178fb6610ed001a16289ca907f9fba9b8caa7f81",
+      "receipt": {
+        "surface": "quota",
+        "columns": 48,
+        "rows": 24,
+        "binary_sha256": "eb0039cc5968f387907e5c31c63a8e0babb72ccbaccc85b51b8df6432bd63724",
+        "vhs_sha256": "abe4a8cb35f31364da680955d9b05b046b9b7eef571c653d7bd0c26ec24b3b5d",
+        "ttyd_sha256": "be2cc452a22260a2c29517526be0edbd2a296690d176ceaa289a26c4d4b4405e",
+        "verifier_sha256": "fbf24438503a20f87a0f0f908d68e880f5b69782dfe04344c6a19a7b7686c021",
+        "verifier_source_sha256": "be256521d2b1c6f7ebad3af7358346aafd89ac9847e1e7f8447d2bc316941267",
+        "driver_source_sha256": "77316155f3365c52ff7c36d272a82c93e4c2eb5cefcad31e05db2a7597d12553",
+        "tape_driver_source_sha256": "ac20b020d324920f568b0624df329d1bcea5497cfbebfed0bbb07ee39affaf31",
+        "fixed_child_sha256": "f1eb617dbda2729c46bbaff323e255486619661a7169589ba56f89bbac3e3517",
+        "tape_sha256": "0bd764bb0bba474c189d7594fd817dd6dd443a7ae60f9025d83daad3a9dd5e80",
+        "state_and_secrets_unchanged": true,
+        "provider_requests": 0,
+        "child_exit": 0,
+        "owned_processes_stopped": true,
+        "fixture": "synthetic typed inputs; actual compiled UI/input/rendering",
+        "images": [
+          {
+            "checkpoint": "compact-quota-all",
+            "png_sha256": "a463228a08bb663144745070b44be2377946e7031af2043975d655383898a8ce"
+          },
+          {
+            "checkpoint": "compact-quota-chooser",
+            "png_sha256": "19e642572f2a5ee25879e4aef2b392e1a4bc2f999b6572bd28c00218c83e19ef"
+          },
+          {
+            "checkpoint": "compact-quota-help",
+            "png_sha256": "34c4a66cde112c55b88dd6ad4d177f590126d88699791ae07b6b80318e6bd7d3"
+          },
+          {
+            "checkpoint": "compact-quota-claude",
+            "png_sha256": "13cd1292cf0b9a6942f5eb04bf034004f8a1c289e587ac92e8839881c07b9221"
+          },
+          {
+            "checkpoint": "compact-quota-cancelled",
+            "png_sha256": "c1ed4533b4059310def703dbe79fd42b69df6880f06dfbcf48a3d30a1fba9614"
+          },
+          {
+            "checkpoint": "compact-quota-details",
+            "png_sha256": "3aafb6e703ae7e9a7b81793324cacc0fe2697675b3f1d31be6700cd0fe6f3438"
+          }
+        ]
+      }
+    }
+  ]
+}

@@ -242,11 +242,7 @@ pub(super) fn render_record_row(
     width: usize,
 ) -> AnyElement<'static> {
     let foreground = if selected { Color::White } else { Color::Grey };
-    let metadata = if selected {
-        Color::Grey
-    } else {
-        Color::DarkGrey
-    };
+    let metadata = Color::Grey;
     let title_prefix = if selected { "❯ " } else { "  " };
     let (title_width, status_width, age_width) = session_column_widths(width);
     let title = truncate_end(&record.title, title_width);
@@ -279,10 +275,10 @@ pub(super) fn render_record_row(
                 View(width: age_width as u32, overflow: Overflow::Hidden, justify_content: JustifyContent::FlexEnd) { Text(content: compact_age(&record.created), color: foreground, weight: Weight::Bold, wrap: TextWrap::NoWrap) }
             }
             View(width: 100pct, column_gap: 1, overflow: Overflow::Hidden) {
-                Text(content: record.client_provider_family().label(), color: metadata, weight: Weight::Light, wrap: TextWrap::NoWrap)
-                Text(content: record.machine_label(), color: metadata, weight: Weight::Light, wrap: TextWrap::NoWrap)
+                Text(content: record.client_provider_family().label(), color: metadata, weight: Weight::Normal, wrap: TextWrap::NoWrap)
+                Text(content: record.machine_label(), color: metadata, weight: Weight::Normal, wrap: TextWrap::NoWrap)
                 Text(content: "·", color: metadata)
-                Text(content: second_line, color: metadata, weight: Weight::Light, wrap: TextWrap::NoWrap)
+                Text(content: second_line, color: metadata, weight: Weight::Normal, wrap: TextWrap::NoWrap)
             }
         }
     }

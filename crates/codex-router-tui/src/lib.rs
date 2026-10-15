@@ -7,7 +7,7 @@ pub use dialog::{
 };
 pub use dialog_interaction::{DialogInputScope, UseDialogInteraction};
 mod dialog_action;
-pub use dialog_action::{DialogAction, DialogActionProps};
+pub use dialog_action::{DialogAction, DialogActionEmphasis, DialogActionProps};
 mod typography;
 pub use typography::{
     SurfaceHeader, SurfaceHeaderProps, UiHeading, UiHeadingLevel, UiHeadingProps, UiText,

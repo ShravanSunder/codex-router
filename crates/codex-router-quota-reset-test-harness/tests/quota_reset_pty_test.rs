@@ -114,7 +114,7 @@ mod quota_reset_pty_test {
         )?;
         let cancel_start = terminal.transcript_len();
         terminal.send(&[0x12])?;
-        if let Err(error) = terminal.wait_for_text_after("Inspect", cancel_start, SEMANTIC_WAIT) {
+        if let Err(error) = terminal.wait_for_text_after("Close", cancel_start, SEMANTIC_WAIT) {
             let diagnostics = terminal.safe_semantic_diagnostics(cancel_start);
             return Err(std::io::Error::other(format!(
                 "cancelled inspection browse restoration: {error}; {diagnostics}"
@@ -123,10 +123,15 @@ mod quota_reset_pty_test {
         }
         let options_close_start = terminal.transcript_len();
         terminal.send(b"\x1b")?;
-        stage(
-            terminal.wait_for_text_after("Filters", options_close_start, SEMANTIC_WAIT),
-            "options pane closes after inspection cancellation",
-        )?;
+        if let Err(error) =
+            terminal.wait_for_text_after("Filters", options_close_start, SEMANTIC_WAIT)
+        {
+            let diagnostics = terminal.safe_semantic_diagnostics(options_close_start);
+            return Err(std::io::Error::other(format!(
+                "options pane closes after inspection cancellation: {error}; {diagnostics}"
+            ))
+            .into());
+        }
         terminal.send(b"q")?;
         let transcript = stage(terminal.finish(SEMANTIC_WAIT), "cancelled path child exit")?;
         let request_records = stage(provider.finish(), "provider shutdown")?;

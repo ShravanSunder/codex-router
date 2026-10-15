@@ -66,13 +66,13 @@ enum ScreenCheckpoint: String {
         case .compactSessionsDetails:
             ["Session details", "Help", "Claude Gamma", "Session ID", "Endpoint", "State", "Close"]
         case .compactQuotaAll:
-            ["Quota status", "Help", "All", "Disabled: Shown", "4/4 accounts", "Claude Delta"]
+            ["Quota status", "Help", "All", "Disabled: Shown", "4/4", "Claude De"]
         case .compactQuotaChooser:
             ["Account filters", "Help", "Account provider", "Draft: OpenAI", "Claude", "Disabled accounts: Shown", "Apply", "Cancel"]
         case .compactQuotaHelp:
             ["Quota Help", "Account filters", "Choose provider", "Space", "Apply draft", "Close"]
         case .compactQuotaClaude, .compactQuotaCancelled:
-            ["Quota status", "Help", "Claude", "Disabled: Hidden", "1/4 accounts", "Claude Gamma", "Details"]
+            ["Quota status", "Help", "Claude", "Disabled: Hidden", "1/4", "Claude Ga", "Details"]
         case .compactQuotaDetails:
             ["Account details", "Help", "Selected account", "Claude Gamma", "Close"]
         case .sessionsDetails:
@@ -150,6 +150,16 @@ enum ScreenCheckpoint: String {
         }
     }
 
+    // Compact chrome intentionally omits the unit at narrow widths. Enforce the
+    // complete count token independently so 4/40 can never satisfy 4/4.
+    var exactCompactCount: String? {
+        switch self {
+        case .compactQuotaAll: "4/4"
+        case .compactQuotaClaude, .compactQuotaCancelled: "1/4"
+        default: nil
+        }
+    }
+
     var forbiddenMarkers: [String] {
         switch self {
         case .compactSessionsAll:
@@ -169,7 +179,7 @@ enum ScreenCheckpoint: String {
         case .compactQuotaHelp:
             ["Sessions Help", "Draft:"]
         case .compactQuotaClaude, .compactQuotaCancelled:
-            hiddenShortcutMarkers + ["Claude Delta", "OpenAI Alpha", "OpenAI Beta", "Account provider", "Draft:"]
+            hiddenShortcutMarkers + ["Claude De", "OpenAI Al", "OpenAI Be", "Account provider", "Draft:"]
         case .compactQuotaDetails:
             hiddenShortcutMarkers + ["Draft:", "Account provider", "Quota Help"]
         case .sessionsDetails, .quotaDetails:
@@ -279,8 +289,17 @@ struct VerifyScreenImage {
             // when they occupy one painted toolbar row. Normalize only this
             // literal count/unit pair; keep draft and provider markers intact.
             .replacingOccurrences(of: "([0-9]+/[0-9]+)[ \t\r\n]+(accounts|sessions)\\b", with: "$1 $2", options: .regularExpression)
+            // Vision can split this single subdued label inside one observation.
+            // Normalize only the complete He lp token, never arbitrary spaces or lines.
+            .replacingOccurrences(of: "\\bHe[ \\t]+lp\\b", with: "Help", options: [.regularExpression, .caseInsensitive])
             .lowercased()
-        let missingMarkers = checkpoint.requiredMarkers.filter { !recognizedText.contains($0.lowercased()) }
+        var missingMarkers = checkpoint.requiredMarkers.filter { !recognizedText.contains($0.lowercased()) }
+        if let expectedCount = checkpoint.exactCompactCount {
+            let pattern = "(?<![0-9])" + NSRegularExpression.escapedPattern(for: expectedCount) + "(?![0-9])"
+            if recognizedText.range(of: pattern, options: .regularExpression) == nil {
+                missingMarkers.append("exact count " + expectedCount)
+            }
+        }
         let unexpectedMarkers = checkpoint.forbiddenMarkers.filter { recognizedText.contains($0.lowercased()) }
         let observation = ScreenImageObservation(
             checkpoint: checkpoint.rawValue,

@@ -1,4 +1,39 @@
 #[test]
+fn review_qstatic_preserves_original_narrow_primary_columns() {
+    let column_of = |line: &str, label: &str| {
+        line.find(label).map(|offset| {
+            unicode_width::UnicodeWidthStr::width(
+                line.get(..offset).expect("matched label is a UTF-8 boundary"),
+            )
+        })
+    };
+    let mut model = quota_two_account_view_model();
+    model.rows.truncate(1);
+    let row = model.rows.first_mut().expect("fixture account");
+    row.account = "Account".to_owned();
+    row.status = "Ready".to_owned();
+    row.reason = "reason 0123456789".to_owned();
+    row.active_clients = "Clients".to_owned();
+
+    let text = super::quota_browse_rendering::render_account_row(row, 46, false)
+        .render(None).to_string();
+    let primary = text.lines().find(|line| line.contains("Ready"))
+        .expect("primary account row");
+    // Original narrow contract: one inset + 13 account cells + 13 status cells.
+    assert_eq!(column_of(primary, "Ready"), Some(14), "{text}");
+    assert_eq!(column_of(primary, "reason 0123456789"), Some(27), "{text}");
+
+    let frame = render_quota_static_capture(model, 76, false);
+    let primary = frame.lines().find(|line| line.contains("Ready"))
+        .expect("static primary row");
+    let clients = frame.lines().find(|line| line.contains("Clients"))
+        .expect("static metadata row");
+    // The composed screen has five inset cells; primary and metadata stay aligned.
+    assert_eq!(column_of(primary, "Ready"), Some(18), "{frame}");
+    assert_eq!(column_of(clients, "Clients"), Some(18), "{frame}");
+}
+
+#[test]
 fn quota_status_selected_panel_renders_weekly_before_five_hour_window() {
     let text = render_quota_static_capture(quota_view_model(), 160, false);
     let lines = text.lines().collect::<Vec<_>>();
@@ -20,6 +55,17 @@ fn quota_status_selected_panel_renders_weekly_before_five_hour_window() {
         .unwrap_or_else(|| panic!("selected panel should render 5h quota:\n{text}"));
 
     assert!(weekly_index < five_hour_index, "{text}");
+}
+
+#[test]
+fn owner_feedback_phone_details_preserve_complete_exclusion_reason() {
+    let details = selected_account_details("Work account", "excluded: missing credential for this account");
+    let frame = super::quota_browse_rendering::render_selected_details(&details, 38, true).render(None).to_string();
+    let words = frame.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(words.contains("excluded: missing credential for this account"),
+        "Details must wrap the reason instead of clipping it: {frame}");
+    assert!(frame.lines().all(|line| unicode_width::UnicodeWidthStr::width(line) <= 38),
+        "detail content must remain within its allocated width: {frame}");
 }
 #[test]
 fn quota_status_selected_panel_spaces_activity_header_after_5h_pace() {

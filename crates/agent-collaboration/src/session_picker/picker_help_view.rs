@@ -1,10 +1,12 @@
 //! Shortcut content and caller-owned Help action; shared chrome owns visual hierarchy.
 use super::picker_model::SessionsPickerModel;
-use codex_router_tui::{DialogAction, ShortcutEntry, ShortcutHelp, ShortcutSection};
+use codex_router_tui::{
+    DialogAction, DialogActionEmphasis, ShortcutEntry, ShortcutHelp, ShortcutSection,
+};
 use iocraft::prelude::*;
 
 pub(super) fn help_action(mut model: State<SessionsPickerModel>) -> AnyElement<'static> {
-    element!(DialogAction(label: "Help", handler: move |_| model.write().show_help = true))
+    element!(DialogAction(label: "Help", emphasis: DialogActionEmphasis::Secondary, handler: move |_| model.write().show_help = true))
         .into_any()
 }
 
@@ -26,7 +28,7 @@ pub(super) fn render_help(
         title: "Sessions".to_owned(),
         entries: entries(&[
             ("↑ / ↓", "Move selection"),
-            ("Page Up / Page Down", "Move a page"),
+            ("PgUp / PgDn", "Move a page"),
             ("Home / End", "First / last choice"),
             ("Enter", "Resume selected session"),
             ("Alt+Enter", "Fork selected session"),

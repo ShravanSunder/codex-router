@@ -61,6 +61,7 @@ pub fn UiText(props: &UiTextProps) -> impl Into<AnyElement<'static>> {
 pub struct SurfaceHeaderProps<'a> {
     pub title: String,
     pub inactive: bool,
+    pub column_gap: Option<u16>,
     pub help_action: Option<AnyElement<'a>>,
     pub children: Vec<AnyElement<'a>>,
 }
@@ -71,7 +72,7 @@ pub fn SurfaceHeader<'a>(props: &mut SurfaceHeaderProps<'a>) -> impl Into<AnyEle
     let help_action = props.help_action.take();
     let children = std::mem::take(&mut props.children);
     element! {
-        View(width: 100pct, column_gap: 2, flex_shrink: 0.0_f32) {
+        View(width: 100pct, column_gap: props.column_gap.unwrap_or(2), flex_shrink: 0.0_f32) {
             View(flex_grow: 1.0_f32, flex_shrink: 1.0_f32, min_width: 0, overflow: Overflow::Hidden) {
                 UiHeading(content: props.title.clone(), level: UiHeadingLevel::Surface, inactive: props.inactive)
             }

@@ -5,12 +5,8 @@ use super::quota_provider_filters::*;
 
 const NARROW_FILTER_TOOLBAR_WIDTH: usize = 90;
 
-pub(super) const fn quota_filter_toolbar_height(width: usize) -> usize {
-    if width < NARROW_FILTER_TOOLBAR_WIDTH {
-        2
-    } else {
-        1
-    }
+pub(super) const fn quota_filter_toolbar_height(_width: usize) -> usize {
+    1
 }
 
 pub(super) fn quota_filter_controls_height(
@@ -71,19 +67,18 @@ pub(super) fn render_quota_filter_toolbar(
     width: usize,
     enabled: bool,
     on_open: impl FnMut(()) + Send + Sync + 'static,
-    on_details: impl FnMut(()) + Send + Sync + 'static,
 ) -> AnyElement<'static> {
     let summary = quota_filter_summary(filters, visible_count, loaded_count);
     let narrow = width < NARROW_FILTER_TOOLBAR_WIDTH;
+    let full_label = format!(
+        "{} · Disabled: {} · {visible_count}/{loaded_count} ▾",
+        filters.provider.label(),
+        filters.disabled.label()
+    );
     element! {
-        View(width: width as u32, height: quota_filter_toolbar_height(width) as u32, flex_direction: if narrow { FlexDirection::Column } else { FlexDirection::Row }, column_gap: 2, flex_shrink: 0.0_f32) {
-            View(column_gap:2,flex_shrink:0.0_f32) {
-                QuotaFilterButton(label: "Filters ▾".to_owned(), enabled, on_click: on_open)
-                #(render_quota_details_button(on_details))
-            }
-            Text(content: if width < 64 {
-                format!("{} · Disabled: {} · {visible_count}/{loaded_count} accounts", filters.provider.label(), filters.disabled.label())
-            } else { summary }, color: Color::White, wrap: TextWrap::NoWrap)
+        View(width: width as u32, height: 1, column_gap: 2, flex_shrink: 0.0_f32) {
+            QuotaFilterButton(label: if narrow { full_label } else { "Filters ▾".to_owned() }, enabled, on_click: on_open)
+            #(if !narrow { Some(element!(Text(content: summary, color: Color::White, wrap: TextWrap::NoWrap))) } else { None })
         }
     }.into_any()
 }
@@ -154,10 +149,10 @@ pub(super) fn render_quota_filter_chooser(
 }
 
 pub(super) fn render_quota_details_button(
+    enabled: bool,
     on_open: impl FnMut(()) + Send + Sync + 'static,
 ) -> AnyElement<'static> {
-    element!(QuotaFilterButton(label: "Details".to_owned(), enabled: true, on_click: on_open))
-        .into_any()
+    element!(QuotaFilterButton(label: "Details".to_owned(), enabled, on_click: on_open)).into_any()
 }
 
 pub(super) fn render_quota_filter_actions(

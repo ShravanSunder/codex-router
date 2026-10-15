@@ -136,6 +136,9 @@ async fn sessions_help_click_opens_overlay_with_surface_and_section_styles() {
                 let title_style = canvas.cell(title_column, row).unwrap().text_style().unwrap();
                 assert_eq!(title_style.color, Some(Color::Cyan));
                 assert_eq!(title_style.weight, Weight::Bold);
+                let help_style = canvas.cell(column, row).unwrap().text_style().unwrap();
+                assert_eq!(help_style.color, Some(Color::Grey), "Help is secondary, not a second heading");
+                assert_eq!(help_style.weight, Weight::Normal);
                 sender.send(TerminalEvent::FullscreenMouse(FullscreenMouseEvent::new(MouseEventKind::Down(MouseButton::Left), column as u16, row as u16))).unwrap();
                 opened = true;
             } else if text.contains("Sessions Help") {
@@ -150,6 +153,212 @@ async fn sessions_help_click_opens_overlay_with_surface_and_section_styles() {
         }
         panic!("Help click must reach actual overlay");
     }).await.expect("Help click must finish within bounded event wait");
+}
+
+#[tokio::test]
+async fn owner_feedback_help_page_keys_fit_one_row() {
+    for (width, height) in [(48, 24), (76, 30), (120, 36)] {
+        let frame = render_picker_capture_at(
+            picker_request(),
+            width,
+            height,
+            vec![key(KeyCode::F(1)), ctrl_key('d')],
+        )
+        .await;
+        assert!(
+            frame
+                .lines()
+                .any(|line| line.contains("PgUp / PgDn") && line.contains("Move a page")),
+            "page keys must stay together at {width}: {frame}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn owner_feedback_atomic_paste_searches_full_session_id_without_executing_controls() {
+    const SESSION_ID: &str = "00000000-0000-4000-8000-000000000042";
+    for pasted in [
+        SESSION_ID.to_owned(),
+        format!("\u{3}\u{1b}{SESSION_ID}\n\r\u{e}"),
+    ] {
+        let mut request = picker_request();
+        request.root = SessionsRoot::Any;
+        request.source = SessionsSource::All;
+        request.records[0].session_id = SESSION_ID.to_owned();
+        request.records[0].identity =
+            crate::sessions::SessionPickerIdentity::LocalCodex(SESSION_ID.to_owned());
+        let mut outcome: Option<SessionsPickerOutcome> = None;
+        let canvases = element! {
+            SessionsPickerComponent(request, width: 120usize, height: 36usize, selected_outcome_out: &mut outcome)
+        }.mock_terminal_render_loop(MockTerminalConfig::with_events(futures_util::stream::iter(vec![
+            TerminalEvent::BracketedPaste(pasted), ctrl_key('d'),
+        ]))).collect::<Vec<_>>().await;
+        let frame = canvases.last().unwrap().to_string();
+        assert!(
+            frame.contains(&format!("Search: [{SESSION_ID}]")),
+            "paste must reach search atomically: {frame}"
+        );
+        assert!(frame.contains("Feature design session"), "{frame}");
+        assert!(
+            !frame.contains("Provider migration") && !frame.contains("Subagent planning"),
+            "full ID must match only its own row: {frame}"
+        );
+        assert!(
+            outcome.is_none(),
+            "pasted control bytes cannot activate a session or start a new one"
+        );
+    }
+}
+
+#[tokio::test]
+async fn owner_feedback_modal_input_blocks_atomic_paste() {
+    for opening in [
+        key(KeyCode::F(1)),
+        ctrl_key('f'),
+        ctrl_key('g'),
+        alt_enter_key(),
+        key(KeyCode::F(4)),
+    ] {
+        let frame = render_picker_capture_at(
+            picker_request(),
+            120,
+            36,
+            vec![
+                opening,
+                TerminalEvent::BracketedPaste("thread-b".to_owned()),
+                key(KeyCode::Esc),
+                ctrl_key('d'),
+            ],
+        )
+        .await;
+        assert!(
+            !frame.contains("Search: [thread-b]"),
+            "modal paste leaked into the background query: {frame}"
+        );
+        assert!(
+            frame.contains("Feature design session"),
+            "modal close must preserve the browse query: {frame}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn owner_feedback_session_metadata_keeps_readable_secondary_contrast() {
+    let mut request = picker_request();
+    request.root = SessionsRoot::Any;
+    request.source = SessionsSource::All;
+    let canvases = element!(SessionsPickerComponent(request, width: 120usize, height: 36usize))
+        .mock_terminal_render_loop(MockTerminalConfig::with_events(futures_util::stream::iter(
+            vec![ctrl_key('d')],
+        )))
+        .collect::<Vec<_>>()
+        .await;
+    let canvas = canvases.last().unwrap();
+    let frame = canvas.to_string();
+    let mut metadata_rows = 0;
+    for (row, line) in frame
+        .lines()
+        .enumerate()
+        .filter(|(_, line)| line.contains("Codex This machine"))
+    {
+        let offset = line.find("Codex").unwrap();
+        let column = line
+            .get(..offset)
+            .expect("matched label is a UTF-8 boundary")
+            .chars()
+            .count();
+        let style = canvas.cell(column, row).unwrap().text_style().unwrap();
+        assert_eq!(
+            style.color,
+            Some(Color::Grey),
+            "supporting text must not use the disabled role: {frame}"
+        );
+        assert_eq!(style.weight, Weight::Normal);
+        metadata_rows += 1;
+    }
+    assert!(
+        metadata_rows >= 2,
+        "exercise both focused and unfocused metadata: {frame}"
+    );
+}
+
+#[tokio::test]
+async fn owner_feedback_atomic_paste_advances_the_real_source_query_once() {
+    const SESSION_ID: &str = "00000000-0000-4000-8000-000000000042";
+    let (started_sender, mut started_receiver) = tokio::sync::mpsc::unbounded_channel();
+    let loader: SessionsPickerRecordLoader = Arc::new(move |request| {
+        let started_sender = started_sender.clone();
+        Box::pin(async move {
+            started_sender
+                .send((request.request_generation, request.query.search.clone()))
+                .unwrap();
+            if request.query.search.is_empty() {
+                // Changing the query must supersede this real pending source read.
+                futures_util::future::pending::<()>().await;
+            }
+            crate::presentation::session_picker::SourceInventoryResult::Ready {
+                request,
+                binding: None,
+                progress: crate::presentation::session_picker::InventoryPageProgress::Complete,
+                snapshot: observed_records(vec![picker_record(
+                    SESSION_ID,
+                    "Paste source result",
+                    "/repo/project-a",
+                    "codex-router",
+                    "cli",
+                )]),
+            }
+        })
+    });
+    let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+    let events = futures_util::stream::unfold(receiver, |mut receiver| async {
+        receiver.recv().await.map(|event| (event, receiver))
+    });
+    let mut request = picker_request();
+    request.root = SessionsRoot::Any;
+    request.source = SessionsSource::All;
+    let mut picker = element!(SessionsPickerComponent(request, record_loader: Some(loader), width: 120usize, height: 36usize));
+    let frames = picker.mock_terminal_render_loop(MockTerminalConfig::with_events(events));
+    tokio::pin!(frames);
+    let mut queries = Vec::new();
+    let mut pasted = false;
+    let mut observed = false;
+    let mut exit_sent = false;
+    let mut last_frame = String::new();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            tokio::select! {
+                Some(query) = started_receiver.recv() => {
+                    if query.1.is_empty() && !pasted {
+                        pasted = true;
+                        sender.send(TerminalEvent::BracketedPaste(SESSION_ID.to_owned())).unwrap();
+                    }
+                    queries.push(query);
+                }
+                frame = frames.next() => {
+                    let Some(canvas) = frame else { break; };
+                    last_frame = canvas.to_string();
+                    if !observed && last_frame.contains("Paste source result") && last_frame.contains(SESSION_ID) {
+                        observed = true;
+                    }
+                }
+            }
+            if observed && !exit_sent && queries.iter().any(|(_, search)| !search.is_empty()) {
+                exit_sent = true;
+                sender.send(ctrl_key('d')).unwrap();
+            }
+        }
+    }).await.unwrap_or_else(|_| panic!("paste must supersede the pending read and render its own result: {last_frame}"));
+    assert!(observed, "{last_frame}");
+    let pasted_queries = queries
+        .into_iter()
+        .filter(|(_, search)| !search.is_empty())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        pasted_queries,
+        vec![(1, SESSION_ID.to_owned())],
+        "one atomic paste must create one source generation, not one per character"
+    );
 }
 
 #[tokio::test]

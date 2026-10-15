@@ -1,4 +1,24 @@
-# Automated real quota storyboard experiment
+# Current sessions and quota storyboard
+
+Use the compact runner from the repository root on the approved capture surface:
+
+```sh
+sh crates/codex-router-quota-reset-test-harness/tests/quota_storyboard_capture_test/run_provider_filter_capture.sh
+```
+
+[Provider-filter capture instructions](PROVIDER_FILTERS.md) describe the required
+private tools/output/target configuration and the exact selected test. It drives
+six real compiled fixture journeys: sessions and quota at120×36,76×30,48×24,
+six checkpoints each (36 PNGs). Synthetic inputs and zero provider requests are
+explicit limits; this is not live quota or configured-native launch proof.
+
+The old full runner and its scene oracles below describe historical0.1.95
+coverage. Their inline-shortcut waits target that earlier UI. Do not run that
+unfiltered ignored-test route as verification of the current compact UI or
+update its oracles merely to make current screens pass. Preserved historical
+images remain separate from the current gallery.
+
+## Historical full quota experiment (0.1.95)
 
 Run from the repository root on the nominated macOS capture surface:
 

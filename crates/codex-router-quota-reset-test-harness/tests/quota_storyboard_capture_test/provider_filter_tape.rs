@@ -272,12 +272,14 @@ pub(super) fn build_compact_filter_tape(
             tape.push_str("Escape\nWait+Screen /(?s)2\\/6.*Claude Gamma/\nCtrl+D\n");
         }
         CapturedTuiSurface::Quota => {
-            tape.push_str("Wait+Screen /4\\/4 accounts/\nUp\nUp\nUp\n");
+            tape.push_str(
+                "Wait+Screen /(?s)All.*Disabled: Shown.*4\\/4( accounts| ▾)/\nUp\nUp\nUp\n",
+            );
             checkpoint(
                 &mut tape,
                 &mut checkpoints,
                 "compact-quota-all",
-                "4/4 accounts.*Claude Delta",
+                "All.*Disabled: Shown.*4/4( accounts| ▾).*Claude De(lta|…)",
             );
             tape.push_str("Ctrl+F\nDown\n");
             checkpoint(
@@ -300,14 +302,14 @@ pub(super) fn build_compact_filter_tape(
                 &mut tape,
                 &mut checkpoints,
                 "compact-quota-claude",
-                "Disabled: Hidden.*1/4 accounts.*Claude Gamma",
+                "Claude.*Disabled: Hidden.*1/4( accounts| ▾).*Claude Ga(mma|…)",
             );
             tape.push_str("Ctrl+F\nUp\nWait+Screen /Draft: OpenAI/\nEscape\n");
             checkpoint(
                 &mut tape,
                 &mut checkpoints,
                 "compact-quota-cancelled",
-                "Disabled: Hidden.*1/4 accounts.*Claude Gamma",
+                "Claude.*Disabled: Hidden.*1/4( accounts| ▾).*Claude Ga(mma|…)",
             );
             tape.push_str("F4\n");
             checkpoint(
@@ -316,7 +318,7 @@ pub(super) fn build_compact_filter_tape(
                 "compact-quota-details",
                 "Account details.*Claude Gamma",
             );
-            tape.push_str("Escape\nWait+Screen /(?s)Disabled: Hidden.*1\\/4 accounts.*Claude Gamma/\nType \"q\"\n");
+            tape.push_str("Escape\nWait+Screen /(?s)Claude.*Disabled: Hidden.*1\\/4( accounts| ▾).*Claude Ga(mma|…)/\nType \"q\"\n");
         }
     }
     tape.push_str("Wait+Screen /QUOTA_STORYBOARD_CHILD_EXIT=0/\n");
@@ -368,6 +370,25 @@ mod compact_capture_contract_tests {
             ] {
                 assert!(!tape.contains(forbidden), "unrelated scene: {tape}");
             }
+        }
+    }
+
+    #[test]
+    fn quota_capture_requires_exact_provider_disabled_and_count_variants() {
+        for (columns, rows) in [(120, 36), (76, 30), (48, 24)] {
+            let (tape, checkpoints) =
+                build_compact_filter_tape(CapturedTuiSurface::Quota, columns, rows);
+            assert_eq!(checkpoints.len(), 6);
+            // Original narrow account columns display distinct De…/Ga… names;
+            // wide columns retain the complete identity. Details must stay full.
+            assert!(tape.contains("All.*Disabled: Shown.*4\\/4( accounts| ▾).*Claude De(lta|…)"));
+            assert!(
+                tape.contains("Claude.*Disabled: Hidden.*1\\/4( accounts| ▾).*Claude Ga(mma|…)")
+            );
+            assert!(tape.contains("Quota Help.*Apply draft"));
+            assert!(tape.contains("Account details.*Claude Gamma"));
+            assert!(tape.contains("QUOTA_STORYBOARD_CHILD_EXIT=0"));
+            assert!(!tape.contains("Wait+Screen /4\\/4 accounts/"));
         }
     }
 }

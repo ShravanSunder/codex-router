@@ -1,12 +1,13 @@
 //! Quota-owned contextual Help and surface chrome; no command or runtime ownership.
 use codex_router_tui::{
-    DialogAction, ShortcutEntry, ShortcutHelp, ShortcutSection, SurfaceHeader, UiText, UiTextRole,
+    DialogAction, DialogActionEmphasis, ShortcutEntry, ShortcutHelp, ShortcutSection,
+    SurfaceHeader, UiText, UiTextRole,
 };
 use iocraft::prelude::*;
 
 use super::quota_status_view_model::QuotaStatusViewModel;
 use super::responsive_quota_layout::{
-    quota_title_row, quota_title_status, truncate_quota_header_text,
+    quota_spinner_tick, quota_title_row, quota_title_status, truncate_quota_header_text,
 };
 
 #[derive(Clone, Copy, Default)]
@@ -21,28 +22,55 @@ pub(super) enum QuotaHelpMode {
 }
 
 pub(super) fn quota_help_key(code: KeyCode, modifiers: KeyModifiers) -> bool {
-    code == KeyCode::F(1)
-        || (code == KeyCode::Char('/') && modifiers.contains(KeyModifiers::CONTROL))
+    matches!(code, KeyCode::F(1) | KeyCode::Char('\u{1f}'))
+        || (matches!(code, KeyCode::Char('/' | '_' | '7'))
+            && modifiers.contains(KeyModifiers::CONTROL))
 }
 
 pub(super) fn quota_help_action(mut open: State<bool>) -> AnyElement<'static> {
-    element!(DialogAction(label: "Help".to_owned(), handler: move |_| open.set(true))).into_any()
+    element!(DialogAction(label: "Help".to_owned(), emphasis: DialogActionEmphasis::Secondary, handler: move |_| open.set(true))).into_any()
 }
 
-pub(super) fn render_quota_header(
-    model: &QuotaStatusViewModel,
-    width: usize,
-    tick: usize,
-    interactive: bool,
-    inactive: bool,
-    help: State<bool>,
-) -> AnyElement<'static> {
+pub(super) struct QuotaHeaderProps<'a> {
+    pub model: &'a QuotaStatusViewModel,
+    pub width: usize,
+    pub tick: usize,
+    pub interactive: bool,
+    pub inactive: bool,
+    pub help: State<bool>,
+    pub details_action: AnyElement<'static>,
+}
+
+pub(super) fn render_quota_header(props: QuotaHeaderProps<'_>) -> AnyElement<'static> {
+    let QuotaHeaderProps {
+        model,
+        width,
+        tick,
+        interactive,
+        inactive,
+        help,
+        details_action,
+    } = props;
     if !interactive {
         return quota_title_row(model, width, tick);
     }
-    let status =
-        truncate_quota_header_text(&quota_title_status(model, tick), width.saturating_sub(20));
-    element!(SurfaceHeader(title: "Quota status".to_owned(), inactive, help_action: Some(quota_help_action(help)), children: vec![element!(UiText(content: status, role: UiTextRole::Secondary)).into_any()])).into_any()
+    let column_gap: u16 = if width < 64 { 1 } else { 2 };
+    // Keep the title and both actions; reserve their actual labels and three gaps.
+    let status_width = width.saturating_sub(23 + 3 * usize::from(column_gap));
+    let full_status = quota_title_status(model, tick);
+    let status = if width < 64
+        && unicode_width::UnicodeWidthStr::width(full_status.as_str()) > status_width
+    {
+        // Operational words take precedence over a decorative spinner on phones.
+        full_status
+            .strip_prefix(quota_spinner_tick(tick))
+            .unwrap_or(&full_status)
+            .trim_start()
+    } else {
+        full_status.as_str()
+    };
+    let status = truncate_quota_header_text(status, status_width);
+    element!(SurfaceHeader(title: "Quota status".to_owned(), inactive, column_gap, help_action: Some(quota_help_action(help)), children: vec![element!(UiText(content: status, role: UiTextRole::Secondary)).into_any(), details_action])).into_any()
 }
 
 pub(super) fn render_quota_help(
@@ -77,7 +105,7 @@ pub(super) fn render_quota_help(
             "Account details",
             vec![
                 ("↑ / ↓ / PgUp / PgDn", "Scroll details"),
-                ("Esc / F4", "Close details"),
+                ("Esc", "Close details"),
             ],
         ),
         QuotaHelpMode::Floor => (

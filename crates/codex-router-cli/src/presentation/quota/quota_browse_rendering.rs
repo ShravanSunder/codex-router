@@ -165,9 +165,8 @@ pub(super) fn render_account_row(
     let inner_width = width.saturating_sub(2);
     let (account_width, status_width, pace_width) = quota_list_columns(inner_width);
     let marker = if focused { "❯" } else { " " };
-    // Identity has its own primary-row allocation. Keep metadata columns below
-    // unchanged so making names readable does not hide quota percentages.
-    let primary_account_width = account_width.max(17);
+    // Static and interactive rows share the original account/status allocation.
+    let primary_account_width = account_width;
     let primary_reason_width = inner_width.saturating_sub(primary_account_width + status_width);
     let status_color = if focused { Color::Yellow } else { Color::White };
     let metadata_color = if focused { Color::Yellow } else { Color::Grey };
@@ -250,31 +249,72 @@ pub(super) fn render_selected_details(
     detail_width: usize,
     interactive: bool,
 ) -> AnyElement<'static> {
+    let line = |label: &str, value: &str, color: Color| {
+        if interactive {
+            element! {
+                View(width: 100pct) {
+                    View(width: DETAIL_LABEL_WIDTH as u32, flex_shrink: 0.0_f32) {
+                        Text(content: label.to_owned(), color: Color::Grey, wrap: TextWrap::NoWrap)
+                    }
+                    View(flex_grow: 1.0_f32, flex_shrink: 1.0_f32, min_width: 0) {
+                        Text(content: value.to_owned(), color, wrap: TextWrap::Wrap)
+                    }
+                }
+            }
+            .into_any()
+        } else {
+            detail_line(label, value, detail_width, color)
+        }
+    };
+    let pace_line = |label: &str, pace: &ResetPaceViewModel| {
+        if interactive {
+            line(
+                label,
+                &reset_pace_summary(pace),
+                reset_pace_color(pace.state),
+            )
+        } else {
+            reset_pace_detail_line(label, pace, detail_width)
+        }
+    };
     element! {
         View(
             width: detail_width as u32,
+            max_width: 100pct,
             flex_direction: FlexDirection::Column,
             row_gap: 0,
             padding_top: 0,
         ) {
             #(if interactive { element!(codex_router_tui::UiHeading(content: "Selected account".to_owned(), level: codex_router_tui::UiHeadingLevel::Section)).into_any() } else { element!(Text(content: "Selected account", color: Color::Cyan, weight: Weight::Bold)).into_any() })
-            Text(content: fit_line(&format!("{}    {}    {}", selected.account, selected.status, selected.reason), detail_width), color: Color::White, weight: Weight::Bold, wrap: TextWrap::NoWrap)
+            #(if interactive {
+                element! {
+                    View(width: 100pct, column_gap: 4, flex_wrap: FlexWrap::Wrap, flex_shrink: 0.0_f32) {
+                        Text(content: selected.account.clone(), color: Color::White, weight: Weight::Bold, wrap: TextWrap::NoWrap)
+                        Text(content: selected.status.clone(), color: Color::White, weight: Weight::Bold, wrap: TextWrap::NoWrap)
+                        View(flex_grow: 1.0_f32, flex_shrink: 1.0_f32, min_width: 0, max_width: 100pct) {
+                            Text(content: selected.reason.clone(), color: Color::White, weight: Weight::Bold, wrap: TextWrap::Wrap)
+                        }
+                    }
+                }.into_any()
+            } else {
+                element!(Text(content: fit_line(&format!("{}    {}    {}", selected.account, selected.status, selected.reason), detail_width), color: Color::White, weight: Weight::Bold, wrap: TextWrap::NoWrap)).into_any()
+            })
             #(if interactive { element!(codex_router_tui::UiHeading(content: "Quota windows".to_owned(), level: codex_router_tui::UiHeadingLevel::Section)).into_any() } else { element!(Text(content: "Quota windows", color: Color::Cyan, weight: Weight::Bold)).into_any() })
-            #(detail_line("weekly", &selected.weekly_window, detail_width, Color::White))
-            #(detail_line("5h", &selected.short_window, detail_width, Color::White))
+            #(line("weekly", &selected.weekly_window, Color::White))
+            #(line("5h", &selected.short_window, Color::White))
             #(quota_gap())
             #(if interactive { element!(codex_router_tui::UiHeading(content: "Reset pace".to_owned(), level: codex_router_tui::UiHeadingLevel::Section)).into_any() } else { element!(Text(content: "Reset pace", color: Color::Cyan, weight: Weight::Bold)).into_any() })
-            #(reset_pace_detail_line("weekly", &selected.reset_pace, detail_width))
-            #(detail_line("sample", &sample_metadata_summary(&selected.sample_metadata), detail_width, Color::White))
-            #(detail_line("rate", &selected.total_rate, detail_width, Color::White))
-            #(detail_line("conn", &selected.connection_rate, detail_width, Color::White))
-            #(reset_pace_detail_line("5h", &selected.short_reset_pace, detail_width))
+            #(pace_line("weekly", &selected.reset_pace))
+            #(line("sample", &sample_metadata_summary(&selected.sample_metadata), Color::White))
+            #(line("rate", &selected.total_rate, Color::White))
+            #(line("conn", &selected.connection_rate, Color::White))
+            #(pace_line("5h", &selected.short_reset_pace))
             #(quota_gap())
             #(if interactive { element!(codex_router_tui::UiHeading(content: "Activity".to_owned(), level: codex_router_tui::UiHeadingLevel::Section)).into_any() } else { element!(Text(content: "Activity", color: Color::Cyan, weight: Weight::Bold)).into_any() })
-            #(detail_line("clients", &selected.active_clients, detail_width, Color::White))
-            #(detail_line("guards", &selected.guards, detail_width, Color::White))
-            #(detail_line("reset", &selected.reset, detail_width, Color::White))
-            #(detail_line("note", &selected.note, detail_width, Color::Grey))
+            #(line("clients", &selected.active_clients, Color::White))
+            #(line("guards", &selected.guards, Color::White))
+            #(line("reset", &selected.reset, Color::White))
+            #(line("note", &selected.note, Color::Grey))
         }
     }
     .into_any()

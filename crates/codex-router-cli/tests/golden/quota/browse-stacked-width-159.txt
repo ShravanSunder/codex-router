@@ -1,7 +1,7 @@
 ╭─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
-│ Quota status                                                                                                                                ◌ fresh 1  Help │
+│ Quota status                                                                                                                       ◌ fresh 1  Details  Help │
 │ Pool-wide: responses -> ssdev    [preferred]                                                                                                                │
-│ Filters ▾  Details  Provider: All · Disabled: Shown · 1/1 accounts                                                                                          │
+│ Filters ▾  Provider: All · Disabled: Shown · 1/1 accounts                                                                                                   │
 │ ┌─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐ │
 │ │  ❯ ssdev          [usable]          safest quota                                                                                                        │ │
 │ │                   1 client          █████ 83% left, reset 7d                                                                                            │ │

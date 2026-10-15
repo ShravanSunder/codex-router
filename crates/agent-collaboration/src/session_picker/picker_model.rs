@@ -195,6 +195,19 @@ impl SessionsPickerModel {
         }
     }
 
+    pub(super) fn append_search_text(&mut self, text: &str) {
+        let previous_length = self.search.len();
+        self.search
+            .extend(text.chars().filter(|character| !character.is_control()));
+        if self.search.len() == previous_length {
+            return;
+        }
+        let previous_index = self.focused_visible_index();
+        self.pointer_window_start = None;
+        self.rebuild_visible_rows();
+        self.restore_focus_or_fallback(previous_index);
+    }
+
     pub(crate) fn set_width(&mut self, width: usize) {
         self.width = width;
     }

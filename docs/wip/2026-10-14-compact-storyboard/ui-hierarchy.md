@@ -21,4 +21,4 @@ Help is a plain action on the title row. Shortcut instructions appear inside Hel
 
 Dialogs use the shared iocraft frame and input scope. At narrow sizes they fill the available viewport within the configured margins; at wider sizes they are framed overlays. Their title and actions remain fixed while the body scrolls. Opening Help retains the underlying draft and focused identity, blocks background input, and closing it restores the prior screen.
 
-Static quota output retains its existing noninteractive presentation. The current HTML gallery contains historical compiled fixture pictures until the new source has passed validation and a fresh capture replaces it.
+Static quota output must preserve its existing noninteractive presentation. The [current gallery](storyboard.html) contains 36 compiled fixture pictures captured after the review corrections, with the exact source snapshot in its manifest. Narrow account columns use the original allocation; Details retains full identity. The [93-image 0.1.95 archive](storyboard-0.1.95-archived.html) remains historical. See [validation.md](validation.md) for exact source, results and unverified gates.

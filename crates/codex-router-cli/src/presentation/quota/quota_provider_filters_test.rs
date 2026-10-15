@@ -41,9 +41,10 @@ fn provider_filter_key(code: KeyCode) -> TerminalEvent {
 fn compact_account_rows_preserve_identity_and_quota_values() {
     let mut model=quota_two_account_view_model();
     model.rows[0].account="Claude Delta".to_owned();
-    for width in [40,68] {
+    // Preserve the original 13-cell narrow account column; Details retains the full name.
+    for (width,visible_name) in [(40,"Claude De…"),(68,"Claude De…"),(96,"Claude Delta")] {
         let frame=super::quota_browse_rendering::render_account_row(&model.rows[0],width,true).render(None).to_string();
-        for marker in ["Claude Delta","1 client","2 resets","83%","99%"] {
+        for marker in [visible_name,"1 client","2 resets","83%","99%"] {
             assert!(frame.contains(marker),"missing {marker} atwidth{width}: {frame}");
         }
         assert!(frame.lines().all(|line|line.chars().count()<=width),"{frame}");
@@ -137,6 +138,42 @@ fn mixed_provider_filter_view_model() -> QuotaStatusViewModel {
     model.selected = Some(model.rows[0].details.clone());
     model.route_line = "fixture pool summary".to_owned();
     model
+}
+
+#[tokio::test]
+async fn review_qstatic_narrow_filters_keep_distinct_visible_names() {
+    for (width, height) in [(76, 30), (48, 24)] {
+        let mut model = mixed_provider_filter_view_model();
+        assert_eq!(model.rows.len(), 4);
+        let names = ["OpenAI Alpha", "OpenAI Beta", "Claude Gamma", "Claude Delta"];
+        for (row, name) in model.rows.iter_mut().zip(names) {
+            row.account = name.to_owned();
+        }
+        let mut exit = KeyEvent::new(KeyEventKind::Press, KeyCode::Char('d'));
+        exit.modifiers = KeyModifiers::CONTROL;
+        let phases = vec![
+            ("Quota status", vec![provider_filter_key(KeyCode::F(3))]),
+            (
+                "Account provider · Draft: All",
+                vec![
+                    provider_filter_key(KeyCode::Down),
+                    provider_filter_key(KeyCode::Down),
+                    provider_filter_key(KeyCode::Tab),
+                    provider_filter_key(KeyCode::Char(' ')),
+                    provider_filter_key(KeyCode::Enter),
+                ],
+            ),
+            ("1/4", vec![TerminalEvent::Key(exit)]),
+        ];
+        let frames = render_quota_filter_phases(model, width, height, phases, None).await;
+        let frame = frames.last().expect("filtered narrow frame");
+        // The original 13-cell account column preserves this distinguishing
+        // visible label; the complete identity remains in the model and Details.
+        assert!(frame.contains("Claude Ga…"), "{frame}");
+        assert!(frame.contains("1/4"), "{frame}");
+        assert!(!frame.contains("Claude De"), "{frame}");
+        assert!(!frame.contains("OpenAI"), "{frame}");
+    }
 }
 
 fn apply_filter_events(provider_steps: usize, hidden: bool) -> Vec<TerminalEvent> {
@@ -437,7 +474,7 @@ async fn quota_provider_filters_toolbar_chooser_and_footer_fit_owner_viewports()
             height,
             vec![
                 (
-                    "Filters ▾",
+                    "Quota status",
                     vec![provider_filter_key(KeyCode::F(3))],
                 ),
                 (
@@ -511,8 +548,23 @@ async fn render_quota_filter_phases(
 fn compact_header_quota_toolbar_uses_at_most_two_rows_and_preserves_filter_state() {
     use super::quota_provider_filter_rendering::render_quota_filter_toolbar;
     use super::quota_provider_filters::QuotaAccountFilters;
-    let frame = render_quota_filter_toolbar(QuotaAccountFilters::default(), 4, 4, 44, true, |_| {}, |_| {}).render(None).to_string();
+    let frame = render_quota_filter_toolbar(QuotaAccountFilters::default(), 4, 4, 44, true, |_| {}).render(None).to_string();
     assert!(frame.lines().count() <= 2, "phone toolbar must leave account space: {frame}");
-    assert!(frame.lines().any(|line| line.contains("All") && line.contains("Shown") && line.contains("4/4 accounts")), "one compact committed summary: {frame}");
-    assert!(frame.contains("Filters ▾") && frame.contains("Details"), "actions stay discoverable without inline shortcuts: {frame}");
+    assert!(frame.lines().any(|line| line.contains("All") && line.contains("Shown") && line.contains("4/4")), "one compact committed summary: {frame}");
+    assert!(frame.contains("▾"), "the compact filter action stays discoverable: {frame}");
+}
+
+#[tokio::test]
+async fn owner_feedback_quota_chrome_uses_title_plus_two_supporting_rows() {
+    for (width, height) in [(120, 36), (76, 30), (48, 24)] {
+        let frame = render_quota_capture_model_at(
+            quota_two_account_view_model(), width, height,
+            vec![provider_filter_key(KeyCode::Esc)],
+        ).await;
+        let title_row = frame.lines().position(|line| line.contains("Quota status")).unwrap();
+        let first_account = frame.lines().position(|line| line.contains("alpha") && line.contains("[usable]")).unwrap();
+        assert!(first_account <= title_row + 4,
+            "title plus at most two supporting rows and the existing list border at {width}: {frame}");
+        assert!(frame.contains("Details") && frame.contains("Disabled") && frame.contains("Shown"), "keep active controls and state visible: {frame}");
+    }
 }

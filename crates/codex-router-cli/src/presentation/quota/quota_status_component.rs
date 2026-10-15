@@ -749,11 +749,6 @@ pub(super) fn QuotaStatusComponent(
                         filter_controller.dispatch(QuotaFilterAction::Open);
                     }
                 },
-                move |_| {
-                    if !help_open.get() && filters.read().draft.is_none() {
-                        details_dialog.set(focused_account_id.read().clone());
-                    }
-                },
             )];
             controls
         } else {
@@ -792,17 +787,28 @@ pub(super) fn QuotaStatusComponent(
     let background = render_quota_screen(QuotaScreenChromeProps {
         width,
         height: component_height,
-        header: render_quota_header(
-            &view_model,
-            content_width,
-            spinner_tick.get(),
+        header: render_quota_header(QuotaHeaderProps {
+            model: &view_model,
+            width: content_width,
+            tick: spinner_tick.get(),
             interactive,
-            help_open.get()
+            inactive: help_open.get()
                 || (!sidecar && filter_modal_owns_input)
                 || filter_state.draft.is_some()
                 || details_dialog.read().is_some(),
-            help_open,
-        ),
+            help: help_open,
+            details_action: render_quota_details_button(
+                account_pointer_interaction_enabled,
+                move |_| {
+                    if account_pointer_interaction_enabled
+                        && !help_open.get()
+                        && filters.read().draft.is_none()
+                    {
+                        details_dialog.set(focused_account_id.read().clone());
+                    }
+                },
+            ),
+        }),
         route: truncate_quota_header_text(&route_line, content_width),
         controls,
         body,

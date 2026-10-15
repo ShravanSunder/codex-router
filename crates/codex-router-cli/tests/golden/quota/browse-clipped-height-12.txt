@@ -1,7 +1,7 @@
 ╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
-│ Quota status                                                                                                                                ◌ fresh 10  Help │
+│ Quota status                                                                                                                       ◌ fresh 10  Details  Help │
 │ Pool-wide: responses -> acct00    [preferred]                                                                                                                │
-│ Filters ▾  Details  Provider: All · Disabled: Shown · 10/10 accounts                                                                                         │
+│ Filters ▾  Provider: All · Disabled: Shown · 10/10 accounts                                                                                                  │
 │ ┌──────────────────────────────────────────────────────────────────────────────────────────┐  ┌────────────────────────────────────────────────────────────┐ │
 │ │  ❯ acct00         [usable]          account 00 detail                                    │  │ Selected account                                           │ │
 │ │                   0 clients         █████ 83% left, reset 7d                             │  │ acct00    [usable]    account 00 detail                    │ │

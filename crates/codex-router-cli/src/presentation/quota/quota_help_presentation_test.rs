@@ -1,3 +1,46 @@
+#[test]
+fn review_qhelp_preserves_legacy_and_disambiguated_help_keys() {
+    use super::quota_help_rendering::quota_help_key;
+
+    // Legacy 0x1f becomes Control+7 in the pinned Unix decoder. The compiled
+    // PTY regression below this layer supplies that byte to the actual decoder.
+    for (code, modifiers) in [
+        (KeyCode::Char('7'), KeyModifiers::CONTROL),
+        (KeyCode::Char('_'), KeyModifiers::CONTROL),
+        (KeyCode::Char('/'), KeyModifiers::CONTROL),
+        (KeyCode::Char('\u{1f}'), KeyModifiers::empty()),
+        (KeyCode::F(1), KeyModifiers::empty()),
+    ] {
+        assert!(quota_help_key(code, modifiers), "Help key rejected: {code:?}");
+    }
+    for code in [KeyCode::Char('7'), KeyCode::Char('_'), KeyCode::Char('/')] {
+        assert!(!quota_help_key(code, KeyModifiers::empty()));
+    }
+}
+
+#[tokio::test]
+async fn review_qdetail_help_describes_existing_escape_close() {
+    let frames = render_quota_filter_phases(
+        quota_two_account_view_model(),
+        120,
+        36,
+        vec![
+            ("Quota status", vec![provider_filter_key(KeyCode::F(4))]),
+            ("Account details", vec![provider_filter_key(KeyCode::F(1))]),
+            ("Quota Help", vec![provider_filter_key(KeyCode::Esc)]),
+            ("Account details", vec![provider_filter_key(KeyCode::Esc)]),
+            ("Filters", vec![provider_filter_key(KeyCode::Esc)]),
+        ],
+        None,
+    ).await;
+    let help = frames.iter().find(|frame| frame.contains("Quota Help"))
+        .expect("Details contextual Help must render");
+    assert!(help.contains("Close details"), "{help}");
+    assert!(!help.contains("Esc / F4"), "F4 is an opener, not an existing close action: {help}");
+    let browse = frames.last().expect("Esc returns to Browse");
+    assert!(browse.contains("Quota status") && !browse.contains("Account details"), "{browse}");
+}
+
 #[tokio::test]
 async fn quota_help_top_line_hides_inline_shortcut_labels() {
     let text = render_quota_capture_model_at(quota_two_account_view_model(), 120, 36,
@@ -7,6 +50,20 @@ async fn quota_help_top_line_hides_inline_shortcut_labels() {
     for shortcut in ["Ctrl+F", "F4", "ctrl-r", "↑/↓ focus", "esc/q"] {
         assert!(!text.contains(shortcut), "visible shortcut {shortcut}: {text}");
     }
+}
+
+#[tokio::test]
+async fn owner_feedback_quota_help_is_secondary_in_the_actual_header() {
+    let mut component = element!(QuotaStatusComponent(view_model: quota_two_account_view_model(), width: 48usize, height: 24usize));
+    let canvases = component.mock_terminal_render_loop(MockTerminalConfig::with_events(futures_util::stream::iter(vec![provider_filter_key(KeyCode::Esc)]))).collect::<Vec<_>>().await;
+    let canvas = canvases.last().unwrap();
+    let frame = canvas.to_string();
+    let (row, line) = frame.lines().enumerate().find(|(_, line)| line.contains("Quota status") && line.contains("Help")).unwrap();
+    let offset = line.find("Help").unwrap();
+    let column = line.get(..offset).expect("matched label is a UTF-8 boundary").chars().count();
+    let style = canvas.cell(column, row).unwrap().text_style().unwrap();
+    assert_eq!(style.color, Some(Color::Grey), "Help must stay enabled but secondary: {frame}");
+    assert_eq!(style.weight, Weight::Normal);
 }
 
 #[tokio::test]

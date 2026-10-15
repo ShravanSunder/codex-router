@@ -1,14 +1,14 @@
 ╭──────────────────────────────────────────────╮
-│ Quota status                 ◌ fresh 1  Help │
+│ Quota status          ◌ fresh 1 Details Help │
 │ Pool-wide: responses -> ssdev    [preferred] │
-│ Filters ▾  Details                           │
-│ All · Disabled: Shown · 1/1 accounts         │
+│ All · Disabled: Shown · 1/1 ▾                │
 │ ┌──────────────────────────────────────────┐ │
-│ │  ❯ ssdev          [usable]     safest …  │ │
+│ │  ❯ ssdev      [usable]     safest quota  │ │
 │ │               1 client     █████ 83% l…  │ │
 │ │               2 resets     █████ 99% l…  │ │
 │ │               unknown      □□□□□□□│□□□…  │ │
 │ └──────────────────────────────────────────┘ │
+│                                              │
 │                                              │
 │                                              │
 │                                              │
