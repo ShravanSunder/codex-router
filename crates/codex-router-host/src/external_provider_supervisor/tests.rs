@@ -959,3 +959,7 @@ fn coded_provider_error_trace_reference_matches_safe_host_failure() {
 
 #[path = "failure_projection_tests.rs"]
 mod failure_projection_tests;
+
+#[cfg(debug_assertions)]
+#[path = "provider_error_category_tests.rs"]
+mod provider_error_category_tests;

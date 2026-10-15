@@ -90,6 +90,22 @@ impl AcpFixtureScript {
         self
     }
 
+    /// Supply synthetic error data without changing the existing default error step.
+    pub(crate) fn respond_error_with_data(
+        mut self,
+        request_name: &str,
+        code: i32,
+        data: Value,
+    ) -> Self {
+        self.steps.push(json!({
+            "action": "respond_error",
+            "requestName": request_name,
+            "code": code,
+            "data": data,
+        }));
+        self
+    }
+
     pub(crate) fn send(mut self, message: Value) -> Self {
         self.steps
             .push(json!({"action": "send", "message": message}));

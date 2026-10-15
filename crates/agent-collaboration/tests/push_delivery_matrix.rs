@@ -4,6 +4,8 @@
     clippy::panic_in_result_fn
 )]
 //! Recipient-observed push-format matrix on an isolated debug Host.
+#[path = "delivery_matrix/cli_process.rs"]
+mod cli_process;
 #[path = "automation_live_support/debug_backend_restart.rs"]
 mod debug_backend_restart;
 #[path = "delivery_matrix/support.rs"]
@@ -13,9 +15,17 @@ mod delivery_matrix_support;
 mod held_cells;
 #[path = "delivery_matrix/held_subscription_producer.rs"]
 mod held_subscription_producer;
+#[path = "delivery_matrix/owned_resource_cleanup.rs"]
+mod owned_resource_cleanup;
+#[path = "delivery_matrix/owned_resources.rs"]
+mod owned_resources;
+#[path = "delivery_matrix/peer_fixture.rs"]
+mod peer_fixture;
 #[path = "automation_live_support/proof_context.rs"]
 #[allow(dead_code)]
 mod proof_context;
+#[path = "delivery_matrix/runner_finalization.rs"]
+mod runner_finalization;
 #[path = "delivery_matrix/subscription_notice_observer.rs"]
 mod subscription;
 
@@ -71,13 +81,26 @@ fn prepare_delivery_matrix_acp_target_fixture() -> ProofResult<()> {
 #[ignore = "requires an isolated debug Host with the delivery-matrix provider fixture"]
 async fn push_delivery_matrix_covers_codex_and_claude_peer() -> ProofResult<()> {
     let config_guard = delivery_matrix_support::ConfigHashGuard::capture()?;
-    let result = exercise_push_delivery_matrix(&config_guard).await;
-    config_guard.verify()?;
-    result
+    let mut peer_owner: Option<delivery_matrix_support::PeerFixture> = None;
+    runner_finalization::run_matrix_scenario(
+        &mut peer_owner,
+        async |owner: &mut &mut Option<delivery_matrix_support::PeerFixture>| {
+            exercise_push_delivery_matrix(&config_guard, owner).await
+        },
+        |owner: &mut Option<delivery_matrix_support::PeerFixture>| async move {
+            match owner.take() {
+                Some(peer) => peer.shutdown().await,
+                None => Ok(()),
+            }
+        },
+        || config_guard.verify(),
+    )
+    .await
 }
 
 async fn exercise_push_delivery_matrix(
     config_guard: &delivery_matrix_support::ConfigHashGuard,
+    peer_owner: &mut Option<delivery_matrix_support::PeerFixture>,
 ) -> ProofResult<()> {
     let mut proof = ProofContext::connect().await?;
     proof.record(
@@ -85,7 +108,10 @@ async fn exercise_push_delivery_matrix(
         json!({"runId":uuid::Uuid::now_v7().to_string(),
         "cells":["S1","S1-long","S2","S3","S4","S5","S6","S7","S8","S9","S10"]}),
     )?;
-    let mut peer = delivery_matrix_support::PeerFixture::start(&proof).await?;
+    *peer_owner = Some(delivery_matrix_support::PeerFixture::start(&proof).await?);
+    let peer = peer_owner
+        .as_mut()
+        .ok_or("actual peer missing from runner owner")?;
     let mut automation = AutomationStore::open(&proof.root.join("automation.sqlite")).await?;
     let sender = proof.start_thread("Push matrix sender").await?;
     let mut covered_cells = Vec::new();
@@ -300,7 +326,6 @@ async fn exercise_push_delivery_matrix(
         "pushDeliveryMatrix",
         json!({"coveredCells":covered_cells,"separateModelCells":["S3","S5","S6"]}),
     )?;
-    peer.shutdown().await?;
     config_guard.verify()?;
     Ok(())
 }
@@ -309,9 +334,13 @@ async fn exercise_push_delivery_matrix(
 #[ignore = "requires a fresh isolated debug Host with the scripted ACP target fixture"]
 async fn push_delivery_matrix_reaches_scripted_acp_target() -> ProofResult<()> {
     let config_guard = delivery_matrix_support::ConfigHashGuard::capture()?;
-    let result = exercise_scripted_acp_target(&config_guard).await;
-    config_guard.verify()?;
-    result
+    runner_finalization::run_matrix_scenario(
+        (),
+        async |_: &mut ()| exercise_scripted_acp_target(&config_guard).await,
+        |_| async { Ok(()) },
+        || config_guard.verify(),
+    )
+    .await
 }
 
 async fn exercise_scripted_acp_target(
@@ -374,141 +403,161 @@ async fn exercise_scripted_acp_target(
 #[tokio::test]
 #[ignore = "requires the documented automation-debug-host with existing debug model access"]
 async fn push_delivery_matrix_holds_codex_recipients() -> ProofResult<()> {
-    let mut proof = ProofContext::connect().await?;
     let config_guard = delivery_matrix_support::ConfigHashGuard::capture()?;
-    let result = async {
-        proof.record(
-            "pushDeliveryMatrixRun",
-            json!({
-                "runId":uuid::Uuid::now_v7().to_string(),"cells":["S3","S5","S6"],
-                "route":"documentedAcceptanceHost",
-            }),
-        )?;
-        let unloaded_targets = held_cells::prepare_unloaded_targets(&mut proof).await?;
-        let sender = proof.start_thread("Held matrix sender").await?;
-        let machine_label = machine_label(&proof)?;
-        let mut automation = AutomationStore::open(&proof.root.join("automation.sqlite")).await?;
-        let mut covered_cells = Vec::new();
-        // S3: a DM sent to an unloaded Codex conversation is stored as held and
-        // arrives as the same line after an explicit conversation load.
-        held_cells::cover_held_dm_cell(&mut proof, &sender, &unloaded_targets.held_dm).await?;
-        config_guard.verify()?;
-        covered_cells.push("S3 held DM delivered after Codex load");
+    let mut resource_owner: Option<owned_resource_cleanup::OwnedMatrixScope> = None;
+    runner_finalization::run_matrix_scenario(
+        &mut resource_owner,
+        async |owner: &mut &mut Option<owned_resource_cleanup::OwnedMatrixScope>| {
+            exercise_held_codex_recipients(&config_guard, owner).await
+        },
+        |owner: &mut Option<owned_resource_cleanup::OwnedMatrixScope>| async move {
+            match owner.take() {
+                Some(scope) => scope.cleanup().await,
+                None => Ok(()),
+            }
+        },
+        || config_guard.verify(),
+    )
+    .await
+}
 
-        // S5: two independently subscribed roots are held as one batch, then
-        // delivered as one notice after loading the Codex recipient.
-        held_cells::cover_held_subscription_batch_cell(
-            &mut proof,
-            &sender,
-            &unloaded_targets.held_subscription,
-        )
-        .await?;
-        config_guard.verify()?;
-        covered_cells.push("S5 held two-thread subscription batch delivered after Codex load");
-
-        // S6: an unloaded Codex session resumes for a wake; a scheduled run then targets
-        // a separate existing native session. Both inputs are matched back to their PushId.
-        let wake_target = unloaded_targets.wake;
-        let wake_marker = matrix_marker("wake");
-        let wake_receipt = cli_wake_send(&proof, &sender, &wake_target, &wake_marker).await?;
-        let fire: FireReceipt = serde_json::from_value(
-            wake_receipt
-                .pointer("/result/record/firstFire")
-                .cloned()
-                .ok_or("wake receipt omitted firstFire")?,
-        )?;
-        let wake_origin = RouterOriginRef::Wake {
-            wakeup_id: fire.wakeup_id,
-            occurrence_id: fire.occurrence_id,
-        };
-        let wake_record = automation
-            .get_push_record_by_origin_reference(&wake_origin)
-            .await?
-            .ok_or("fired wake has no stored push record")?;
-        let wake_show = proof
-            .client
-            .router_show(PushRecordShowParams {
-                caller: wake_target.clone(),
-                reference: wake_record.push_id.as_str().to_owned(),
-            })
-            .await?;
-        let wake_expected = expected_push_line(&wake_show, &machine_label)?;
-        let wake_item =
-            wait_for_codex_input(&mut proof, &wake_target, &wake_marker, OBSERVATION_TIMEOUT)
-                .await?;
-        assert_exact_notice_line(&user_message_text(&wake_item)?, &wake_expected)?;
-        let wake_correlation = record_push_input_correlation(
-            &mut proof,
-            "wake",
-            &wake_show.record.push_id,
-            &wake_item,
-        )?;
-
-        let schedule_target = proof
-            .start_thread("S6 scheduled existing-session recipient")
-            .await?;
-        let schedule_marker = matrix_marker("schedule-run");
-        let schedule_id =
-            create_existing_session_schedule(&mut proof, &schedule_target, &schedule_marker)
-                .await?;
-        let (schedule_origin, schedule_record) = wait_for_schedule_push(
-            &mut proof,
-            &mut automation,
-            schedule_id,
-            OBSERVATION_TIMEOUT,
-        )
-        .await?;
-        let schedule_show = proof
-            .client
-            .router_show(PushRecordShowParams {
-                caller: schedule_target.clone(),
-                reference: schedule_record.push_id.as_str().to_owned(),
-            })
-            .await?;
-        let schedule_expected = expected_push_line(&schedule_show, &machine_label)?;
-        let schedule_item = wait_for_codex_input(
-            &mut proof,
-            &schedule_target,
-            &schedule_marker,
-            OBSERVATION_TIMEOUT,
-        )
-        .await?;
-        assert_exact_notice_line(&user_message_text(&schedule_item)?, &schedule_expected)?;
-        let schedule_correlation = record_push_input_correlation(
-            &mut proof,
-            "schedule-run",
-            &schedule_show.record.push_id,
-            &schedule_item,
-        )?;
-        proof.record(
-            "pushDeliveryCorrelation",
-            json!({
-                "wake":wake_correlation,
-                "scheduleRun":schedule_correlation,
-                "scheduleOrigin":schedule_origin,
-            }),
-        )?;
-        record_passed_matrix_cell(
-            &proof,
-            &config_guard,
-            "S6",
-            &[
-                user_message_text(&wake_item)?,
-                user_message_text(&schedule_item)?,
-            ],
-        )?;
-        covered_cells.push("S6 wake and existing-session schedule run");
-
-        config_guard.verify()?;
-        proof.record(
-            "pushDeliveryModelMatrix",
-            json!({"coveredCells":covered_cells}),
-        )?;
-        Ok(())
-    }
-    .await;
+async fn exercise_held_codex_recipients(
+    config_guard: &delivery_matrix_support::ConfigHashGuard,
+    resource_owner: &mut Option<owned_resource_cleanup::OwnedMatrixScope>,
+) -> ProofResult<()> {
+    let mut proof = ProofContext::connect().await?;
+    *resource_owner = Some(owned_resource_cleanup::OwnedMatrixScope::new(
+        proof.client.clone(),
+    ));
+    let resources = &mut resource_owner
+        .as_mut()
+        .ok_or("actual cleanup client and resources missing from runner owner")?
+        .resources;
+    proof.record(
+        "pushDeliveryMatrixRun",
+        json!({
+            "runId":uuid::Uuid::now_v7().to_string(),"cells":["S3","S5","S6"],
+            "route":"documentedAcceptanceHost",
+        }),
+    )?;
+    let unloaded_targets = held_cells::prepare_unloaded_targets(&mut proof).await?;
+    let sender = proof.start_thread("Held matrix sender").await?;
+    let machine_label = machine_label(&proof)?;
+    let mut automation = AutomationStore::open(&proof.root.join("automation.sqlite")).await?;
+    let mut covered_cells = Vec::new();
+    // S3: a DM sent to an unloaded Codex conversation is stored as held and
+    // arrives as the same line after an explicit conversation load.
+    held_cells::cover_held_dm_cell(&mut proof, &sender, &unloaded_targets.held_dm).await?;
     config_guard.verify()?;
-    result
+    covered_cells.push("S3 held DM delivered after Codex load");
+
+    // S5: two independently subscribed roots are held as one batch, then
+    // delivered as one notice after loading the Codex recipient.
+    held_cells::cover_held_subscription_batch_cell(
+        &mut proof,
+        &sender,
+        &unloaded_targets.held_subscription,
+        resources,
+    )
+    .await?;
+    config_guard.verify()?;
+    covered_cells.push("S5 held two-thread subscription batch delivered after Codex load");
+
+    // S6: an unloaded Codex session resumes for a wake; a scheduled run then targets
+    // a separate existing native session. Both inputs are matched back to their PushId.
+    let wake_target = unloaded_targets.wake;
+    let wake_marker = matrix_marker("wake");
+    let wake_receipt =
+        cli_wake_send(&proof, &sender, &wake_target, &wake_marker, resources).await?;
+    let fire: FireReceipt = serde_json::from_value(
+        wake_receipt
+            .pointer("/result/record/firstFire")
+            .cloned()
+            .ok_or("wake receipt omitted firstFire")?,
+    )?;
+    let wake_origin = RouterOriginRef::Wake {
+        wakeup_id: fire.wakeup_id,
+        occurrence_id: fire.occurrence_id,
+    };
+    let wake_record = automation
+        .get_push_record_by_origin_reference(&wake_origin)
+        .await?
+        .ok_or("fired wake has no stored push record")?;
+    let wake_show = proof
+        .client
+        .router_show(PushRecordShowParams {
+            caller: wake_target.clone(),
+            reference: wake_record.push_id.as_str().to_owned(),
+        })
+        .await?;
+    let wake_expected = expected_push_line(&wake_show, &machine_label)?;
+    let wake_item =
+        wait_for_codex_input(&mut proof, &wake_target, &wake_marker, OBSERVATION_TIMEOUT).await?;
+    assert_exact_notice_line(&user_message_text(&wake_item)?, &wake_expected)?;
+    let wake_correlation =
+        record_push_input_correlation(&mut proof, "wake", &wake_show.record.push_id, &wake_item)?;
+
+    let schedule_target = proof
+        .start_thread("S6 scheduled existing-session recipient")
+        .await?;
+    let schedule_marker = matrix_marker("schedule-run");
+    let schedule_id =
+        create_existing_session_schedule(&mut proof, &schedule_target, &schedule_marker, resources)
+            .await?;
+    let (schedule_origin, schedule_record) = wait_for_schedule_push(
+        &mut proof,
+        &mut automation,
+        schedule_id,
+        OBSERVATION_TIMEOUT,
+    )
+    .await?;
+    let schedule_show = proof
+        .client
+        .router_show(PushRecordShowParams {
+            caller: schedule_target.clone(),
+            reference: schedule_record.push_id.as_str().to_owned(),
+        })
+        .await?;
+    let schedule_expected = expected_push_line(&schedule_show, &machine_label)?;
+    let schedule_item = wait_for_codex_input(
+        &mut proof,
+        &schedule_target,
+        &schedule_marker,
+        OBSERVATION_TIMEOUT,
+    )
+    .await?;
+    assert_exact_notice_line(&user_message_text(&schedule_item)?, &schedule_expected)?;
+    let schedule_correlation = record_push_input_correlation(
+        &mut proof,
+        "schedule-run",
+        &schedule_show.record.push_id,
+        &schedule_item,
+    )?;
+    proof.record(
+        "pushDeliveryCorrelation",
+        json!({
+            "wake":wake_correlation,
+            "scheduleRun":schedule_correlation,
+            "scheduleOrigin":schedule_origin,
+        }),
+    )?;
+    record_passed_matrix_cell(
+        &proof,
+        config_guard,
+        "S6",
+        &[
+            user_message_text(&wake_item)?,
+            user_message_text(&schedule_item)?,
+        ],
+    )?;
+    covered_cells.push("S6 wake and existing-session schedule run");
+
+    config_guard.verify()?;
+    proof.record(
+        "pushDeliveryModelMatrix",
+        json!({"coveredCells":covered_cells}),
+    )?;
+    Ok(())
 }
 
 fn record_passed_matrix_cell(

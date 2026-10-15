@@ -182,15 +182,17 @@ pub(super) async fn cover_held_subscription_batch_cell(
     proof: &mut ProofContext,
     sender: &SessionRef,
     target: &SessionRef,
+    resources: &mut super::owned_resources::OwnedMatrixResources,
 ) -> ProofResult<()> {
     require_unloaded_target(proof, target).await?;
     let first_marker = matrix_marker("held-subscription-first-root");
     let second_marker = matrix_marker("held-subscription-second-root");
     let roots = super::held_subscription_producer::board_two_thread_subscription_push(
-        proof,
+        &proof.client,
         sender,
         target,
         [&first_marker, &second_marker],
+        resources,
     )
     .await?;
 

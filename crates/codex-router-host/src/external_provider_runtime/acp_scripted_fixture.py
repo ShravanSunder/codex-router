@@ -110,7 +110,7 @@ for step_number, step in enumerate(steps, start=1):
         send_message({
             "jsonrpc": "2.0",
             "id": request_ids.pop(request_name),
-            "error": {"code": step["code"], "message": "private provider text", "data": {"privateText": "secret sentinel"}},
+            "error": {"code": step["code"], "message": "private provider text", "data": step.get("data", {"privateText": "secret sentinel"})},
         })
     elif action == "send":
         send_message(step["message"])

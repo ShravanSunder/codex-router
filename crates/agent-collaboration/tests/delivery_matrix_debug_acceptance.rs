@@ -14,6 +14,8 @@ use collaboration_client::{ConversationClient, ConversationCreateActor, Conversa
 mod delivery_matrix_approval;
 #[path = "delivery_matrix/support.rs"]
 mod delivery_matrix_support;
+#[path = "delivery_matrix/peer_fixture.rs"]
+mod peer_fixture;
 use delivery_matrix_support::{
     ConfigHashGuard, PeerFixture, mcp_send, prepare_acp_target_fixture, prepare_provider_fixture,
 };
