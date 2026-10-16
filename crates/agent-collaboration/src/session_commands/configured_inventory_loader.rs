@@ -82,7 +82,7 @@ async fn read_page(
         return Err(SourceInventoryRejection::InvalidInventory);
     };
     configured_inventory_query::qualify_configured_query(&request.query)?;
-    if profile.credential.is_some() {
+    if profile.has_unqualified_http_credential() {
         return Err(SourceInventoryRejection::EndpointUnqualified);
     }
     let mut captured = request.clone();

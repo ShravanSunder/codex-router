@@ -1,6 +1,7 @@
 //! Read the existing stateless v3 JSON MCP API; no session, credential or recovery owner.
 use super::picker_runtime_inventory::native_inventory_pager::NativeInventoryReadClient;
-use super::router_connection_registry::RouterConnectionProfile;
+use super::router_connection_registry::{RouterConnectionProfile, RouterConnectionTransport};
+use super::source_ssh_protocol::{SourceOperation, SourceReply};
 use collaboration_client::{
     ClientError,
     protocol::{
@@ -19,20 +20,30 @@ const READ_TIMEOUT: Duration = Duration::from_secs(30);
 // Match the existing API's bounded envelope budget, without buffering an unbounded reply.
 const MAX_READ_REPLY_BYTES: usize = 4 * collaboration_client::protocol::MAX_CONTROL_FRAME_BYTES;
 
-pub(super) struct ConfiguredInventoryClient {
+pub(super) struct HttpConfiguredInventoryClient {
     client: reqwest::Client,
     url: String,
 }
 
-impl ConfiguredInventoryClient {
+impl HttpConfiguredInventoryClient {
     pub(super) fn new(profile: &RouterConnectionProfile) -> Result<Self, ClientError> {
         // Credential presentation is operator-owned; never guess a header or read a secret.
-        if profile.credential.is_some() {
+        let RouterConnectionTransport::Remote {
+            mcp_address,
+            credential,
+            ..
+        } = &profile.transport
+        else {
+            return Err(ClientError::InvalidRequest(
+                "HTTP source connection required",
+            ));
+        };
+        if credential.is_some() {
             return Err(ClientError::InvalidRequest(
                 "configured read credential presentation is unqualified",
             ));
         }
-        let address = url::Url::parse(profile.mcp_address.as_str())
+        let address = url::Url::parse(mcp_address.as_str())
             .map_err(|_| ClientError::InvalidRequest("invalid configured source address"))?;
         let mut client_builder = reqwest::Client::builder()
             .no_proxy()
@@ -54,7 +65,7 @@ impl ConfiguredInventoryClient {
             .map_err(|_| ClientError::Protocol("configured read transport unavailable"))?;
         Ok(Self {
             client,
-            url: profile.mcp_address.as_str().to_owned(),
+            url: mcp_address.as_str().to_owned(),
         })
     }
 
@@ -176,12 +187,107 @@ impl ConfiguredInventoryClient {
     }
 }
 
-impl NativeInventoryReadClient for ConfiguredInventoryClient {
+impl NativeInventoryReadClient for HttpConfiguredInventoryClient {
     async fn read_native_page(
         &mut self,
         request: NativeSessionListParams,
     ) -> Result<NativeSessionListResult, ClientError> {
         self.call("sessions_list", &request).await
+    }
+}
+
+pub(super) enum ConfiguredInventoryClient {
+    Remote(HttpConfiguredInventoryClient),
+    Ssh(Box<RouterConnectionProfile>),
+}
+
+impl ConfiguredInventoryClient {
+    pub(super) fn new(profile: &RouterConnectionProfile) -> Result<Self, ClientError> {
+        match &profile.transport {
+            RouterConnectionTransport::Remote { .. } => {
+                Ok(Self::Remote(HttpConfiguredInventoryClient::new(profile)?))
+            }
+            RouterConnectionTransport::Ssh(_) => Ok(Self::Ssh(Box::new(profile.clone()))),
+        }
+    }
+
+    pub(super) async fn inventory(&self) -> Result<EndpointInventory, ClientError> {
+        match self {
+            Self::Remote(client) => client.inventory().await,
+            Self::Ssh(profile) => match ssh_read(profile, SourceOperation::Endpoints).await? {
+                SourceReply::Endpoints { inventory } => Ok(inventory),
+                _ => Err(ClientError::Protocol(
+                    "source reply kind does not match inventory",
+                )),
+            },
+        }
+    }
+
+    pub(super) async fn provider_page(
+        &self,
+        request: &ProviderSessionListParams,
+    ) -> Result<ProviderSessionListResult, ClientError> {
+        match self {
+            Self::Remote(client) => client.provider_page(request).await,
+            Self::Ssh(profile) => match ssh_read(
+                profile,
+                SourceOperation::ProviderSessions {
+                    params: request.clone(),
+                },
+            )
+            .await?
+            {
+                SourceReply::ProviderSessions { page } => Ok(page),
+                _ => Err(ClientError::Protocol(
+                    "source reply kind does not match provider page",
+                )),
+            },
+        }
+    }
+}
+
+impl NativeInventoryReadClient for ConfiguredInventoryClient {
+    async fn read_native_page(
+        &mut self,
+        request: NativeSessionListParams,
+    ) -> Result<NativeSessionListResult, ClientError> {
+        match self {
+            Self::Remote(client) => client.read_native_page(request).await,
+            Self::Ssh(profile) => {
+                match ssh_read(profile, SourceOperation::NativeSessions { params: request }).await?
+                {
+                    SourceReply::NativeSessions { page } => Ok(page),
+                    _ => Err(ClientError::Protocol(
+                        "source reply kind does not match native page",
+                    )),
+                }
+            }
+        }
+    }
+}
+
+async fn ssh_read(
+    profile: &RouterConnectionProfile,
+    operation: SourceOperation,
+) -> Result<SourceReply, ClientError> {
+    super::source_ssh_transport::read_source(profile, operation)
+        .await
+        .map_err(source_read_client_error)
+}
+
+fn source_read_client_error(error: super::source_ssh_protocol::SourceReadError) -> ClientError {
+    use super::source_ssh_protocol::{SourceReadError, SourceRejection};
+    match error {
+        SourceReadError::ReadUnavailable
+        | SourceReadError::Rejected(SourceRejection::SourceUnavailable) => {
+            ClientError::Transport(std::io::Error::new(
+                std::io::ErrorKind::ConnectionAborted,
+                "configured SSH read unavailable",
+            ))
+        }
+        SourceReadError::InvalidReply | SourceReadError::Rejected(_) => {
+            ClientError::Protocol("configured SSH read failed")
+        }
     }
 }
 

@@ -4,16 +4,13 @@ use super::SessionsPickerModel;
 pub(super) fn picker_body_budget(
     height: usize,
     control_height: usize,
-    footer_line_count: usize,
     minimum_render_height: usize,
 ) -> usize {
     let root_border_height = 2;
     let title_height = 1;
-    let footer_border_height = 1;
-    let footer_height = footer_border_height + footer_line_count;
     height
         .max(minimum_render_height)
-        .saturating_sub(root_border_height + title_height + control_height + footer_height)
+        .saturating_sub(root_border_height + title_height + control_height)
 }
 
 pub(super) fn session_visible_row_budget(

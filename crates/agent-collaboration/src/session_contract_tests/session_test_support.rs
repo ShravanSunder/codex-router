@@ -197,6 +197,9 @@ impl CodexStateThreadFixture {
 #[derive(Default)]
 pub(super) struct FakeSessionsCommandRunner {
     pub(super) new_codex_args: Vec<Vec<OsString>>,
+    pub(super) prepared_source_sessions:
+        Vec<crate::sessions::source_ssh_protocol::PreparedSourceSession>,
+    pub(super) prepared_source_args: Vec<Vec<OsString>>,
     pub(super) resumed_session_ids: Vec<String>,
     pub(super) resume_codex_args: Vec<Vec<OsString>>,
     pub(super) resume_model_choices: Vec<codex_native_integration::ResumeModelChoice>,
@@ -206,6 +209,16 @@ pub(super) struct FakeSessionsCommandRunner {
 }
 
 impl crate::sessions::SessionsCommandRunner for FakeSessionsCommandRunner {
+    fn run_prepared_source(
+        &mut self,
+        arguments: &[OsString],
+        selection: &crate::sessions::source_ssh_protocol::PreparedSourceSession,
+    ) -> Result<(), crate::sessions::SessionsCommandError> {
+        self.prepared_source_sessions.push(selection.clone());
+        self.prepared_source_args.push(arguments.to_vec());
+        Ok(())
+    }
+
     fn run_codex_new(
         &mut self,
         codex_args: &[OsString],

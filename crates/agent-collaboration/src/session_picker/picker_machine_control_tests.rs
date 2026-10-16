@@ -97,7 +97,7 @@ async fn individual_machine_switch_reads_and_publishes_only_its_bound_source() {
                 activated = true;
                 sender.send(key(KeyCode::Home)).unwrap();
                 sender.send(key(KeyCode::Down)).unwrap();
-                sender.send(key(KeyCode::Enter)).unwrap();
+                sender.send(resume_key()).unwrap();
             }
             frames.push(text);
         }
@@ -423,7 +423,7 @@ async fn named_new_uses_configured_remote_cwd_and_cannot_create_before_route_qua
 }
 
 #[tokio::test]
-async fn tab_and_enter_open_machine_control_while_plain_enter_still_resumes() {
+async fn tab_and_enter_open_machine_control_while_control_enter_resumes() {
     let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
     sender.send(key(KeyCode::Tab)).unwrap();
     sender.send(key(KeyCode::Enter)).unwrap();
@@ -447,7 +447,7 @@ async fn tab_and_enter_open_machine_control_while_plain_enter_still_resumes() {
         "Tab then Enter must display the control before cancellation"
     );
     assert_eq!(outcome, None);
-    let (_, outcome) = render_events(picker_request(), vec![key(KeyCode::Enter)])
+    let (_, outcome) = render_events(picker_request(), vec![resume_key()])
         .await
         .unwrap();
     assert!(matches!(

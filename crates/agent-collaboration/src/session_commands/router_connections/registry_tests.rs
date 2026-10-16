@@ -28,12 +28,7 @@ fn registry_accepts_comments_trailing_commas_and_preserves_explicit_native_port(
     let registry = RouterConnectionRegistry::parse(text).unwrap();
     assert_eq!(registry.routers[0].name.as_str(), "Sunbook");
     assert_eq!(
-        registry.routers[0]
-            .native_codex
-            .as_ref()
-            .unwrap()
-            .address
-            .as_str(),
+        registry.routers[0].native_codex().unwrap().address.as_str(),
         "wss://machine.example.invalid:443/"
     );
     assert_eq!(
@@ -173,5 +168,69 @@ fn registry_reader_keeps_missing_empty_and_invalid_distinct_without_writing() {
     assert_eq!(
         std::fs::read_to_string(path).unwrap(),
         "SECRET_CANARY_INVALID_JSON"
+    );
+}
+
+#[test]
+fn registry_accepts_source_ssh_without_exposed_mcp_address() {
+    let document = json!({"version":1,"routers":[{
+        "name":"Sunbook", "connection":{
+            "kind":"ssh", "serviceId":"00000000-0000-4000-8000-000000000001",
+            "destination":"developer@100.64.0.2",
+            "executable":"/opt/router/bin/agent-sessions",
+            "serviceDirectory":"/private/router/collaboration",
+            "clientProfile":"routerDebug"
+        }, "defaultRemoteCwd":"/remote-only/project"
+    }]});
+    let result = RouterConnectionRegistry::parse(&document.to_string());
+    assert!(
+        result.is_ok(),
+        "trusted SSH source must not require an exposed HTTP/native listener"
+    );
+    let registry = result.unwrap();
+    assert_eq!(registry.routers[0].name.as_str(), "Sunbook");
+    assert_eq!(
+        registry.routers[0]
+            .default_remote_cwd
+            .as_ref()
+            .unwrap()
+            .as_str(),
+        "/remote-only/project"
+    );
+}
+
+#[test]
+fn registry_rejects_source_ssh_option_injection_and_nonabsolute_source_paths() {
+    let base = json!({"version":1,"routers":[{
+        "name":"Sunbook", "connection":{
+            "kind":"ssh", "serviceId":"00000000-0000-4000-8000-000000000001",
+            "destination":"100.64.0.2",
+            "executable":"/opt/router/bin/agent-sessions",
+            "serviceDirectory":"/private/router/collaboration",
+            "clientProfile":"routerDebug"
+        }
+    }]});
+    for (field, value) in [
+        ("destination", "-oProxyCommand=SECRET_CANARY"),
+        ("destination", "host name"),
+        ("destination", "host\nsecond-command"),
+        ("destination", "user@"),
+        ("executable", "agent-sessions"),
+        ("serviceDirectory", "~/router"),
+        ("clientProfile", "../../alternate"),
+    ] {
+        let mut document = base.clone();
+        document["routers"][0]["connection"][field] = json!(value);
+        let error = RouterConnectionRegistry::parse(&document.to_string()).unwrap_err();
+        assert!(
+            !error.to_string().contains(value),
+            "diagnostic must not echo untrusted input"
+        );
+    }
+    let mut document = base;
+    document["routers"][0]["connection"]["mcpUrl"] = json!("http://unrelated.invalid/mcp");
+    assert!(
+        RouterConnectionRegistry::parse(&document.to_string()).is_err(),
+        "SSH and HTTP locator fields must not mix"
     );
 }

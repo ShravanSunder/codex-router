@@ -1,4 +1,5 @@
 use super::*;
+use crate::presentation::session_picker::source_reload_worker::SessionRecordsReloadRequest;
 
 #[tokio::test]
 async fn session_record_reload_worker_runs_single_flight_and_keeps_only_latest_pending_query() {

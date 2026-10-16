@@ -221,7 +221,7 @@ impl PickerMachineControls {
             MachineChoicePurpose::NewSession if profile.default_remote_cwd.is_none() => {
                 MachineChoiceNotice::MissingDestinationCwd(name)
             }
-            MachineChoicePurpose::NewSession => match &profile.native_codex {
+            MachineChoicePurpose::NewSession => match profile.native_codex() {
                 None => MachineChoiceNotice::NativeRouteUnavailable(name),
                 Some(native)
                     if native.credential.is_some()

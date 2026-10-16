@@ -19,6 +19,19 @@ fn review_qhelp_preserves_legacy_and_disambiguated_help_keys() {
 }
 
 #[tokio::test]
+async fn owner_details_navigation_quota_enter_opens_focused_account_details() {
+    let mut exit = KeyEvent::new(KeyEventKind::Press, KeyCode::Char('d'));
+    exit.modifiers = KeyModifiers::CONTROL;
+    for width in [120, 76, 48] {
+        let frame = render_quota_capture_model_at(
+            quota_two_account_view_model(), width, 30,
+            vec![provider_filter_key(KeyCode::Enter), TerminalEvent::Key(exit.clone())],
+        ).await;
+        assert!(frame.contains("Account details"), "ordinary Enter opens focused account details: {frame}");
+    }
+}
+
+#[tokio::test]
 async fn review_qdetail_help_describes_existing_escape_close() {
     let frames = render_quota_filter_phases(
         quota_two_account_view_model(),

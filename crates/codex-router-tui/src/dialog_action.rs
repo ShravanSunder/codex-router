@@ -8,12 +8,21 @@ pub enum DialogActionEmphasis {
     Secondary,
 }
 
+/// A modal may own modified Enter and focus navigation as one state transition.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum DialogKeyboardOwner {
+    #[default]
+    Button,
+    Caller,
+}
+
 #[derive(Props)]
 pub struct DialogActionProps {
     #[iocraft(required)]
     pub label: String,
     pub has_focus: bool,
     pub emphasis: DialogActionEmphasis,
+    pub keyboard_owner: DialogKeyboardOwner,
     pub handler: HandlerMut<'static, ()>,
 }
 
@@ -33,7 +42,7 @@ pub fn DialogAction(props: &mut DialogActionProps, hooks: Hooks) -> impl Into<An
         }
     };
     element! {
-        Button(has_focus: enabled && props.has_focus, handler: move |_| {
+        Button(has_focus: enabled && props.has_focus && props.keyboard_owner == DialogKeyboardOwner::Button, handler: move |_| {
             if enabled { handler(()); }
         }) {
             Text(content: props.label.clone(), color, weight,

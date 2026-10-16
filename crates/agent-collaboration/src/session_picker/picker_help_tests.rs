@@ -88,7 +88,7 @@ async fn sessions_help_preserves_provider_draft_and_blocks_background_keys() {
 async fn sessions_help_precedes_existing_machine_fork_and_details_input() {
     for (opening, restored) in [
         (ctrl_key('g'), "Choose machine"),
-        (alt_enter_key(), "Fork session"),
+        (control_shift_enter_key(), "Fork session"),
         (key(KeyCode::F(4)), "Session details"),
     ] {
         let frame = render_picker_capture_at(
@@ -216,7 +216,7 @@ async fn owner_feedback_modal_input_blocks_atomic_paste() {
         key(KeyCode::F(1)),
         ctrl_key('f'),
         ctrl_key('g'),
-        alt_enter_key(),
+        control_shift_enter_key(),
         key(KeyCode::F(4)),
     ] {
         let frame = render_picker_capture_at(
@@ -441,8 +441,8 @@ async fn sessions_help_wide_overlay_preserves_background_top_bottom_and_inactive
     assert_eq!(style.color, Some(Color::Grey));
     assert_eq!(style.weight, Weight::Bold);
     assert!(
-        text.lines().nth(34).unwrap().contains("Details"),
-        "background action must retain bottom row: {text}"
+        text.lines().nth(1).unwrap().contains("Details"),
+        "background Details action must retain title row: {text}"
     );
     assert!(
         text.lines().nth(35).unwrap().contains('╰'),

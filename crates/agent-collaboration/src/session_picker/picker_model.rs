@@ -22,25 +22,9 @@ use crate::sessions::{SessionPickerIdentity, SessionPickerRecord};
 
 pub(super) const VISIBLE_SESSION_ROWS: usize = 8;
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) enum SessionsPickerRuntimeView {
-    Blocked,
-    Active,
-    Idle,
-    #[default]
-    All,
-}
-
-impl SessionsPickerRuntimeView {
-    pub(crate) const fn next(self) -> Self {
-        match self {
-            Self::All => Self::Blocked,
-            Self::Blocked => Self::Active,
-            Self::Active => Self::Idle,
-            Self::Idle => Self::All,
-        }
-    }
-}
+#[path = "picker_runtime_view.rs"]
+mod picker_runtime_view;
+pub(crate) use picker_runtime_view::SessionsPickerRuntimeView;
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(super) enum SessionsPickerFocus {
@@ -65,9 +49,10 @@ pub(crate) struct SessionsPickerModel {
     pub(super) sort: SessionsSort,
     pub(super) search: String,
     pub(super) show_help: bool,
+    pub(super) source_action: super::source_action_state::PickerSourceAction,
     pub(super) provider_filter: super::provider_filter_model::SessionProviderFilter,
     pub(super) provider_filter_draft: Option<super::provider_filter_model::ProviderFilterDraft>,
-    pub(super) details_dialog: Option<crate::sessions::SessionPickerRecord>,
+    pub(super) details_dialog: Option<super::details_dialog_state::SessionDetailsDialog>,
     pub(super) runtime_coverage: PickerRuntimeCoverage,
     focus: SessionsPickerFocus,
     pointer_window_start: Option<usize>,
@@ -102,6 +87,7 @@ impl SessionsPickerModel {
             source_switch_checkpoint: None,
             search: String::new(),
             show_help: false,
+            source_action: super::source_action_state::PickerSourceAction::default(),
             provider_filter: super::provider_filter_model::SessionProviderFilter::All,
             provider_filter_draft: None,
             details_dialog: None,
@@ -117,6 +103,9 @@ impl SessionsPickerModel {
     }
 
     pub(crate) fn handle_key(&mut self, key: SessionsPickerKey) {
+        if self.source_action.pending.is_some() {
+            return;
+        }
         self.pointer_window_start = None;
         match key {
             SessionsPickerKey::MoveDown => {
@@ -196,6 +185,9 @@ impl SessionsPickerModel {
     }
 
     pub(super) fn append_search_text(&mut self, text: &str) {
+        if self.source_action.pending.is_some() {
+            return;
+        }
         let previous_length = self.search.len();
         self.search
             .extend(text.chars().filter(|character| !character.is_control()));
@@ -251,7 +243,7 @@ impl SessionsPickerModel {
                 super::picker_machine_controls::PickerMachineStage::Browsing
             )
         {
-            self.details_dialog = self.focused_record().cloned();
+            self.open_captured_details();
         }
     }
 
@@ -591,16 +583,6 @@ impl SessionsPickerModel {
     }
 }
 
-pub(super) fn visible_window_start(
-    focused_index: usize,
-    visible_len: usize,
-    max_visible: usize,
-) -> usize {
-    if visible_len <= max_visible {
-        return 0;
-    }
-    focused_index
-        .saturating_add(1)
-        .saturating_sub(max_visible)
-        .min(visible_len.saturating_sub(max_visible))
-}
+#[path = "picker_visible_window.rs"]
+mod picker_visible_window;
+pub(super) use picker_visible_window::visible_window_start;

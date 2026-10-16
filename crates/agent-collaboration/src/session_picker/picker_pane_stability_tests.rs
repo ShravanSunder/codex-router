@@ -64,7 +64,9 @@ async fn sessions_details_dialog_scrolls_without_launching_or_mutating_search() 
                     phase = 1;
                 } else if phase == 1 && frame.contains("Session details") && frame.contains('┃') {
                     sender.send(ctrl_key('n')).unwrap();
-                    sender.send(alt_enter_key()).unwrap();
+                    let mut retired_fork_key = KeyEvent::new(KeyEventKind::Press, KeyCode::Enter);
+                    retired_fork_key.modifiers = KeyModifiers::ALT;
+                    sender.send(TerminalEvent::Key(retired_fork_key)).unwrap();
                     sender
                         .send(TerminalEvent::Key(KeyEvent::new(
                             KeyEventKind::Press,

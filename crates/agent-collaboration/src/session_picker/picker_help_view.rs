@@ -30,12 +30,12 @@ pub(super) fn render_help(
             ("↑ / ↓", "Move selection"),
             ("PgUp / PgDn", "Move a page"),
             ("Home / End", "First / last choice"),
-            ("Enter", "Resume selected session"),
-            ("Alt+Enter", "Fork selected session"),
+            ("Enter / F4", "Open details"),
+            ("Ctrl+Enter", "Resume selected session"),
+            ("Ctrl+Shift+Enter", "Fork selected session"),
             ("Ctrl+N", "New Codex session"),
             ("Ctrl+G / F2", "Choose machine"),
             ("Ctrl+F / F3", "Session filters"),
-            ("F4", "Session details"),
             ("Ctrl+S", "Cycle scope"),
             ("Ctrl+T", "Cycle runtime view"),
             ("Ctrl+O", "Cycle sort"),
@@ -56,6 +56,23 @@ pub(super) fn render_help(
                 ("Tab / Shift+Tab", "Move between provider, Apply and Cancel"),
                 ("Enter", "Apply draft, or cancel when Cancel is focused"),
                 ("Esc", "Cancel draft"),
+            ]),
+        });
+    }
+    if model.details_dialog.is_some() {
+        sections.push(ShortcutSection {
+            title: "Session details".to_owned(),
+            entries: entries(&[
+                ("↑ / ↓ / PgUp / PgDn", "Scroll details"),
+                ("Tab / Shift+Tab", "Choose action"),
+                ("Enter / Space", "Activate selected action"),
+                ("Ctrl+Enter", "Resume selected session"),
+                ("Ctrl+Shift+Enter", "Fork selected session"),
+                (
+                    "Copy session ID",
+                    "Send the exact ID to the terminal clipboard",
+                ),
+                ("Esc", "Close details"),
             ]),
         });
     }
@@ -119,7 +136,7 @@ pub(super) fn render_choice_surface(
             model.width,
             height,
             help_action(state),
-            model.show_help,
+            model.show_help || model.source_action.pending.is_some(),
         )
         .into_any()
     } else if !matches!(
@@ -131,10 +148,16 @@ pub(super) fn render_choice_surface(
     } else {
         return None;
     };
-    let dialog = model.show_help.then(|| render_help(model, state, height));
+    let dialog = if let Some(pending) = &model.source_action.pending {
+        Some(super::source_action_view::checking_dialog(
+            pending, state, height,
+        ))
+    } else {
+        model.show_help.then(|| render_help(model, state, height))
+    };
     Some(element! {
         View(width: model.width as u32, height: height as u32) {
-            codex_router_tui::DialogHost(width: u16::try_from(model.width).unwrap_or(u16::MAX), height: u16::try_from(height).unwrap_or(u16::MAX), background: vec![background], dialog)
+            codex_router_tui::DialogHost(width: u16::try_from(model.width).unwrap_or(u16::MAX), height: u16::try_from(height).unwrap_or(u16::MAX), background: vec![background, element!(View(position: Position::Absolute, bottom: 2, left: 2) { #(super::source_action_view::source_error(model)) }).into_any()], dialog)
         }
     })
 }

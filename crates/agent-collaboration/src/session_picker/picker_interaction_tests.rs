@@ -47,7 +47,7 @@ async fn provider_selection_shows_read_only_details_without_a_codex_outcome() {
                         frame.contains("Claude fixture"),
                         "dialog must identify its provider session: {frame}"
                     );
-                    sender.send(alt_enter_key()).unwrap();
+                    sender.send(control_shift_enter_key()).unwrap();
                     sender
                         .send(TerminalEvent::Key(KeyEvent::new(
                             KeyEventKind::Press,
@@ -93,7 +93,7 @@ async fn sessions_picker_iocraft_mock_terminal_handles_keys() {
             ctrl_key('s'),
             ctrl_key('s'),
             TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Down)),
-            TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Enter)),
+            resume_key(),
         ],
     )))
     .map(|canvas| canvas.to_string())
@@ -115,7 +115,7 @@ async fn sessions_picker_iocraft_mock_terminal_handles_keys() {
 }
 
 #[tokio::test]
-async fn sessions_picker_option_enter_forks_the_focused_existing_session() {
+async fn sessions_picker_control_shift_enter_forks_the_focused_existing_session() {
     let mut selected_outcome = Option::<SessionsPickerOutcome>::None;
     let _frames = element! {
         SessionsPickerComponent(
@@ -126,7 +126,7 @@ async fn sessions_picker_option_enter_forks_the_focused_existing_session() {
     }
     .mock_terminal_render_loop(MockTerminalConfig::with_events(futures_util::stream::iter(
         vec![
-            alt_enter_key(),
+            control_shift_enter_key(),
             TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Enter)),
         ],
     )))
@@ -214,7 +214,7 @@ async fn sessions_picker_start_new_hover_focuses_preview_without_activation() {
 }
 
 #[tokio::test]
-async fn sessions_picker_enter_resumes_pointer_focused_existing_session() {
+async fn sessions_picker_control_enter_resumes_pointer_focused_existing_session() {
     let mut selected_outcome = Option::<SessionsPickerOutcome>::None;
     let _frames = element! {
         SessionsPickerComponent(
@@ -231,7 +231,7 @@ async fn sessions_picker_enter_resumes_pointer_focused_existing_session() {
                 10,
                 14,
             )),
-            TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Enter)),
+            resume_key(),
         ],
     )))
     .collect::<Vec<_>>()
@@ -295,7 +295,7 @@ async fn sessions_picker_non_left_row_events_do_not_focus_or_activate() {
                 10,
                 14,
             )),
-            TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Enter)),
+            resume_key(),
         ],
     )))
     .collect::<Vec<_>>()
@@ -336,7 +336,7 @@ async fn sessions_picker_hover_keeps_scrolled_row_under_pointer_until_click_and_
                             .unwrap();
                         phase = 1;
                     }
-                    1 if frame.contains("+8 more above") => {
+                    1 if frame.contains("❯ Follow-up implementation lane 7") => {
                         pointer_row = frame
                             .lines()
                             .position(|line| line.contains("Follow-up implementation lane 5"))
@@ -367,12 +367,7 @@ async fn sessions_picker_hover_keeps_scrolled_row_under_pointer_until_click_and_
                                 pointer_row,
                             )))
                             .unwrap();
-                        sender
-                            .send(TerminalEvent::Key(KeyEvent::new(
-                                KeyEventKind::Press,
-                                KeyCode::Enter,
-                            )))
-                            .unwrap();
+                        sender.send(resume_key()).unwrap();
                         phase = 3;
                     }
                     _ => {}
@@ -627,10 +622,10 @@ async fn picker_control_g_opens_a_visible_machine_selector_without_selecting_an_
 }
 
 #[tokio::test]
-async fn alt_enter_opens_fork_confirmation_before_any_action_is_selected() {
+async fn control_shift_enter_opens_fork_confirmation_before_any_action_is_selected() {
     let mut outcome = Option::<SessionsPickerOutcome>::None;
     let (send_event, receive_event) = tokio::sync::mpsc::unbounded_channel();
-    send_event.send(alt_enter_key()).unwrap();
+    send_event.send(control_shift_enter_key()).unwrap();
     let events = futures_util::stream::unfold(receive_event, |mut receiver| async {
         receiver.recv().await.map(|event| (event, receiver))
     });

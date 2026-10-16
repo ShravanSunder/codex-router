@@ -41,7 +41,7 @@ async fn sessions_provider_filter_real_keys_apply_cancel_and_hide_nonmatching_ro
 #[tokio::test]
 async fn sessions_provider_filter_real_keys_respect_fork_and_machine_modals() {
     for (opening, expected_modal) in [
-        (alt_enter_key(), "Fork session"),
+        (control_shift_enter_key(), "Fork session"),
         (ctrl_key('g'), "Choose machine"),
     ] {
         let frames = element! {

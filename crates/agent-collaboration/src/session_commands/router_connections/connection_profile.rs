@@ -1,7 +1,13 @@
 //! Registry DTOs and validated machine connection names, addresses and references.
 use collaboration_client::protocol::UuidIdentity;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use url::Url;
+
+#[path = "source_ssh_connection.rs"]
+mod source_ssh_connection;
+pub(crate) use source_ssh_connection::{
+    AbsoluteSourcePath, SourceClientProfile, SourceSshConnection,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub(crate) enum RouterRegistryError {
@@ -29,6 +35,10 @@ pub(crate) enum RouterRegistryError {
     InvalidCredentialReference,
     #[error("machine registry contains an invalid remote working directory")]
     InvalidRemoteCwd,
+    #[error("machine registry contains an invalid SSH destination")]
+    InvalidSshDestination,
+    #[error("machine registry contains an invalid absolute source path")]
+    InvalidSshPath,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
@@ -152,7 +162,8 @@ pub(crate) enum CredentialReference {
     Environment { variable: CredentialEnvironmentName },
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
 pub(crate) struct AbsoluteRemoteCwd(String);
 
 impl AbsoluteRemoteCwd {
@@ -164,10 +175,16 @@ impl AbsoluteRemoteCwd {
 impl TryFrom<String> for AbsoluteRemoteCwd {
     type Error = RouterRegistryError;
     fn try_from(value: String) -> Result<Self, Self::Error> {
-        if !value.starts_with('/') || value.chars().any(char::is_control) {
+        if !value.starts_with('/') || value.len() > 4096 || value.chars().any(char::is_control) {
             return Err(RouterRegistryError::InvalidRemoteCwd);
         }
         Ok(Self(value))
+    }
+}
+
+impl From<AbsoluteRemoteCwd> for String {
+    fn from(value: AbsoluteRemoteCwd) -> Self {
+        value.0
     }
 }
 
@@ -181,10 +198,37 @@ pub(crate) struct NativeCodexConnection {
 pub(crate) struct RouterConnectionProfile {
     pub(crate) name: RouterConnectionName,
     pub(crate) service_id: UuidIdentity,
-    pub(crate) mcp_address: McpConnectionAddress,
-    pub(crate) credential: Option<CredentialReference>,
-    pub(crate) native_codex: Option<NativeCodexConnection>,
+    pub(crate) transport: RouterConnectionTransport,
     pub(crate) default_remote_cwd: Option<AbsoluteRemoteCwd>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum RouterConnectionTransport {
+    Remote {
+        mcp_address: McpConnectionAddress,
+        credential: Option<CredentialReference>,
+        native_codex: Option<NativeCodexConnection>,
+    },
+    Ssh(SourceSshConnection),
+}
+
+impl RouterConnectionProfile {
+    pub(crate) fn native_codex(&self) -> Option<&NativeCodexConnection> {
+        match &self.transport {
+            RouterConnectionTransport::Remote { native_codex, .. } => native_codex.as_ref(),
+            RouterConnectionTransport::Ssh(_) => None,
+        }
+    }
+
+    pub(crate) fn has_unqualified_http_credential(&self) -> bool {
+        matches!(
+            &self.transport,
+            RouterConnectionTransport::Remote {
+                credential: Some(_),
+                ..
+            }
+        )
+    }
 }
 
 #[derive(Deserialize)]
@@ -214,6 +258,16 @@ enum RemoteConnectionDto {
         #[serde(rename = "nativeCodex")]
         native_codex: Option<NativeCodexConnectionDto>,
     },
+    Ssh {
+        #[serde(rename = "serviceId")]
+        service_id: UuidIdentity,
+        destination: String,
+        executable: String,
+        #[serde(rename = "serviceDirectory")]
+        service_directory: String,
+        #[serde(rename = "clientProfile")]
+        client_profile: SourceClientProfile,
+    },
 }
 
 #[derive(Deserialize)]
@@ -242,25 +296,47 @@ impl TryFrom<CredentialReferenceDto> for CredentialReference {
 impl TryFrom<RouterConnectionProfileDto> for RouterConnectionProfile {
     type Error = RouterRegistryError;
     fn try_from(value: RouterConnectionProfileDto) -> Result<Self, Self::Error> {
-        let RemoteConnectionDto::Remote {
-            service_id,
-            mcp_url,
-            credential,
-            native_codex,
-        } = value.connection;
+        let (service_id, transport) = match value.connection {
+            RemoteConnectionDto::Remote {
+                service_id,
+                mcp_url,
+                credential,
+                native_codex,
+            } => (
+                service_id,
+                RouterConnectionTransport::Remote {
+                    mcp_address: mcp_url.try_into()?,
+                    credential: credential.map(TryInto::try_into).transpose()?,
+                    native_codex: native_codex
+                        .map(|native| {
+                            Ok(NativeCodexConnection {
+                                address: native.address.try_into()?,
+                                credential: native.credential.map(TryInto::try_into).transpose()?,
+                            })
+                        })
+                        .transpose()?,
+                },
+            ),
+            RemoteConnectionDto::Ssh {
+                service_id,
+                destination,
+                executable,
+                service_directory,
+                client_profile,
+            } => (
+                service_id,
+                RouterConnectionTransport::Ssh(SourceSshConnection {
+                    destination: destination.try_into()?,
+                    executable: executable.try_into()?,
+                    service_directory: service_directory.try_into()?,
+                    client_profile,
+                }),
+            ),
+        };
         Ok(Self {
             name: value.name.try_into()?,
             service_id,
-            mcp_address: mcp_url.try_into()?,
-            credential: credential.map(TryInto::try_into).transpose()?,
-            native_codex: native_codex
-                .map(|native| {
-                    Ok(NativeCodexConnection {
-                        address: native.address.try_into()?,
-                        credential: native.credential.map(TryInto::try_into).transpose()?,
-                    })
-                })
-                .transpose()?,
+            transport,
             default_remote_cwd: value
                 .default_remote_cwd
                 .map(TryInto::try_into)

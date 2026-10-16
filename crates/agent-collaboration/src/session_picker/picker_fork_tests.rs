@@ -104,7 +104,7 @@ async fn after_popup_until(
 ) -> (Vec<String>, Option<SessionsPickerOutcome>) {
     let mut outcome = None;
     let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
-    sender.send(alt_enter_key()).unwrap();
+    sender.send(control_shift_enter_key()).unwrap();
     let input = futures_util::stream::unfold(receiver, |mut receiver| async {
         receiver.recv().await.map(|event| (event, receiver))
     });
@@ -196,8 +196,7 @@ async fn fork_escape_preserves_main_focus_and_query() {
     let mut request = picker_request();
     request.records.truncate(1);
     let expected = request.records[0].identity.clone();
-    let (frames, outcome) =
-        after_popup(request, vec![key(KeyCode::Esc), key(KeyCode::Enter)]).await;
+    let (frames, outcome) = after_popup(request, vec![key(KeyCode::Esc), resume_key()]).await;
     assert!(frames.iter().any(|frame| frame.contains("Fork session")));
     let Some(SessionsPickerOutcome::ResumeSession(selection)) = outcome else {
         panic!("back should restore row activation")

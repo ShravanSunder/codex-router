@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex};
 
 use super::*;
 use crate::picker_runtime_status::PickerRuntimeStatus;
+use crate::presentation::session_picker::picker_request::SessionsPickerDataQuery;
 use crate::presentation::session_picker::picker_request::SessionsPickerRoot as SessionsRoot;
 use crate::presentation::session_picker::test_support::observed_records;
 use crate::presentation::session_picker::test_support::picker_record;
@@ -24,6 +25,9 @@ mod picker_fork_tests;
 
 #[path = "picker_performance_tests.rs"]
 mod picker_performance_tests;
+
+#[path = "picker_details_navigation_tests.rs"]
+mod picker_details_navigation_tests;
 
 // Blocking external fixture procedures run off the executor; production loaders are async.
 fn fixture_record_loader<FixtureProcedure>(
@@ -118,9 +122,9 @@ fn ctrl_key(character: char) -> TerminalEvent {
     TerminalEvent::Key(event)
 }
 
-fn alt_enter_key() -> TerminalEvent {
+fn control_shift_enter_key() -> TerminalEvent {
     let mut event = KeyEvent::new(KeyEventKind::Press, KeyCode::Enter);
-    event.modifiers = KeyModifiers::ALT;
+    event.modifiers = KeyModifiers::CONTROL | KeyModifiers::SHIFT;
     TerminalEvent::Key(event)
 }
 
@@ -278,3 +282,12 @@ mod picker_compact_header_tests;
 
 #[path = "picker_help_tests.rs"]
 mod picker_help_tests;
+
+#[path = "source_action_component_tests.rs"]
+mod source_action_component_tests;
+
+fn resume_key() -> TerminalEvent {
+    let mut event = KeyEvent::new(KeyEventKind::Press, KeyCode::Enter);
+    event.modifiers = KeyModifiers::CONTROL;
+    TerminalEvent::Key(event)
+}

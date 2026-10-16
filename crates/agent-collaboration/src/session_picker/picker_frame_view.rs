@@ -18,6 +18,7 @@ pub(super) fn render_picker_view(
     selected_conversation: Option<&SessionConversationPreview>,
     height: usize,
     minimum_render_height: usize,
+    session_id_copier: super::super::session_id_clipboard::SessionIdCopier,
 ) -> Element<'static, View> {
     let content_width = model.width.saturating_sub(4).max(MIN_PICKER_WIDTH);
     let control_width = content_width.saturating_sub(2) / 2;
@@ -55,13 +56,20 @@ pub(super) fn render_picker_view(
             Text(content: fit_line(notice, content_width), color: Color::Yellow, wrap: TextWrap::NoWrap)
         }.into_any());
     }
+    if let Some(error) = super::super::source_action_view::source_error(model) {
+        filter_controls.push(error);
+    }
     let control_height = filter_controls.len();
-    let body_budget = picker_body_budget(height, control_height, 1, minimum_render_height);
-    let inactive =
-        model.show_help || model.provider_filter_draft.is_some() || model.details_dialog.is_some();
+    let body_budget = picker_body_budget(height, control_height, minimum_render_height);
+    let inactive = model.show_help
+        || model.provider_filter_draft.is_some()
+        || model.details_dialog.is_some()
+        || model.source_action.pending.is_some();
+    let mut details_model = model_state;
     let mut children = vec![element! {
         SurfaceHeader(title: format!("Sessions · {}/{}", model.visible_record_len(), model.request.records.len()), inactive,
-            help_action: Some(super::super::picker_help_view::help_action(model_state)))
+            help_action: Some(super::super::picker_help_view::help_action(model_state)),
+            children: vec![element!(DialogAction(label: "Details", handler: move |_| details_model.write().open_details_dialog())).into_any()])
     }.into_any()];
     children.extend(filter_controls);
 
@@ -95,10 +103,6 @@ pub(super) fn render_picker_view(
         ));
     }
 
-    let mut details_model = model_state;
-    children.push(render_footer(move |_| {
-        details_model.write().open_details_dialog()
-    }));
     let picker_height = height.max(minimum_render_height);
     let background = element! {
         View(
@@ -120,7 +124,13 @@ pub(super) fn render_picker_view(
     .into_any();
     let viewport_width = u16::try_from(model.width).unwrap_or(u16::MAX);
     let viewport_height = u16::try_from(picker_height).unwrap_or(u16::MAX);
-    let dialog = if model.show_help {
+    let dialog = if let Some(pending) = &model.source_action.pending {
+        Some(super::super::source_action_view::checking_dialog(
+            pending,
+            model_state,
+            picker_height,
+        ))
+    } else if model.show_help {
         Some(super::super::picker_help_view::render_help(
             model,
             model_state,
@@ -136,16 +146,16 @@ pub(super) fn render_picker_view(
                 #(super::super::provider_filter_view::render_provider_chooser(model, model_state))
             }
         }.into_any())
-    } else if let Some(record) = model.details_dialog.as_ref() {
-        let mut cancel_model = model_state;
-        Some(element! {
-            DialogFrame(width: viewport_width, height: viewport_height, title: format!("Session details · {}", record.title), help_action: Some(super::super::picker_help_view::help_action(model_state)),
-                presentation: if model.width < NARROW_PICKER_WIDTH { DialogPresentation::FullScreen } else { DialogPresentation::Framed { maximum_width: 100, maximum_height: 28 } },
-                margins: DialogMargins { top: 1, right: 2, bottom: 1, left: 2 }, keyboard_scroll: true,
-                actions: vec![element!(DialogAction(label: "Close", handler: move |_| cancel_model.write().details_dialog = None)).into_any()]) {
-                #(render_details(record, content_width.min(90).saturating_sub(4), selected_conversation, Size::Auto))
-            }
-        }.into_any())
+    } else if model.details_dialog.is_some() {
+        Some(super::details_dialog_view::render_details_dialog(
+            model,
+            model_state,
+            selected_outcome,
+            selected_conversation,
+            viewport_width,
+            viewport_height,
+            session_id_copier,
+        ))
     } else {
         None
     };
@@ -219,18 +229,4 @@ pub(super) fn control_line(parts: Vec<String>) -> AnyElement<'static> {
         })
         .collect::<Vec<_>>();
     element! { View(column_gap: 3, flex_shrink: 0.0_f32) { #(children) } }.into_any()
-}
-
-pub(super) fn render_footer(
-    details_handler: impl FnMut(()) + Send + Sync + 'static,
-) -> AnyElement<'static> {
-    element! {
-        View(width: 100pct, flex_grow: 1.0_f32, flex_direction: FlexDirection::Column, justify_content: JustifyContent::FlexEnd) {
-            View(width: 100pct, border_style: BorderStyle::Single, border_edges: Edges::Top, border_color: Color::DarkGrey) {
-                super::InteractiveSessionChoiceRow(activates_on_click: true, activation_handler: details_handler) {
-                    Text(content: "Details", color: Color::White, weight: Weight::Bold, wrap: TextWrap::NoWrap)
-                }
-            }
-        }
-    }.into_any()
 }

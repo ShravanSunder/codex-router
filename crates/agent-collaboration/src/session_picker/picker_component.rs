@@ -1,6 +1,3 @@
-use std::io;
-use std::sync::Arc;
-use std::sync::Mutex;
 use std::time::Duration;
 
 use super::picker_machine_controls::{PickerMachineFilter, PickerMachineStage};
@@ -11,7 +8,6 @@ use crate::presentation::session_picker::picker_actions::SessionsPickerKey;
 use crate::presentation::session_picker::picker_actions::SessionsPickerOutcome;
 use crate::presentation::session_picker::picker_model::SessionsPickerModel;
 use crate::presentation::session_picker::picker_rendering::MIN_PICKER_WIDTH;
-use crate::presentation::session_picker::picker_request::SessionsPickerDataQuery;
 use crate::presentation::session_picker::picker_request::SessionsPickerRecordLoader;
 use crate::presentation::session_picker::picker_request::SessionsPickerRequest;
 use crate::presentation::session_picker::picker_request::SessionsPickerRoot;
@@ -24,6 +20,9 @@ use crate::sessions::SessionsSort;
 #[path = "picker_frame_view.rs"]
 mod picker_frame_view;
 use picker_frame_view::render_picker_view;
+
+#[path = "details_dialog_view.rs"]
+mod details_dialog_view;
 
 #[path = "picker_layout_budget.rs"]
 mod picker_layout_budget;
@@ -58,52 +57,25 @@ use conversation_preview_state::{ConversationPreviewKey, SelectedConversationPre
 pub(crate) struct SessionsPickerComponentProps<'a> {
     request: SessionsPickerRequest,
     record_loader: Option<SessionsPickerRecordLoader>,
+    source_preparer: Option<super::source_action_worker::SourceActionPreparer>,
+    session_id_copier: Option<super::session_id_clipboard::SessionIdCopier>,
     width: usize,
     height: usize,
     selected_outcome_out: Option<&'a mut Option<SessionsPickerOutcome>>,
 }
 
-use super::source_reload_worker::{SessionRecordsReloadRequest, run_session_record_reload_worker};
-
-#[derive(Clone)]
-struct SessionRecordsReloadPort {
-    sender: tokio::sync::watch::Sender<SessionRecordsReloadRequest>,
-    receiver: Arc<Mutex<Option<tokio::sync::watch::Receiver<SessionRecordsReloadRequest>>>>,
-}
-
-impl SessionRecordsReloadPort {
-    fn new(
-        initial_query: SessionsPickerDataQuery,
-        sources: Vec<super::PickerSourceContext>,
-    ) -> Self {
-        let (sender, receiver) = tokio::sync::watch::channel(SessionRecordsReloadRequest {
-            generation: 0,
-            query: initial_query,
-            sources,
-        });
-        Self {
-            sender,
-            receiver: Arc::new(Mutex::new(Some(receiver))),
-        }
-    }
-
-    fn send(&self, request: SessionRecordsReloadRequest) {
-        self.sender.send_replace(request);
-    }
-
-    fn take_receiver(&self) -> Option<tokio::sync::watch::Receiver<SessionRecordsReloadRequest>> {
-        self.receiver
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take()
-    }
-}
+use super::source_reload_port::SessionRecordsReloadPort;
+use super::source_reload_worker::run_session_record_reload_worker;
 
 #[component]
 pub(crate) fn SessionsPickerComponent<'a>(
     props: &mut SessionsPickerComponentProps<'a>,
     mut hooks: Hooks,
 ) -> impl Into<AnyElement<'static>> {
+    let session_id_copier = props
+        .session_id_copier
+        .clone()
+        .unwrap_or_else(super::session_id_clipboard::unavailable_session_id_copier);
     let mut system = hooks.use_context_mut::<SystemContext>();
     let (terminal_width, terminal_height) = hooks.use_terminal_size();
     let live_terminal_width = props.width == 0;
@@ -185,7 +157,8 @@ pub(crate) fn SessionsPickerComponent<'a>(
             refresh_interval.tick().await;
             loop {
                 refresh_interval.tick().await;
-                if model.read().machine_controls.filter != PickerMachineFilter::Default
+                if model.read().source_action.pending.is_some()
+                    || model.read().machine_controls.filter != PickerMachineFilter::Default
                     || model.read().fork_confirmation.is_some()
                     || !matches!(
                         model.read().machine_controls.stage,
@@ -215,7 +188,14 @@ pub(crate) fn SessionsPickerComponent<'a>(
     });
     let mut selected_outcome = hooks.use_state(|| Option::<SessionsPickerOutcome>::None);
     let mut should_cancel = hooks.use_state(|| false);
+    super::source_action_worker::use_source_preparation(
+        &mut hooks,
+        model,
+        selected_outcome,
+        props.source_preparer.clone(),
+    );
     hooks.use_terminal_events({
+        let session_id_copier = session_id_copier.clone();
         let mut observed_width = observed_width;
         let mut observed_height = observed_height;
         let mut reload_generation = reload_generation;
@@ -238,7 +218,8 @@ pub(crate) fn SessionsPickerComponent<'a>(
                     return;
                 }
                 let mut model_value = model.write();
-                if model_value.show_help
+                if model_value.source_action.pending.is_some()
+                    || model_value.show_help
                     || model_value.fork_confirmation.is_some()
                     || model_value.provider_filter_draft.is_some()
                     || model_value.details_dialog.is_some()
@@ -281,8 +262,18 @@ pub(crate) fn SessionsPickerComponent<'a>(
             if modifiers.contains(KeyModifiers::CONTROL) && matches!(code, KeyCode::Char('c' | 'd'))
                 || matches!(code, KeyCode::Char('\u{3}' | '\u{4}'))
             {
+                model_value.cancel_source_action();
                 should_cancel.set(true);
                 selected_outcome.set(None);
+                return;
+            }
+            if should_cancel.get() || selected_outcome.read().is_some() {
+                return;
+            }
+            if model_value.source_action.pending.is_some() {
+                if code == KeyCode::Esc {
+                    model_value.cancel_source_action();
+                }
                 return;
             }
             let help_key = matches!(code, KeyCode::F(1) | KeyCode::Char('\u{1f}'))
@@ -308,7 +299,11 @@ pub(crate) fn SessionsPickerComponent<'a>(
                             KeyModifiers::ALT | KeyModifiers::CONTROL | KeyModifiers::SUPER,
                         ) =>
                     {
-                        selected_outcome.set(confirmation.confirm());
+                        if !model_value.begin_source_fork() {
+                            if let Some(confirmation) = model_value.fork_confirmation.as_mut() {
+                                selected_outcome.set(confirmation.confirm());
+                            }
+                        }
                     }
                     _ => {}
                 }
@@ -343,6 +338,9 @@ pub(crate) fn SessionsPickerComponent<'a>(
                             KeyModifiers::ALT | KeyModifiers::CONTROL | KeyModifiers::SUPER,
                         ) =>
                     {
+                        if model_value.begin_configured_new() {
+                            return;
+                        }
                         let previous_filter = model_value.machine_controls.filter.clone();
                         if model_value.machine_controls.select_choice(
                             &registry,
@@ -375,8 +373,13 @@ pub(crate) fn SessionsPickerComponent<'a>(
                 return;
             }
             if model_value.details_dialog.is_some() {
-                if code == KeyCode::Esc {
-                    model_value.details_dialog = None;
+                if let Some(outcome) = super::details_dialog_actions::handle_details_key(
+                    &mut model_value,
+                    code,
+                    modifiers,
+                    &session_id_copier,
+                ) {
+                    selected_outcome.set(Some(outcome));
                 }
                 return;
             }
@@ -454,10 +457,19 @@ pub(crate) fn SessionsPickerComponent<'a>(
                 {
                     model_value.handle_key(SessionsPickerKey::SearchChar(character));
                 }
-                KeyCode::Enter if modifiers.contains(KeyModifiers::ALT) => {
+                KeyCode::Enter
+                    if modifiers.contains(KeyModifiers::CONTROL | KeyModifiers::SHIFT)
+                        && !modifiers.intersects(KeyModifiers::ALT | KeyModifiers::SUPER) =>
+                {
                     model_value.open_fork_confirmation();
                 }
-                KeyCode::Enter => {
+                KeyCode::Enter
+                    if modifiers.contains(KeyModifiers::CONTROL)
+                        && !modifiers.intersects(KeyModifiers::ALT | KeyModifiers::SUPER) =>
+                {
+                    if model_value.begin_source_resume() {
+                        return;
+                    }
                     let outcome = if model_value.focused_identity().is_none() {
                         model_value.start_new_action()
                     } else {
@@ -465,6 +477,7 @@ pub(crate) fn SessionsPickerComponent<'a>(
                     };
                     selected_outcome.set(outcome);
                 }
+                KeyCode::Enter if modifiers.is_empty() => model_value.open_details_dialog(),
                 KeyCode::Esc => {
                     if model_value.search.is_empty()
                         && model_value.machine_controls.filter != PickerMachineFilter::Default
@@ -535,6 +548,7 @@ pub(crate) fn SessionsPickerComponent<'a>(
         model_value
             .details_dialog
             .as_ref()
+            .and_then(|dialog| dialog.record())
             .or_else(|| model_value.focused_record())
             .map(|record| {
                 let selected_preview = {
@@ -561,61 +575,15 @@ pub(crate) fn SessionsPickerComponent<'a>(
         selected_conversation.as_ref(),
         height,
         minimum_render_height,
+        session_id_copier,
     )
 }
 
-pub(crate) fn run_sessions_picker(
-    request: SessionsPickerRequest,
-    record_loader: Option<SessionsPickerRecordLoader>,
-) -> io::Result<Option<SessionsPickerOutcome>> {
-    let mut selected_outcome = None;
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()?;
-    runtime.block_on(
-        element! {
-            SessionsPickerComponent(
-                request: request,
-                record_loader: record_loader,
-                width: 0usize,
-                selected_outcome_out: &mut selected_outcome,
-            )
-        }
-        .render_loop()
-        .enable_bracketed_paste()
-        .fullscreen()
-        .ignore_ctrl_c(),
-    )?;
-    Ok(selected_outcome)
-}
-
+#[path = "picker_entrypoint.rs"]
+mod picker_entrypoint;
+pub(crate) use picker_entrypoint::run_sessions_picker;
 #[cfg(feature = "quota-reset-test-harness")]
-pub(crate) fn run_sessions_picker_test_harness() -> io::Result<()> {
-    if std::env::args().nth(2).as_deref() != Some("--provider-filter-storyboard") {
-        return crate::sessions::run_stored_model_terminal_fixture();
-    }
-    use std::io::Write;
-
-    let request = super::provider_filter_storyboard_fixture::provider_filter_storyboard_request()?;
-
-    let outcome = run_sessions_picker(request, None)?;
-    let marker = match outcome {
-        Some(SessionsPickerOutcome::ResumeSession(selection)) => {
-            format!("SESSION_PICKER_OUTCOME resume:{}", selection.session_id())
-        }
-        Some(SessionsPickerOutcome::ForkSession(selection)) => {
-            format!("SESSION_PICKER_OUTCOME fork:{}", selection.session_id())
-        }
-        Some(SessionsPickerOutcome::StartNewSession) => {
-            "SESSION_PICKER_OUTCOME start-new".to_owned()
-        }
-        Some(SessionsPickerOutcome::TerminalTooNarrow) => {
-            "SESSION_PICKER_OUTCOME terminal-too-narrow".to_owned()
-        }
-        None => "SESSION_PICKER_OUTCOME canceled".to_owned(),
-    };
-    writeln!(io::stdout(), "{marker}")
-}
+pub(crate) use picker_entrypoint::run_sessions_picker_test_harness;
 
 #[cfg(test)]
 #[path = "picker_component_tests.rs"]

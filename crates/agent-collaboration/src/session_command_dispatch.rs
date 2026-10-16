@@ -3,7 +3,6 @@
 use std::{
     ffi::OsString,
     io::{IsTerminal, Write},
-    process::Command,
 };
 
 use crate::CliContext;
@@ -87,12 +86,28 @@ mod configured_inventory_query;
 #[path = "session_commands/configured_inventory_transport.rs"]
 mod configured_inventory_transport;
 
+#[path = "session_commands/source_native_carrier.rs"]
+mod source_native_carrier;
+#[path = "session_commands/source_native_options.rs"]
+mod source_native_options;
+#[path = "session_commands/source_ssh_executor.rs"]
+pub(crate) mod source_ssh_executor;
+#[path = "session_commands/source_ssh_protocol.rs"]
+pub(crate) mod source_ssh_protocol;
+#[path = "session_commands/source_ssh_transport.rs"]
+pub(crate) mod source_ssh_transport;
+
 #[cfg(test)]
 #[path = "../tests/integration/configured_inventory_faults.rs"]
 pub(crate) mod configured_inventory_fault_tests;
 #[cfg(test)]
 #[path = "../tests/integration/configured_inventory_read.rs"]
 pub(crate) mod configured_inventory_read_tests;
+
+#[path = "session_commands/native_process_runner.rs"]
+mod native_process_runner;
+use native_process_runner::ProcessSessionsCommandRunner;
+pub(crate) use native_process_runner::SessionsCommandRunner;
 
 const SESSION_TITLE_MAX_CHARS: usize = 96;
 const SESSION_CONTEXT_MAX_CHARS: usize = 32;
@@ -342,6 +357,9 @@ fn run_interactive_session(
             runner.run_codex_fork(&command.codex_args, &selection)
         }
         SessionsPickerOutcome::StartNewSession => runner.run_codex_new(&command.codex_args),
+        SessionsPickerOutcome::PreparedSourceSession(selection) => {
+            runner.run_prepared_source(&command.codex_args, &selection)
+        }
         SessionsPickerOutcome::TerminalTooNarrow => Err(SessionsCommandError::TerminalTooNarrow),
     }
 }
@@ -560,114 +578,6 @@ impl SessionsPicker for TerminalSessionsPicker {
         record_loader: Option<SessionsPickerRecordLoader>,
     ) -> Result<Option<SessionsPickerOutcome>, SessionsCommandError> {
         run_sessions_picker(request, record_loader).map_err(SessionsCommandError::Picker)
-    }
-}
-
-/// Runs a selected Codex session.
-pub(crate) trait SessionsCommandRunner {
-    /// Launches `codex --profile codex-router`.
-    fn run_codex_new(&mut self, codex_args: &[OsString]) -> Result<(), SessionsCommandError>;
-
-    /// Launches `codex --profile codex-router resume <session_id>` with the session's
-    /// own stored model and reasoning effort.
-    fn run_codex_resume(
-        &mut self,
-        codex_args: &[OsString],
-        selection: &SessionActionSelection,
-    ) -> Result<(), SessionsCommandError>;
-
-    /// Launches `codex --profile codex-router fork <session_id>` with the session's
-    /// own stored model and reasoning effort.
-    fn run_codex_fork(
-        &mut self,
-        codex_args: &[OsString],
-        selection: &SessionActionSelection,
-    ) -> Result<(), SessionsCommandError>;
-}
-
-struct ProcessSessionsCommandRunner {
-    launch_target: SessionsLaunchTarget,
-}
-
-impl SessionsCommandRunner for ProcessSessionsCommandRunner {
-    fn run_codex_new(&mut self, codex_args: &[OsString]) -> Result<(), SessionsCommandError> {
-        self.launch_target.resolve_for_launch()?;
-        let launch = self.launch_target.new_launch(codex_args);
-        let status = Command::new("codex")
-            .args(launch.arguments())
-            .status()
-            .map_err(SessionsCommandError::CodexLaunch)?;
-        if !status.success() {
-            return Err(SessionsCommandError::CodexExit {
-                status: status.to_string(),
-            });
-        }
-
-        Ok(())
-    }
-
-    fn run_codex_resume(
-        &mut self,
-        codex_args: &[OsString],
-        selection: &SessionActionSelection,
-    ) -> Result<(), SessionsCommandError> {
-        if matches!(
-            &selection.source_context,
-            Some(crate::presentation::session_picker::PickerSourceContext::ConfiguredHosted(_))
-        ) {
-            return Err(SessionsCommandError::SessionSourceUnqualified);
-        }
-        self.launch_target.ensure_profile_allows_remote_resume()?;
-        self.launch_target
-            .resolve_for_selection(&selection.identity)?;
-        let launch = self.launch_target.resume_launch(
-            codex_args,
-            &selection.session_id(),
-            &selection.model_choice,
-        );
-        let status = Command::new("codex")
-            .args(launch.arguments())
-            .status()
-            .map_err(SessionsCommandError::CodexLaunch)?;
-        if !status.success() {
-            return Err(SessionsCommandError::CodexExit {
-                status: status.to_string(),
-            });
-        }
-
-        Ok(())
-    }
-
-    fn run_codex_fork(
-        &mut self,
-        codex_args: &[OsString],
-        selection: &SessionActionSelection,
-    ) -> Result<(), SessionsCommandError> {
-        if matches!(
-            &selection.source_context,
-            Some(crate::presentation::session_picker::PickerSourceContext::ConfiguredHosted(_))
-        ) {
-            return Err(SessionsCommandError::SessionSourceUnqualified);
-        }
-        self.launch_target.ensure_profile_allows_remote_resume()?;
-        self.launch_target
-            .resolve_for_selection(&selection.identity)?;
-        let launch = self.launch_target.fork_launch(
-            codex_args,
-            &selection.session_id(),
-            &selection.model_choice,
-        );
-        let status = Command::new("codex")
-            .args(launch.arguments())
-            .status()
-            .map_err(SessionsCommandError::CodexLaunch)?;
-        if !status.success() {
-            return Err(SessionsCommandError::CodexExit {
-                status: status.to_string(),
-            });
-        }
-
-        Ok(())
     }
 }
 

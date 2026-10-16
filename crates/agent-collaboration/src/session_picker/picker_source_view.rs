@@ -47,6 +47,9 @@ impl SessionsPickerModel {
         request: &SessionRecordsReloadRequest,
         update: SourceReloadUpdate,
     ) -> SourceReloadAcceptance {
+        if self.source_action.pending.is_some() {
+            return SourceReloadAcceptance::Ignored;
+        }
         if self.data_query() != request.query || self.source_contexts() != request.sources {
             return SourceReloadAcceptance::Ignored;
         }
@@ -143,6 +146,8 @@ impl SessionsPickerModel {
         if contains_failed {
             previous.retire_restored_work(&request.sources, reason);
         }
+        // A view rollback cannot rewind invocation-local source attempts or their error state.
+        previous.source_action = std::mem::take(&mut self.source_action);
         *self = previous;
         Some(if contains_failed {
             SourceReloadAcceptance::RestoredRetiredView
@@ -337,5 +342,79 @@ mod tests {
         );
         assert_eq!(model.machine_controls.filter, PickerMachineFilter::Default);
         assert_eq!(model.request.records, rows);
+    }
+
+    #[test]
+    fn source_action_view_rollback_keeps_attempts_monotonic_and_rejects_canceled_completion() {
+        use crate::presentation::session_picker::{
+            picker_machine_controls::MachineChoicePurpose,
+            source_action_tests::{prepared, source_model},
+        };
+        let mut model = source_model();
+        let crate::sessions::RouterRegistryRead::Ready(registry) = &model.request.router_registry
+        else {
+            panic!("fixture registry");
+        };
+        let source =
+            PickerSourceContext::ConfiguredHosted(registry.routers.first().unwrap().clone());
+        model.machine_controls.stage = PickerMachineStage::Loading {
+            source: Box::new(source),
+            focus: 2,
+        };
+        let reload = model.prepare_source_reload(41);
+        assert!(
+            model.source_switch_checkpoint.is_some(),
+            "checkpoint must precede the action"
+        );
+        model.machine_controls.stage = PickerMachineStage::Choosing {
+            purpose: MachineChoicePurpose::NewSession,
+            focus: 1,
+            notice: None,
+        };
+        assert!(model.begin_configured_new());
+        let canceled = model.source_action.pending.clone().unwrap();
+        model.cancel_source_action();
+        model.source_action.error =
+            Some(crate::sessions::source_ssh_protocol::SourceReadError::ReadUnavailable);
+        assert_eq!(
+            model.restore_switch_checkpoint(&reload, SourceInventoryRejection::SourceUnavailable),
+            Some(SourceReloadAcceptance::RestoredIndependentView)
+        );
+        assert_eq!(
+            model.source_action.error,
+            Some(crate::sessions::source_ssh_protocol::SourceReadError::ReadUnavailable),
+            "view restoration must not restore an old source error"
+        );
+        model.machine_controls.stage = PickerMachineStage::Choosing {
+            purpose: MachineChoicePurpose::NewSession,
+            focus: 1,
+            notice: None,
+        };
+        assert!(model.begin_configured_new());
+        let current = model.source_action.pending.clone().unwrap();
+        assert_eq!(current.profile, canceled.profile);
+        assert_eq!(current.action, canceled.action);
+        assert_ne!(
+            current.attempt, canceled.attempt,
+            "a view rollback cannot reuse a canceled attempt"
+        );
+        assert!(
+            model
+                .complete_source_action(&canceled, Ok(prepared(&canceled)))
+                .is_none()
+        );
+        assert_eq!(
+            model.source_action.pending.as_ref(),
+            Some(&current),
+            "late completion must not consume the current attempt"
+        );
+        assert!(matches!(
+            model.complete_source_action(&current, Ok(prepared(&current))),
+            Some(
+                crate::presentation::session_picker::SessionsPickerOutcome::PreparedSourceSession(
+                    _
+                )
+            )
+        ));
     }
 }

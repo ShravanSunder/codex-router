@@ -85,7 +85,7 @@ pub(super) fn render_quota_help(
             vec![
                 ("↑ / ↓", "Focus account"),
                 ("Ctrl+F / F3", "Open filters"),
-                ("F4", "Account details"),
+                ("Enter / F4", "Account details"),
                 ("Ctrl+E", "Edit weekly floor"),
                 ("Ctrl+R", "Account options"),
                 ("Esc / Q", "Exit"),

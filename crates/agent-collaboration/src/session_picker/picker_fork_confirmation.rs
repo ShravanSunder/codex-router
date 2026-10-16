@@ -79,7 +79,11 @@ impl ForkConfirmation {
         };
         let availability = if record.identity.is_provider() {
             ForkAvailability::ProviderUnsupported
-        } else if configured {
+        } else if configured
+            && !matches!((&record.source_context, &record.identity, record.provenance),
+            (Some(PickerSourceContext::ConfiguredHosted(profile)), SessionPickerIdentity::HostedCodex(target), crate::sessions::SessionRowProvenance::ObservedHosted)
+            if matches!(profile.transport, crate::sessions::router_connection_registry::RouterConnectionTransport::Ssh(_)) && target.endpoint.service_id == profile.service_id)
+        {
             ForkAvailability::SourceUnqualified
         } else {
             ForkAvailability::Eligible

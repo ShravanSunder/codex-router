@@ -259,7 +259,9 @@ pub(super) fn QuotaStatusComponent(
                     }
                     return;
                 }
-                if code == KeyCode::F(4) && interaction_mode == QuotaInteractionMode::Interactive {
+                if (code == KeyCode::F(4) || code == KeyCode::Enter && modifiers.is_empty())
+                    && interaction_mode == QuotaInteractionMode::Interactive
+                {
                     details_dialog.set(focused_account_id.read().clone());
                     return;
                 }

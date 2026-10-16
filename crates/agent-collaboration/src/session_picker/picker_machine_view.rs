@@ -53,7 +53,7 @@ pub(super) fn render_machine_choices(
         return element! {
             View(width: model.width as u32, height: height as u32, padding: 1,
                 flex_direction: FlexDirection::Column, border_style: BorderStyle::Round, border_color: Color::Cyan) {
-                SurfaceHeader(title: format!("Loading machine: {name}"), inactive: model.show_help, help_action: Some(help_action))
+                SurfaceHeader(title: format!("Loading machine: {name}"), inactive: model.show_help || model.source_action.pending.is_some(), help_action: Some(help_action))
                 Text(content: "Previous view retained until the selected source is verified", color: Color::Grey)
                 View(flex_grow: 1.0_f32) {}
 
@@ -127,7 +127,7 @@ pub(super) fn render_machine_choices(
         View(width: model.width as u32, height: height as u32, padding_left: 1, padding_right: 1,
             flex_direction: FlexDirection::Column, border_style: BorderStyle::Round,
             border_color: Color::Cyan, overflow: Overflow::Hidden) {
-            SurfaceHeader(title: title.to_owned(), inactive: model.show_help, help_action: Some(help_action))
+            SurfaceHeader(title: title.to_owned(), inactive: model.show_help || model.source_action.pending.is_some(), help_action: Some(help_action))
             View(border_style: BorderStyle::Single, border_color: Color::DarkGrey, padding: 1,
                 flex_direction: FlexDirection::Column, margin_top: 1) {
                 #(rows)

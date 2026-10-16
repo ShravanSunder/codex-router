@@ -128,6 +128,14 @@ impl SessionsPicker for SealedCatalogTerminalPicker {
 struct NoLaunchMarkerRunner;
 
 impl SessionsCommandRunner for NoLaunchMarkerRunner {
+    fn run_prepared_source(
+        &mut self,
+        _arguments: &[OsString],
+        _selection: &super::source_ssh_protocol::PreparedSourceSession,
+    ) -> Result<(), SessionsCommandError> {
+        Err(SessionsCommandError::SessionSourceUnqualified)
+    }
+
     fn run_codex_new(&mut self, _arguments: &[OsString]) -> Result<(), SessionsCommandError> {
         writeln!(io::stdout(), "SESSION_PICKER_OUTCOME start-new")
             .map_err(SessionsCommandError::Stdout)

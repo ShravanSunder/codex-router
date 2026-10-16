@@ -4,7 +4,10 @@ use std::{collections::BTreeSet, fs::File, io::Read, path::Path};
 #[path = "router_connections/connection_profile.rs"]
 mod connection_profile;
 use connection_profile::RouterRegistryDocument;
-pub(crate) use connection_profile::{RouterConnectionProfile, RouterRegistryError};
+pub(crate) use connection_profile::{
+    AbsoluteRemoteCwd, AbsoluteSourcePath, RouterConnectionProfile, RouterConnectionTransport,
+    RouterRegistryError, SourceClientProfile, SourceSshConnection,
+};
 
 const MAX_REGISTRY_BYTES: u64 = 65536;
 

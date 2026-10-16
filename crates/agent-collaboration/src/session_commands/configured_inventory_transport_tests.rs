@@ -81,7 +81,14 @@ async fn https_source_preserves_certificate_verification_and_trusted_api_reads()
     else {
         panic!("configured fixture")
     };
-    let upstream = url::Url::parse(source_profile.mcp_address.as_str()).unwrap();
+    let crate::sessions::router_connection_registry::RouterConnectionTransport::Remote {
+        mcp_address,
+        ..
+    } = &source_profile.transport
+    else {
+        panic!("HTTP fixture")
+    };
+    let upstream = url::Url::parse(mcp_address.as_str()).unwrap();
     let upstream_address = (
         upstream.host_str().unwrap().to_owned(),
         upstream.port().unwrap(),
@@ -166,5 +173,32 @@ async fn https_source_probe() {
             matches!(result, Err(ClientError::Transport(_))),
             "untrusted certificate must fail the real transport"
         );
+    }
+}
+
+#[test]
+fn ssh_source_read_failure_preserves_unavailable_and_invalid_categories() {
+    use crate::sessions::source_ssh_protocol::{SourceReadError, SourceRejection};
+
+    // Availability failures must reach the loader as SourceUnavailable, as HTTP does.
+    for failure in [
+        SourceReadError::ReadUnavailable,
+        SourceReadError::Rejected(SourceRejection::SourceUnavailable),
+    ] {
+        assert!(
+            matches!(source_read_client_error(failure), ClientError::Transport(_)),
+            "SSH reachability failure was mislabeled invalid inventory: {failure}"
+        );
+    }
+    // A reachable wrong service or malformed response must never become empty/unavailable.
+    for failure in [
+        SourceReadError::InvalidReply,
+        SourceReadError::Rejected(SourceRejection::WrongService),
+        SourceReadError::Rejected(SourceRejection::InvalidRequest),
+    ] {
+        assert!(matches!(
+            source_read_client_error(failure),
+            ClientError::Protocol(_)
+        ));
     }
 }

@@ -147,7 +147,7 @@ async fn sessions_picker_width_contract_preserves_layout() {
             width,
             vec![
                 TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Down)),
-                TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Enter)),
+                resume_key(),
             ],
         )
         .await;
@@ -172,15 +172,19 @@ async fn sessions_picker_width_contract_preserves_layout() {
         let footer_index = lines
             .iter()
             .rposition(|line| line.contains("Details"))
-            .unwrap_or_else(|| panic!("capture should render footer:\n{text}"));
+            .unwrap_or_else(|| panic!("capture should render Details title action:\n{text}"));
         let bottom_border_index = lines
             .iter()
             .rposition(|line| line.contains('╰'))
             .unwrap_or_else(|| panic!("capture should render bottom border:\n{text}"));
         assert_eq!(
-            bottom_border_index,
-            footer_index + 1,
-            "picker outer border should sit directly below footer at width {width}:\n{text}"
+            footer_index, 1,
+            "Details belongs on the title row at width {width}: {text}"
+        );
+        assert_eq!(
+            bottom_border_index + 1,
+            lines.len(),
+            "outer border must retain the viewport at width {width}: {text}"
         );
     }
 
@@ -399,7 +403,7 @@ async fn sessions_picker_sidecar_clamps_tall_details_to_body_budget() {
 }
 
 #[tokio::test]
-async fn sessions_picker_sidecar_panels_reach_footer_without_unframed_gap() {
+async fn sessions_picker_sidecar_panels_reach_bottom_without_footer_gap() {
     let text = render_picker_capture_at(
         capture_picker_request(),
         160,
@@ -411,19 +415,23 @@ async fn sessions_picker_sidecar_panels_reach_footer_without_unframed_gap() {
     )
     .await;
     let lines = text.lines().collect::<Vec<_>>();
-    let footer_index = lines
+    let outer_bottom_index = lines
         .iter()
-        .position(|line| line.contains("Details"))
-        .unwrap_or_else(|| panic!("sidecar footer should render:\n{text}"));
-    let panel_bottom_index = lines[..footer_index]
+        .rposition(|line| line.contains('╰'))
+        .unwrap_or_else(|| panic!("outer bottom should render:\n{text}"));
+    assert!(
+        lines[1].contains("Details"),
+        "Details belongs in the title row: {text}"
+    );
+    let panel_bottom_index = lines[..outer_bottom_index]
         .iter()
         .rposition(|line| line.matches('└').count() >= 2)
         .unwrap_or_else(|| panic!("both sidecar panel bottoms should render:\n{text}"));
 
     assert_eq!(
-        panel_bottom_index + 2,
-        footer_index,
-        "sidecar panels should meet the footer divider without an unframed gap:\n{text}"
+        panel_bottom_index + 1,
+        outer_bottom_index,
+        "sidecar panels should meet the outer bottom without footer space:\n{text}"
     );
 }
 
@@ -546,10 +554,11 @@ async fn sessions_picker_stacked_layout_removes_top_padding_and_keeps_panels_adj
         })
         .unwrap_or_else(|| panic!("sessions list bottom border should render:\n{text}"));
     assert!(
-        lines
-            .get(list_bottom_border_index + 2)
-            .is_some_and(|line| line.contains("Details")),
-        "details must be an explicit control instead of a second stacked pane: {text}"
+        lines[title_index].contains("Details")
+            && lines
+                .get(list_bottom_border_index + 1)
+                .is_some_and(|line| line.contains('╰')),
+        "Details must be in the title and the list must reach the outer border: {text}"
     );
 }
 

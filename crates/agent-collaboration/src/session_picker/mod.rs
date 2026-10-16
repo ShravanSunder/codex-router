@@ -1,3 +1,5 @@
+mod details_dialog_actions;
+mod details_dialog_state;
 mod interactive_row;
 mod picker_actions;
 mod picker_component;
@@ -14,6 +16,7 @@ mod provider_filter_storyboard_fixture;
 #[cfg(test)]
 mod provider_filter_tests;
 mod provider_filter_view;
+mod session_id_clipboard;
 pub(crate) use provider_filter_model::SessionProviderFamily;
 mod picker_source_view;
 pub(crate) use picker_machine_controls::PickerMachineSourceMode;
@@ -47,3 +50,11 @@ pub(crate) use picker_request::SessionsPickerRequest;
 pub(crate) use picker_request::SessionsPickerRoot;
 
 mod picker_help_view;
+
+mod source_action_state;
+#[cfg(test)]
+mod source_action_tests;
+mod source_action_view;
+mod source_action_worker;
+
+mod source_reload_port;

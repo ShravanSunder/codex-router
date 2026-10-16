@@ -126,6 +126,18 @@ pub struct ResumeModelChoice {
 }
 
 impl ResumeModelChoice {
+    /// Frozen model metadata to carry with the same source-observed session.
+    #[must_use]
+    pub fn stored_model(&self) -> Option<&str> {
+        self.model.as_deref()
+    }
+
+    /// Frozen reasoning metadata to carry with the same source-observed session.
+    #[must_use]
+    pub fn stored_reasoning_effort(&self) -> Option<&str> {
+        self.reasoning_effort.as_deref()
+    }
+
     /// Builds a choice from stored catalog values, dropping values that cannot be
     /// expressed as a TOML basic string.
     #[must_use]

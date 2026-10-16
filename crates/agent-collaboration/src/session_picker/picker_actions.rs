@@ -22,5 +22,6 @@ pub(crate) enum SessionsPickerOutcome {
     ResumeSession(crate::sessions::SessionActionSelection),
     ForkSession(crate::sessions::SessionActionSelection),
     StartNewSession,
+    PreparedSourceSession(Box<crate::sessions::source_ssh_protocol::PreparedSourceSession>),
     TerminalTooNarrow,
 }

@@ -7,7 +7,9 @@ pub use dialog::{
 };
 pub use dialog_interaction::{DialogInputScope, UseDialogInteraction};
 mod dialog_action;
-pub use dialog_action::{DialogAction, DialogActionEmphasis, DialogActionProps};
+pub use dialog_action::{
+    DialogAction, DialogActionEmphasis, DialogActionProps, DialogKeyboardOwner,
+};
 mod typography;
 pub use typography::{
     SurfaceHeader, SurfaceHeaderProps, UiHeading, UiHeadingLevel, UiHeadingProps, UiText,
@@ -16,6 +18,8 @@ pub use typography::{
 mod shortcut_help;
 pub use shortcut_help::{ShortcutEntry, ShortcutHelp, ShortcutHelpProps, ShortcutSection};
 
+#[cfg(test)]
+mod dialog_action_keyboard_tests;
 #[cfg(test)]
 mod dialog_async_tests;
 #[cfg(test)]
