@@ -22,8 +22,12 @@ from scripts.verification.process_ownership import (
     same_identity,
     signal_each_owned,
 )
+from scripts.verification.runtime_qualification import (
+    qualify_global_claude,
+    qualify_normal_binaries,
+    sha256,
+)
 from scripts.verification.typed_observations import (
-    BinaryQualification,
     CleanupFailure,
     CleanupResult,
     IdentityRecord,
@@ -33,6 +37,8 @@ from scripts.verification.typed_observations import (
     observed_object,
     read_observed_json,
 )
+
+__all__ = ["sha256"]
 
 
 class RuntimePlan(BaseModel):
@@ -63,11 +69,6 @@ def save_record(path: Path, value: object) -> None:
         json.dump(value, output, indent=2)
         _ = output.write("\n")
     path.chmod(0o600)
-
-
-def sha256(path: Path) -> str:
-    with path.open("rb") as source:
-        return hashlib.file_digest(source, "sha256").hexdigest()
 
 
 def process_table() -> dict[int, ProcessIdentity]:
@@ -303,30 +304,12 @@ def run_lifecycle(plan: RuntimePlan) -> None:
     _ = process_table()
     if plan.router_root.resolve() == Path.home() / ".codex-router":
         raise RuntimeError("production Router root is outside verification scope")
-    qualification = BinaryQualification.model_validate_json(
-        plan.qualification.read_text()
+    binaries = qualify_normal_binaries(plan.qualification)
+    host_environment = os.environ.copy()
+    _ = host_environment.pop("CLAUDE_CODE_EXECUTABLE", None)
+    claude_binding = qualify_global_claude(
+        plan.claude_executable, host_environment.get("PATH")
     )
-    binaries = {item.target: item for item in qualification.binaries}
-    for name in ["codex-router", "agent-collaboration", "agent-sessions"]:
-        item = binaries[name]
-        if sha256(Path(item.path)) != item.sha256 or item.testGuardFeatures:
-            raise RuntimeError("binary hash or normal-build mismatch")
-        _ = subprocess.run(
-            ["/usr/bin/codesign", "--verify", "--strict", item.path],
-            capture_output=True,
-            check=True,
-        )
-        signature = subprocess.run(
-            ["/usr/bin/codesign", "-dv", "--verbose=4", item.path],
-            capture_output=True,
-            text=True,
-            check=True,
-        ).stderr
-        if (
-            f"Identifier=dev.shravansunder.{name}.debug" not in signature
-            or "TeamIdentifier=974QD84WVC" not in signature
-        ):
-            raise RuntimeError("debug signing identity mismatch")
     check_root_consumers(plan.router_root)
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", plan.port))
@@ -338,6 +321,7 @@ def run_lifecycle(plan: RuntimePlan) -> None:
             "plan": plan.model_dump(mode="json"),
             "qualificationSHA256": sha256(plan.qualification),
             "observedSource": head,
+            "claudeGlobalExecutable": claude_binding.model_dump(mode="json"),
         },
     )
     workspace = plan.evidence / "workspace"
@@ -426,11 +410,17 @@ def run_lifecycle(plan: RuntimePlan) -> None:
             },
         )
         for phase in ["A", "B"]:
+            if dt.datetime.now(dt.UTC) >= plan.deadline:
+                raise TimeoutError(
+                    f"Host {phase} allocation deadline expired before launch"
+                )
+            if (plan.evidence / "stop.json").exists():
+                break
             check_root_consumers(plan.router_root, router.pid)
             host = None
             known: dict[int, ProcessIdentity] = {}
             try:
-                environment = os.environ.copy()
+                environment = host_environment.copy()
                 environment.update(
                     {
                         "CODEX_ROUTER_DEBUG_APP_SERVER_SOCKET": str(
@@ -439,7 +429,6 @@ def run_lifecycle(plan: RuntimePlan) -> None:
                         "NODE_COMPILE_CACHE": str(plan.evidence / "node-cache"),
                         "DIRENV_DISABLE": "1",
                         "CURSOR_AGENT_DISABLE_DEBUG_LOG": "1",
-                        "CLAUDE_CODE_EXECUTABLE": str(plan.claude_executable),
                         "RUST_LOG": "off",
                     }
                 )
@@ -493,7 +482,11 @@ def run_lifecycle(plan: RuntimePlan) -> None:
                     },
                 )
                 readiness_end = time.monotonic() + 120
-                while host.poll() is None and time.monotonic() < readiness_end:
+                while (
+                    host.poll() is None
+                    and time.monotonic() < readiness_end
+                    and dt.datetime.now(dt.UTC) < plan.deadline
+                ):
                     observe_owned(host.pid, known)
                     manifest_path = (
                         plan.router_root / "agent-communication/service.json"
@@ -513,12 +506,24 @@ def run_lifecycle(plan: RuntimePlan) -> None:
                             break
                     time.sleep(0.2)
                 else:
+                    if dt.datetime.now(dt.UTC) >= plan.deadline:
+                        raise TimeoutError(
+                            f"Host {phase} allocation deadline expired during readiness"
+                        )
                     raise RuntimeError("Host readiness not reached")
-                while host.poll() is None and dt.datetime.now(dt.UTC) < plan.deadline:
+                while True:
+                    if dt.datetime.now(dt.UTC) >= plan.deadline:
+                        raise TimeoutError(f"Host {phase} allocation deadline expired")
+                    if host.poll() is not None:
+                        raise RuntimeError(
+                            f"Host {phase} exited before an explicit lifecycle directive"
+                        )
                     observe_owned(host.pid, known)
-                    if (plan.evidence / "stop.json").exists() or (
-                        phase == "A" and (plan.evidence / "reopen.json").exists()
-                    ):
+                    if (plan.evidence / "stop.json").exists():
+                        directive = "stop"
+                        break
+                    if phase == "A" and (plan.evidence / "reopen.json").exists():
+                        directive = "reopen"
                         break
                     time.sleep(0.2)
             finally:
@@ -534,7 +539,7 @@ def run_lifecycle(plan: RuntimePlan) -> None:
                     if result.remaining or result.exit != 0 or result.errors:
                         raise RuntimeError("Host cleanup incomplete")
             check_root_consumers(plan.router_root, router.pid)
-            if (plan.evidence / "stop.json").exists():
+            if directive == "stop":
                 break
     except BaseException as error:
         failure = {"class": type(error).__name__, "message": str(error)}
