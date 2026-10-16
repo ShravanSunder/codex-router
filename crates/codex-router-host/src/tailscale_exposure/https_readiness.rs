@@ -49,9 +49,9 @@ pub(super) async fn verify(
     service_id: &UuidIdentity,
     service_epoch: &UuidIdentity,
 ) -> io::Result<()> {
-    tokio::time::timeout(Duration::from_secs(15), async {
+    tokio::time::timeout(Duration::from_secs(75), async {
         let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(10))
+            .timeout(Duration::from_secs(65))
             .redirect(reqwest::redirect::Policy::none())
             .no_proxy()
             .build()
@@ -253,3 +253,7 @@ mod transport_error_tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "https_readiness_tests.rs"]
+mod budget_tests;
