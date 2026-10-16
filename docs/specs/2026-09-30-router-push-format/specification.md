@@ -95,8 +95,9 @@ runs, and the summary worker's read-only thread. Task input is delivered in full
   Expired or unknown ids give `not found (expired after 30 days, or never existed)`.
 - **R7 — retention (30 days).** Router deletes 30 days after creation:
   - push records of every kind, including held or undelivered ones;
-  - interaction-history entries (they gain a creation time; existing undated entries count as created at
-    upgrade);
+  - typed interaction-history entries, from their immutable creation instant in SQLite; the
+    [SQLite-only cutover](../2026-10-04-interaction-sqlite/specification.md) starts fresh without reading
+    or importing old typed JSON history. Separate legacy approval history keeps its existing contract;
   - `mailbox_deliveries` rows, deleted whole once settled and 30 days old, never while a wake still
     references them as pending;
   - whole `operation_receipts` rows older than 30 days. The idempotency window is 30 days: an operation id

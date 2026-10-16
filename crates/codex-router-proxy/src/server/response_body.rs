@@ -273,6 +273,18 @@ pub(crate) fn http_error_response(
     match error {
         HttpProxyError::LocalAuth { .. } => empty_response(StatusCode::UNAUTHORIZED),
         HttpProxyError::Selection {
+            reason:
+                crate::account_selection::QuotaAwareAccountSelectorError::NoConfiguredOpenaiAccounts,
+        } => HttpResponse::builder()
+            .status(StatusCode::SERVICE_UNAVAILABLE)
+            .header(http::header::CONTENT_TYPE, "application/json")
+            .body(box_body_from_bytes(
+                crate::websocket::ROUTER_NO_OPENAI_ACCOUNTS_SIGNAL
+                    .as_bytes()
+                    .to_vec(),
+            ))
+            .unwrap_or_else(|_error| HttpResponse::new(empty_body())),
+        HttpProxyError::Selection {
             reason: crate::account_selection::QuotaAwareAccountSelectorError::NoEligibleAccounts,
         } => all_accounts_exhausted_response(),
         HttpProxyError::Selection { .. } => quota_state_unavailable_response(),

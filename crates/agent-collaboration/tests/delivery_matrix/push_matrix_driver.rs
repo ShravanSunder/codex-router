@@ -13,8 +13,8 @@ use collaboration_client::{
     },
 };
 use collaboration_protocol::{
-    MachineLabel, PushId, PushLineInput, PushRecord, PushRecordNotice, PushRecordShowResult,
-    RouterLink, RouterOriginRef, render_push_line,
+    MachineLabel, PushLineInput, PushRecord, PushRecordNotice, PushRecordShowResult, RouterLink,
+    RouterOriginRef, render_push_line,
 };
 use serde_json::{Value, json};
 use std::{path::Path, time::Duration};
@@ -367,38 +367,6 @@ pub(super) async fn wait_for_codex_input(
         }
         if tokio::time::Instant::now() >= deadline {
             return Err(format!("thread/read did not observe push marker {marker}").into());
-        }
-    }
-}
-
-pub(super) fn record_push_input_correlation(
-    proof: &mut ProofContext,
-    producer: &str,
-    push_id: &PushId,
-    user_message: &Value,
-) -> ProofResult<bool> {
-    let observed_id = user_message.get("id").and_then(Value::as_str);
-    match observed_id {
-        Some(observed_id) => {
-            if observed_id != push_id.as_str() {
-                return Err(format!(
-                    "{producer} native userMessage id {observed_id} did not match PushId {}",
-                    push_id.as_str()
-                )
-                .into());
-            }
-            proof.record(
-                "pushInputCorrelation",
-                json!({"producer":producer,"pushId":push_id,"observedUserMessageId":observed_id,"status":"asserted"}),
-            )?;
-            Ok(true)
-        }
-        None => {
-            proof.record(
-                "pushInputCorrelationGap",
-                json!({"producer":producer,"pushId":push_id,"status":"threadReadHasNoUserMessageId"}),
-            )?;
-            Ok(false)
         }
     }
 }

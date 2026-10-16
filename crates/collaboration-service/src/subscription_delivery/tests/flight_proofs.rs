@@ -7,6 +7,73 @@ use message_board::{EndReason, SubscriptionMode, SubscriptionScope, WhenIdle};
 use sqlx::Connection;
 
 #[tokio::test(start_paused = true)]
+async fn resumed_reader_batches_held_roots_with_staggered_presence_checks() {
+    let fixture = OwnerFixture::new().await;
+    let second_root = fixture.add_root().await;
+    let poll_root = fixture.add_root().await;
+    fixture
+        .policy(&poll_root, SubscriptionMode::Poll, WhenIdle::Hold, 0, 0)
+        .await;
+    *fixture.presence.0.lock().unwrap() = crate::TargetPresence::Wakeable;
+    let runtime = fixture.runtime().await;
+    fixture.post(&fixture.root, "First held root").await;
+    runtime
+        .observe(|event| matches!(event, OwnerObservation::Held))
+        .await;
+    runtime.synchronize(&fixture.reader).await;
+
+    fixture.clock.advance(1).await;
+    fixture.post(&second_root, "Second held root").await;
+    runtime
+        .observe(|event| matches!(event, OwnerObservation::Held))
+        .await;
+    runtime.synchronize(&fixture.reader).await;
+    fixture
+        .post(&poll_root, "Poll activity stays pending")
+        .await;
+
+    // Only the first root's presence interval has elapsed when the reader resumes.
+    *fixture.presence.0.lock().unwrap() = crate::TargetPresence::Running;
+    fixture.clock.advance(29).await;
+    let request = runtime.requests.lock().await.recv().await.unwrap();
+    let record = fixture
+        .push_store
+        .lock()
+        .await
+        .get_push_record(&request.payload.push_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let activity = record.activity.unwrap();
+    assert!(activity.held);
+    assert_eq!(activity.ranges.len(), 2);
+    for root in [&fixture.root, &second_root] {
+        assert_eq!(
+            activity
+                .ranges
+                .iter()
+                .filter(|range| &range.root_message_id == root)
+                .count(),
+            1
+        );
+    }
+    assert!(request.payload.line.as_str().contains(" · 2 threads · "));
+    runtime.await_settled().await;
+    runtime.synchronize(&fixture.reader).await;
+    assert!(runtime.requests.lock().await.try_recv().is_err());
+    let poll = fixture
+        .store
+        .lock()
+        .await
+        .get_thread_subscription_record(&fixture.reader, &SubscriptionScope::thread(poll_root))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(poll.roots()[0].pending_count(), 1);
+    runtime.close().await;
+}
+
+#[tokio::test(start_paused = true)]
 async fn mode_change_during_flight_settles_original_push_and_polls_only_later_activity() {
     let fixture = OwnerFixture::new().await;
     let runtime = fixture.runtime().await;

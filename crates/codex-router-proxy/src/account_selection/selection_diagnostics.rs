@@ -240,6 +240,9 @@ pub(crate) fn session_affinity_publication_error_class(
 pub(crate) fn selection_error_class(error: &HttpProxyError) -> &'static str {
     match error {
         HttpProxyError::Selection { reason } => match reason {
+            QuotaAwareAccountSelectorError::NoConfiguredOpenaiAccounts => {
+                "no_openai_accounts_configured"
+            }
             QuotaAwareAccountSelectorError::NoEligibleAccounts => "no_eligible_accounts",
             QuotaAwareAccountSelectorError::ShortQuotaExhausted { .. } => "short_quota_exhausted",
             QuotaAwareAccountSelectorError::SelectorStateUnavailable => "selector_state",

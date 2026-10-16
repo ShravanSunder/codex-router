@@ -383,6 +383,17 @@ where
                 }
             }
             if assessment.selected_pool() == SelectedPool::None {
+                record_selection_error_on_failure(
+                    require_configured_openai_accounts(
+                        route_profile.provider,
+                        projection
+                            .account_states()
+                            .iter()
+                            .map(|account| account.provider()),
+                    ),
+                    SelectionDiagnosticStage::Assessment,
+                    route_band,
+                )?;
                 if affinity_owner_account_id.as_ref().is_some_and(|owner_id| {
                     assessment.accounts().iter().any(|account| {
                         account.account_id() == owner_id

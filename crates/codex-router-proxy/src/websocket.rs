@@ -114,7 +114,8 @@ mod transport_cleanup;
 
 use provider_signals::POST_EXHAUSTION_ALTERNATIVE_SELECTION_TIMEOUT;
 pub(crate) use provider_signals::{
-    ROUTER_ALL_ACCOUNTS_EXHAUSTED_SIGNAL, ROUTER_QUOTA_STATE_UNAVAILABLE_SIGNAL,
+    ROUTER_ALL_ACCOUNTS_EXHAUSTED_SIGNAL, ROUTER_NO_OPENAI_ACCOUNTS_SIGNAL,
+    ROUTER_QUOTA_STATE_UNAVAILABLE_SIGNAL,
 };
 use response_metadata::has_forbidden_top_level_websocket_auth_carrier;
 pub use session_registry::{

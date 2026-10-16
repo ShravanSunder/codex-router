@@ -100,7 +100,7 @@ impl ReaderDeliveryOwner {
         due: &[MessageId],
         facts: &HashMap<MessageId, RootSubscriptionFacts>,
     ) -> Result<bool, BoardError> {
-        let roots = due
+        let mut roots = due
             .iter()
             .filter(|root| {
                 facts.get(*root).is_some_and(|facts| {
@@ -125,6 +125,19 @@ impl ReaderDeliveryOwner {
             .unwrap_or_else(|error| TargetPresence::Unreachable {
                 reason: error.to_string(),
             });
+        if matches!(&presence, TargetPresence::Running) {
+            // Presence belongs to the reader. Staggered per-root checks must not
+            // split an already-held batch when that reader resumes.
+            roots = due
+                .iter()
+                .filter(|root| {
+                    facts
+                        .get(*root)
+                        .is_some_and(|facts| facts.mode == SubscriptionMode::Deliver)
+                })
+                .cloned()
+                .collect();
+        }
         let mut dropped = Vec::new();
         let mut held = Vec::new();
         let mut delivered = Vec::new();
