@@ -91,11 +91,14 @@ impl SessionDetailsDialog {
             .iter()
             .position(|action| *action == self.focused_action)
             .unwrap_or(0);
-        self.focused_action = actions[if backwards {
+        let next_index = if backwards {
             (index + actions.len() - 1) % actions.len()
         } else {
             (index + 1) % actions.len()
-        }];
+        };
+        if let Some(action) = actions.get(next_index) {
+            self.focused_action = *action;
+        }
     }
 }
 

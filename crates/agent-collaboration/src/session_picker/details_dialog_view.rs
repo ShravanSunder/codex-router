@@ -16,7 +16,9 @@ pub(super) fn render_details_dialog(
     height: u16,
     copier: SessionIdCopier,
 ) -> AnyElement<'static> {
-    let dialog = model.details_dialog.as_ref().expect("open Details dialog");
+    let Some(dialog) = model.details_dialog.as_ref() else {
+        return element!(View).into_any();
+    };
     let title = match &dialog.target {
         SessionDetailsTarget::Session(record) => format!("Session details · {}", record.title),
         SessionDetailsTarget::NewSession => "New session details".to_owned(),

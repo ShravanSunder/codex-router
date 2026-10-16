@@ -218,7 +218,7 @@ fn owner_details_navigation_actions_keep_the_captured_record_after_background_fo
                 assert!(outcome.is_none());
                 assert_eq!(copied.lock().unwrap().as_slice(), ["thread-a"]);
             }
-            _ => unreachable!(),
+            other => panic!("unexpected Details action in test case: {other:?}"),
         }
     }
 }

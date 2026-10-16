@@ -297,12 +297,10 @@ pub(crate) fn SessionsPickerComponent<'a>(
                     KeyCode::Enter
                         if !modifiers.intersects(
                             KeyModifiers::ALT | KeyModifiers::CONTROL | KeyModifiers::SUPER,
-                        ) =>
+                        ) && !model_value.begin_source_fork() =>
                     {
-                        if !model_value.begin_source_fork() {
-                            if let Some(confirmation) = model_value.fork_confirmation.as_mut() {
-                                selected_outcome.set(confirmation.confirm());
-                            }
+                        if let Some(confirmation) = model_value.fork_confirmation.as_mut() {
+                            selected_outcome.set(confirmation.confirm());
                         }
                     }
                     _ => {}
