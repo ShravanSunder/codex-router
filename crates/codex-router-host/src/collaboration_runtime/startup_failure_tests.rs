@@ -8,6 +8,21 @@ use std::{num::NonZeroU16, os::unix::fs::PermissionsExt as _};
 #[tokio::test]
 async fn exposure_startup_failure_preserves_the_primary_error_and_closes_constructor_owned_stores()
 {
+    assert_exposure_failure_cleanup(Vec::new()).await;
+}
+
+#[tokio::test]
+async fn exposure_failure_with_configured_provider_releases_constructor_delivery_owners() {
+    let unavailable = crate::ExternalProviderStartup::unavailable(
+        ProviderKind::Cursor,
+        "disabled fixture provider".to_owned(),
+        "enable fixture provider".to_owned(),
+    )
+    .expect("configured endpoint");
+    assert_exposure_failure_cleanup(vec![unavailable]).await;
+}
+
+async fn assert_exposure_failure_cleanup(provider_launches: Vec<crate::ExternalProviderStartup>) {
     let root = tempfile::tempdir().expect("private runtime root");
     std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700))
         .expect("private root");
@@ -42,9 +57,11 @@ else:
             native_schema: None,
             peer_registry_directory: Some(root.path().join("peers")),
             remote_control_server_name: None,
-            owner_human_id: None,
+            owner_human_id: Some(
+                message_board::HumanId::try_from("fixture-owner".to_owned()).expect("owner"),
+            ),
         },
-        Vec::new(),
+        provider_launches,
         relation,
         None,
         prepared,

@@ -571,9 +571,13 @@ impl CollaborationRuntime {
                 );
             }
         }
-        // Runtime listeners now own the hub; this construction-only Arc must not
-        // keep provider storage alive during exposure-startup failure cleanup.
+        // Runtime listeners now own these dependencies. Constructor-local hub,
+        // router, presence and broker references can retain provider storage
+        // transitively and must be gone before exposure-startup cleanup runs.
         drop(provider_session_hub);
+        drop(message_routes.router);
+        drop(subscription_presence);
+        drop(approval_broker);
         let publication = publication.with_acp_listener()?;
         if let Some(settings) = settings_backend
             && settings.recover().await.is_err()
