@@ -9,8 +9,8 @@ use collaboration_mcp::ProxyAuthority;
 use collaboration_protocol::UuidIdentity;
 use std::{io, net::SocketAddr};
 
-#[path = "tailscale_exposure/https_readiness.rs"]
-mod https_readiness;
+#[path = "tailscale_exposure/mcp_readiness.rs"]
+mod mcp_readiness;
 #[cfg(test)]
 #[path = "tailscale_exposure/tests.rs"]
 mod tests;
@@ -69,7 +69,7 @@ impl PreparedTailscaleExposure {
                 after.owned_session(node_name, https_port, &format!("http://{backend}"))?;
             let url = format!("https://{node_name}:{https_port}/mcp");
             tokio::select! {
-                ready = https_readiness::verify(&url, service_id, service_epoch) => ready?,
+                ready = mcp_readiness::verify(backend, &self.authority, service_id, service_epoch) => ready?,
                 failure = process.failure() => return Err(failure),
             }
             Ok::<_, io::Error>((session_id, url))

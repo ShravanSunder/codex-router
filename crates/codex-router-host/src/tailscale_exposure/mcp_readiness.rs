@@ -1,9 +1,10 @@
-//! Read-only MCP requests over ordinary verified TLS; no trust override or retry.
+//! Read-only health of the bound loopback MCP under its private proxy authority.
 
+use collaboration_mcp::ProxyAuthority;
 use collaboration_protocol::{EndpointInventory, UuidIdentity};
 use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::json;
-use std::{io, time::Duration};
+use std::{io, net::SocketAddr, time::Duration};
 
 const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
 
@@ -45,18 +46,33 @@ struct EndpointAnswer {
 }
 
 pub(super) async fn verify(
-    url: &str,
+    backend: SocketAddr,
+    proxy_authority: &ProxyAuthority,
     service_id: &UuidIdentity,
     service_epoch: &UuidIdentity,
 ) -> io::Result<()> {
+    if !backend.ip().is_loopback() || backend.port() == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "MCP readiness requires an actual bound nonzero loopback address",
+        ));
+    }
+    let url = format!("http://{backend}/mcp");
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert(
+        reqwest::header::HOST,
+        reqwest::header::HeaderValue::from_str(&proxy_authority.authority())
+            .map_err(io::Error::other)?,
+    );
     tokio::time::timeout(Duration::from_secs(75), async {
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(65))
+            .default_headers(headers)
             .redirect(reqwest::redirect::Policy::none())
             .no_proxy()
             .build()
             .map_err(transport_failure)?;
-        let tools: ToolInventory = call(&client, url, 1, "tools/list", json!({})).await?;
+        let tools: ToolInventory = call(&client, &url, 1, "tools/list", json!({})).await?;
         if !tools.tools.iter().any(|tool| tool.name == "endpoints_list")
             || !tools
                 .tools
@@ -64,12 +80,12 @@ pub(super) async fn verify(
                 .any(|tool| tool.name == "board_project_list")
         {
             return Err(io::Error::other(
-                "private HTTPS endpoint lacks the collaboration MCP inventory",
+                "loopback MCP endpoint lacks the collaboration MCP inventory",
             ));
         }
         let answer: EndpointAnswer = call(
             &client,
-            url,
+            &url,
             2,
             "tools/call",
             json!({"name":"endpoints_list","arguments":{}}),
@@ -81,7 +97,7 @@ pub(super) async fn verify(
     .map_err(|_| {
         io::Error::new(
             io::ErrorKind::TimedOut,
-            "private MCP HTTPS readiness timed out; no request was retried",
+            "private MCP loopback readiness timed out; no request was retried",
         )
     })?
 }
@@ -91,9 +107,13 @@ struct ReadinessTransportFailure(reqwest::Error);
 
 impl std::fmt::Display for ReadinessTransportFailure {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // The URL is constructed from the validated private node authority. Only
+        // The URL is constructed from the validated bound loopback address. Only
         // error Display/source text is included, never request headers or bodies.
-        write!(formatter, "private MCP HTTPS transport failed: {}", self.0)?;
+        write!(
+            formatter,
+            "private MCP loopback transport failed: {}",
+            self.0
+        )?;
         let mut cause = std::error::Error::source(&self.0);
         while let Some(error) = cause {
             write!(formatter, "; caused by: {error}")?;
@@ -180,7 +200,7 @@ fn validate_endpoint_identity(
             .any(|endpoint| endpoint.endpoint.service_id != *service_id)
     {
         return Err(io::Error::other(
-            "private HTTPS endpoint does not identify this Host invocation",
+            "loopback MCP endpoint does not identify this Host invocation",
         ));
     }
     Ok(())
@@ -255,5 +275,5 @@ mod transport_error_tests {
 }
 
 #[cfg(test)]
-#[path = "https_readiness_tests.rs"]
+#[path = "mcp_readiness_tests.rs"]
 mod budget_tests;

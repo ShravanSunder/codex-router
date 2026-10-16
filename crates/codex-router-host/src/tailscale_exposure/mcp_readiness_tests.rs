@@ -11,10 +11,23 @@ use tokio_util::sync::CancellationToken;
 
 const SERVICE: &str = "00000000-0000-4000-8000-000000000001";
 const EPOCH: &str = "00000000-0000-4000-8000-000000000002";
-type HeldRequest = (serde_json::Value, oneshot::Sender<serde_json::Value>);
+struct ObservedRequest {
+    payload: serde_json::Value,
+    host: Option<String>,
+    origin: Option<String>,
+}
+type HeldRequest = (ObservedRequest, oneshot::Sender<serde_json::Value>);
+
+fn proxy_authority(port: u16) -> ProxyAuthority {
+    ProxyAuthority::new(
+        "node.example.ts.net".to_owned(),
+        std::num::NonZeroU16::new(port).expect("port"),
+    )
+    .expect("validated authority")
+}
 
 struct ReadinessHttpFixture {
-    url: String,
+    backend: std::net::SocketAddr,
     incoming: mpsc::UnboundedReceiver<HeldRequest>,
     request_count: Arc<AtomicUsize>,
     shutdown: CancellationToken,
@@ -26,7 +39,7 @@ impl ReadinessHttpFixture {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("listener");
-        let url = format!("http://{}/mcp", listener.local_addr().expect("address"));
+        let backend = listener.local_addr().expect("actual bound address");
         let (sender, incoming) = mpsc::unbounded_channel::<HeldRequest>();
         let request_count = Arc::new(AtomicUsize::new(0));
         let count = Arc::clone(&request_count);
@@ -51,7 +64,7 @@ impl ReadinessHttpFixture {
             Ok(())
         });
         Self {
-            url,
+            backend,
             incoming,
             request_count,
             shutdown,
@@ -60,10 +73,11 @@ impl ReadinessHttpFixture {
     }
 
     fn verification(&self) -> JoinHandle<io::Result<()>> {
-        let url = self.url.clone();
+        let backend = self.backend;
         tokio::spawn(async move {
             verify(
-                &url,
+                backend,
+                &proxy_authority(8443),
                 &UuidIdentity::try_from(SERVICE.to_owned()).expect("service"),
                 &UuidIdentity::try_from(EPOCH.to_owned()).expect("epoch"),
             )
@@ -83,6 +97,9 @@ impl ReadinessHttpFixture {
                 result = verification => panic!("readiness ended before expected request {id}: {result:?}"),
             }
         }).await.expect("request event bound");
+        assert_eq!(request.host.as_deref(), Some("node.example.ts.net:8443"));
+        assert!(request.origin.is_none(), "health must send no Origin");
+        let request = request.payload;
         assert_eq!(request["id"], id);
         assert_eq!(request["method"], method);
         assert_eq!(request["jsonrpc"], "2.0");
@@ -126,6 +143,8 @@ async fn serve_request(
     use tokio::io::{AsyncBufReadExt as _, AsyncReadExt as _, AsyncWriteExt as _};
     let mut stream = tokio::io::BufReader::new(stream);
     let mut content_length = None;
+    let mut host = None;
+    let mut origin = None;
     loop {
         let mut line = String::new();
         if stream.read_line(&mut line).await? == 0 {
@@ -134,10 +153,14 @@ async fn serve_request(
         if line == "\r\n" {
             break;
         }
-        if let Some((name, value)) = line.split_once(':')
-            && name.eq_ignore_ascii_case("content-length")
-        {
-            content_length = Some(value.trim().parse::<usize>().map_err(io::Error::other)?);
+        if let Some((name, value)) = line.split_once(':') {
+            if name.eq_ignore_ascii_case("content-length") {
+                content_length = Some(value.trim().parse::<usize>().map_err(io::Error::other)?);
+            } else if name.eq_ignore_ascii_case("host") {
+                host = Some(value.trim().to_owned());
+            } else if name.eq_ignore_ascii_case("origin") {
+                origin = Some(value.trim().to_owned());
+            }
         }
     }
     let mut body = vec![0; content_length.ok_or_else(|| io::Error::other("fixture body length"))?];
@@ -146,7 +169,14 @@ async fn serve_request(
     count.fetch_add(1, Ordering::SeqCst);
     let (reply, response) = oneshot::channel();
     sender
-        .send((request, reply))
+        .send((
+            ObservedRequest {
+                payload: request,
+                host,
+                origin,
+            },
+            reply,
+        ))
         .map_err(|_| io::Error::other("fixture receiver closed"))?;
     let response = response
         .await
@@ -200,7 +230,7 @@ async fn completion(verification: JoinHandle<io::Result<()>>) -> io::Result<()> 
 }
 
 #[tokio::test]
-async fn cold_certificate_window_accepts_a_35_second_first_reply_without_replay() {
+async fn local_health_accepts_a_35_second_first_reply_without_replay() {
     let mut fixture = ReadinessHttpFixture::start().await;
     let mut verification = fixture.verification();
     let first = fixture.request(&mut verification, 1, "tools/list").await;
@@ -212,7 +242,7 @@ async fn cold_certificate_window_accepts_a_35_second_first_reply_without_replay(
         .expect("second request waiting");
     completion(verification)
         .await
-        .expect("35-second cold certificate window must fit readiness");
+        .expect("35-second local health reply must fit readiness");
     fixture.stop(2).await;
 }
 
@@ -255,4 +285,104 @@ async fn total_budget_times_out_across_two_individually_bounded_requests_without
     );
     drop(second);
     fixture.stop(2).await;
+}
+
+async fn actual_mcp_readiness(
+    allowed: Option<ProxyAuthority>,
+    requested: &ProxyAuthority,
+) -> io::Result<()> {
+    use collaboration_mcp::{CollaborationApiConfig, CollaborationApiListener};
+    use collaboration_service::{CollaborationApplication, ServiceIdentity};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bound listener");
+    let address = listener.local_addr().expect("actual address");
+    let inventory: EndpointInventory =
+        serde_json::from_value(endpoint_response()["result"]["structuredContent"].clone())
+            .expect("inventory");
+    let identity = ServiceIdentity::new(SERVICE, EPOCH)
+        .expect("identity")
+        .with_endpoints(inventory.endpoints)
+        .expect("endpoint");
+    let directory = tempfile::tempdir().expect("service directory");
+    let (_, relation) =
+        tokio::sync::watch::channel(collaboration_protocol::RouterExecutableRelation::Match);
+    let shutdown = CancellationToken::new();
+    let config = CollaborationApiConfig {
+        application: CollaborationApplication::new(identity),
+        service_directory: directory.path().to_owned(),
+        native_definitions: None,
+        router_executable_relation: relation,
+        concurrent_requests: collaboration_mcp::DEFAULT_CONCURRENT_REQUESTS,
+        shutdown: shutdown.clone(),
+    };
+    let router = collaboration_mcp::collaboration_api_router(
+        &config,
+        CollaborationApiListener::LoopbackTcp {
+            address,
+            proxy_authority: allowed,
+        },
+    );
+    let server = tokio::spawn(collaboration_mcp::serve_collaboration_api(
+        listener,
+        router,
+        shutdown.clone(),
+    ));
+    let result = verify(
+        address,
+        requested,
+        &UuidIdentity::try_from(SERVICE.to_owned()).expect("service"),
+        &UuidIdentity::try_from(EPOCH.to_owned()).expect("epoch"),
+    )
+    .await;
+    shutdown.cancel();
+    server.await.expect("server task").expect("server shutdown");
+    result
+}
+
+#[tokio::test]
+async fn readiness_requires_the_actual_mcp_listener_to_admit_the_proxy_host() {
+    assert!(
+        actual_mcp_readiness(None, &proxy_authority(8443))
+            .await
+            .is_err(),
+        "readiness omitted the proxy Host and accepted a listener without proxy authority"
+    );
+}
+
+#[tokio::test]
+async fn actual_mcp_health_accepts_exact_proxy_authority_and_rejects_wrong_node_or_port() {
+    for port in [443, 8443] {
+        let exact = proxy_authority(port);
+        actual_mcp_readiness(Some(exact.clone()), &exact)
+            .await
+            .expect("exact proxy Host on actual MCP");
+        assert!(
+            actual_mcp_readiness(Some(exact.clone()), &proxy_authority(9443))
+                .await
+                .is_err()
+        );
+        let wrong_node = ProxyAuthority::new("other.example.ts.net".to_owned(), exact.https_port())
+            .expect("other node");
+        assert!(
+            actual_mcp_readiness(Some(exact), &wrong_node)
+                .await
+                .is_err()
+        );
+    }
+}
+
+#[tokio::test]
+async fn health_rejects_zero_port_and_non_loopback_targets_before_requesting() {
+    for backend in ["127.0.0.1:0", "192.0.2.1:8443", "0.0.0.0:8443", "[::]:8443"] {
+        let error = verify(
+            backend.parse().expect("socket"),
+            &proxy_authority(8443),
+            &UuidIdentity::try_from(SERVICE.to_owned()).expect("service"),
+            &UuidIdentity::try_from(EPOCH.to_owned()).expect("epoch"),
+        )
+        .await
+        .expect_err("invalid health target");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+    }
 }
