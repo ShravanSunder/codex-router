@@ -6,7 +6,8 @@ use super::{
 use codex_native_integration::NativeOperation;
 use collaboration_client::board::{Identity, MessageId, SubscriptionScope};
 use collaboration_client::protocol::{
-    RouterAccess, SessionRef, ThreadSubscriptionPresence, ThreadSubscriptionsRequest,
+    PushRecordShowParams, RouterAccess, SessionRef, ThreadSubscriptionPresence,
+    ThreadSubscriptionsRequest,
 };
 use collaboration_client::{
     ConversationClient, ConversationLoadInput, ConversationOperationResult,
@@ -164,9 +165,18 @@ pub(super) async fn cover_held_dm_cell(
     let item = super::wait_for_codex_input(proof, target, &marker, OBSERVATION_TIMEOUT).await?;
     let observed_line = super::user_message_text(&item)?;
     super::assert_exact_notice_line(&observed_line, &expected_line)?;
-    let (delivered, delivered_line) = dm_notice_and_show(proof, target, &push_id).await?;
+    // The first show marked this DM read, so it no longer belongs in the unread inbox.
+    let delivered = proof
+        .client
+        .router_show(PushRecordShowParams {
+            caller: target.clone(),
+            reference: held.link.clone(),
+        })
+        .await?;
+    let delivered_line = super::expected_push_line(&delivered, &super::machine_label(proof)?)?;
     if delivered.record.delivery_state != PushDeliveryState::Delivered
         || delivered.record.push_id.as_str() != push_id
+        || delivered.record.target != *target
         || delivered_line != expected_line
     {
         return Err("S3 load did not deliver the original stored DM line".into());

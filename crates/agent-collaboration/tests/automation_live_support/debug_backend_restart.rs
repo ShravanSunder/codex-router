@@ -55,7 +55,7 @@ pub async fn restart(proof: &mut ProofContext) -> ProofResult<()> {
     let output = tokio::time::timeout(
         Duration::from_secs(130),
         tokio::process::Command::new(binary)
-            .args(["host", "restart", "--router-root"])
+            .args(["host", "app-server", "restart", "--router-root"])
             .arg(&proof.root)
             .args(["--port", &port.to_string(), "--require-debug-isolation"])
             .kill_on_drop(true)
@@ -63,7 +63,7 @@ pub async fn restart(proof: &mut ProofContext) -> ProofResult<()> {
     )
     .await??;
     let succeeded = output.status.success()
-        && String::from_utf8_lossy(&output.stdout).contains("result: Succeeded");
+        && String::from_utf8_lossy(&output.stdout).contains("result: succeeded");
     proof.record("ownedBackendRestartResult", json!({"exitCode":output.status.code(),"succeeded":succeeded,"stdout":String::from_utf8_lossy(&output.stdout)}))?;
     if !succeeded {
         return Err(

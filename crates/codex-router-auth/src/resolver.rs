@@ -766,6 +766,29 @@ fn map_state_error(_error: StateStoreError) -> CredentialResolverError {
 }
 
 fn map_secret_error(error: SecretStoreError) -> CredentialResolverError {
+    // Error Display/Debug may contain a credential path or a parser payload.
+    // Keep the diagnostic useful without retaining either at this boundary.
+    let failure_class = match &error {
+        SecretStoreError::KeyUnavailable => "key_unavailable",
+        SecretStoreError::KeyMissing => "key_missing",
+        SecretStoreError::StoreUnavailable(_) => "store_unavailable",
+        SecretStoreError::CredentialAuthenticationFailed => "envelope_authentication_failed",
+        SecretStoreError::InvalidCredentialEnvelope => "invalid_envelope",
+        SecretStoreError::InvalidCredentialEncoding => "invalid_encoding",
+        SecretStoreError::InvalidSecretPayload { .. } => "invalid_payload",
+        SecretStoreError::CredentialStoreLock { .. } => "store_lock_failed",
+        SecretStoreError::SymlinkPath { .. } => "symlink_rejected",
+        SecretStoreError::Filesystem { source, .. } => match source.kind() {
+            std::io::ErrorKind::NotFound => "file_missing",
+            std::io::ErrorKind::PermissionDenied => "file_permission_denied",
+            _ => "filesystem_error",
+        },
+        _ => "unclassified",
+    };
+    tracing::warn!(
+        credential_failure_class = failure_class,
+        "provider credential local storage operation failed"
+    );
     match error {
         SecretStoreError::KeyUnavailable
         | SecretStoreError::KeyMissing

@@ -1,6 +1,83 @@
 use super::*;
 
 #[test]
+fn credential_diagnostics_identify_local_failures_without_private_payloads_or_egress() {
+    for (scenario, malformed_bundle, expected_class) in [
+        ("private_path_canary", false, "file_missing"),
+        ("private_payload_canary", true, "invalid_payload"),
+    ] {
+        let temp_dir = ProxyTestTempDir::new(scenario);
+        let state = must_ok(SqliteStateStore::open(
+            &temp_dir.path().join("state.sqlite"),
+        ));
+        let secrets = must_ok(
+            codex_router_secret_store::test_support::open_encrypted_credential_store(
+                temp_dir.path().join("secrets"),
+            ),
+        );
+        let selected_account = account_id("acct_selected");
+        let account = AccountRecord::new(
+            Provider::Openai,
+            selected_account.clone(),
+            "private_account_canary",
+            AccountStatus::Enabled,
+        )
+        .with_active_credential_generation(1);
+        must_ok(AccountStateRepository::upsert_account(&state, &account));
+        if malformed_bundle {
+            let key = must_ok(openai_account_credential_bundle_key(&selected_account, 1));
+            must_ok(secrets.write_secret(
+                &key,
+                &SecretString::new(
+                    r#"{"version":"private_payload_canary","access_token":"private_token_canary"}"#,
+                ),
+            ));
+        }
+        let resolver =
+            RouterCredentialResolver::new(&state, &secrets, NoopCredentialRefreshClient, 1_000);
+        let upstream = RecordingUpstream::new(HttpProxyResponse::new(
+            200,
+            HeaderCollection::default(),
+            b"must-not-forward".to_vec(),
+        ));
+        let selector = RecordingSelector::new();
+        let auth_gate = local_auth_gate();
+        let service =
+            AuthenticatedHttpProxyService::new(&auth_gate, &selector, &resolver, &upstream)
+                .with_affinity_secret_provider(&TEST_AFFINITY_SECRET_PROVIDER);
+
+        let captured = crate::test_log_capture::capture_log_output(|| {
+            let result = service.handle_request(
+                HttpProxyRequest::new(Method::Get, "/v1/models")
+                    .with_header(Header::new("X-Codex-Router-Token", "current-token")),
+            );
+            assert!(matches!(
+                result,
+                Err(HttpProxyError::ProviderCredential { .. })
+            ));
+        });
+
+        assert!(
+            captured.contains(expected_class),
+            "missing fixed diagnostic category"
+        );
+        for private_value in [
+            "private_path_canary",
+            "private_payload_canary",
+            "private_token_canary",
+            "private_account_canary",
+            "acct_selected",
+        ] {
+            assert!(
+                !captured.contains(private_value),
+                "private data reached diagnostics"
+            );
+        }
+        assert!(upstream.take_recorded().is_empty());
+    }
+}
+
+#[test]
 fn http_proxy_missing_refresh_token_fails_closed_before_upstream_egress() {
     let upstream = RecordingUpstream::new(HttpProxyResponse::new(
         200,
