@@ -33,8 +33,8 @@ from scripts.verification.process_ownership import (
 from scripts.verification.runtime_qualification import sha256
 from scripts.verification.tailnet_mcp_client import (
     observe_http_boundary,
+    observe_local_inventory,
     observe_native_readiness,
-    require_service,
     tool,
 )
 from scripts.verification.tailnet_mcp_models import (
@@ -59,7 +59,7 @@ from scripts.verification.typed_observations import (
 def host_readiness_until(
     allocation_deadline: dt.datetime, monotonic_now: float, utc_now: dt.datetime
 ) -> float:
-    # 2*5s preflight +20s advertisement +5s status +75s HTTPS +40s native margin.
+    # 2*5s preflight +20s advertisement +5s status +75s MCP +40s native margin.
     # This initial observation cap never extends the caller's allocation.
     return monotonic_now + min(150.0, (allocation_deadline - utc_now).total_seconds())
 
@@ -511,10 +511,8 @@ def run_host(plan: HostPlan) -> None:
                             during, local, plan.https
                         )
                         boundary = observe_http_boundary(local, plan.https)
-                        require_service(
-                            tool(plan.https, "endpoints_list", {}),
-                            service_id,
-                            service_epoch,
+                        local_inventory = observe_local_inventory(
+                            local, plan.https, (service_id, service_epoch)
                         )
                         save_record(plan.evidence / "serve-during.json", during)
                         save_record(
@@ -522,7 +520,9 @@ def run_host(plan: HostPlan) -> None:
                             {
                                 "manifest": manifest,
                                 "inventory": inventory,
+                                "localInventory": local_inventory,
                                 "https": plan.https.url,
+                                "peerTls": "unobserved; requires the separate peer journey",
                                 "httpBoundary": boundary,
                                 "ownedServeSession": serve_session,
                                 "nativeActions": "none; endpoint/generation readiness only",

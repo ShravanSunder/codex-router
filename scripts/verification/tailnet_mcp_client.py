@@ -1,6 +1,7 @@
 "Real stateless MCP transport and independent destination board readback."
 
 import base64
+import datetime as dt
 import http.client
 import json
 import os
@@ -95,9 +96,9 @@ def curl_post_arguments(target: HttpsEndpoint, headers: dict[str, str]) -> list[
         "--retry",
         "0",
         "--connect-timeout",
-        "5",
+        "65",
         "--max-time",
-        "5",
+        "75",
         "--max-filesize",
         str(4 * 1024 * 1024),
         "--request",
@@ -159,7 +160,7 @@ def https_post(
             arguments,
             input=body,
             capture_output=True,
-            timeout=6,
+            timeout=76,
             check=False,
             env=environment,
         )
@@ -308,6 +309,20 @@ def require_marker(record: JsonObject, marker: BoardMarker, actor: JsonObject) -
         raise ValueError("destination board marker/actor mismatch")
 
 
+def observe_local_inventory(
+    local: LoopbackEndpoint, remote: HttpsEndpoint, invocation: tuple[str, str]
+) -> JsonObject:
+    inventory = tool_result(
+        http_post(
+            local,
+            tool_payload("endpoints_list", {}),
+            ProbeHeaders(host_authority=remote.authority),
+        )
+    )
+    require_service(inventory, *invocation)
+    return inventory
+
+
 def observe_http_boundary(local: LoopbackEndpoint, remote: HttpsEndpoint) -> JsonObject:
     """Drive the real loopback listener with Host and Origin varied independently."""
     payload: JsonObject = {
@@ -367,9 +382,10 @@ def run_peer(
     request: t.Callable[
         [HttpsEndpoint, JsonObject, ProbeHeaders | None], HttpReply
     ] = http_post,
+    check_allocation: t.Callable[[dt.datetime], None] = require_deadline,
 ) -> None:
     """One write only: save intent first, then preserve unknown outcomes without replay."""
-    require_deadline(plan.deadline)
+    check_allocation(plan.deadline)
     require_private_directory(plan.evidence)
 
     def request_tool(name: str, arguments: JsonObject) -> JsonObject:
@@ -437,6 +453,7 @@ def run_peer(
             "postArguments": post_arguments,
         },
     )
+    check_allocation(plan.deadline)
     try:
         response = request(plan.https, post_payload, None)
     except Exception as failure:

@@ -1,6 +1,5 @@
 """Safety and observation checks for the apparatus; never Tailnet product proof."""
 
-import datetime as dt
 import hashlib
 import os
 import socket
@@ -11,7 +10,9 @@ import tempfile
 import threading
 import typing as t
 import unittest
-from pathlib import Path
+from collections import abc
+from contextlib import contextmanager
+from pathlib import Path, PosixPath
 
 from scripts.verification import tailnet_mcp_client as client
 from scripts.verification import tailnet_mcp_host as host
@@ -51,10 +52,17 @@ class LiteralMcpHandler(socketserver.StreamRequestHandler):
             name, value = line.decode().split(":", 1)
             headers[name.lower()] = value.strip()
         body = self.rfile.read(content_length)
-        if request_line != b"POST /mcp HTTP/1.1\r\n" or b'"tools/list"' not in body:
+        if request_line != b"POST /mcp HTTP/1.1\r\n" or not any(
+            method in body for method in [b'"tools/list"', b'"endpoints_list"']
+        ):
             raise ValueError("apparatus sent the wrong real request")
         payload = b'{"jsonrpc":"2.0","id":1,"result":{"tools":[]}}'
+        inventory_request = b'"endpoints_list"' in body
+        if inventory_request:
+            payload = b'{"jsonrpc":"2.0","id":1,"result":{"structuredContent":{"serviceEpoch":"epoch","endpoints":[{"endpoint":{"serviceId":"destination","endpointId":"codex-local"},"availability":{"state":"available"},"channels":[{"kind":"nativeCodex","generation":{"serviceEpoch":"epoch","generation":1}}]}]}}}'
         status = 200
+        if inventory_request and headers.get("host") != self.proxy_authority:
+            status = 403
         if self.check_authority:
             authority = headers.get("host", "")
             origin = headers.get("origin")
@@ -85,7 +93,35 @@ class Default443AuthorityHandler(LiteralMcpHandler):
     proxy_authority: t.ClassVar[str] = "node.tail.ts.net:443"
 
 
+@contextmanager
+def literal_tcp_fixture(
+    handler: type[LiteralMcpHandler],
+) -> abc.Generator[socketserver.TCPServer, None, None]:
+    with socketserver.TCPServer(("127.0.0.1", 0), handler) as server:
+        thread = threading.Thread(
+            target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True
+        )
+        thread.start()
+        try:
+            yield server
+        finally:
+            server.shutdown()
+            thread.join(timeout=5)
+        if thread.is_alive():
+            raise RuntimeError("literal TCP fixture did not settle")
+
+
 class TailnetGuardTests(unittest.TestCase):
+    def test_board_marker_rejects_the_old_impossible_topic_only_plan(self) -> None:
+        with self.assertRaises(ValueError):
+            _ = models.BoardMarker.model_validate(
+                {
+                    "topic_id": "01900000-0000-7000-8000-000000000001",
+                    "message_id": "01900000-0000-7000-8000-000000000003",
+                    "text": "unique private marker",
+                }
+            )
+
     def test_manifest_mcp_accepts_actual_transport_and_url_wire_shape(self) -> None:
         manifest: JsonObject = {
             "version": 3,
@@ -132,11 +168,26 @@ class TailnetGuardTests(unittest.TestCase):
         for root in [Path.home(), Path("/private/tmp/x/y"), Path("/tmp/x")]:
             with self.subTest(root=root), self.assertRaises(ValueError):
                 host.validate_fresh_root(root)
-        with (
-            tempfile.TemporaryDirectory(dir="/private/tmp") as folder,
-            self.assertRaises(ValueError),
-        ):
-            host.validate_fresh_root(Path(folder))
+        with tempfile.TemporaryDirectory(
+            dir=Path(tempfile.gettempdir()).resolve()
+        ) as folder:
+
+            class HostRootCandidatePath(PosixPath):
+                # Only the parent query stands in for the macOS contract.
+                # Existing-file and symlink probes use the real private fixture.
+                @property
+                @t.override
+                def parent(self) -> Path:
+                    return Path("/private/tmp")
+
+            private = Path(folder)
+            host.validate_fresh_root(HostRootCandidatePath(private / "fresh-root"))
+            with self.assertRaises(ValueError):
+                host.validate_fresh_root(HostRootCandidatePath(private))
+            alias = private / "alias-root"
+            alias.symlink_to(private / "missing-root")
+            with self.assertRaises(ValueError):
+                host.validate_fresh_root(HostRootCandidatePath(alias))
 
     def test_selected_ports_are_nonproduction_and_distinct(self) -> None:
         for port in [0, 65536, 19741, 18787, 43127]:
@@ -209,7 +260,9 @@ class TailnetGuardTests(unittest.TestCase):
                     self.fail("unsafe profile accepted")
 
     def test_private_evidence_rejects_alias_and_shared_directory(self) -> None:
-        with tempfile.TemporaryDirectory(dir="/private/tmp") as folder:
+        with tempfile.TemporaryDirectory(
+            dir=Path(tempfile.gettempdir()).resolve()
+        ) as folder:
             private = Path(folder)
             client.require_private_directory(private)
             alias = private / "alias"
@@ -222,6 +275,32 @@ class TailnetGuardTests(unittest.TestCase):
 
 
 class TailnetObservationTests(unittest.TestCase):
+    def test_local_health_uses_real_loopback_proxy_authority_and_identity(self) -> None:
+        with literal_tcp_fixture(AuthorityMcpHandler) as server:
+            local = models.LoopbackEndpoint(
+                url=f"http://127.0.0.1:{server.server_address[1]}/mcp"
+            )
+            remote = models.HttpsEndpoint(url="https://node.tail.ts.net:8443/mcp")
+            inventory = client.observe_local_inventory(
+                local, remote, ("destination", "epoch")
+            )
+            self.assertEqual(inventory["serviceEpoch"], "epoch")
+            for invocation in [
+                ("wrong-service", "epoch"),
+                ("destination", "wrong-epoch"),
+            ]:
+                with self.subTest(invocation=invocation), self.assertRaises(ValueError):
+                    _ = client.observe_local_inventory(local, remote, invocation)
+            wrong = models.HttpsEndpoint(url="https://wrong-node.ts.net:8443/mcp")
+            with self.assertRaises(ValueError):
+                _ = client.observe_local_inventory(
+                    local, wrong, ("destination", "epoch")
+                )
+            missing_host = client.http_post(
+                local, client.tool_payload("endpoints_list", {})
+            )
+            self.assertEqual(missing_host.status, 403)
+
     def test_only_same_invocation_disabled_provider_startup_may_remain_pending(
         self,
     ) -> None:
@@ -257,36 +336,25 @@ class TailnetObservationTests(unittest.TestCase):
             Default443AuthorityHandler,
             LiteralMcpHandler,
         ]:
-            with socketserver.TCPServer(("127.0.0.1", 0), handler) as server:
+            with literal_tcp_fixture(handler) as server:
                 endpoint = models.LoopbackEndpoint(
                     url=f"http://127.0.0.1:{server.server_address[1]}/mcp"
                 )
                 remote = models.HttpsEndpoint(
                     url=f"https://{handler.proxy_authority}/mcp"
                 )
-                thread = threading.Thread(
-                    target=server.serve_forever,
-                    kwargs={"poll_interval": 0.01},
-                    daemon=True,
-                )
-                thread.start()
-                try:
-                    if handler != LiteralMcpHandler:
-                        statuses = client.observe_http_boundary(endpoint, remote)
-                        self.assertEqual(statuses["proxyAuthorityControl"], 200)
-                        self.assertEqual(statuses["tailnetOrigin"], 403)
-                        self.assertEqual(statuses["wrongPort"], 403)
-                        self.assertEqual(
-                            statuses["missingPort"],
-                            200 if handler == Default443AuthorityHandler else 403,
-                        )
-                    else:
-                        with self.assertRaisesRegex(ValueError, "proxyHttpOrigin"):
-                            _ = client.observe_http_boundary(endpoint, remote)
-                finally:
-                    server.shutdown()
-                    thread.join(timeout=5)
-                self.assertFalse(thread.is_alive())
+                if handler != LiteralMcpHandler:
+                    statuses = client.observe_http_boundary(endpoint, remote)
+                    self.assertEqual(statuses["proxyAuthorityControl"], 200)
+                    self.assertEqual(statuses["tailnetOrigin"], 403)
+                    self.assertEqual(statuses["wrongPort"], 403)
+                    self.assertEqual(
+                        statuses["missingPort"],
+                        200 if handler == Default443AuthorityHandler else 403,
+                    )
+                else:
+                    with self.assertRaisesRegex(ValueError, "proxyHttpOrigin"):
+                        _ = client.observe_http_boundary(endpoint, remote)
 
     def test_serve_backend_must_be_the_owned_foreground_loopback_http_route(
         self,
@@ -319,7 +387,9 @@ class TailnetObservationTests(unittest.TestCase):
                     _ = host.require_http_serve_backend(status, local, remote)
 
     def test_real_unix_transport_reaches_literal_mcp_response(self) -> None:
-        with tempfile.TemporaryDirectory(dir="/private/tmp") as folder:
+        with tempfile.TemporaryDirectory(
+            dir=Path(tempfile.gettempdir()).resolve()
+        ) as folder:
             endpoint = Path(folder) / "mcp.sock"
             with socketserver.UnixStreamServer(
                 str(endpoint), LiteralMcpHandler
@@ -432,38 +502,6 @@ class TailnetObservationTests(unittest.TestCase):
                 if child.stdin is not None:
                     child.stdin.close()
                 _ = child.wait(timeout=5)
-
-    def test_deadline_requires_aware_future_time(self) -> None:
-        for deadline in [
-            dt.datetime(2000, 1, 1),
-            dt.datetime(2000, 1, 1, tzinfo=dt.UTC),
-        ]:
-            with self.subTest(deadline=deadline), self.assertRaises(ValueError):
-                models.require_deadline(deadline)
-
-    def test_initial_readiness_covers_cold_start_without_extending_allocation(
-        self,
-    ) -> None:
-        utc_now = dt.datetime(2026, 10, 16, tzinfo=dt.UTC)
-        for remaining, expected_until in [
-            (1000, 1150),
-            (150, 1150),
-            (45, 1045),
-            (0, 1000),
-            (-1, 999),
-        ]:
-            with self.subTest(remaining=remaining):
-                until = host.host_readiness_until(
-                    utc_now + dt.timedelta(seconds=remaining), 1000, utc_now
-                )
-                self.assertEqual(until, expected_until)
-                self.assertLessEqual(until, 1000 + remaining)
-        # A valid late initial observation may cross the old120s cap; no sleeping.
-        until = host.host_readiness_until(
-            utc_now + dt.timedelta(seconds=1000), 1000, utc_now
-        )
-        self.assertLess(1125, until)
-        self.assertFalse(1150 < until)
 
     def test_unobservable_cleanup_is_unknown_instead_of_empty(self) -> None:
         identity = process_table()[os.getpid()]

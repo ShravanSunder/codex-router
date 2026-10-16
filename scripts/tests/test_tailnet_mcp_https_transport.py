@@ -17,6 +17,7 @@ from contextlib import closing
 from pathlib import Path
 
 from scripts.verification import tailnet_mcp_client as client
+from scripts.verification import tailnet_mcp_host as host
 from scripts.verification import tailnet_mcp_models as models
 from scripts.verification.typed_observations import JsonObject, read_observed_json
 
@@ -82,8 +83,8 @@ class TailnetHttpsTransportTests(unittest.TestCase):
             "--proxy": "",
             "--retry": "0",
             "--max-redirs": "0",
-            "--connect-timeout": "5",
-            "--max-time": "5",
+            "--connect-timeout": "65",
+            "--max-time": "75",
             "--max-filesize": "4194304",
             "--data-binary": "@-",
             "--url": target.url,
@@ -284,16 +285,10 @@ def board_marker() -> models.BoardMarker:
 
 
 def board_actor() -> JsonObject:
-    return {
-        "kind": "session",
-        "session": {
-            "endpoint": {
-                "serviceId": "01900000-0000-7000-8000-000000000010",
-                "endpointId": "codex-local",
-            },
-            "sessionId": "01900000-0000-7000-8000-000000000011",
-        },
-    }
+    return read_observed_json("""{"kind":"session","session":{
+      "endpoint":{"serviceId":"01900000-0000-7000-8000-000000000010","endpointId":"codex-local"},
+      "sessionId":"01900000-0000-7000-8000-000000000011"}}
+    """)
 
 
 def board_plan(evidence: Path) -> models.BoardPlan:
@@ -352,27 +347,11 @@ class BoardPeerFixture:
                 "text": marker.text,
             }
             if name == "endpoints_list":
-                result = {
-                    "serviceEpoch": "epoch",
-                    "endpoints": [
-                        {
-                            "endpoint": {
-                                "serviceId": "destination",
-                                "endpointId": "codex-local",
-                            },
-                            "availability": {"state": "available"},
-                            "channels": [
-                                {
-                                    "kind": "nativeCodex",
-                                    "generation": {
-                                        "serviceEpoch": "epoch",
-                                        "generation": 1,
-                                    },
-                                }
-                            ],
-                        }
-                    ],
-                }
+                result = read_observed_json("""{"serviceEpoch":"epoch","endpoints":[
+                  {"endpoint":{"serviceId":"destination","endpointId":"codex-local"},
+                   "availability":{"state":"available"},
+                   "channels":[{"kind":"nativeCodex","generation":{"serviceEpoch":"epoch","generation":1}}]}
+                ]}""")
             elif name == "board_message_post":
                 self.posts += 1
                 expected: JsonObject = {
@@ -429,6 +408,51 @@ class BoardPeerFixture:
 
 
 class TailnetBoardPeerTests(unittest.TestCase):
+    def test_deadline_requires_aware_future_time(self) -> None:
+        past = dt.datetime(2000, 1, 1)
+        for deadline in [past, past.replace(tzinfo=dt.UTC)]:
+            with self.subTest(deadline=deadline), self.assertRaises(ValueError):
+                models.require_deadline(deadline)
+
+    def test_initial_readiness_covers_cold_start_without_extending_allocation(
+        self,
+    ) -> None:
+        utc_now = dt.datetime(2026, 10, 16, tzinfo=dt.UTC)
+        for remaining, expected_until in [
+            (1000, 1150),
+            (150, 1150),
+            (45, 1045),
+            (0, 1000),
+            (-1, 999),
+        ]:
+            with self.subTest(remaining=remaining):
+                until = host.host_readiness_until(
+                    utc_now + dt.timedelta(seconds=remaining), 1000, utc_now
+                )
+                self.assertEqual(until, expected_until)
+                self.assertLessEqual(until, 1000 + remaining)
+                if remaining == 1000:
+                    # A valid late initial observation may cross the old120s cap.
+                    self.assertLess(1125, until)
+
+    def test_allocation_expiry_after_preflight_prevents_the_only_write(self) -> None:
+        with tempfile.TemporaryDirectory(
+            dir=Path(tempfile.gettempdir()).resolve()
+        ) as folder:
+            plan = board_plan(Path(folder))
+            fixture = BoardPeerFixture(plan, "success")
+            original = models.require_deadline
+
+            def allocation_clock(deadline: dt.datetime) -> None:
+                if (plan.evidence / "peer-intent.json").exists():
+                    deadline = dt.datetime(2000, 1, 1, tzinfo=dt.UTC)
+                original(deadline)
+
+            with self.assertRaisesRegex(ValueError, "expired"):
+                client.run_peer(plan, fixture, allocation_clock)
+            self.assertEqual(fixture.posts, 0)
+            self.assertFalse((plan.evidence / "peer-post-response.json").exists())
+
     def test_marker_ids_require_canonical_rfc_uuidv7(self) -> None:
         valid = board_marker().model_dump()
         for field in ["topic_id", "message_id", "root_message_id"]:
@@ -455,7 +479,9 @@ class TailnetBoardPeerTests(unittest.TestCase):
         ]:
             with (
                 self.subTest(mode=mode),
-                tempfile.TemporaryDirectory(dir="/private/tmp") as folder,
+                tempfile.TemporaryDirectory(
+                    dir=Path(tempfile.gettempdir()).resolve()
+                ) as folder,
             ):
                 plan = board_plan(Path(folder))
                 fixture = BoardPeerFixture(plan, mode)
@@ -496,16 +522,6 @@ class TailnetBoardPeerTests(unittest.TestCase):
                 with self.assertRaises(FileExistsError):
                     client.run_peer(plan, fixture)
                 self.assertEqual(fixture.posts, 1)
-
-    def test_board_marker_rejects_the_old_impossible_topic_only_plan(self) -> None:
-        with self.assertRaises(ValueError):
-            _ = models.BoardMarker.model_validate(
-                {
-                    "topic_id": "01900000-0000-7000-8000-000000000001",
-                    "message_id": "01900000-0000-7000-8000-000000000003",
-                    "text": "unique private marker",
-                }
-            )
 
     def test_local_readback_requires_the_exact_message_and_actor(self) -> None:
         marker = board_marker()
