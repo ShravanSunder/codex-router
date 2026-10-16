@@ -15,6 +15,8 @@ mod delivery_matrix_support;
 mod held_cells;
 #[path = "delivery_matrix/held_subscription_producer.rs"]
 mod held_subscription_producer;
+#[path = "delivery_matrix/native_push_correlation.rs"]
+mod native_push_correlation;
 #[path = "delivery_matrix/owned_resource_cleanup.rs"]
 mod owned_resource_cleanup;
 #[path = "delivery_matrix/owned_resources.rs"]
@@ -502,7 +504,7 @@ async fn exercise_held_codex_recipients(
         wait_for_codex_input(&mut proof, &wake_target, &wake_marker, OBSERVATION_TIMEOUT).await?;
     assert_exact_notice_line(&user_message_text(&wake_item)?, &wake_expected)?;
     let wake_correlation =
-        record_push_input_correlation(&mut proof, "wake", &wake_show.record.push_id, &wake_item)?;
+        record_push_input_correlation(&mut proof, "wake", &wake_show.record, &wake_item).await?;
 
     let schedule_target = proof
         .start_thread("S6 scheduled existing-session recipient")
@@ -537,9 +539,10 @@ async fn exercise_held_codex_recipients(
     let schedule_correlation = record_push_input_correlation(
         &mut proof,
         "schedule-run",
-        &schedule_show.record.push_id,
+        &schedule_show.record,
         &schedule_item,
-    )?;
+    )
+    .await?;
     proof.record(
         "pushDeliveryCorrelation",
         json!({

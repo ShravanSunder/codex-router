@@ -1,5 +1,8 @@
 //! CLI producers and recipient observations for the isolated push matrix.
 use super::cli_process::run_cli_output;
+use super::native_push_correlation::{
+    ExpectedNativePushCorrelation, validate_native_push_correlation,
+};
 use super::owned_resources::OwnedMatrixResources;
 use super::{OBSERVATION_TIMEOUT, ProofContext, ProofResult};
 use automation_storage::AutomationStore;
@@ -13,8 +16,8 @@ use collaboration_client::{
     },
 };
 use collaboration_protocol::{
-    MachineLabel, PushId, PushLineInput, PushRecord, PushRecordNotice, PushRecordShowResult,
-    RouterLink, RouterOriginRef, render_push_line,
+    DeliveryClientReceipt, MachineLabel, NativeSendAcceptance, PushLineInput, PushRecord,
+    PushRecordNotice, PushRecordShowResult, RouterLink, RouterOriginRef, render_push_line,
 };
 use serde_json::{Value, json};
 use std::{path::Path, time::Duration};
@@ -371,36 +374,59 @@ pub(super) async fn wait_for_codex_input(
     }
 }
 
-pub(super) fn record_push_input_correlation(
+pub(super) async fn record_push_input_correlation(
     proof: &mut ProofContext,
     producer: &str,
-    push_id: &PushId,
+    record: &PushRecord,
     user_message: &Value,
 ) -> ProofResult<bool> {
-    let observed_id = user_message.get("id").and_then(Value::as_str);
-    match observed_id {
-        Some(observed_id) => {
-            if observed_id != push_id.as_str() {
-                return Err(format!(
-                    "{producer} native userMessage id {observed_id} did not match PushId {}",
-                    push_id.as_str()
-                )
-                .into());
-            }
-            proof.record(
-                "pushInputCorrelation",
-                json!({"producer":producer,"pushId":push_id,"observedUserMessageId":observed_id,"status":"asserted"}),
-            )?;
-            Ok(true)
-        }
-        None => {
-            proof.record(
-                "pushInputCorrelationGap",
-                json!({"producer":producer,"pushId":push_id,"status":"threadReadHasNoUserMessageId"}),
-            )?;
-            Ok(false)
-        }
+    let receipt = record
+        .last_outcome
+        .as_ref()
+        .and_then(|outcome| outcome.client.as_ref());
+    let Some(DeliveryClientReceipt::CodexAppServer(receipt)) = receipt else {
+        return Err(format!("{producer} omitted native delivery acceptance").into());
+    };
+    if receipt.target != record.target
+        || receipt.generation != proof.generation
+        || String::from(receipt.client_user_message_id.clone()) != record.push_id.as_str()
+    {
+        return Err(
+            format!("{producer} native receipt target/generation/correlation mismatch").into(),
+        );
     }
+    let turn_id = match &receipt.acceptance {
+        NativeSendAcceptance::NativeInputAccepted { turn_id, .. }
+        | NativeSendAcceptance::SteerAccepted { turn_id, .. } => String::from(turn_id.clone()),
+        NativeSendAcceptance::QueueAccepted { .. } => {
+            return Err("S6 requires a native accepted turn".into());
+        }
+    };
+    let observed_id = user_message
+        .get("id")
+        .and_then(Value::as_str)
+        .ok_or("native userMessage omitted its generated identity")?;
+    if user_message.get("clientId").and_then(Value::as_str) != Some(record.push_id.as_str()) {
+        return Err(format!("{producer} native userMessage clientId did not match PushId").into());
+    }
+    let turns = proof.turns(&record.target).await?;
+    validate_native_push_correlation(
+        &turns,
+        ExpectedNativePushCorrelation {
+            push_id: record.push_id.as_str(),
+            accepted_turn_id: &turn_id,
+            native_item_id: observed_id,
+        },
+    )?;
+    proof.record(
+        "pushInputCorrelation",
+        json!({
+            "producer":producer,"pushId":record.push_id,"observedUserMessageId":observed_id,
+            "observedClientId":record.push_id,"acceptedTurnId":turn_id,
+            "target":record.target,"generation":receipt.generation,"status":"asserted"
+        }),
+    )?;
+    Ok(true)
 }
 
 pub(super) async fn cli_wake_send(
