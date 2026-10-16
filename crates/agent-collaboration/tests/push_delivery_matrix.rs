@@ -112,7 +112,8 @@ async fn exercise_push_delivery_matrix(
     let peer = peer_owner
         .as_mut()
         .ok_or("actual peer missing from runner owner")?;
-    let mut automation = AutomationStore::open(&proof.root.join("automation.sqlite")).await?;
+    let mut automation =
+        AutomationStore::open(&proof.service_directory.join("automation.sqlite")).await?;
     let sender = proof.start_thread("Push matrix sender").await?;
     let mut covered_cells = Vec::new();
 
@@ -304,6 +305,11 @@ async fn exercise_push_delivery_matrix(
             created_at: Utc::now() - ChronoDuration::days(31),
         })
         .await?;
+    let stale_before_prune = cli_show(&proof, &peer.target, stale_push_id.as_str()).await?;
+    assert_eq!(
+        stale_before_prune.pointer("/result/record/pushId"),
+        Some(&json!(stale_push_id))
+    );
     automation.prune_push_records(Utc::now(), 500).await?;
     let stale_record = automation.get_push_record(&stale_push_id).await?;
     if stale_record.is_some() {
@@ -443,7 +449,8 @@ async fn exercise_held_codex_recipients(
     let unloaded_targets = held_cells::prepare_unloaded_targets(&mut proof).await?;
     let sender = proof.start_thread("Held matrix sender").await?;
     let machine_label = machine_label(&proof)?;
-    let mut automation = AutomationStore::open(&proof.root.join("automation.sqlite")).await?;
+    let mut automation =
+        AutomationStore::open(&proof.service_directory.join("automation.sqlite")).await?;
     let mut covered_cells = Vec::new();
     // S3: a DM sent to an unloaded Codex conversation is stored as held and
     // arrives as the same line after an explicit conversation load.
