@@ -48,22 +48,54 @@ impl TailscaleCommand {
     }
 
     pub(super) async fn capture(&self, arguments: &[&str]) -> io::Result<Vec<u8>> {
+        // Only fixed read-only command names are safe diagnostic context. Never
+        // format arbitrary argv, captured output, or private daemon metadata.
+        let command_name = match arguments {
+            ["status", "--json"] => "tailscale status --json",
+            ["serve", "status", "--json"] => "tailscale serve status --json",
+            _ => "Tailscale finite command",
+        };
+        let failure = |phase: &str, error: io::Error| {
+            io::Error::new(
+                error.kind(),
+                format!("{command_name} during {phase}: {error}"),
+            )
+        };
         let mut child = self.command().args(arguments).spawn().map_err(|error| {
             io::Error::new(
                 error.kind(),
-                "could not run Tailscale; install its CLI and verify operator access",
+                format!("{command_name} during spawn: could not run Tailscale; install its CLI and verify operator access"),
             )
         })?;
         let stdout = child
             .stdout
             .take()
-            .ok_or_else(|| io::Error::other("missing Tailscale stdout"))?;
+            .ok_or_else(|| failure("stdout setup", io::Error::other("missing Tailscale stdout")))?;
         let stderr = child
             .stderr
             .take()
-            .ok_or_else(|| io::Error::other("missing Tailscale stderr"))?;
+            .ok_or_else(|| failure("stderr setup", io::Error::other("missing Tailscale stderr")))?;
+        let mut stdout_finished = false;
+        let mut stderr_finished = false;
+        let mut exit_finished = false;
         let completed = tokio::time::timeout(COMMAND_TIMEOUT, async {
-            tokio::try_join!(read_bounded(stdout), read_bounded(stderr), child.wait())
+            tokio::try_join!(
+                async {
+                    let result = read_bounded(stdout).await;
+                    stdout_finished = true;
+                    result.map_err(|error| failure("stdout capture", error))
+                },
+                async {
+                    let result = read_bounded(stderr).await;
+                    stderr_finished = true;
+                    result.map_err(|error| failure("stderr capture", error))
+                },
+                async {
+                    let result = child.wait().await;
+                    exit_finished = true;
+                    result.map_err(|error| failure("process exit", error))
+                }
+            )
         })
         .await;
         match completed {
@@ -72,12 +104,28 @@ impl TailscaleCommand {
                 let _reaped = child.kill().await;
                 match result {
                     Ok(Err(error)) => Err(error),
-                    Ok(Ok(_)) => Err(io::Error::other(
-                        "Tailscale command failed; check daemon status and operator permissions",
+                    Ok(Ok(_)) => Err(failure(
+                        "process exit",
+                        io::Error::other(
+                            "command failed; check daemon status and operator permissions",
+                        ),
                     )),
                     Err(_) => Err(io::Error::new(
                         io::ErrorKind::TimedOut,
-                        "Tailscale command timed out; no command was retried",
+                        format!(
+                            "{command_name} timed out during finite capture (stdout {}, stderr {}, exit {}); no command was retried",
+                            if stdout_finished {
+                                "complete"
+                            } else {
+                                "pending"
+                            },
+                            if stderr_finished {
+                                "complete"
+                            } else {
+                                "pending"
+                            },
+                            if exit_finished { "complete" } else { "pending" },
+                        ),
                     )),
                 }
             }

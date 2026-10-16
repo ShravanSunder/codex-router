@@ -5,6 +5,15 @@ use std::{num::NonZeroU16, path::Path};
 const CHILD_FIXTURE: &str = r#"
 import json, os, signal, socket, sys
 mode = os.environ['TAILNET_TEST_MODE']
+if mode == 'finite_failure':
+    print('PRIVATE_FIXTURE_OUTPUT', file=sys.stderr)
+    sys.exit(23)
+if mode == 'finite_overflow':
+    print('PRIVATE_FIXTURE_OUTPUT' * 65537)
+    sys.exit(0)
+if mode == 'finite_hang':
+    while True:
+        signal.pause()
 if sys.argv[1:] == ['status', '--json']:
     if mode == 'overflow':
         print('x' * 65537)
@@ -175,4 +184,51 @@ async fn cancelling_an_observation_keeps_the_child_owned_until_explicit_shutdown
         .await
         .expect("explicit owner shutdown after cancellation");
     assert_reaped(process_id);
+}
+
+async fn assert_finite_failure_context(mode: &str, phase: &str) {
+    for (arguments, command_name) in [
+        (vec!["status", "--json"], "tailscale status --json"),
+        (
+            vec!["serve", "status", "--json"],
+            "tailscale serve status --json",
+        ),
+    ] {
+        let failure = command_fixture(mode, None)
+            .capture(&arguments)
+            .await
+            .expect_err("negative foreign CLI fixture");
+        let message = failure.to_string();
+        assert!(
+            message.contains(command_name),
+            "missing command context: {message}"
+        );
+        assert!(message.contains(phase), "missing phase context: {message}");
+        assert!(
+            !message.contains("PRIVATE_FIXTURE_OUTPUT"),
+            "output leaked: {message}"
+        );
+        if mode == "finite_hang" {
+            assert_eq!(failure.kind(), io::ErrorKind::TimedOut);
+            assert!(message.contains("stdout pending"), "{message}");
+            assert!(message.contains("stderr pending"), "{message}");
+            assert!(message.contains("exit pending"), "{message}");
+            assert!(message.contains("no command was retried"), "{message}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn finite_failure_identifies_command_and_exit_phase_without_output() {
+    assert_finite_failure_context("finite_failure", "exit").await;
+}
+
+#[tokio::test]
+async fn finite_overflow_identifies_command_and_stdout_phase_without_output() {
+    assert_finite_failure_context("finite_overflow", "stdout").await;
+}
+
+#[tokio::test]
+async fn finite_timeout_identifies_command_and_pending_phases_without_retry() {
+    assert_finite_failure_context("finite_hang", "timed out").await;
 }
