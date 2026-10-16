@@ -17,6 +17,8 @@ mod held_cells;
 mod held_subscription_producer;
 #[path = "delivery_matrix/native_push_correlation.rs"]
 mod native_push_correlation;
+#[path = "delivery_matrix/native_push_receipt.rs"]
+mod native_push_receipt;
 #[path = "delivery_matrix/owned_resource_cleanup.rs"]
 mod owned_resource_cleanup;
 #[path = "delivery_matrix/owned_resources.rs"]
@@ -26,6 +28,8 @@ mod peer_fixture;
 #[path = "automation_live_support/proof_context.rs"]
 #[allow(dead_code)]
 mod proof_context;
+#[path = "delivery_matrix/public_push_receipt.rs"]
+mod public_push_receipt;
 #[path = "delivery_matrix/runner_finalization.rs"]
 mod runner_finalization;
 #[path = "delivery_matrix/subscription_notice_observer.rs"]
@@ -39,6 +43,7 @@ use collaboration_protocol::{
 };
 #[path = "delivery_matrix/push_matrix_driver.rs"]
 mod push_matrix_driver;
+use native_push_receipt::record_push_input_correlation;
 use proof_context::{ProofContext, ProofResult};
 use push_matrix_driver::*;
 use serde_json::json;
@@ -500,11 +505,23 @@ async fn exercise_held_codex_recipients(
         })
         .await?;
     let wake_expected = expected_push_line(&wake_show, &machine_label)?;
-    let wake_item =
-        wait_for_codex_input(&mut proof, &wake_target, &wake_marker, OBSERVATION_TIMEOUT).await?;
+    let wake_deadline = tokio::time::Instant::now() + OBSERVATION_TIMEOUT;
+    let wake_item = wait_for_codex_input(
+        &mut proof,
+        &wake_target,
+        &wake_marker,
+        wake_deadline.saturating_duration_since(tokio::time::Instant::now()),
+    )
+    .await?;
     assert_exact_notice_line(&user_message_text(&wake_item)?, &wake_expected)?;
-    let wake_correlation =
-        record_push_input_correlation(&mut proof, "wake", &wake_show.record, &wake_item).await?;
+    let wake_correlation = record_push_input_correlation(
+        &mut proof,
+        "wake",
+        &wake_show.record,
+        &wake_item,
+        wake_deadline,
+    )
+    .await?;
 
     let schedule_target = proof
         .start_thread("S6 scheduled existing-session recipient")
@@ -528,11 +545,12 @@ async fn exercise_held_codex_recipients(
         })
         .await?;
     let schedule_expected = expected_push_line(&schedule_show, &machine_label)?;
+    let schedule_deadline = tokio::time::Instant::now() + OBSERVATION_TIMEOUT;
     let schedule_item = wait_for_codex_input(
         &mut proof,
         &schedule_target,
         &schedule_marker,
-        OBSERVATION_TIMEOUT,
+        schedule_deadline.saturating_duration_since(tokio::time::Instant::now()),
     )
     .await?;
     assert_exact_notice_line(&user_message_text(&schedule_item)?, &schedule_expected)?;
@@ -541,6 +559,7 @@ async fn exercise_held_codex_recipients(
         "schedule-run",
         &schedule_show.record,
         &schedule_item,
+        schedule_deadline,
     )
     .await?;
     proof.record(
