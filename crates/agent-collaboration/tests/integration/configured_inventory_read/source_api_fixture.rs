@@ -143,7 +143,10 @@ impl SourceApiFixture {
                 concurrent_requests: collaboration_mcp::DEFAULT_CONCURRENT_REQUESTS,
                 shutdown: shutdown.clone(),
             },
-            collaboration_mcp::CollaborationApiListener::LoopbackTcp(address),
+            collaboration_mcp::CollaborationApiListener::LoopbackTcp {
+                address,
+                proxy_authority: None,
+            },
         );
         let task = tokio::spawn(collaboration_mcp::serve_collaboration_api(
             listener,
