@@ -617,7 +617,8 @@ mod quota_reset_pty_test {
     }
 
     #[test]
-    fn compiled_sessions_tui_click_focuses_conversation_and_enter_resumes() -> TestResult<()> {
+    fn compiled_sessions_tui_click_focuses_enter_inspects_and_control_enter_resumes()
+    -> TestResult<()> {
         let arguments = [OsString::from("--sessions-picker")];
         let mut terminal = TerminalDriver::spawn(
             Path::new(env!("CARGO_BIN_EXE_codex-router-quota-reset-test-harness")),
@@ -645,13 +646,21 @@ mod quota_reset_pty_test {
             terminal.child_is_running()?,
             "existing-session click activated instead of changing conversation focus",
         )?;
+        let details_start = terminal.transcript_len();
         terminal.send(b"\r")?;
+        terminal.wait_for_text_after("Session details", details_start, SEMANTIC_WAIT)?;
+        terminal.wait_for_text_after("Session ID: thread-b", details_start, SEMANTIC_WAIT)?;
+        ensure(
+            terminal.child_is_running()?,
+            "ordinary Enter must inspect the focused session without launching",
+        )?;
+        terminal.send(b"\x1b[13;5u")?;
 
         let transcript = terminal.finish(SEMANTIC_WAIT)?;
         let transcript = String::from_utf8_lossy(&transcript);
         ensure(
             transcript.contains("SESSION_PICKER_OUTCOME resume:thread-b"),
-            "Enter did not resume the pointer-focused existing session",
+            "Ctrl+Enter did not resume the inspected pointer-focused session",
         )?;
         ensure(
             transcript.contains("\u{1b}[?1049h")

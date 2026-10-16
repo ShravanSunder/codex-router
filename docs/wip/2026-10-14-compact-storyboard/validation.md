@@ -1,8 +1,18 @@
 # Compact storyboard validation
 
-The [current gallery](storyboard.html) has 36 actual compiled fixture screenshots: sessions/quota ×120×36,76×30,48×24 ×six states. The [manifest](help-image-manifest.json) includes six cleanup receipts and exact image/source/tool hashes. All36 embedded and copied PNGs match those receipts and were inspected. The [93-image 0.1.95 archive](storyboard-0.1.95-archived.html) is separate historical proof.
+The [current gallery](storyboard.html) has 36 actual compiled fixture screenshots: sessions/quota ×120×36,76×30,48×24 ×six states. The [manifest](help-image-manifest.json) includes six cleanup receipts and exact image/source/tool hashes. All36 embedded and copied PNGs match those receipts and passed the per-image oracles. The Lead viewed representative wide and phone Details/browse/filter images. The [93-image 0.1.95 archive](storyboard-0.1.95-archived.html) is separate historical proof.
 
-## Current correction snapshot
+## Current 2026-10-16 capture and terminal contract
+
+Version0.1.96, base commit `bb634c7a5ab56c55af8721d5c2adcdc1eac2b133` plus terminal-test input updates. Source snapshot `b4adb9e07c5dec6c0d1ba4b2b940ce37eab44932093503aacbc155d7f5c98c54` is bound in the manifest. Current HTML has36 embedded screenshots at120×36,76×30,48×24. The fresh compiled capture passed1/0/0, exit0,58.82s: six complete journeys, zero provider requests, unchanged state/secrets, successful child exit and owned process cleanup. It rejects18 blank/wrong-state/unapplied images. The fixture and capture executable hashes were retained before execution, and the fixture binary remained unchanged throughout.
+
+The current compiled PTY suite passed19/0/0, exit0,42.45s. It observes ordinary Enter opening exact session Details without launching, then Ctrl+Enter resuming the same session; Ctrl+Shift+Enter retains fork cancellation. Stored-model warning ordering, terminal restoration, paste and sealed quota effects remain asserted. Two old key-input tests first failed0/2; the broader follow-up exposed one additional obsolete Enter-resume expectation18/1. Only owner-superseded inputs were changed, and the latter test was strengthened with the intermediate Details/identity observation. No timeouts, cleanup or effect assertions were weakened.
+
+Strict workspace/all-target Clippy, formatting and Rust size1956files passed on the combined parent/source implementation before these test-only input changes. Current-head CI and final affected quality remain open. Earlier library388agent/480CLI and shared-dialog13/0/1ignored counts are scoped earlier runs, not relabeled as a new combined full-suite pass. A local full-workspace run reached its900s cap during cold compilation without a test verdict; it is not a behavioral failure or a passing gate.
+
+The gallery is current UI proof. Actual configured NEW/resume/fork, literal terminal clipboard interaction, private Tailscale HTTPS/board operations, final normal artifact qualification, independent affected implementation review and current published-head CI remain separate. No release or production replacement follows from pictures.
+
+## Historical 2026-10-15 correction snapshot
 
 Captured on 2026-10-15 with version 0.1.96, base commit d448337c plus uncommitted review corrections. The manifest identifies source snapshot `903a19b5b39192487a35c9dd968a1aeb14322f066a7d749649a9bae4e3d7f468`. The published PR head is separate; these results do not establish its CI or readiness.
 
@@ -24,7 +34,7 @@ The self-contained HTML embeds exactly the36 receipt-bound PNGs; static integrit
 
 The later controlled component case held the existing Inspected snapshot after Cancel. It observed the `Inspect` body while the action owner still offered Review/Cancel; an early Escape issued another Cancel. Only after the Browse acknowledgement did the Close action appear, and Escape then restored Filters. This demonstrates an unsafe observation marker in the earlier test; it does not establish the exact timing of the original failed attempt or a product cancellation defect.
 
-The two existing tests now wait for the Browse-owned Close action. Events, timeouts, final Filters, zero-POST, read-only and terminal-cleanup assertions are unchanged. The controlled witness passed1/0; the affected component group passed3/0; the compiled cancellation case passed1/0; and the full PTY suite passed19/0, all exit0. Strict workspace/all-target Clippy, formatting, Rust size and whitespace checks passed. This was test-only work: the application, capture fixture and all36 images are unchanged, so capture was not repeated. The earlier18/1 failure remains retained. The same reviewer is checking this bounded proof correction; acceptance of the four original fixes and current pictures is already recorded.
+The two existing tests now wait for the Browse-owned Close action. Events, timeouts, final Filters, zero-POST, read-only and terminal-cleanup assertions are unchanged. The controlled witness passed1/0; the affected component group passed3/0; the compiled cancellation case passed1/0; and the full PTY suite passed19/0, all exit0. Strict workspace/all-target Clippy, formatting, Rust size and whitespace checks passed. This was test-only work: the application, capture fixture and all36 images are unchanged, so capture was not repeated. The earlier18/1 failure remains retained. The retained reviewer subsequently verified this bounded PTY1 observation correction closed; it is historical evidence for the unchanged cancellation owner.
 
 ## Prior reviewed snapshot (before corrections)
 
@@ -51,6 +61,6 @@ Exact successful debug test executables measured16 session cases and24 quota cas
 
 Use the [compact capture instructions](../../../crates/codex-router-quota-reset-test-harness/tests/quota_storyboard_capture_test/PROVIDER_FILTERS.md). The current runner selects only compiled_compact_current_storyboard_exports_both_real_tuis; the old full runner/ignored captures and their old shortcut oracles remain historical.
 
-The original independent review returned needs-revision for legacy quota Ctrl+/, unsupported F4-close Help text, narrow static-row allocation and stale proof labels. Local corrections and their affected tests/captures are now recorded above. The same reviewer accepted those four fixes and the current-image/documentation increments. The later cancellation-readiness proof qualification above remains under affected recheck; no whole-PR readiness is inferred.
+The original independent review returned needs-revision for legacy quota Ctrl+/, unsupported F4-close Help text, narrow static-row allocation and stale proof labels. Local corrections and their affected tests/captures are now recorded above. The same reviewer accepted those four fixes and the current-image/documentation increments. The later cancellation-readiness proof qualification was independently verified closed. New 2026-10-16 source/UI work still requires its affected implementation review; no whole-PR readiness is inferred.
 
 Local/SSH terminal paste gestures, live provider metadata/quota, browser controls, actual configured NEW/resume/fork, current publication/stack/CI/body and normal native artifact qualification remain separate. Configured action guards do not establish successful source-affine execution. Nothing here authorizes merge, release, install or production replacement.

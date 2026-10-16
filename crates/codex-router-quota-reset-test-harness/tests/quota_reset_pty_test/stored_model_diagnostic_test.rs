@@ -26,7 +26,7 @@ fn focused_malformed_model_picker() -> TestResult<TerminalDriver> {
 fn compiled_picker_discarded_model_warning_follows_teardown_and_precedes_resume() -> TestResult<()>
 {
     let mut terminal = focused_malformed_model_picker()?;
-    terminal.send(b"\r")?;
+    terminal.send(b"\x1b[13;5u")?;
     let transcript = terminal.finish(SEMANTIC_WAIT)?;
     let text = String::from_utf8_lossy(&transcript);
     ensure(
@@ -61,7 +61,7 @@ fn compiled_picker_discarded_model_warning_follows_teardown_and_precedes_resume(
 fn compiled_picker_canceling_captured_model_emits_no_warning_or_launch() -> TestResult<()> {
     let mut terminal = focused_malformed_model_picker()?;
     let popup_start = terminal.transcript_len();
-    terminal.send(b"\x1b\r")?;
+    terminal.send(b"\x1b[13;6u")?;
     terminal.wait_for_text_after("Fork session", popup_start, SEMANTIC_WAIT)?;
     let cancel_start = terminal.transcript_len();
     terminal.send(b"\x1b")?;
