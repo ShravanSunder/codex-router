@@ -172,6 +172,23 @@ impl SourceApiFixture {
         }
     }
 
+    pub(super) async fn seed_later_page_session(&mut self, session_id: &str) {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(sqlx::sqlite::SqliteConnectOptions::new().filename(&self.database))
+            .await
+            .unwrap();
+        for index in 0..100 {
+            sqlx::query("INSERT INTO threads (id,cwd,title,first_user_message,source,thread_source,updated_at_ms,recency_at_ms,archived) VALUES (?,'/source/project','Recent unrelated session','User message','cli','cli',3000,3000,0)")
+                .bind(format!("recent-session-{index:03}"))
+                .execute(&pool).await.unwrap();
+        }
+        sqlx::query("INSERT INTO threads (id,cwd,title,first_user_message,source,thread_source,updated_at_ms,recency_at_ms,archived) VALUES (?,'/source/project','Older target session','User message','cli','cli',1000,1000,0)")
+            .bind(session_id).execute(&pool).await.unwrap();
+        pool.close().await;
+        self.original = std::fs::read(&self.database).unwrap();
+    }
+
     pub(crate) fn request(&self, name: &str) -> SourceInventoryRequest {
         let registry = RouterConnectionRegistry::parse(&serde_json::json!({"version":1,"routers":[{
             "name":name,"connection":{"kind":"remote","serviceId":self.endpoint.service_id,"mcpUrl":self.url}

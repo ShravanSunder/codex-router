@@ -304,6 +304,45 @@ async fn native_only_source_keeps_supported_interactive_filter_and_no_provider_c
     fixture.finish().await;
 }
 
+#[tokio::test]
+async fn configured_full_uuid_search_reads_later_pages_without_reinterpreting_remote_query() {
+    use crate::sessions::SessionPickerIdentity;
+    let session_id = "01a146f5-0cda-7cf0-a4d1-c7ff5461d497";
+    let mut fixture = SourceApiFixture::start_with_provider(
+        "00000000-0000-4000-8000-000000000008",
+        "source-model",
+        true,
+    )
+    .await;
+    fixture.seed_later_page_session(session_id).await;
+    let mut request = fixture.request("UUID source");
+    request.query.search = format!("  {}  ", session_id.to_ascii_uppercase());
+    let result = read_complete_source(fixture.loader(), request.clone()).await;
+    assert_eq!(result.request(), &request);
+    let snapshot = result
+        .into_snapshot()
+        .expect("full UUID must reach the source API");
+    let target = snapshot
+        .records
+        .iter()
+        .find(|row| row.session_id == session_id)
+        .expect("ID is absent from title; source query must stay unfiltered across pages");
+    let SessionPickerIdentity::HostedCodex(reference) = &target.identity else {
+        panic!("configured session must retain its source identity");
+    };
+    assert_eq!(reference.endpoint, fixture.endpoint);
+    assert_eq!(String::from(reference.session_id.clone()), session_id);
+    assert_eq!(target.cwd.as_deref(), Some("/source/project"));
+    assert_eq!(
+        snapshot.records.len(),
+        103,
+        "caller filters the complete native/provider projection"
+    );
+    assert_eq!(fixture.api_call_count("sessions_list"), 2);
+    assert_eq!(fixture.api_call_count("provider_sessions_list"), 1);
+    fixture.finish().await;
+}
+
 /// A test consumer exhausts real page continuations to preserve terminal scan oracles.
 /// Production progressive publication is separately exercised through the actual worker/UI.
 pub(crate) async fn read_complete_source(

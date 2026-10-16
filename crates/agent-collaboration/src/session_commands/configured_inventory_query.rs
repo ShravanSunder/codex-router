@@ -13,9 +13,12 @@ pub(super) fn qualify_configured_query(
         // NEW's defaultRemoteCwd is likewise not an inventory scope.
         return Err(SourceInventoryRejection::UnsupportedViewOrScope);
     }
-    if !query.search.trim().is_empty() {
-        // The native query is one name/title substring, whereas the picker expression matches
-        // more fields and ANDs terms. Sending it unchanged or omitting it would change meaning.
+    let search = query.search.trim();
+    if !search.is_empty()
+        && super::session_command_options::validate_exact_uuid_session_id(search).is_err()
+    {
+        // A complete pasted UUID is filtered locally across source-owned pages. The native
+        // query only searches name/title, so it stays unset; other expressions remain rejected.
         return Err(SourceInventoryRejection::UnsupportedQuery);
     }
     if query.sort != SessionsSort::Updated {

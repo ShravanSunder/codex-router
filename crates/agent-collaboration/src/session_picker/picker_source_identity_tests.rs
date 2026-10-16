@@ -69,3 +69,39 @@ fn picker_actions_freeze_the_selected_rows_model_and_effort() {
     assert_eq!(resume.model_choice, expected);
     assert_eq!(fork.model_choice, expected);
 }
+
+#[test]
+fn full_uuid_paste_keeps_shared_matching_and_source_action_identity() {
+    let session_id = "01a146f5-0cda-7cf0-a4d1-c7ff5461d497";
+    let mut request = picker_request();
+    let mut record = request.records.remove(0);
+    record.session_id = session_id.to_owned();
+    let target: SessionRef = serde_json::from_value(json!({
+        "endpoint": {"serviceId":"00000000-0000-4000-8000-000000000008","endpointId":"codex-local"},
+        "sessionId": session_id,
+    }))
+    .unwrap();
+    record.identity = SessionPickerIdentity::HostedCodex(target);
+    let mut metadata_match = record.clone();
+    metadata_match.session_id = "another-session".into();
+    metadata_match.full_title = format!("Notes about {session_id}");
+    metadata_match.identity = SessionPickerIdentity::LocalCodex("another-session".into());
+    request.records = vec![record.clone(), metadata_match];
+    let mut model = SessionsPickerModel::new(request, 120);
+    model.append_search_text(&session_id.to_ascii_uppercase());
+    assert_eq!(
+        model.visible_record_len(),
+        2,
+        "UUID admission preserves shared substring semantics"
+    );
+    assert!(model.focus_visible_identity(&record.identity));
+    let Some(SessionsPickerOutcome::ResumeSession(resume)) = model.activation_outcome_for_focus()
+    else {
+        panic!("matching source row resumes");
+    };
+    let Some(SessionsPickerOutcome::ForkSession(fork)) = model.fork_outcome_for_focus() else {
+        panic!("matching source row forks");
+    };
+    assert_eq!(resume.identity, record.identity);
+    assert_eq!(fork.identity, record.identity);
+}

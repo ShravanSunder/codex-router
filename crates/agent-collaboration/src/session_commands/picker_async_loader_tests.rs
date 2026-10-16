@@ -47,10 +47,25 @@ async fn configured_picker_loader_rejects_unqualified_credentials_and_unsupporte
         query.provider = provider;
         cases.push((query, SourceInventoryRejection::UnsupportedViewOrScope));
     }
-    for search in ["ordinary terms", "name:alpha", "id:shared", "cwd:/caller"] {
+    for search in [
+        "ordinary terms",
+        "name:alpha",
+        "id:shared",
+        "cwd:/caller",
+        "00000000-0000-4000-8000",
+        "id:00000000-0000-4000-8000-000000000042",
+    ] {
         let mut query = base.clone();
         query.search = search.to_owned();
         cases.push((query, SourceInventoryRejection::UnsupportedQuery));
+    }
+    for search in [
+        "00000000-0000-4000-8000-000000000042",
+        "  01A146F5-0CDA-7CF0-A4D1-C7FF5461D497  ",
+    ] {
+        let mut query = base.clone();
+        query.search = search.to_owned();
+        cases.push((query, SourceInventoryRejection::EndpointUnqualified));
     }
     let mut whitespace_query = base.clone();
     let mut creation_query = base.clone();
