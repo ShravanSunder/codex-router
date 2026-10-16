@@ -26,7 +26,7 @@ impl PreparedTailscaleExposure {
         Self::prepare_with_command(access, TailscaleCommand::default()).await
     }
 
-    async fn prepare_with_command(
+    pub(crate) async fn prepare_with_command(
         access: Option<RemoteAccess>,
         command: TailscaleCommand,
     ) -> io::Result<Option<Self>> {

@@ -176,12 +176,16 @@ impl CollaborationRuntime {
         provider_launches: Vec<crate::ExternalProviderStartup>,
         relation_receiver: tokio::sync::watch::Receiver<RouterExecutableRelation>,
     ) -> io::Result<Self> {
+        let prepared_exposure = crate::tailscale_exposure::PreparedTailscaleExposure::prepare(
+            host_inputs.remote_access,
+        )
+        .await?;
         Self::start_with_optional_router_proxy_endpoint(
             host_inputs.collaboration_runtime,
             provider_launches,
             relation_receiver,
             Some(host_inputs.router_proxy_endpoint),
-            host_inputs.remote_access,
+            prepared_exposure,
         )
         .await
     }
@@ -191,7 +195,7 @@ impl CollaborationRuntime {
         provider_launches: Vec<crate::ExternalProviderStartup>,
         relation_receiver: tokio::sync::watch::Receiver<RouterExecutableRelation>,
         router_proxy_endpoint: Option<SocketAddr>,
-        remote_access: Option<crate::RemoteAccess>,
+        prepared_exposure: Option<crate::tailscale_exposure::PreparedTailscaleExposure>,
     ) -> io::Result<Self> {
         let mut owner_human_id = inputs.owner_human_id.clone();
         let service_id = load_service_identity(&inputs.directory)?;
@@ -315,8 +319,6 @@ impl CollaborationRuntime {
                 None
             }
         };
-        let prepared_exposure =
-            crate::tailscale_exposure::PreparedTailscaleExposure::prepare(remote_access).await?;
         let proxy_authority = prepared_exposure
             .as_ref()
             .map(|prepared| prepared.authority().clone());
@@ -569,6 +571,9 @@ impl CollaborationRuntime {
                 );
             }
         }
+        // Runtime listeners now own the hub; this construction-only Arc must not
+        // keep provider storage alive during exposure-startup failure cleanup.
+        drop(provider_session_hub);
         let publication = publication.with_acp_listener()?;
         if let Some(settings) = settings_backend
             && settings.recover().await.is_err()
@@ -969,3 +974,7 @@ fn current_observation_timestamp() -> io::Result<ObservationTimestamp> {
 
 #[path = "collaboration_runtime/provider_retention.rs"]
 mod provider_retention;
+
+#[cfg(test)]
+#[path = "collaboration_runtime/startup_failure_tests.rs"]
+mod startup_failure_tests;
