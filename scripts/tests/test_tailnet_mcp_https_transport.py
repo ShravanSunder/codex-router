@@ -1,19 +1,24 @@
-"""System curl apparatus checks; successful private HTTPS remains a live gate."""
+"""Tailnet HTTPS/board apparatus checks; private live journeys remain separate."""
 
+import base64
+import datetime as dt
 import json
 import os
 import socket
 import socketserver
+import sqlite3
 import ssl
 import subprocess
 import tempfile
 import threading
 import typing as t
 import unittest
+from contextlib import closing
 from pathlib import Path
 
 from scripts.verification import tailnet_mcp_client as client
 from scripts.verification import tailnet_mcp_models as models
+from scripts.verification.typed_observations import JsonObject, read_observed_json
 
 
 class CurlMcpHandler(socketserver.StreamRequestHandler):
@@ -267,6 +272,306 @@ class TailnetHttpsTransportTests(unittest.TestCase):
                 finally:
                     thread.join(timeout=6)
                 self.assertFalse(thread.is_alive())
+
+
+def board_marker() -> models.BoardMarker:
+    return models.BoardMarker(
+        topic_id="01900000-0000-7000-8000-000000000001",
+        root_message_id="01900000-0000-7000-8000-000000000002",
+        message_id="01900000-0000-7000-8000-000000000003",
+        text="unique",
+    )
+
+
+def board_actor() -> JsonObject:
+    return {
+        "kind": "session",
+        "session": {
+            "endpoint": {
+                "serviceId": "01900000-0000-7000-8000-000000000010",
+                "endpointId": "codex-local",
+            },
+            "sessionId": "01900000-0000-7000-8000-000000000011",
+        },
+    }
+
+
+def board_plan(evidence: Path) -> models.BoardPlan:
+    return models.BoardPlan(
+        destination_root=evidence,
+        evidence=evidence,
+        https=models.HttpsEndpoint(url="https://node.tail.ts.net:8443/mcp"),
+        destination_service_id="destination",
+        destination_service_epoch="epoch",
+        actor=board_actor(),
+        marker=board_marker(),
+        deadline=dt.datetime.now(dt.UTC) + dt.timedelta(hours=1),
+    )
+
+
+class BoardPeerFixture:
+    def __init__(self, plan: models.BoardPlan, mode: str) -> None:
+        self.plan: models.BoardPlan = plan
+        self.mode: str = mode
+        self.posts: int = 0
+
+    def __call__(
+        self,
+        target: models.HttpsEndpoint,
+        payload: JsonObject,
+        headers: models.ProbeHeaders | None,
+    ) -> models.HttpReply:
+        if target != self.plan.https:
+            raise ValueError("fixture reached wrong destination")
+        if payload.get("method") == "tools/list":
+            status = 403 if headers is not None and headers.origin is not None else 200
+            result: JsonObject = {
+                "tools": [
+                    {"name": name}
+                    for name in [
+                        "endpoints_list",
+                        "board_message_post",
+                        "board_message_show",
+                    ]
+                ]
+            }
+        else:
+            params = read_observed_json(json.dumps(payload.get("params")))
+            name = params.get("name")
+            arguments = read_observed_json(json.dumps(params.get("arguments")))
+            status = 200
+            marker = self.plan.marker
+            record: JsonObject = {
+                "messageId": marker.message_id,
+                "topicId": marker.topic_id,
+                "placement": {
+                    "kind": "thread",
+                    "rootMessageId": marker.root_message_id,
+                },
+                "actor": self.plan.actor,
+                "text": marker.text,
+            }
+            if name == "endpoints_list":
+                result = {
+                    "serviceEpoch": "epoch",
+                    "endpoints": [
+                        {
+                            "endpoint": {
+                                "serviceId": "destination",
+                                "endpointId": "codex-local",
+                            },
+                            "availability": {"state": "available"},
+                            "channels": [
+                                {
+                                    "kind": "nativeCodex",
+                                    "generation": {
+                                        "serviceEpoch": "epoch",
+                                        "generation": 1,
+                                    },
+                                }
+                            ],
+                        }
+                    ],
+                }
+            elif name == "board_message_post":
+                self.posts += 1
+                expected: JsonObject = {
+                    "messageId": marker.message_id,
+                    "placement": {
+                        "kind": "thread",
+                        "rootMessageId": marker.root_message_id,
+                    },
+                    "actor": self.plan.actor,
+                    "text": marker.text,
+                    "references": [],
+                }
+                intent = read_observed_json(
+                    (self.plan.evidence / "peer-intent.json").read_bytes()
+                )
+                if arguments != expected or intent.get("postArguments") != expected:
+                    raise ValueError(
+                        "wrong placement or missing durable arguments before post"
+                    )
+                if self.mode == "transport":
+                    raise TimeoutError("literal ambiguous transport failure")
+                if self.mode == "invalid":
+                    return models.HttpReply(status=502, body=b"invalid MCP body\xff")
+                if self.mode == "error":
+                    return models.HttpReply(
+                        status=200,
+                        body=b'{"jsonrpc":"2.0","id":1,"result":{"isError":true,"content":[{"type":"text","text":"literal refusal"}]}}',
+                    )
+                result = {"structuredContent": {"message": record}}
+            elif name == "board_message_show":
+                if arguments.get("messageId") == marker.root_message_id:
+                    record = {
+                        "messageId": marker.root_message_id,
+                        "topicId": marker.topic_id,
+                        "placement": {"kind": "topic", "topicId": marker.topic_id},
+                        "actor": self.plan.actor,
+                    }
+                    if self.mode == "wrong-root":
+                        record["topicId"] = "01900000-0000-7000-8000-000000000009"
+                elif self.mode == "wrong-thread":
+                    record["placement"] = {
+                        "kind": "thread",
+                        "rootMessageId": "01900000-0000-7000-8000-000000000009",
+                    }
+                result = {"structuredContent": record}
+            else:
+                raise ValueError("unexpected fixture tool")
+            if name == "endpoints_list":
+                result = {"structuredContent": result}
+        return models.HttpReply(
+            status=status,
+            body=json.dumps({"jsonrpc": "2.0", "id": 1, "result": result}).encode(),
+        )
+
+
+class TailnetBoardPeerTests(unittest.TestCase):
+    def test_marker_ids_require_canonical_rfc_uuidv7(self) -> None:
+        valid = board_marker().model_dump()
+        for field in ["topic_id", "message_id", "root_message_id"]:
+            for invalid in [
+                "topic",
+                "01900000-0000-4000-8000-000000000001",
+                "01900000-0000-7000-0000-000000000001",
+                "01900000-0000-7ABC-8000-000000000001",
+            ]:
+                with (
+                    self.subTest(field=field, invalid=invalid),
+                    self.assertRaises(ValueError),
+                ):
+                    _ = models.BoardMarker.model_validate({**valid, field: invalid})
+
+    def test_peer_uses_seeded_thread_retains_failures_and_never_replays(self) -> None:
+        for mode in [
+            "success",
+            "error",
+            "invalid",
+            "transport",
+            "wrong-thread",
+            "wrong-root",
+        ]:
+            with (
+                self.subTest(mode=mode),
+                tempfile.TemporaryDirectory(dir="/private/tmp") as folder,
+            ):
+                plan = board_plan(Path(folder))
+                fixture = BoardPeerFixture(plan, mode)
+                if mode == "success":
+                    client.run_peer(plan, fixture)
+                    self.assertTrue((plan.evidence / "peer-result.json").exists())
+                else:
+                    with self.assertRaises((ValueError, TimeoutError)):
+                        client.run_peer(plan, fixture)
+                    self.assertFalse((plan.evidence / "peer-result.json").exists())
+                if mode == "wrong-root":
+                    self.assertEqual(fixture.posts, 0)
+                    self.assertFalse((plan.evidence / "peer-intent.json").exists())
+                    continue
+                self.assertEqual(fixture.posts, 1)
+                if mode == "transport":
+                    self.assertTrue(
+                        (plan.evidence / "peer-post-transport-error.json").exists()
+                    )
+                else:
+                    raw = read_observed_json(
+                        (plan.evidence / "peer-post-response.json").read_bytes()
+                    )
+                    encoded = raw.get("bodyBase64")
+                    if not isinstance(encoded, str):
+                        self.fail("raw MCP response bytes were not retained")
+                    body = base64.b64decode(encoded, validate=True)
+                    intent = read_observed_json(
+                        (plan.evidence / "peer-intent.json").read_bytes()
+                    )
+                    self.assertEqual(raw["arguments"], intent["postArguments"])
+                    if mode == "error":
+                        self.assertIn(b'"isError":true', body)
+                    elif mode == "invalid":
+                        self.assertEqual(
+                            (raw["httpStatus"], body), (502, b"invalid MCP body\xff")
+                        )
+                with self.assertRaises(FileExistsError):
+                    client.run_peer(plan, fixture)
+                self.assertEqual(fixture.posts, 1)
+
+    def test_board_marker_rejects_the_old_impossible_topic_only_plan(self) -> None:
+        with self.assertRaises(ValueError):
+            _ = models.BoardMarker.model_validate(
+                {
+                    "topic_id": "01900000-0000-7000-8000-000000000001",
+                    "message_id": "01900000-0000-7000-8000-000000000003",
+                    "text": "unique private marker",
+                }
+            )
+
+    def test_local_readback_requires_the_exact_message_and_actor(self) -> None:
+        marker = board_marker()
+        actor = board_actor()
+        record: JsonObject = {
+            "topicId": marker.topic_id,
+            "messageId": marker.message_id,
+            "placement": {"kind": "thread", "rootMessageId": marker.root_message_id},
+            "text": "unique",
+            "actor": actor,
+        }
+        client.require_marker(record, marker, actor)
+        for field in ["messageId", "topicId", "text", "actor", "placement"]:
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                client.require_marker({**record, field: "wrong"}, marker, actor)
+
+    def test_independent_sql_readback_rejects_missing_or_changed_stored_marker(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            database = Path(folder) / "board.sqlite"
+            marker = board_marker()
+            actor = board_actor()
+            with closing(sqlite3.connect(database)) as connection, connection:
+                _ = connection.execute(
+                    "CREATE TABLE board_messages(message_id TEXT,topic_id TEXT,text TEXT,actor_key TEXT,root_id TEXT)"
+                )
+                _ = connection.execute(
+                    "CREATE TABLE board_identities(identity_key TEXT,kind TEXT,service_id TEXT,endpoint_id TEXT,session_id TEXT)"
+                )
+                _ = connection.execute(
+                    "INSERT INTO board_identities VALUES('actor','session',?,'codex-local',?)",
+                    (
+                        "01900000-0000-7000-8000-000000000010",
+                        "01900000-0000-7000-8000-000000000011",
+                    ),
+                )
+                _ = connection.execute(
+                    "INSERT INTO board_messages VALUES(?,?,?,'actor',?)",
+                    (
+                        marker.message_id,
+                        marker.topic_id,
+                        marker.text,
+                        marker.root_message_id,
+                    ),
+                )
+            client.read_stored_marker(database, marker, actor)
+            for wrong_root in [None, "01900000-0000-7000-8000-000000000009"]:
+                with closing(sqlite3.connect(database)) as connection, connection:
+                    _ = connection.execute(
+                        "UPDATE board_messages SET root_id=?", (wrong_root,)
+                    )
+                with self.assertRaises(ValueError):
+                    client.read_stored_marker(database, marker, actor)
+            with closing(sqlite3.connect(database)) as connection, connection:
+                _ = connection.execute(
+                    "UPDATE board_messages SET root_id=?", (marker.root_message_id,)
+                )
+            with closing(sqlite3.connect(database)) as connection, connection:
+                _ = connection.execute("UPDATE board_messages SET text='wrong'")
+            with self.assertRaises(ValueError):
+                client.read_stored_marker(database, marker, actor)
+            with closing(sqlite3.connect(database)) as connection, connection:
+                _ = connection.execute("DELETE FROM board_messages")
+            with self.assertRaises(ValueError):
+                client.read_stored_marker(database, marker, actor)
 
 
 if __name__ == "__main__":

@@ -5,14 +5,12 @@ import hashlib
 import os
 import socket
 import socketserver
-import sqlite3
 import subprocess
 import sys
 import tempfile
 import threading
 import typing as t
 import unittest
-from contextlib import closing
 from pathlib import Path
 
 from scripts.verification import tailnet_mcp_client as client
@@ -411,25 +409,6 @@ class TailnetObservationTests(unittest.TestCase):
             {"tools": []},
         )
 
-    def test_local_readback_requires_the_exact_message_and_actor(self) -> None:
-        marker = models.BoardMarker(
-            topic_id="topic", message_id="message", text="unique"
-        )
-        actor: JsonObject = {
-            "kind": "session",
-            "session": {"sessionId": "real-commissioner"},
-        }
-        record: JsonObject = {
-            "topicId": "topic",
-            "messageId": "message",
-            "text": "unique",
-            "actor": actor,
-        }
-        client.require_marker(record, marker, actor)
-        for field in ["messageId", "topicId", "text", "actor"]:
-            with self.subTest(field=field), self.assertRaises(ValueError):
-                client.require_marker({**record, field: "wrong"}, marker, actor)
-
     def test_cleanup_reaps_a_real_owned_child_when_body_raises(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             child = harmless_child()
@@ -461,6 +440,30 @@ class TailnetObservationTests(unittest.TestCase):
         ]:
             with self.subTest(deadline=deadline), self.assertRaises(ValueError):
                 models.require_deadline(deadline)
+
+    def test_initial_readiness_covers_cold_start_without_extending_allocation(
+        self,
+    ) -> None:
+        utc_now = dt.datetime(2026, 10, 16, tzinfo=dt.UTC)
+        for remaining, expected_until in [
+            (1000, 1150),
+            (150, 1150),
+            (45, 1045),
+            (0, 1000),
+            (-1, 999),
+        ]:
+            with self.subTest(remaining=remaining):
+                until = host.host_readiness_until(
+                    utc_now + dt.timedelta(seconds=remaining), 1000, utc_now
+                )
+                self.assertEqual(until, expected_until)
+                self.assertLessEqual(until, 1000 + remaining)
+        # A valid late initial observation may cross the old120s cap; no sleeping.
+        until = host.host_readiness_until(
+            utc_now + dt.timedelta(seconds=1000), 1000, utc_now
+        )
+        self.assertLess(1125, until)
+        self.assertFalse(1150 < until)
 
     def test_unobservable_cleanup_is_unknown_instead_of_empty(self) -> None:
         identity = process_table()[os.getpid()]
@@ -548,44 +551,6 @@ class TailnetObservationTests(unittest.TestCase):
                 if child.stdin is not None:
                     child.stdin.close()
                 _ = child.wait(timeout=5)
-
-    def test_independent_sql_readback_rejects_missing_or_changed_stored_marker(
-        self,
-    ) -> None:
-        with tempfile.TemporaryDirectory() as folder:
-            database = Path(folder) / "board.sqlite"
-            marker = models.BoardMarker(
-                topic_id="topic", message_id="message", text="unique"
-            )
-            actor: JsonObject = {
-                "kind": "session",
-                "session": {
-                    "endpoint": {"serviceId": "service", "endpointId": "codex-local"},
-                    "sessionId": "commissioner",
-                },
-            }
-            with closing(sqlite3.connect(database)) as connection, connection:
-                _ = connection.execute(
-                    "CREATE TABLE board_messages(message_id TEXT,topic_id TEXT,text TEXT,actor_key TEXT)"
-                )
-                _ = connection.execute(
-                    "CREATE TABLE board_identities(identity_key TEXT,kind TEXT,service_id TEXT,endpoint_id TEXT,session_id TEXT)"
-                )
-                _ = connection.execute(
-                    "INSERT INTO board_identities VALUES('actor','session','service','codex-local','commissioner')"
-                )
-                _ = connection.execute(
-                    "INSERT INTO board_messages VALUES('message','topic','unique','actor')"
-                )
-            client.read_stored_marker(database, marker, actor)
-            with closing(sqlite3.connect(database)) as connection, connection:
-                _ = connection.execute("UPDATE board_messages SET text='wrong'")
-            with self.assertRaises(ValueError):
-                client.read_stored_marker(database, marker, actor)
-            with closing(sqlite3.connect(database)) as connection, connection:
-                _ = connection.execute("DELETE FROM board_messages")
-            with self.assertRaises(ValueError):
-                client.read_stored_marker(database, marker, actor)
 
 
 if __name__ == "__main__":

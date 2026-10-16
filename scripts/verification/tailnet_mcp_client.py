@@ -1,5 +1,6 @@
 "Real stateless MCP transport and independent destination board readback."
 
+import base64
 import http.client
 import json
 import os
@@ -216,19 +217,22 @@ def rpc_result(reply: HttpReply) -> JsonObject:
     return result
 
 
-def tool(target: HttpsEndpoint | Path, name: str, arguments: JsonObject) -> JsonObject:
-    result = rpc_result(
-        http_post(
-            target,
-            {
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "tools/call",
-                "params": {"name": name, "arguments": arguments},
-            },
-        )
-    )
+def tool_payload(name: str, arguments: JsonObject) -> JsonObject:
+    return {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {"name": name, "arguments": arguments},
+    }
+
+
+def tool_result(reply: HttpReply) -> JsonObject:
+    result = rpc_result(reply)
     return read_observed_json(json.dumps(result.get("structuredContent")))
+
+
+def tool(target: HttpsEndpoint | Path, name: str, arguments: JsonObject) -> JsonObject:
+    return tool_result(http_post(target, tool_payload(name, arguments)))
 
 
 def require_service(
@@ -296,6 +300,8 @@ def require_marker(record: JsonObject, marker: BoardMarker, actor: JsonObject) -
     if (
         record.get("messageId") != marker.message_id
         or record.get("topicId") != marker.topic_id
+        or record.get("placement")
+        != {"kind": "thread", "rootMessageId": marker.root_message_id}
         or record.get("text") != marker.text
         or record.get("actor") != actor
     ):
@@ -356,12 +362,21 @@ def observe_http_boundary(local: LoopbackEndpoint, remote: HttpsEndpoint) -> Jso
     return statuses
 
 
-def run_peer(plan: BoardPlan) -> None:
+def run_peer(
+    plan: BoardPlan,
+    request: t.Callable[
+        [HttpsEndpoint, JsonObject, ProbeHeaders | None], HttpReply
+    ] = http_post,
+) -> None:
     """One write only: save intent first, then preserve unknown outcomes without replay."""
     require_deadline(plan.deadline)
     require_private_directory(plan.evidence)
+
+    def request_tool(name: str, arguments: JsonObject) -> JsonObject:
+        return tool_result(request(plan.https, tool_payload(name, arguments), None))
+
     require_service(
-        tool(plan.https, "endpoints_list", {}),
+        request_tool("endpoints_list", {}),
         plan.destination_service_id,
         plan.destination_service_epoch,
     )
@@ -371,7 +386,7 @@ def run_peer(plan: BoardPlan) -> None:
         "method": "tools/list",
         "params": {},
     }
-    tools = rpc_result(http_post(plan.https, payload))
+    tools = rpc_result(request(plan.https, payload, None))
     available = tools.get("tools")
     tool_names: set[str] = set()
     if isinstance(available, list):
@@ -388,10 +403,29 @@ def run_peer(plan: BoardPlan) -> None:
         raise ValueError("required real MCP tools missing")
     origin_statuses: JsonObject = {}
     for origin in [plan.https.origin, "https://invalid.example"]:
-        negative = http_post(plan.https, payload, ProbeHeaders(origin=origin))
+        negative = request(plan.https, payload, ProbeHeaders(origin=origin))
         if negative.status != 403:
             raise ValueError("remote Origin was not rejected")
         origin_statuses[origin] = negative.status
+    thread_root = request_tool(
+        "board_message_show", {"messageId": plan.marker.root_message_id}
+    )
+    if (
+        thread_root.get("messageId") != plan.marker.root_message_id
+        or thread_root.get("topicId") != plan.marker.topic_id
+        or thread_root.get("placement")
+        != {"kind": "topic", "topicId": plan.marker.topic_id}
+        or thread_root.get("actor") != plan.actor
+    ):
+        raise ValueError("caller-seeded thread root/topic/actor mismatch")
+    post_arguments: JsonObject = {
+        "messageId": plan.marker.message_id,
+        "placement": {"kind": "thread", "rootMessageId": plan.marker.root_message_id},
+        "actor": plan.actor,
+        "text": plan.marker.text,
+        "references": [],
+    }
+    post_payload = tool_payload("board_message_post", post_arguments)
     save_record(
         plan.evidence / "peer-intent.json",
         {
@@ -399,25 +433,36 @@ def run_peer(plan: BoardPlan) -> None:
             "marker": plan.marker.model_dump(),
             "tools": tools,
             "originStatuses": origin_statuses,
+            "threadRoot": thread_root,
+            "postArguments": post_arguments,
         },
     )
-    posted = tool(
-        plan.https,
-        "board_message_post",
+    try:
+        response = request(plan.https, post_payload, None)
+    except Exception as failure:
+        save_record(
+            plan.evidence / "peer-post-transport-error.json",
+            {
+                "arguments": post_arguments,
+                "error": str(failure),
+                "errorType": type(failure).__name__,
+                "outcome": "unknown; do not replay",
+            },
+        )
+        raise
+    save_record(
+        plan.evidence / "peer-post-response.json",
         {
-            "messageId": plan.marker.message_id,
-            "placement": {"kind": "topic", "topicId": plan.marker.topic_id},
-            "actor": plan.actor,
-            "text": plan.marker.text,
-            "references": [],
+            "arguments": post_arguments,
+            "httpStatus": response.status,
+            "bodyBase64": base64.b64encode(response.body).decode("ascii"),
         },
     )
+    posted = tool_result(response)
     require_marker(
         read_observed_json(json.dumps(posted.get("message"))), plan.marker, plan.actor
     )
-    observed = tool(
-        plan.https, "board_message_show", {"messageId": plan.marker.message_id}
-    )
+    observed = request_tool("board_message_show", {"messageId": plan.marker.message_id})
     require_marker(observed, plan.marker, plan.actor)
     save_record(
         plan.evidence / "peer-result.json", {"posted": posted, "readback": observed}
@@ -431,11 +476,13 @@ def read_stored_marker(database: Path, marker: BoardMarker, actor: JsonObject) -
         row = t.cast(
             object,
             connection.execute(
-                "SELECT m.message_id,m.topic_id,m.text,i.kind,i.service_id,i.endpoint_id,i.session_id FROM board_messages m JOIN board_identities i ON i.identity_key=m.actor_key WHERE m.message_id=?",
+                "SELECT m.message_id,m.topic_id,m.text,i.kind,i.service_id,i.endpoint_id,i.session_id,m.root_id FROM board_messages m JOIN board_identities i ON i.identity_key=m.actor_key WHERE m.message_id=?",
                 (marker.message_id,),
             ).fetchone(),
         )
-    stored = TypeAdapter(tuple[str, str, str, str, str, str, str]).validate_python(row)
+    stored = TypeAdapter(tuple[str, str, str, str, str, str, str, str]).validate_python(
+        row
+    )
     expected: JsonObject = {
         "kind": stored[3],
         "session": {
@@ -447,6 +494,7 @@ def read_stored_marker(database: Path, marker: BoardMarker, actor: JsonObject) -
         {
             "messageId": stored[0],
             "topicId": stored[1],
+            "placement": {"kind": "thread", "rootMessageId": stored[7]},
             "text": stored[2],
             "actor": expected,
         },

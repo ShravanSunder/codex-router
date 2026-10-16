@@ -75,9 +75,18 @@ class NativeStartingInventory(DriverModel):
         return self
 
 
+type BoardUuid = t.Annotated[
+    str,
+    Field(
+        pattern=r"^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    ),
+]
+
+
 class BoardMarker(DriverModel):
-    topic_id: str = Field(min_length=1)
-    message_id: str = Field(min_length=1)
+    topic_id: BoardUuid
+    message_id: BoardUuid
+    root_message_id: BoardUuid
     text: str = Field(min_length=1)
 
 

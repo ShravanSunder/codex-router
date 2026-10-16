@@ -56,6 +56,14 @@ from scripts.verification.typed_observations import (
 )
 
 
+def host_readiness_until(
+    allocation_deadline: dt.datetime, monotonic_now: float, utc_now: dt.datetime
+) -> float:
+    # 2*5s preflight +20s advertisement +5s status +75s HTTPS +40s native margin.
+    # This initial observation cap never extends the caller's allocation.
+    return monotonic_now + min(150.0, (allocation_deadline - utc_now).total_seconds())
+
+
 def validate_fresh_root(root: Path) -> None:
     if (
         root.parent != Path("/private/tmp")
@@ -453,10 +461,8 @@ def run_host(plan: HostPlan) -> None:
                     raise ValueError("actual Host image differs from declared binary")
                 ready = False
                 invocation: tuple[str, str] | None = None
-                until = min(
-                    time.monotonic() + 120,
-                    time.monotonic()
-                    + (plan.deadline - dt.datetime.now(dt.UTC)).total_seconds(),
+                until = host_readiness_until(
+                    plan.deadline, time.monotonic(), dt.datetime.now(dt.UTC)
                 )
                 while time.monotonic() < until:
                     require_deadline(plan.deadline)
