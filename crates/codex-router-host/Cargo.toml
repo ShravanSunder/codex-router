@@ -34,6 +34,7 @@ codex-router-core.workspace = true
 codex-router-secret-store = { path = "../codex-router-secret-store", version = "0.1.4" }
 httparse.workspace = true
 opentelemetry.workspace = true
+reqwest.workspace = true
 rustix.workspace = true
 serde.workspace = true
 serde_json.workspace = true

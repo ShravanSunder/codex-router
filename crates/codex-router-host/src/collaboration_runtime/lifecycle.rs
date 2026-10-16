@@ -2,21 +2,27 @@ use super::*;
 
 impl CollaborationRuntime {
     /// The lifecycle event loop must monitor this future; listener death is not healthy readiness.
-    pub async fn listener_failure(&mut self) -> io::Error {
+    pub async fn listener_failure(&mut self) -> CollaborationFailure {
         loop {
             let failure = tokio::select! {
-                task = self.tasks.join_next() => match task {
+                task = self.tasks.join_next() => CollaborationFailure::LocalListener(match task {
                     Some(Ok(Err(error))) => error,
                     Some(Err(_)) => io::Error::other("collaboration listener task failed"),
                     _ => io::Error::other("collaboration listener stopped unexpectedly"),
-                },
-                task = self.provider_retirement_tasks.join_next(), if !self.provider_retirement_tasks.is_empty() => match task {
+                }),
+                task = self.provider_retirement_tasks.join_next(), if !self.provider_retirement_tasks.is_empty() => CollaborationFailure::LocalListener(match task {
                     Some(Ok(Ok(()))) => continue,
                     Some(Ok(Err(error))) => error,
                     Some(Err(_)) => io::Error::other("provider retirement publication task failed"),
                     None => continue,
-                },
-                failure = self.collaboration_api.failure() => failure,
+                }),
+                failure = self.collaboration_api.failure() => CollaborationFailure::LocalListener(failure),
+                failure = async {
+                    match &mut self.tailscale_exposure {
+                        Some(exposure) => exposure.failure().await,
+                        None => std::future::pending().await,
+                    }
+                } => CollaborationFailure::TailnetExposure(failure),
             };
             self.manifest.take();
             self.shutdown.cancel();
@@ -30,10 +36,15 @@ impl CollaborationRuntime {
     pub async fn shutdown(mut self) -> io::Result<()> {
         self.manifest.take();
         self.shutdown.cancel();
+        let mut failure = None;
+        if let Some(mut exposure) = self.tailscale_exposure.take()
+            && let Err(error) = exposure.shutdown().await
+        {
+            failure.get_or_insert(error);
+        }
         if let Some(service) = self.subscription_delivery.take() {
             service.shutdown().await;
         }
-        let mut failure = None;
         if let Err(error) = self.collaboration_api.stopped().await {
             failure.get_or_insert(error);
         }

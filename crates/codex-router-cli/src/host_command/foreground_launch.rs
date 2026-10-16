@@ -31,6 +31,8 @@ mod router_child_command;
 
 use crate::CliContext;
 use router_child_command::{RouterChildCommandInputs, router_child_command};
+#[cfg(test)]
+mod tailnet_replacement_tests;
 
 struct HostPreExecTelemetry(crate::telemetry::TelemetryShutdownHandle);
 
@@ -47,6 +49,7 @@ pub(super) struct ForegroundHostInputs {
     pub owner_home: Option<PathBuf>,
     pub port: u16,
     pub mcp_bind: SocketAddr,
+    pub remote_access: Option<codex_router_host::RemoteAccess>,
     pub provider_operation_retention_days: std::num::NonZeroU32,
     pub coordination_paths: HostCoordinationPaths,
     pub external_provider_launches: Vec<codex_router_host::ExternalProviderLaunchBinding>,
@@ -64,6 +67,7 @@ pub(super) async fn run_foreground_host(
         owner_home,
         port,
         mcp_bind,
+        remote_access,
         provider_operation_retention_days,
         coordination_paths,
         external_provider_launches,
@@ -155,6 +159,7 @@ pub(super) async fn run_foreground_host(
         router_root: router_root.clone(),
         port,
         mcp_bind,
+        remote_access,
         provider_operation_retention_days,
         owner_human_id: owner_human_id.as_ref(),
         external_provider_launches: &external_provider_launches,
@@ -174,6 +179,9 @@ pub(super) async fn run_foreground_host(
     })
     .with_provider_operation_retention_days(provider_operation_retention_days)
     .with_collaboration_directory(collaboration_directory, codex_home);
+    if let Some(remote_access) = remote_access {
+        config = config.with_remote_access(remote_access);
+    }
     if let Some(owner_human_id) = owner_human_id {
         config = config.with_owner_human_id(owner_human_id);
     }
@@ -265,6 +273,7 @@ struct HostReplacementCommandInputs<'a> {
     router_root: PathBuf,
     port: u16,
     mcp_bind: SocketAddr,
+    remote_access: Option<codex_router_host::RemoteAccess>,
     provider_operation_retention_days: std::num::NonZeroU32,
     owner_human_id: Option<&'a message_board::HumanId>,
     external_provider_launches: &'a [codex_router_host::ExternalProviderLaunchBinding],
@@ -277,6 +286,7 @@ fn host_replacement_command(inputs: HostReplacementCommandInputs<'_>) -> ChildCo
         router_root,
         port,
         mcp_bind,
+        remote_access,
         provider_operation_retention_days,
         owner_human_id,
         external_provider_launches,
@@ -293,6 +303,14 @@ fn host_replacement_command(inputs: HostReplacementCommandInputs<'_>) -> ChildCo
         OsString::from("--provider-operation-retention-days"),
         OsString::from(provider_operation_retention_days.to_string()),
     ];
+    if let Some(codex_router_host::RemoteAccess::Tailscale { https_port }) = remote_access {
+        arguments.extend([
+            OsString::from("--remote-access"),
+            OsString::from("tailscale"),
+            OsString::from("--tailscale-https-port"),
+            OsString::from(https_port.to_string()),
+        ]);
+    }
     if let Some(owner_human_id) = owner_human_id {
         arguments.push(OsString::from("--owner-human-id"));
         arguments.push(OsString::from(owner_human_id.as_str()));
@@ -438,6 +456,7 @@ mod tests {
                 router_root: router_root.clone(),
                 port: 19087,
                 mcp_bind,
+                remote_access: None,
                 provider_operation_retention_days: std::num::NonZeroU32::new(60).expect("positive"),
                 owner_human_id: None,
                 external_provider_launches: &[],
@@ -472,6 +491,7 @@ mod tests {
             router_root: router_root.clone(),
             port: 19087,
             mcp_bind,
+            remote_access: None,
             provider_operation_retention_days: std::num::NonZeroU32::new(60).expect("positive"),
             owner_human_id: None,
             external_provider_launches: &[provider],
@@ -508,6 +528,7 @@ mod tests {
             router_root: router_root.clone(),
             port: 19087,
             mcp_bind: SocketAddr::from(([127, 0, 0, 1], 19088)),
+            remote_access: None,
             provider_operation_retention_days: std::num::NonZeroU32::new(60).expect("positive"),
             owner_human_id: Some(&owner),
             external_provider_launches: &[],
@@ -538,6 +559,7 @@ mod tests {
             router_root: PathBuf::from("/tmp/private-router"),
             port: 18787,
             mcp_bind: SocketAddr::from(([127, 0, 0, 1], 18788)),
+            remote_access: None,
             provider_operation_retention_days: std::num::NonZeroU32::new(60).expect("positive"),
             owner_human_id: None,
             external_provider_launches: &[],

@@ -19,17 +19,22 @@ use tokio::{
 pub(super) struct BoundCollaborationApi {
     listener: TcpListener,
     local_address: SocketAddr,
+    proxy_authority: Option<collaboration_mcp::ProxyAuthority>,
     service_socket: Option<(UnixListener, SocketCleanup)>,
 }
 
 impl BoundCollaborationApi {
-    pub(super) async fn bind(address: SocketAddr) -> io::Result<Self> {
+    pub(super) async fn bind(
+        address: SocketAddr,
+        proxy_authority: Option<collaboration_mcp::ProxyAuthority>,
+    ) -> io::Result<Self> {
         let address = LoopbackBindAddress::new(address).map_err(io::Error::other)?;
         let listener = TcpListener::bind(address.socket_addr()).await?;
         let local_address = listener.local_addr()?;
         Ok(Self {
             listener,
             local_address,
+            proxy_authority,
             service_socket: None,
         })
     }
@@ -44,12 +49,19 @@ impl BoundCollaborationApi {
         format!("http://{}{COLLABORATION_API_PATH}", self.local_address)
     }
 
+    pub(super) const fn local_address(&self) -> SocketAddr {
+        self.local_address
+    }
+
     /// Serves the API on every bound listener until the configuration's shutdown token is
     /// cancelled.
     pub(super) fn serve(self, config: &CollaborationApiConfig) -> ServedCollaborationApi {
         let loopback = collaboration_mcp::collaboration_api_router(
             config,
-            CollaborationApiListener::LoopbackTcp(self.local_address),
+            CollaborationApiListener::LoopbackTcp {
+                address: self.local_address,
+                proxy_authority: self.proxy_authority,
+            },
         );
         let mut tasks = vec![tokio::spawn(collaboration_mcp::serve_collaboration_api(
             self.listener,

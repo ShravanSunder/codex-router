@@ -32,6 +32,18 @@ pub(super) async fn settle_for_shutdown(context: ShutdownContext<'_>) -> Result<
     shutdown_retained_children(context.app_server, context.router).await
 }
 
+pub(super) async fn settle_failed_tailnet_exposure(
+    error: std::io::Error,
+    context: ShutdownContext<'_>,
+) -> Result<HostExit, HostError> {
+    settle_for_shutdown(context).await?;
+    Err(HostError::Collaboration(error))
+}
+
+#[cfg(test)]
+#[path = "tailnet_failure_tests.rs"]
+mod tailnet_failure_tests;
+
 pub(super) enum RecoveryCompletion {
     Ready(AppServerChild, AppServerReadiness),
     Failed {

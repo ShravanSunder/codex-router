@@ -12,6 +12,7 @@ pub(super) struct CollaborationLifecycle {
     peer_registry_directory: Option<PathBuf>,
     backend_socket: PathBuf,
     mcp_bind: std::net::SocketAddr,
+    remote_access: Option<crate::RemoteAccess>,
     router_proxy_endpoint: std::net::SocketAddr,
     external_provider_startups: Vec<crate::ExternalProviderStartup>,
     provider_operation_retention_days: std::num::NonZeroU32,
@@ -54,6 +55,7 @@ impl CollaborationLifecycle {
                 .map(PathBuf::from),
             backend_socket: config.app_server_socket().to_owned(),
             mcp_bind: config.mcp_bind(),
+            remote_access: config.remote_access(),
             router_proxy_endpoint: config.router_endpoint(),
             external_provider_startups,
             provider_operation_retention_days: config.provider_operation_retention_days(),
@@ -63,7 +65,13 @@ impl CollaborationLifecycle {
             published_child: None,
             schema_digest: None,
         };
-        owner.synchronize(Some(child)).await?;
+        if let Err(error) = owner.synchronize(Some(child)).await {
+            let cleanup = owner.shutdown().await;
+            return Err(match cleanup {
+                Ok(()) => error,
+                Err(cleanup) => io::Error::other(format!("{error}; startup cleanup: {cleanup}")),
+            });
+        }
         Ok(Some(owner))
     }
     pub(super) async fn synchronize(&mut self, child: Option<&AppServerChild>) -> io::Result<()> {
@@ -116,14 +124,24 @@ impl CollaborationLifecycle {
                         owner_human_id: self.owner_human_id.clone(),
                     },
                     router_proxy_endpoint: self.router_proxy_endpoint,
+                    remote_access: self.remote_access,
                 },
                 self.external_provider_startups.clone(),
                 self.router_executable_relation.clone(),
             )
             .await?;
-            runtime
+            if let Err(error) = runtime
                 .configure_provider_operation_retention(self.provider_operation_retention_days)
-                .await?;
+                .await
+            {
+                let cleanup = runtime.shutdown().await;
+                return Err(match cleanup {
+                    Ok(()) => error,
+                    Err(cleanup) => {
+                        io::Error::other(format!("{error}; startup cleanup: {cleanup}"))
+                    }
+                });
+            }
             self.runtime = Some(runtime);
             self.schema_digest = digest;
         }
@@ -143,7 +161,7 @@ impl CollaborationLifecycle {
         self.published_child = Some(child.process.process_id());
         Ok(())
     }
-    pub(super) async fn listener_failure(&mut self) -> io::Error {
+    pub(super) async fn listener_failure(&mut self) -> crate::CollaborationFailure {
         match &mut self.runtime {
             Some(runtime) => runtime.listener_failure().await,
             None => std::future::pending().await,
@@ -157,7 +175,9 @@ impl CollaborationLifecycle {
         Ok(())
     }
 }
-pub(super) async fn wait_failure(owner: &mut Option<CollaborationLifecycle>) -> io::Error {
+pub(super) async fn wait_failure(
+    owner: &mut Option<CollaborationLifecycle>,
+) -> crate::CollaborationFailure {
     match owner {
         Some(owner) => owner.listener_failure().await,
         None => std::future::pending().await,

@@ -122,10 +122,24 @@ impl ServedApi {
         address: &str,
         grace: Option<Duration>,
     ) -> Self {
+        Self::tcp_with_proxy_authority(config, address, grace, None).await
+    }
+
+    pub(crate) async fn tcp_with_proxy_authority(
+        config: &CollaborationApiConfig,
+        address: &str,
+        grace: Option<Duration>,
+        proxy_authority: Option<crate::ProxyAuthority>,
+    ) -> Self {
         let listener = TcpListener::bind(address).await.expect("bind loopback TCP");
         let address = listener.local_addr().expect("loopback address");
-        let mut api =
-            collaboration_api_router(config, CollaborationApiListener::LoopbackTcp(address));
+        let mut api = collaboration_api_router(
+            config,
+            CollaborationApiListener::LoopbackTcp {
+                address,
+                proxy_authority,
+            },
+        );
         if let Some(grace) = grace {
             api = api.with_call_grace(grace);
         }
