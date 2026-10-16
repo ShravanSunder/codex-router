@@ -20,7 +20,11 @@ def lookup_process_identity(pid: int) -> IdentityRecord | None:
         timeout=5,
         check=False,
     )
-    if result.returncode == 1 and not result.stdout.strip():
+    if (
+        result.returncode == 1
+        and not result.stdout.strip()
+        and not result.stderr.strip()
+    ):
         return None
     result.check_returncode()
     fields = result.stdout.strip().split(None, 8)

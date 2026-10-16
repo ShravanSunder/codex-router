@@ -74,9 +74,9 @@ jobs:
         run: |
           verification_python="$RUNNER_TEMP/router-verification/bin/python"
           "$verification_python" -W error::ResourceWarning -m unittest scripts.tests.test_verification_observations scripts.tests.test_verification_lifecycle -v
-          "$verification_python" -m ruff check scripts/verification scripts/tests/test_verification_observations.py scripts/tests/test_verification_lifecycle.py
-          "$verification_python" -m ruff format --check scripts/verification scripts/tests/test_verification_observations.py scripts/tests/test_verification_lifecycle.py
-          "$verification_python" -m basedpyright --pythonversion 3.13 --pythonplatform All --pythonpath "$verification_python" scripts/verification scripts/tests/test_verification_observations.py scripts/tests/test_verification_lifecycle.py
+          "$verification_python" -m ruff check scripts/verification scripts/tests/test_verification_observations.py scripts/tests/test_verification_lifecycle.py scripts/tests/verification_controller_fixture.py
+          "$verification_python" -m ruff format --check scripts/verification scripts/tests/test_verification_observations.py scripts/tests/test_verification_lifecycle.py scripts/tests/verification_controller_fixture.py
+          "$verification_python" -m basedpyright --pythonversion 3.13 --pythonplatform All --pythonpath "$verification_python" scripts/verification scripts/tests/test_verification_observations.py scripts/tests/test_verification_lifecycle.py scripts/tests/verification_controller_fixture.py
       - name: Enforce dependency policy
         id: dependency_policy
         background: true

@@ -2,24 +2,24 @@
 
 import datetime as dt
 import hashlib
-import json
 import os
-import selectors
-import socket
 import subprocess
 import sys
 import tempfile
-import time
-import typing as t
 import unittest
 from collections import abc
 from contextlib import contextmanager
 from pathlib import Path
 
+from scripts.tests.verification_controller_fixture import (
+    LifecycleFixture,
+    lookup_response,
+)
 from scripts.verification import (
     native_correlation,
     owned_runtime,
     process_inventory,
+    process_ownership,
     runtime_qualification,
 )
 from scripts.verification.native_correlation import read_carrier_correlation
@@ -28,243 +28,12 @@ from scripts.verification.process_ownership import (
     same_identity,
 )
 from scripts.verification.typed_observations import (
-    BinaryQualification,
     IdentityRecord,
-    JsonObject,
     NativeExpectation,
     ProcessIdentity,
-    QualifiedBinary,
     observed_object,
     read_observed_json,
 )
-
-
-class LifecycleFixture:
-    """Exercise the controller with harmless children and scoped external-I/O fixtures."""
-
-    UTC: t.ClassVar[dt.timezone] = dt.UTC
-    TimeoutExpired: t.ClassVar[type[subprocess.TimeoutExpired]] = (
-        subprocess.TimeoutExpired
-    )
-    SubprocessError: t.ClassVar[type[subprocess.SubprocessError]] = (
-        subprocess.SubprocessError
-    )
-
-    def __init__(self, root: Path, scenario: str, *, mismatch: bool = False) -> None:
-        self.scenario: str = scenario
-        self.now_value: dt.datetime = dt.datetime.now(dt.UTC)
-        self.ready: bool = False
-        self.exited: bool = False
-        self.phases: list[str] = []
-        self.launched: list[str] = []
-        self.children: list[subprocess.Popen[bytes]] = []
-        self.identities: dict[int, IdentityRecord] = {}
-        self.datetime: LifecycleFixture = self
-        self.original_save: abc.Callable[[Path, object], None] = (
-            owned_runtime.save_record
-        )
-        root_dir = root / "router-root"
-        root_dir.mkdir(mode=0o700)
-        binary_dir = root / "qualified"
-        binary_dir.mkdir()
-        binaries: list[JsonObject] = []
-        for name in ["codex-router", "agent-collaboration", "agent-sessions"]:
-            binary = binary_dir / name
-            _ = binary.write_bytes(b"apparatus fixture; never executed")
-            binaries.append(
-                {
-                    "target": name,
-                    "path": str(binary),
-                    "sha256": hashlib.sha256(binary.read_bytes()).hexdigest(),
-                    "testGuardFeatures": [],
-                }
-            )
-        qualification = root / "qualification.json"
-        _ = qualification.write_text(json.dumps({"binaries": binaries}))
-        profile = root / "debug-profile"
-        _ = profile.write_text('url="http://127.0.0.1:43127/v1"\n')
-        self.global_bin: Path = root / "global-bin"
-        self.global_bin.mkdir()
-        claude = self.global_bin / "claude"
-        _ = claude.write_bytes(b"owned executable fixture; never executed")
-        claude.chmod(0o700)
-        planned = root / "different-claude" if mismatch else claude
-        if mismatch:
-            _ = planned.write_bytes(b"different owned fixture")
-            planned.chmod(0o700)
-        self.plan: owned_runtime.RuntimePlan = owned_runtime.RuntimePlan(
-            repository=root,
-            source_head="0" * 40,
-            qualification=qualification,
-            router_root=root_dir,
-            evidence=root / "evidence",
-            port=43128,
-            original_port=43127,
-            expected_version="fixture",
-            profile=profile,
-            claude_node=Path(sys.executable),
-            claude_adapter=root / "unused-adapter",
-            claude_executable=planned,
-            cursor_executable=Path(sys.executable),
-            deadline=self.now_value + dt.timedelta(hours=1),
-        )
-
-    def now(self, _zone: dt.tzinfo) -> dt.datetime:
-        if self.ready and self.scenario == "deadline":
-            return self.plan.deadline + dt.timedelta(seconds=1)
-        if self.ready and self.scenario == "early-exit" and not self.exited:
-            child = self.children[1]
-            assert child.stdin is not None
-            child.stdin.close()
-            _ = child.wait(timeout=5)
-            self.exited = True
-        return self.now_value
-
-    @staticmethod
-    def monotonic() -> float:
-        return time.monotonic()
-
-    @staticmethod
-    def sleep(_seconds: float) -> None:
-        pass
-
-    @contextmanager
-    def socket(self) -> abc.Generator["LifecycleFixture", None, None]:
-        yield self
-
-    def bind(self, _address: tuple[str, int]) -> None:
-        pass
-
-    def check_output(self, _command: list[str], **_options: object) -> str:
-        return self.plan.source_head
-
-    def run(
-        self, command: list[str], **_options: object
-    ) -> subprocess.CompletedProcess[str]:
-        if command[0] == "/usr/bin/codesign":
-            name = Path(command[-1]).name
-            return subprocess.CompletedProcess(
-                command,
-                0,
-                stdout="",
-                stderr=f"Identifier=dev.shravansunder.{name}.debug\nTeamIdentifier=974QD84WVC\n",
-            )
-        if command[0] != "/bin/ps":
-            raise AssertionError(f"unexpected external command: {command[0]}")
-        return subprocess.run(
-            command, capture_output=True, text=True, check=True, timeout=5
-        )
-
-    def Popen(self, command: list[str], **_options: object) -> subprocess.Popen[bytes]:
-        kind = command[1]
-        self.launched.append(kind)
-        if kind == "host":
-            phase = "A" if not self.phases else "B"
-            self.phases.append(phase)
-            publication = self.plan.router_root / "agent-communication/service.json"
-            publication.parent.mkdir(exist_ok=True)
-            _ = publication.write_text(json.dumps({"serviceVersion": "fixture"}))
-        child = subprocess.Popen(
-            [
-                sys.executable,
-                "-u",
-                "-c",
-                "import signal,sys; signal.signal(signal.SIGTERM, lambda *_: sys.exit(0)); print('READY',flush=True); sys.stdin.buffer.read()",
-            ],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            start_new_session=True,
-        )
-        self.children.append(child)
-        identity = lookup_process_identity(child.pid)
-        assert identity is not None
-        self.identities[child.pid] = identity
-        assert child.stdout is not None
-        with selectors.DefaultSelector() as selector:
-            _ = selector.register(child.stdout, selectors.EVENT_READ)
-            if not selector.select(5):
-                raise AssertionError("harmless fixture child did not signal readiness")
-            if child.stdout.readline() != b"READY\n":
-                raise AssertionError("wrong harmless fixture readiness")
-        return child
-
-    def save(self, path: Path, value: object) -> None:
-        self.original_save(path, value)
-        if path.name == "host-A-ready.json":
-            self.ready = True
-            if self.scenario in {"stop", "reopen", "reopen-expired"}:
-                _ = (
-                    self.plan.evidence
-                    / ("stop.json" if self.scenario == "stop" else "reopen.json")
-                ).write_text("{}")
-        if path.name == "host-B-ready.json":
-            _ = (self.plan.evidence / "stop.json").write_text("{}")
-        if path.name in {"host-A-settlement.json", "host-B-settlement.json"}:
-            (self.plan.router_root / "agent-communication/service.json").unlink(
-                missing_ok=True
-            )
-            if self.scenario == "reopen-expired":
-                self.scenario = "deadline"
-
-    @staticmethod
-    def health(_plan: owned_runtime.RuntimePlan) -> JsonObject:
-        return {"binary_version": "fixture"}
-
-    @staticmethod
-    def qualified_binaries(path: Path) -> dict[str, QualifiedBinary]:
-        # External signing is outside the lifecycle/PATH claims in these fixtures.
-        records = BinaryQualification.model_validate_json(path.read_text())
-        return {record.target: record for record in records.binaries}
-
-    def drive(self) -> Exception | None:
-        originals: dict[str, object] = {
-            "subprocess": subprocess,
-            "dt": dt,
-            "time": time,
-            "socket": socket,
-            "save_record": owned_runtime.save_record,
-            "health_check": owned_runtime.health_check,
-            "qualify_normal_binaries": runtime_qualification.qualify_normal_binaries,
-        }
-        previous_path = os.environ.get("PATH")
-        os.environ["PATH"] = str(self.global_bin)
-        for name, replacement in {
-            "subprocess": self,
-            "dt": self,
-            "time": self,
-            "socket": self,
-            "save_record": self.save,
-            "health_check": self.health,
-            "qualify_normal_binaries": self.qualified_binaries,
-        }.items():
-            setattr(owned_runtime, name, replacement)
-        failure: Exception | None = None
-        try:
-            owned_runtime.run_lifecycle(self.plan)
-        except (RuntimeError, OSError, ValueError, subprocess.SubprocessError) as error:
-            failure = error
-        finally:
-            for name, original in originals.items():
-                setattr(owned_runtime, name, original)
-            if previous_path is None:
-                _ = os.environ.pop("PATH", None)
-            else:
-                os.environ["PATH"] = previous_path
-            for child in self.children:
-                if child.poll() is None:
-                    if not same_identity(
-                        lookup_process_identity(child.pid), self.identities[child.pid]
-                    ):
-                        raise AssertionError(
-                            "fixture child identity changed; no signal"
-                        )
-                    child.terminate()
-                _ = child.wait(timeout=5)
-                for pipe in [child.stdin, child.stdout, child.stderr]:
-                    if pipe is not None:
-                        pipe.close()
-        return failure
 
 
 class GlobalClaudeQualificationTests(unittest.TestCase):
@@ -400,7 +169,178 @@ def harmless_child() -> abc.Generator[
         _ = child.wait(timeout=5)
 
 
+class OwnershipSnapshotTests(unittest.TestCase):
+    def test_empty_stdout_with_denial_stderr_is_not_absence(self) -> None:
+        result = subprocess.CompletedProcess(
+            ["/bin/ps"], 1, stdout="", stderr="Operation not permitted"
+        )
+        with lookup_response(result), self.assertRaises(subprocess.CalledProcessError):
+            _ = process_ownership.lookup_process_identity(12)
+
+    def test_clean_absence_and_malformed_rows_keep_distinct_results(self) -> None:
+        with lookup_response(
+            subprocess.CompletedProcess(["/bin/ps"], 1, stdout="", stderr="")
+        ):
+            self.assertIsNone(process_ownership.lookup_process_identity(12))
+        with (
+            lookup_response(
+                subprocess.CompletedProcess(
+                    ["/bin/ps"], 0, stdout="malformed", stderr=""
+                )
+            ),
+            self.assertRaises(ValueError),
+        ):
+            _ = process_ownership.lookup_process_identity(12)
+
+    @contextmanager
+    def snapshot(
+        self, fresh: abc.Callable[[int], IdentityRecord | None]
+    ) -> abc.Generator[dict[int, ProcessIdentity], None, None]:
+        root = ProcessIdentity(
+            pid=10,
+            parent=1,
+            uid=os.getuid(),
+            group=10,
+            birth="root",
+            executable="fixture-root",
+        )
+        child = ProcessIdentity(
+            pid=11,
+            parent=10,
+            uid=os.getuid(),
+            group=10,
+            birth="child",
+            executable="fixture-child",
+        )
+        foreign = ProcessIdentity(
+            pid=12,
+            parent=10,
+            uid=0 if os.getuid() else 1,
+            group=10,
+            birth="foreign",
+            executable="<defunct>",
+        )
+        observed = {10: root, 11: child, 12: foreign}
+        known = {10: root}
+        original_table = owned_runtime.process_table
+        original_lookup = process_ownership.lookup_process_identity
+
+        def table() -> dict[int, ProcessIdentity]:
+            return observed
+
+        try:
+            owned_runtime.process_table = table
+            process_ownership.lookup_process_identity = fresh
+            yield known
+        finally:
+            owned_runtime.process_table = original_table
+            process_ownership.lookup_process_identity = original_lookup
+
+    def test_proven_absent_foreign_snapshot_is_not_acquired(self) -> None:
+        checked: list[int] = []
+
+        def absent(pid: int) -> IdentityRecord | None:
+            checked.append(pid)
+            return None
+
+        with self.snapshot(absent) as known:
+            owned_runtime.observe_owned(10, known)
+            self.assertEqual(set(known), {10, 11})
+            self.assertEqual(checked, [12])
+
+    def test_any_still_present_mismatch_keeps_uid_rejection(self) -> None:
+        for current_uid in [0 if os.getuid() else 1, os.getuid()]:
+            with self.subTest(current_uid=current_uid):
+
+                def present(
+                    pid: int, observed_uid: int = current_uid
+                ) -> IdentityRecord | None:
+                    return {
+                        "pid": pid,
+                        "uid": observed_uid,
+                        "group": 10,
+                        "birth": "foreign",
+                        "executable": "<defunct>",
+                    }
+
+                with (
+                    self.snapshot(present) as known,
+                    self.assertRaisesRegex(RuntimeError, "owned process UID changed"),
+                ):
+                    owned_runtime.observe_owned(10, known)
+
+    def test_denied_or_malformed_fresh_lookup_fails_closed(self) -> None:
+        for error_type in [PermissionError, ValueError]:
+            with self.subTest(error_type=error_type):
+
+                def unavailable(
+                    _pid: int, failure: type[Exception] = error_type
+                ) -> IdentityRecord | None:
+                    raise failure("controlled fresh lookup failure")
+
+                with (
+                    self.snapshot(unavailable) as known,
+                    self.assertRaises((RuntimeError, PermissionError, ValueError)),
+                ):
+                    owned_runtime.observe_owned(10, known)
+
+
 class ControlledLifecycleTests(unittest.TestCase):
+    def test_profile_edit_before_first_write_survives_and_reports_conflict(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            fixture = LifecycleFixture(Path(folder), "profile-beforewrite")
+            error = fixture.drive()
+            self.assertEqual(fixture.plan.profile.read_bytes(), fixture.owner_profile)
+            self.assertIsInstance(error, RuntimeError)
+            self.assertIn("profile changed before temporary projection", str(error))
+            self.assertEqual(fixture.phases, [])
+            settlement = read_observed_json(
+                (fixture.plan.evidence / "lifecycle-settlement.json").read_text()
+            )
+            self.assertIsNotNone(settlement["failure"])
+            self.assertFalse(settlement["profileRestoredExactly"])
+
+    def test_expiry_inside_consumer_check_prevents_host_launch(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            fixture = LifecycleFixture(Path(folder), "inspection-expired")
+            error = fixture.drive()
+            self.assertEqual(fixture.phases, [])
+            self.assertIsInstance(error, TimeoutError)
+            self.assertIn("allocation deadline expired at launch", str(error))
+            settlement = read_observed_json(
+                (fixture.plan.evidence / "lifecycle-settlement.json").read_text()
+            )
+            self.assertIsNotNone(settlement["failure"])
+            self.assertTrue(settlement["profileRestoredExactly"])
+
+    def test_later_profile_edit_remains_preserved_by_existing_guard(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            fixture = LifecycleFixture(Path(folder), "profile-afterwrite")
+            _ = fixture.drive()
+            self.assertEqual(fixture.plan.profile.read_bytes(), fixture.owner_profile)
+            settlement = read_observed_json(
+                (fixture.plan.evidence / "lifecycle-settlement.json").read_text()
+            )
+            self.assertEqual(
+                observed_object(settlement["failure"])["class"],
+                "ConcurrentProfileChange",
+            )
+            self.assertFalse(settlement["profileRestoredExactly"])
+
+    def test_normal_explicit_stop_restores_original_profile(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            fixture = LifecycleFixture(Path(folder), "stop")
+            original = fixture.plan.profile.read_bytes()
+            self.assertIsNone(fixture.drive())
+            self.assertEqual(fixture.plan.profile.read_bytes(), original)
+            settlement = read_observed_json(
+                (fixture.plan.evidence / "lifecycle-settlement.json").read_text()
+            )
+            self.assertIsNone(settlement["failure"])
+            self.assertTrue(settlement["profileRestoredExactly"])
+
     def test_reopen_cannot_launch_host_b_after_cleanup_expires_allocation(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             fixture = LifecycleFixture(Path(folder), "reopen-expired")

@@ -54,9 +54,9 @@ After B readback, write `stop.json` in runtime `evidence`. Inspect `lifecycle-se
 
 ```sh
 uv run --offline --no-project --with pydantic==2.14.1 --python 3.13 python -m unittest scripts.tests.test_verification_observations scripts.tests.test_verification_lifecycle -v
-uv run --offline --no-project --with pydantic==2.14.1 --with basedpyright==1.40.2 --python 3.13 basedpyright --pythonversion 3.12 --pythonplatform All scripts/verification scripts/tests/test_verification_observations.py scripts/tests/test_verification_lifecycle.py
-uv run --offline --no-project --with ruff==0.17.0 ruff check scripts/verification scripts/tests/test_verification_observations.py scripts/tests/test_verification_lifecycle.py
-uv run --offline --no-project --with ruff==0.17.0 ruff format --check scripts/verification scripts/tests/test_verification_observations.py scripts/tests/test_verification_lifecycle.py
+uv run --offline --no-project --with pydantic==2.14.1 --with basedpyright==1.40.2 --python 3.13 basedpyright --pythonversion 3.12 --pythonplatform All scripts/verification scripts/tests/test_verification_observations.py scripts/tests/test_verification_lifecycle.py scripts/tests/verification_controller_fixture.py
+uv run --offline --no-project --with ruff==0.17.0 ruff check scripts/verification scripts/tests/test_verification_observations.py scripts/tests/test_verification_lifecycle.py scripts/tests/verification_controller_fixture.py
+uv run --offline --no-project --with ruff==0.17.0 ruff format --check scripts/verification scripts/tests/test_verification_observations.py scripts/tests/test_verification_lifecycle.py scripts/tests/verification_controller_fixture.py
 ```
 
 These are apparatus checks, not product proof. Return machine/build/source/root/client, genuine IDs, actual callbacks/tool/turn, public/SQLite row/revision/creation-time readbacks, owning reopen, screenshot kind, commands/exits and cleanup. Mark every claim supported, unsupported or unknown, naming harness defects and unreachable routes separately. Acceptance remains with the Lead.

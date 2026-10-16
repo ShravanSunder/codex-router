@@ -17,6 +17,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from scripts.verification import process_ownership
 from scripts.verification.process_ownership import (
     owned_closure,
     same_identity,
@@ -34,7 +35,6 @@ from scripts.verification.typed_observations import (
     JsonObject,
     ProcessIdentity,
     ProcessSignal,
-    observed_object,
     read_observed_json,
 )
 
@@ -106,6 +106,8 @@ def observe_owned(root_pid: int, known: dict[int, ProcessIdentity]) -> None:
         if pid in observed:
             item = observed[pid]
             if item.uid != os.getuid():
+                if process_ownership.lookup_process_identity(pid) is None:
+                    continue
                 raise RuntimeError("owned process UID changed")
             if pid in known and not same_identity(
                 item.model_dump(), known[pid].model_dump()
@@ -254,7 +256,7 @@ def health_check(plan: RuntimePlan) -> JsonObject:
         health = read_observed_json(response.read())
     if health["binary_version"] != plan.expected_version:
         raise RuntimeError("Router version mismatch")
-    return observed_object(health)
+    return health
 
 
 def verify_ready(plan: RuntimePlan) -> JsonObject:
@@ -262,14 +264,7 @@ def verify_ready(plan: RuntimePlan) -> JsonObject:
         (plan.evidence / "router-identity.json").read_text()
     )
     if not same_identity(
-        next(
-            (
-                item.model_dump()
-                for pid, item in process_table().items()
-                if pid == recorded.pid
-            ),
-            None,
-        ),
+        current_identity_fields(recorded.pid),
         recorded.model_dump(),
     ):
         raise RuntimeError("live Router process identity mismatch")
@@ -399,6 +394,8 @@ def run_lifecycle(plan: RuntimePlan) -> None:
             plan.evidence / "router-ready.json",
             {"pid": router.pid, "health": health_check(plan)},
         )
+        if plan.profile.read_bytes() != profile_original:
+            raise RuntimeError("profile changed before temporary projection")
         _ = plan.profile.write_bytes(temporary_profile)
         profile_changed = True
         save_record(
@@ -465,6 +462,8 @@ def run_lifecycle(plan: RuntimePlan) -> None:
                     (plan.evidence / f"host-{phase}.stdout").open("xb") as stdout,
                     (plan.evidence / f"host-{phase}.stderr").open("xb") as stderr,
                 ):
+                    if dt.datetime.now(dt.UTC) >= plan.deadline:
+                        raise TimeoutError("allocation deadline expired at launch")
                     host = subprocess.Popen(
                         argv,
                         env=environment,
