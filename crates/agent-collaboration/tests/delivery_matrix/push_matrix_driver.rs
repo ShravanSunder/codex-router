@@ -380,6 +380,19 @@ pub(super) async fn record_push_input_correlation(
     record: &PushRecord,
     user_message: &Value,
 ) -> ProofResult<bool> {
+    // The initial show predates native delivery; observe its settled receipt only
+    // after thread/read has established that this exact input arrived.
+    let settled = proof
+        .client
+        .router_show(PushRecordShowParams {
+            caller: record.target.clone(),
+            reference: record.push_id.as_str().to_owned(),
+        })
+        .await?;
+    if settled.record.push_id != record.push_id || settled.record.target != record.target {
+        return Err(format!("{producer} settled push identity changed").into());
+    }
+    let record = &settled.record;
     let receipt = record
         .last_outcome
         .as_ref()
