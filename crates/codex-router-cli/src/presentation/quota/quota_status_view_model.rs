@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use crate::quota::CreditUsageStatus;
 use codex_router_core::ids::AccountId;
+use codex_router_core::provider::Provider;
 
 pub(crate) type QuotaStatusViewModelLoader =
     Arc<dyn Fn() -> QuotaStatusViewModelLoadFuture + Send + Sync>;
@@ -24,6 +25,7 @@ pub(crate) struct QuotaStatusViewModel {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct QuotaStatusAccountViewModel {
+    pub(crate) provider: Provider,
     pub(crate) account_id: AccountId,
     pub(crate) account_tag: String,
     pub(crate) active_credential_generation: Option<u64>,

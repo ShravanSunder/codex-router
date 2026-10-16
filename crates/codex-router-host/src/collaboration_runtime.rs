@@ -30,6 +30,7 @@ pub struct CollaborationRuntimeInputs {
 pub(crate) struct HostCollaborationInputs {
     pub collaboration_runtime: CollaborationRuntimeInputs,
     pub router_proxy_endpoint: SocketAddr,
+    pub remote_access: Option<crate::RemoteAccess>,
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExternalProviderLaunchBinding {
@@ -97,6 +98,13 @@ pub struct BackendSchemaEvidence<'a> {
     pub running_executable: &'a codex_native_integration::ExecutableIdentity,
     pub export: &'a codex_native_integration::NativeSchemaExport,
 }
+#[derive(Debug, thiserror::Error)]
+pub enum CollaborationFailure {
+    #[error("local collaboration listener failed: {0}")]
+    LocalListener(#[source] io::Error),
+    #[error("private Tailscale exposure failed: {0}")]
+    TailnetExposure(#[source] io::Error),
+}
 pub struct CollaborationRuntime {
     owner_human_id: Option<message_board::HumanId>,
     board_store: Option<std::sync::Arc<tokio::sync::Mutex<message_board_storage::BoardStore>>>,
@@ -126,52 +134,9 @@ pub struct CollaborationRuntime {
     observer_task: Option<tokio::task::JoinHandle<()>>,
     manifest: Option<collaboration_service::ManifestPublication>,
     collaboration_api: ServedCollaborationApi,
+    tailscale_exposure: Option<crate::tailscale_exposure::TailscaleExposure>,
 }
 impl CollaborationRuntime {
-    pub async fn configure_provider_operation_retention(
-        &mut self,
-        retention_days: std::num::NonZeroU32,
-    ) -> io::Result<u64> {
-        let cutoff_ms = unix_seconds()?
-            .saturating_mul(1_000)
-            .saturating_sub(i64::from(retention_days.get()).saturating_mul(24 * 60 * 60 * 1_000));
-        let protected = self
-            .external_provider_supervisor
-            .as_ref()
-            .map(|supervisor| supervisor.live_operation_ids())
-            .unwrap_or_default();
-        let Some(store) = &self.provider_store else {
-            return Ok(0);
-        };
-        let pruned = store
-            .lock()
-            .await
-            .prune_terminal_before(cutoff_ms, &protected)
-            .await
-            .map_err(io::Error::other)?;
-        let store = std::sync::Arc::clone(store);
-        let supervisor = self.external_provider_supervisor.clone();
-        let shutdown = self.shutdown.clone();
-        self.provider_retention = Some(tokio::spawn(async move {
-            let period = std::time::Duration::from_secs(24 * 60 * 60);
-            let mut interval =
-                tokio::time::interval_at(tokio::time::Instant::now() + period, period);
-            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-            loop {
-                tokio::select! {
-                    () = shutdown.cancelled() => break,
-                    _ = interval.tick() => {
-                        let cutoff_ms = chrono::Utc::now().timestamp_millis().saturating_sub(
-                            i64::from(retention_days.get()).saturating_mul(24 * 60 * 60 * 1_000),
-                        );
-                        let protected = supervisor.as_ref().map(|value| value.live_operation_ids()).unwrap_or_default();
-                        let _ = store.lock().await.prune_terminal_before(cutoff_ms, &protected).await;
-                    }
-                }
-            }
-        }));
-        Ok(pruned)
-    }
     /// Binds both private listeners before spawning tasks. No native process is started.
     pub async fn start(inputs: CollaborationRuntimeInputs) -> io::Result<Self> {
         Self::start_with_external_providers(inputs, Vec::new()).await
@@ -201,6 +166,7 @@ impl CollaborationRuntime {
             provider_launches,
             relation_receiver,
             None,
+            None,
         )
         .await
     }
@@ -210,11 +176,16 @@ impl CollaborationRuntime {
         provider_launches: Vec<crate::ExternalProviderStartup>,
         relation_receiver: tokio::sync::watch::Receiver<RouterExecutableRelation>,
     ) -> io::Result<Self> {
+        let prepared_exposure = crate::tailscale_exposure::PreparedTailscaleExposure::prepare(
+            host_inputs.remote_access,
+        )
+        .await?;
         Self::start_with_optional_router_proxy_endpoint(
             host_inputs.collaboration_runtime,
             provider_launches,
             relation_receiver,
             Some(host_inputs.router_proxy_endpoint),
+            prepared_exposure,
         )
         .await
     }
@@ -224,6 +195,7 @@ impl CollaborationRuntime {
         provider_launches: Vec<crate::ExternalProviderStartup>,
         relation_receiver: tokio::sync::watch::Receiver<RouterExecutableRelation>,
         router_proxy_endpoint: Option<SocketAddr>,
+        prepared_exposure: Option<crate::tailscale_exposure::PreparedTailscaleExposure>,
     ) -> io::Result<Self> {
         let mut owner_human_id = inputs.owner_human_id.clone();
         let service_id = load_service_identity(&inputs.directory)?;
@@ -347,7 +319,12 @@ impl CollaborationRuntime {
                 None
             }
         };
-        let collaboration_api = BoundCollaborationApi::bind(inputs.mcp_bind).await?;
+        let proxy_authority = prepared_exposure
+            .as_ref()
+            .map(|prepared| prepared.authority().clone());
+        let collaboration_api =
+            BoundCollaborationApi::bind(inputs.mcp_bind, proxy_authority).await?;
+        let exposure_backend = collaboration_api.local_address();
         let mcp_url = collaboration_api.url();
         let startup = crate::provider_startup_composition::compose_provider_startup(
             provider_launches,
@@ -594,6 +571,13 @@ impl CollaborationRuntime {
                 );
             }
         }
+        // Runtime listeners now own these dependencies. Constructor-local hub,
+        // router, presence and broker references can retain provider storage
+        // transitively and must be gone before exposure-startup cleanup runs.
+        drop(provider_session_hub);
+        drop(message_routes.router);
+        drop(subscription_presence);
+        drop(approval_broker);
         let publication = publication.with_acp_listener()?;
         if let Some(settings) = settings_backend
             && settings.recover().await.is_err()
@@ -676,7 +660,7 @@ impl CollaborationRuntime {
             let maintenance_stop = shutdown.clone();
             tokio::spawn(async move { maintenance_store.run_maintenance(maintenance_stop).await })
         });
-        Ok(Self {
+        let mut runtime = Self {
             owner_human_id,
             board_store,
             subscription_delivery,
@@ -702,7 +686,33 @@ impl CollaborationRuntime {
             current_generation: None,
             observer_task: None,
             collaboration_api,
-        })
+            tailscale_exposure: None,
+        };
+        if let Some(prepared) = prepared_exposure {
+            match prepared
+                .start(
+                    exposure_backend,
+                    &runtime.service_id,
+                    &runtime.service_epoch,
+                )
+                .await
+            {
+                Ok(exposure) => {
+                    eprintln!("Private collaboration MCP: {}", exposure.url());
+                    runtime.tailscale_exposure = Some(exposure);
+                }
+                Err(error) => {
+                    let cleanup = runtime.shutdown().await;
+                    return Err(match cleanup {
+                        Ok(()) => error,
+                        Err(cleanup) => io::Error::other(format!(
+                            "{error}; collaboration startup cleanup: {cleanup}"
+                        )),
+                    });
+                }
+            }
+        }
+        Ok(runtime)
     }
 
     #[must_use]
@@ -965,3 +975,10 @@ fn current_observation_timestamp() -> io::Result<ObservationTimestamp> {
     )
     .map_err(io::Error::other)
 }
+
+#[path = "collaboration_runtime/provider_retention.rs"]
+mod provider_retention;
+
+#[cfg(test)]
+#[path = "collaboration_runtime/startup_failure_tests.rs"]
+mod startup_failure_tests;

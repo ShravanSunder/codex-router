@@ -1,7 +1,7 @@
 //! Shared mock-terminal fixtures; actual behavior cases live in focused modules.
 
-use crossterm::event::MouseButton;
 use futures_util::StreamExt;
+use iocraft::MouseButton;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc;
@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex};
 
 use super::*;
 use crate::picker_runtime_status::PickerRuntimeStatus;
+use crate::presentation::session_picker::picker_request::SessionsPickerDataQuery;
 use crate::presentation::session_picker::picker_request::SessionsPickerRoot as SessionsRoot;
 use crate::presentation::session_picker::test_support::observed_records;
 use crate::presentation::session_picker::test_support::picker_record;
@@ -18,6 +19,42 @@ use crate::sessions::SessionPickerRecord;
 use crate::sessions::SessionsProvider;
 use crate::sessions::SessionsSort;
 use crate::sessions::SessionsSource;
+
+#[path = "picker_fork_tests.rs"]
+mod picker_fork_tests;
+
+#[path = "picker_performance_tests.rs"]
+mod picker_performance_tests;
+
+#[path = "picker_details_navigation_tests.rs"]
+mod picker_details_navigation_tests;
+
+// Blocking external fixture procedures run off the executor; production loaders are async.
+fn fixture_record_loader<FixtureProcedure>(
+    procedure: FixtureProcedure,
+) -> SessionsPickerRecordLoader
+where
+    FixtureProcedure: Fn(
+            SessionsPickerDataQuery,
+        ) -> Result<crate::picker_runtime_status::PickerRecordsSnapshot, String>
+        + Send
+        + Sync
+        + 'static,
+{
+    let procedure = Arc::new(procedure);
+    Arc::new(move |request| {
+        let procedure = Arc::clone(&procedure);
+        Box::pin(async move {
+            let query = request.query.clone();
+            match tokio::task::spawn_blocking(move || procedure(query)).await {
+                Ok(Ok(snapshot)) => crate::presentation::session_picker::SourceInventoryResult::Ready { progress: crate::presentation::session_picker::InventoryPageProgress::Complete, binding: None, request, snapshot },
+                Ok(Err(_)) | Err(_) => crate::presentation::session_picker::SourceInventoryResult::Rejected {
+                    request, reason: crate::presentation::session_picker::SourceInventoryRejection::SourceUnavailable,
+                },
+            }
+        })
+    })
+}
 
 fn reload_query(search: &str) -> SessionsPickerDataQuery {
     SessionsPickerDataQuery {
@@ -85,9 +122,9 @@ fn ctrl_key(character: char) -> TerminalEvent {
     TerminalEvent::Key(event)
 }
 
-fn alt_enter_key() -> TerminalEvent {
+fn control_shift_enter_key() -> TerminalEvent {
     let mut event = KeyEvent::new(KeyEventKind::Press, KeyCode::Enter);
-    event.modifiers = KeyModifiers::ALT;
+    event.modifiers = KeyModifiers::CONTROL | KeyModifiers::SHIFT;
     TerminalEvent::Key(event)
 }
 
@@ -116,6 +153,10 @@ fn capture_record(
 ) -> SessionPickerRecord {
     SessionPickerRecord {
         identity: crate::sessions::SessionPickerIdentity::LocalCodex(session_id.to_owned()),
+        provider_family: crate::presentation::session_picker::SessionProviderFamily::Codex,
+        source_context: None,
+        machine_display_label: None,
+        provenance: crate::sessions::SessionRowProvenance::LocalHomeCatalog,
         endpoint_label: None,
         provider_state: None,
         session_id: session_id.to_owned(),
@@ -147,6 +188,7 @@ fn capture_record(
         conversation_source: None,
         source: Some(source.to_owned()),
         thread_source: Some(source.to_owned()),
+        native_source: None,
         runtime_status: PickerRuntimeStatus::Unknown,
     }
 }
@@ -214,6 +256,9 @@ fn must_ok<T, E: std::fmt::Display>(result: Result<T, E>) -> T {
 #[path = "picker_interaction_tests.rs"]
 mod picker_interaction_tests;
 
+#[path = "provider_filter_component_tests.rs"]
+mod provider_filter_component_tests;
+
 #[path = "picker_layout_tests.rs"]
 mod picker_layout_tests;
 
@@ -225,3 +270,24 @@ mod picker_background_tests;
 
 #[path = "picker_capture_tests.rs"]
 mod picker_capture_tests;
+
+#[path = "picker_machine_control_tests.rs"]
+mod picker_machine_control_tests;
+
+#[path = "picker_single_view_tests.rs"]
+mod picker_single_view_tests;
+
+#[path = "picker_compact_header_tests.rs"]
+mod picker_compact_header_tests;
+
+#[path = "picker_help_tests.rs"]
+mod picker_help_tests;
+
+#[path = "source_action_component_tests.rs"]
+mod source_action_component_tests;
+
+fn resume_key() -> TerminalEvent {
+    let mut event = KeyEvent::new(KeyEventKind::Press, KeyCode::Enter);
+    event.modifiers = KeyModifiers::CONTROL;
+    TerminalEvent::Key(event)
+}

@@ -12,7 +12,8 @@ use crate::presentation::session_picker::picker_request::SessionsPickerRoot;
 #[cfg(test)]
 use crate::sessions::SessionsSort;
 pub(super) const MIN_PICKER_WIDTH: usize = 24;
-const COMPACT_HELP: &str = "ctrl-/ Help";
+#[cfg(test)]
+const COMPACT_HELP: &str = "ctrl-g/F2 Machine | ctrl-/ Help";
 #[cfg(test)]
 const NARROW_PICKER_WIDTH: usize = 72;
 #[cfg(test)]
@@ -60,7 +61,7 @@ pub(super) fn render_model_snapshot(model: &SessionsPickerModel) -> String {
             };
             if visible_index == 0 {
                 lines.push(fit_line(
-                    &format!("{marker} Start new session"),
+                    &format!("{marker} New Codex session"),
                     model.width,
                 ));
                 lines.push(fit_line(
@@ -170,6 +171,7 @@ fn render_controls_lines(model: &SessionsPickerModel) -> Vec<String> {
     ]
 }
 
+#[cfg(test)]
 pub(super) fn footer_lines(width: usize, show_help: bool) -> Vec<String> {
     let mut lines = control_footer_lines(width, show_help);
     if show_help {
@@ -192,15 +194,20 @@ pub(super) fn footer_lines(width: usize, show_help: bool) -> Vec<String> {
     lines
 }
 
+#[cfg(test)]
 fn control_footer_lines(width: usize, show_help: bool) -> Vec<String> {
     if !show_help {
-        return vec![COMPACT_HELP.to_owned()];
+        return if width >= 40 {
+            vec![COMPACT_HELP.to_owned()]
+        } else {
+            vec!["ctrl-g/F2 Machine".to_owned(), "ctrl-/ Help".to_owned()]
+        };
     }
     if width >= 104 {
         return vec![
             "Search: id:<id> | b:<branch> | repo:<name>    enter resume | opt-enter fork | ctrl-n new"
                 .to_owned(),
-            "ctrl-s scope | ctrl-t view | ctrl-o sort | ctrl-r refresh    ctrl-/ or F1 close help"
+            "ctrl-g/F2 Machine | ctrl-s scope | ctrl-t view | ctrl-o sort | ctrl-r refresh | F1 close help"
                 .to_owned(),
         ];
     }
@@ -208,6 +215,7 @@ fn control_footer_lines(width: usize, show_help: bool) -> Vec<String> {
         return vec![
             "Search: id:<id> | b:<branch> | repo:<name>".to_owned(),
             "enter resume | opt-enter fork | ctrl-n new".to_owned(),
+            "ctrl-g/F2 Machine".to_owned(),
             "ctrl-s scope | ctrl-t view | ctrl-o sort".to_owned(),
             "ctrl-r refresh | ctrl-/ or F1 close help".to_owned(),
         ];
@@ -216,6 +224,7 @@ fn control_footer_lines(width: usize, show_help: bool) -> Vec<String> {
         "Search: id:<id>".to_owned(),
         "b:<branch> | repo:<name>".to_owned(),
         "enter resume | opt-enter fork".to_owned(),
+        "ctrl-g/F2 Machine".to_owned(),
         "ctrl-n new | ctrl-s scope".to_owned(),
         "ctrl-t view | ctrl-o sort".to_owned(),
         "ctrl-r refresh".to_owned(),
@@ -356,7 +365,8 @@ mod tests {
             let lines = footer_lines(width, false);
             let text = lines.join("\n");
 
-            assert_eq!(text, "ctrl-/ Help", "width {width}: {text}");
+            assert!(text.contains("ctrl-g/F2 Machine"), "width {width}: {text}");
+            assert!(text.contains("ctrl-/ Help"), "width {width}: {text}");
             assert!(
                 lines
                     .iter()

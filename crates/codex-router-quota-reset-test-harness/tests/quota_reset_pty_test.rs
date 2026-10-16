@@ -2,6 +2,8 @@ mod quota_reset_pty_test {
     mod credit_refresh_feedback_test;
     mod isolated_fixture_test;
     mod loopback_provider_test;
+    mod provider_filter_pty_test;
+    mod stored_model_diagnostic_test;
     mod terminal_interaction_test;
 
     use std::collections::BTreeSet;
@@ -47,7 +49,7 @@ mod quota_reset_pty_test {
         )?;
 
         stage(
-            terminal.wait_for_text("ctrl-r account options", SEMANTIC_WAIT),
+            terminal.wait_for_text("Filters", SEMANTIC_WAIT),
             "initial browse",
         )?;
         let inspection_start = terminal.transcript_len();
@@ -101,22 +103,18 @@ mod quota_reset_pty_test {
         )?;
 
         stage(
-            terminal.wait_for_text_after("esc/ctrl-r back", inspection_start, SEMANTIC_WAIT),
+            terminal.wait_for_text_after("Cancel", inspection_start, SEMANTIC_WAIT),
             "inspection cancel footer",
         )?;
         let resize_start = terminal.transcript_len();
         stage(terminal.resize(48, 170), "resize request")?;
         stage(
-            terminal.wait_for_text_after("esc/ctrl-r back", resize_start, SEMANTIC_WAIT),
+            terminal.wait_for_text_after("Cancel", resize_start, SEMANTIC_WAIT),
             "inspection after resize",
         )?;
         let cancel_start = terminal.transcript_len();
         terminal.send(&[0x12])?;
-        if let Err(error) = terminal.wait_for_text_after(
-            "enter inspect  tab credits  esc back",
-            cancel_start,
-            SEMANTIC_WAIT,
-        ) {
+        if let Err(error) = terminal.wait_for_text_after("Close", cancel_start, SEMANTIC_WAIT) {
             let diagnostics = terminal.safe_semantic_diagnostics(cancel_start);
             return Err(std::io::Error::other(format!(
                 "cancelled inspection browse restoration: {error}; {diagnostics}"
@@ -125,14 +123,15 @@ mod quota_reset_pty_test {
         }
         let options_close_start = terminal.transcript_len();
         terminal.send(b"\x1b")?;
-        stage(
-            terminal.wait_for_text_after(
-                "ctrl-r account options",
-                options_close_start,
-                SEMANTIC_WAIT,
-            ),
-            "options pane closes after inspection cancellation",
-        )?;
+        if let Err(error) =
+            terminal.wait_for_text_after("Filters", options_close_start, SEMANTIC_WAIT)
+        {
+            let diagnostics = terminal.safe_semantic_diagnostics(options_close_start);
+            return Err(std::io::Error::other(format!(
+                "options pane closes after inspection cancellation: {error}; {diagnostics}"
+            ))
+            .into());
+        }
         terminal.send(b"q")?;
         let transcript = stage(terminal.finish(SEMANTIC_WAIT), "cancelled path child exit")?;
         let request_records = stage(provider.finish(), "provider shutdown")?;
@@ -213,7 +212,7 @@ mod quota_reset_pty_test {
         )?;
 
         stage(
-            terminal.wait_for_text("ctrl-r account options", SEMANTIC_WAIT),
+            terminal.wait_for_text("Filters", SEMANTIC_WAIT),
             "account-options initial browse",
         )?;
         let inspection_start = terminal.transcript_len();
@@ -264,7 +263,7 @@ mod quota_reset_pty_test {
         let cancel_draft_start = terminal.transcript_len();
         terminal.send(b"\x1b")?;
         stage(
-            terminal.wait_for_text_after("enter edit", cancel_draft_start, SEMANTIC_WAIT),
+            terminal.wait_for_text_after("Edit", cancel_draft_start, SEMANTIC_WAIT),
             "cancelled credit policy draft returns to saved Credits view",
         )?;
         let cancelled_state =
@@ -292,8 +291,7 @@ mod quota_reset_pty_test {
         )?;
         let saved_policy_start = terminal.transcript_len();
         terminal.send(b"\r")?;
-        if let Err(error) =
-            terminal.wait_for_text_after("r refresh", saved_policy_start, SEMANTIC_WAIT)
+        if let Err(error) = terminal.wait_for_text_after("Edit", saved_policy_start, SEMANTIC_WAIT)
         {
             let diagnostics = terminal.safe_semantic_diagnostics(saved_policy_start);
             return Err(std::io::Error::other(format!(
@@ -313,9 +311,7 @@ mod quota_reset_pty_test {
         saved_state.close().await?;
         let browse_start = terminal.transcript_len();
         terminal.send(b"\x1b")?;
-        if let Err(error) =
-            terminal.wait_for_text_after("ctrl-r account options", browse_start, SEMANTIC_WAIT)
-        {
+        if let Err(error) = terminal.wait_for_text_after("Filters", browse_start, SEMANTIC_WAIT) {
             let diagnostics = terminal.safe_semantic_diagnostics(browse_start);
             return Err(std::io::Error::other(format!(
                 "account-options returns to browse: {error}; {diagnostics}"
@@ -348,17 +344,13 @@ mod quota_reset_pty_test {
         let reopen_cancel_start = terminal.transcript_len();
         terminal.send(b"\x1b")?;
         stage(
-            terminal.wait_for_text_after("enter edit", reopen_cancel_start, SEMANTIC_WAIT),
+            terminal.wait_for_text_after("Edit", reopen_cancel_start, SEMANTIC_WAIT),
             "reopened policy editor cancels back to Credits",
         )?;
         let final_browse_start = terminal.transcript_len();
         terminal.send(b"\x1b")?;
         stage(
-            terminal.wait_for_text_after(
-                "ctrl-r account options",
-                final_browse_start,
-                SEMANTIC_WAIT,
-            ),
+            terminal.wait_for_text_after("Filters", final_browse_start, SEMANTIC_WAIT),
             "reopened account-options pane closes to Browse",
         )?;
         terminal.send(b"q")?;
@@ -452,7 +444,7 @@ mod quota_reset_pty_test {
             Path::new(env!("CARGO_MANIFEST_DIR")),
         )?;
 
-        if let Err(error) = terminal.wait_for_text("ctrl-r account options", SEMANTIC_WAIT) {
+        if let Err(error) = terminal.wait_for_text("Filters", SEMANTIC_WAIT) {
             let diagnostics = terminal.safe_semantic_diagnostics(0);
             return Err(std::io::Error::other(format!(
                 "committed path initial browse: {error}; {diagnostics}"
@@ -536,21 +528,13 @@ mod quota_reset_pty_test {
         let browse_restoration_start = terminal.transcript_len();
         terminal.send(b"\r")?;
         stage(
-            terminal.wait_for_text_after(
-                "enter inspect  tab credits  esc back",
-                browse_restoration_start,
-                SEMANTIC_WAIT,
-            ),
+            terminal.wait_for_text_after("Inspect", browse_restoration_start, SEMANTIC_WAIT),
             "Resets options restored after reset result",
         )?;
         let options_close_start = terminal.transcript_len();
         terminal.send(b"\x1b")?;
         stage(
-            terminal.wait_for_text_after(
-                "ctrl-r account options",
-                options_close_start,
-                SEMANTIC_WAIT,
-            ),
+            terminal.wait_for_text_after("Filters", options_close_start, SEMANTIC_WAIT),
             "browse restored after options close",
         )?;
         terminal.send(b"q")?;
@@ -592,7 +576,7 @@ mod quota_reset_pty_test {
         terminal.resize(36, 120)?;
 
         stage(
-            terminal.wait_for_text("ctrl-e edit floor", SEMANTIC_WAIT),
+            terminal.wait_for_text("Filters", SEMANTIC_WAIT),
             "initial floor browse",
         )?;
         terminal.send(&[0x05])?;
@@ -601,7 +585,9 @@ mod quota_reset_pty_test {
             "weekly-floor editor",
         )?;
         let click_start = terminal.transcript_len();
-        terminal.send_sgr_mouse_left_down(22, 19)?;
+        // The centered 100x28 dialog at 120x36 places the visible increment
+        // arrow at zero-based (32, 12), pinned by the composed component test.
+        terminal.send_sgr_mouse_left_down(32, 12)?;
         stage(
             terminal.wait_for_text_after("1%", click_start, SEMANTIC_WAIT),
             "pointer-incremented floor",
@@ -609,7 +595,7 @@ mod quota_reset_pty_test {
         let cancel_start = terminal.transcript_len();
         terminal.send(b"\x1b")?;
         stage(
-            terminal.wait_for_text_after("ctrl-e edit floor", cancel_start, SEMANTIC_WAIT),
+            terminal.wait_for_text_after("Filters", cancel_start, SEMANTIC_WAIT),
             "cancelled weekly-floor editor",
         )?;
         terminal.send(b"q")?;
@@ -631,7 +617,8 @@ mod quota_reset_pty_test {
     }
 
     #[test]
-    fn compiled_sessions_tui_click_focuses_conversation_and_enter_resumes() -> TestResult<()> {
+    fn compiled_sessions_tui_click_focuses_enter_inspects_and_control_enter_resumes()
+    -> TestResult<()> {
         let arguments = [OsString::from("--sessions-picker")];
         let mut terminal = TerminalDriver::spawn(
             Path::new(env!("CARGO_BIN_EXE_codex-router-quota-reset-test-harness")),
@@ -641,10 +628,11 @@ mod quota_reset_pty_test {
         terminal.resize(24, 160)?;
 
         stage(
-            terminal.wait_for_text("Start new session", SEMANTIC_WAIT),
+            terminal.wait_for_text("New Codex session", SEMANTIC_WAIT),
             "initial sessions picker",
         )?;
         let pointer_focus_start = terminal.transcript_len();
+        // The compact shared control row puts beta at zero-based row 14.
         terminal.send_sgr_mouse_left_down(10, 14)?;
         stage(
             terminal.wait_for_text_after(
@@ -658,13 +646,21 @@ mod quota_reset_pty_test {
             terminal.child_is_running()?,
             "existing-session click activated instead of changing conversation focus",
         )?;
+        let details_start = terminal.transcript_len();
         terminal.send(b"\r")?;
+        terminal.wait_for_text_after("Session details", details_start, SEMANTIC_WAIT)?;
+        terminal.wait_for_text_after("Session ID: thread-b", details_start, SEMANTIC_WAIT)?;
+        ensure(
+            terminal.child_is_running()?,
+            "ordinary Enter must inspect the focused session without launching",
+        )?;
+        terminal.send(b"\x1b[13;5u")?;
 
         let transcript = terminal.finish(SEMANTIC_WAIT)?;
         let transcript = String::from_utf8_lossy(&transcript);
         ensure(
             transcript.contains("SESSION_PICKER_OUTCOME resume:thread-b"),
-            "Enter did not resume the pointer-focused existing session",
+            "Ctrl+Enter did not resume the inspected pointer-focused session",
         )?;
         ensure(
             transcript.contains("\u{1b}[?1049h")
@@ -692,10 +688,10 @@ mod quota_reset_pty_test {
         terminal.resize(24, 160)?;
 
         stage(
-            terminal.wait_for_text("Start new session", SEMANTIC_WAIT),
+            terminal.wait_for_text("New Codex session", SEMANTIC_WAIT),
             "initial sessions picker",
         )?;
-        terminal.send_sgr_mouse_left_down(10, 7)?;
+        terminal.send_sgr_mouse_left_down(10, 8)?;
 
         let transcript = terminal.finish(SEMANTIC_WAIT)?;
         let transcript = String::from_utf8_lossy(&transcript);
@@ -818,7 +814,7 @@ mod quota_reset_pty_test {
             Path::new(env!("CARGO_MANIFEST_DIR")),
         )?;
 
-        terminal.wait_for_text("ctrl-r account options", SEMANTIC_WAIT)?;
+        terminal.wait_for_text("Filters", SEMANTIC_WAIT)?;
         terminal.send(b"\x1b[B")?;
         terminal.send(&[0x12])?;
         provider.wait_for_request_count(2, SEMANTIC_WAIT)?;

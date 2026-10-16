@@ -1,0 +1,402 @@
+[
+  {
+    "image": "120x36-sessions-all.png",
+    "sha256": "e6e889e074755d5d8d9b8a37ea33850db0ed15ffdc33d142dd22c4ab3196da6f",
+    "receipt": "/private/tmp/2026-10-selector-iocraft-dialog/captures-run5/sessions-filters-120x36/filter-receipt.json",
+    "receipt_sha256": "d724d72db0e5a12ec3bd72827a4ad2e42b870e18ef6f573b008c52547ae04feb",
+    "code_head": "ddfbad481b4e2e2d4e5a1873f47e43af92d711ef",
+    "binary_sha256": "64d3f76e608ed8431ad2a4a02081237bb94a87d3abe5bebee1cc7ae1cc260127",
+    "fixture": "synthetic typed inputs; actual compiled UI/input/rendering",
+    "observation": "independent image oracle passed"
+  },
+  {
+    "image": "120x36-sessions-chooser.png",
+    "sha256": "eed05707cd9ee746d1d743b04806cf9576a6d6312c66daa9f5a7979fb92aefa7",
+    "receipt": "/private/tmp/2026-10-selector-iocraft-dialog/captures-run5/sessions-filters-120x36/filter-receipt.json",
+    "receipt_sha256": "d724d72db0e5a12ec3bd72827a4ad2e42b870e18ef6f573b008c52547ae04feb",
+    "code_head": "ddfbad481b4e2e2d4e5a1873f47e43af92d711ef",
+    "binary_sha256": "64d3f76e608ed8431ad2a4a02081237bb94a87d3abe5bebee1cc7ae1cc260127",
+    "fixture": "synthetic typed inputs; actual compiled UI/input/rendering",
+    "observation": "independent image oracle passed"
+  },
+  {
+    "image": "120x36-sessions-codex.png",
+    "sha256": "33d4384c3c60a3aede6af1f5483afe43107aa6ddc20c2420f832adde3be07584",
+    "receipt": "/private/tmp/2026-10-selector-iocraft-dialog/captures-run5/sessions-filters-120x36/filter-receipt.json",
+    "receipt_sha256": "d724d72db0e5a12ec3bd72827a4ad2e42b870e18ef6f573b008c52547ae04feb",
+    "code_head": "ddfbad481b4e2e2d4e5a1873f47e43af92d711ef",
+    "binary_sha256": "64d3f76e608ed8431ad2a4a02081237bb94a87d3abe5bebee1cc7ae1cc260127",
+    "fixture": "synthetic typed inputs; actual compiled UI/input/rendering",
+    "observation": "independent image oracle passed"
+  },
+  {
+    "image": "120x36-sessions-details.png",
+    "sha256": "86f8993a8c07cf1ee35f435e2e3289f75a50454729d8618dcd3982dca8a2e4ed",
+    "receipt": "/private/tmp/2026-10-selector-iocraft-dialog/captures-run5/sessions-filters-120x36/filter-receipt.json",
+    "receipt_sha256": "d724d72db0e5a12ec3bd72827a4ad2e42b870e18ef6f573b008c52547ae04feb",
+    "code_head": "ddfbad481b4e2e2d4e5a1873f47e43af92d711ef",
+    "binary_sha256": "64d3f76e608ed8431ad2a4a02081237bb94a87d3abe5bebee1cc7ae1cc260127",
+    "fixture": "synthetic typed inputs; actual compiled UI/input/rendering",
+    "observation": "independent image oracle passed"
+  },
+  {
+    "image": "120x36-sessions-details-closed.png",
+    "sha256": "33d4384c3c60a3aede6af1f5483afe43107aa6ddc20c2420f832adde3be07584",
+    "receipt": "/private/tmp/2026-10-selector-iocraft-dialog/captures-run5/sessions-filters-120x36/filter-receipt.json",
+    "receipt_sha256": "d724d72db0e5a12ec3bd72827a4ad2e42b870e18ef6f573b008c52547ae04feb",
+    "code_head": "ddfbad481b4e2e2d4e5a1873f47e43af92d711ef",
+    "binary_sha256": "64d3f76e608ed8431ad2a4a02081237bb94a87d3abe5bebee1cc7ae1cc260127",
+    "fixture": "synthetic typed inputs; actual compiled UI/input/rendering",
+    "observation": "independent image oracle passed"
+  },
+  {
+    "image": "120x36-sessions-claude.png",
+    "sha256": "f0820e7d7c2b26a57e2be6ebc368260c358d9443786fd239eedf9ddd09b4b63d",
+    "receipt": "/private/tmp/2026-10-selector-iocraft-dialog/captures-run5/sessions-filters-120x36/filter-receipt.json",
+    "receipt_sha256": "d724d72db0e5a12ec3bd72827a4ad2e42b870e18ef6f573b008c52547ae04feb",
+    "code_head": "ddfbad481b4e2e2d4e5a1873f47e43af92d711ef",
+    "binary_sha256": "64d3f76e608ed8431ad2a4a02081237bb94a87d3abe5bebee1cc7ae1cc260127",
+    "fixture": "synthetic typed inputs; actual compiled UI/input/rendering",
+    "observation": "independent image oracle passed"
+  },
+  {
+    "image": "120x36-quota-all.png",
+    "sha256": "21d52d6cfe46d4b08003baae21fda0455fc551135dc3015b36b52eac203f6a97",
+    "receipt": "/private/tmp/2026-10-selector-iocraft-dialog/captures-run5/quota-filters-120x36/filter-receipt.json",
+    "receipt_sha256": "8c97634f91f01b7e90d8ccd870e9779dabf11a1c9df3a8d0db8e147803e998ff",
+    "code_head": "ddfbad481b4e2e2d4e5a1873f47e43af92d711ef",
+    "binary_sha256": "64d3f76e608ed8431ad2a4a02081237bb94a87d3abe5bebee1cc7ae1cc260127",
+    "fixture": "synthetic typed inputs; actual compiled UI/input/rendering",
+    "observation": "independent image oracle passed"
+  },
+  {
+    "image": "120x36-quota-chooser.png",
+    "sha256": "7a516160433c36d4927fe1627f4623223ff317d9d631bf771940e259adc8173d",
+    "receipt": "/private/tmp/2026-10-selector-iocraft-dialog/captures-run5/quota-filters-120x36/filter-receipt.json",
+    "receipt_sha256": "8c97634f91f01b7e90d8ccd870e9779dabf11a1c9df3a8d0db8e147803e998ff",
+    "code_head": "ddfbad481b4e2e2d4e5a1873f47e43af92d711ef",
+    "binary_sha256": "64d3f76e608ed8431ad2a4a02081237bb94a87d3abe5bebee1cc7ae1cc260127",
+    "fixture": "synthetic typed inputs; actual compiled UI/input/rendering",
+    "observation": "independent image oracle passed"
+  },
+  {
+    "image": "120x36-quota-openai.png",
+    "sha256": "749b5a354c0c1f73f0ce0f593aee6c750ce17e66cb4b8c9e491a999a8ec5e38e",
+    "receipt": "/private/tmp/2026-10-selector-iocraft-dialog/captures-run5/quota-filters-120x36/filter-receipt.json",
+    "receipt_sha256": "8c97634f91f01b7e90d8ccd870e9779dabf11a1c9df3a8d0db8e147803e998ff",
+    "code_head": "ddfbad481b4e2e2d4e5a1873f47e43af92d711ef",
+    "binary_sha256": "64d3f76e608ed8431ad2a4a02081237bb94a87d3abe5bebee1cc7ae1cc260127",
+    "fixture": "synthetic typed inputs; actual compiled UI/input/rendering",
+    "observation": "independent image oracle passed"
+  },
+  {
+    "image": "120x36-quota-hidden.png",
+    "sha256": "aa19cfbaf3e3a422105686fe040aee25b647266448a2b5eea8867fd038510604",
+    "receipt": "/private/tmp/2026-10-selector-iocraft-dialog/captures-run5/quota-filters-120x36/filter-receipt.json",
+    "receipt_sha256": "8c97634f91f01b7e90d8ccd870e9779dabf11a1c9df3a8d0db8e147803e998ff",
+    "code_head": "ddfbad481b4e2e2d4e5a1873f47e43af92d711ef",
+    "binary_sha256": "64d3f76e608ed8431ad2a4a02081237bb94a87d3abe5bebee1cc7ae1cc260127",
+    "fixture": "synthetic typed inputs; actual compiled UI/input/rendering",
+    "observation": "independent image oracle passed"
+  },
+  {
+    "image": "120x36-quota-details.png",
+    "sha256": "376760a1f1c68f982821c241840cc7565308434c73587d18d3242d5965f762a0",
+    "receipt": "/private/tmp/2026-10-selector-iocraft-dialog/captures-run5/quota-filters-120x36/filter-receipt.json",
+    "receipt_sha256": "8c97634f91f01b7e90d8ccd870e9779dabf11a1c9df3a8d0db8e147803e998ff",
+    "code_head": "ddfbad481b4e2e2d4e5a1873f47e43af92d711ef",
+    "binary_sha256": "64d3f76e608ed8431ad2a4a02081237bb94a87d3abe5bebee1cc7ae1cc260127",
+    "fixture": "synthetic typed inputs; actual compiled UI/input/rendering",
+    "observation": "independent image oracle passed"
+  },
+  {
+    "image": "120x36-quota-details-closed.png",
+    "sha256": "aa19cfbaf3e3a422105686fe040aee25b647266448a2b5eea8867fd038510604",
+    "receipt": "/private/tmp/2026-10-selector-iocraft-dialog/captures-run5/quota-filters-120x36/filter-receipt.json",
+    "receipt_sha256": "8c97634f91f01b7e90d8ccd870e9779dabf11a1c9df3a8d0db8e147803e998ff",
+    "code_head": "ddfbad481b4e2e2d4e5a1873f47e43af92d711ef",
+    "binary_sha256": "64d3f76e608ed8431ad2a4a02081237bb94a87d3abe5bebee1cc7ae1cc260127",
+    "fixture": "synthetic typed inputs; actual compiled UI/input/rendering",
+    "observation": "independent image oracle passed"
+  },
+  {
+    "image": "120x36-quota-empty.png",
+    "sha256": "93565e8c79ec3a01f879f327dc606d7c7c81a1c9bf6a050fb4c7e3e4e0f9cf66",
+    "receipt": "/private/tmp/2026-10-selector-iocraft-dialog/captures-run5/quota-empty-120x36/filter-receipt.json",
+    "receipt_sha256": "b7466a3a5d631ab28669df0bb1179bd080552f5aad249d4fdd73421f6f70a8cc",
+    "code_head": "ddfbad481b4e2e2d4e5a1873f47e43af92d711ef",
+    "binary_sha256": "64d3f76e608ed8431ad2a4a02081237bb94a87d3abe5bebee1cc7ae1cc260127",
+    "fixture": "synthetic typed inputs; actual compiled UI/input/rendering",
+    "observation": "independent image oracle passed"
+  },
+  {
+    "image": "76x30-sessions-all.png",
+    "sha256": "48a8a5c506e22609a4c1e9cbe9010d5b190b7646c4a6bda5939bfb5969016d69",
+    "receipt": "/private/tmp/2026-10-selector-iocraft-dialog/captures-run5/sessions-filters-76x30/filter-receipt.json",
+    "receipt_sha256": "6f30a245a6096ff5e07ed5a2a589270e37ab1a1c08bcec940e8203dfa32b29f8",
+    "code_head": "ddfbad481b4e2e2d4e5a1873f47e43af92d711ef",
+    "binary_sha256": "64d3f76e608ed8431ad2a4a02081237bb94a87d3abe5bebee1cc7ae1cc260127",
+    "fixture": "synthetic typed inputs; actual compiled UI/input/rendering",
+    "observation": "independent image oracle passed"
+  },
+  {
+    "image": "76x30-sessions-chooser.png",
+    "sha256": "a2e303008d0d7dc36eacc24c3918ab4168cd7186c464b99565f77158dfa6b453",
+    "receipt": "/private/tmp/2026-10-selector-iocraft-dialog/captures-run5/sessions-filters-76x30/filter-receipt.json",
+    "receipt_sha256": "6f30a245a6096ff5e07ed5a2a589270e37ab1a1c08bcec940e8203dfa32b29f8",
+    "code_head": "ddfbad481b4e2e2d4e5a1873f47e43af92d711ef",
+    "binary_sha256": "64d3f76e608ed8431ad2a4a02081237bb94a87d3abe5bebee1cc7ae1cc260127",
+    "fixture": "synthetic typed inputs; actual compiled UI/input/rendering",
+    "observation": "independent image oracle passed"
+  },
+  {
+    "image": "76x30-sessions-codex.png",
+    "sha256": "72314103afd134c7519dfe3156e34361ce3e524ee54c0a316784b67a42f51e70",
+    "receipt": "/private/tmp/2026-10-selector-iocraft-dialog/captures-run5/sessions-filters-76x30/filter-receipt.json",
+    "receipt_sha256": "6f30a245a6096ff5e07ed5a2a589270e37ab1a1c08bcec940e8203dfa32b29f8",
+    "code_head": "ddfbad481b4e2e2d4e5a1873f47e43af92d711ef",
+    "binary_sha256": "64d3f76e608ed8431ad2a4a02081237bb94a87d3abe5bebee1cc7ae1cc260127",
+    "fixture": "synthetic typed inputs; actual compiled UI/input/rendering",
+    "observation": "independent image oracle passed"
+  },
+  {
+    "image": "76x30-sessions-details.png",
+    "sha256": "887b2e62f4a4ef61fb1aac5d4810979281d72797ae1463c65acd12087308fb43",
+    "receipt": "/private/tmp/2026-10-selector-iocraft-dialog/captures-run5/sessions-filters-76x30/filter-receipt.json",
+    "receipt_sha256": "6f30a245a6096ff5e07ed5a2a589270e37ab1a1c08bcec940e8203dfa32b29f8",
+    "code_head": "ddfbad481b4e2e2d4e5a1873f47e43af92d711ef",
+    "binary_sha256": "64d3f76e608ed8431ad2a4a02081237bb94a87d3abe5bebee1cc7ae1cc260127",
+    "fixture": "synthetic typed inputs; actual compiled UI/input/rendering",
+    "observation": "independent image oracle passed"
+  },
+  {
+    "image": "76x30-sessions-details-closed.png",
+    "sha256": "72314103afd134c7519dfe3156e34361ce3e524ee54c0a316784b67a42f51e70",
+    "receipt": "/private/tmp/2026-10-selector-iocraft-dialog/captures-run5/sessions-filters-76x30/filter-receipt.json",
+    "receipt_sha256": "6f30a245a6096ff5e07ed5a2a589270e37ab1a1c08bcec940e8203dfa32b29f8",
+    "code_head": "ddfbad481b4e2e2d4e5a1873f47e43af92d711ef",
+    "binary_sha256": "64d3f76e608ed8431ad2a4a02081237bb94a87d3abe5bebee1cc7ae1cc260127",
+    "fixture": "synthetic typed inputs; actual compiled UI/input/rendering",
+    "observation": "independent image oracle passed"
+  },
+  {
+    "image": "76x30-sessions-claude.png",
+    "sha256": "3192a61c2553ef301461fffa013e2f922d20534afb9999ca25a4073df8845fd7",
+    "receipt": "/private/tmp/2026-10-selector-iocraft-dialog/captures-run5/sessions-filters-76x30/filter-receipt.json",
+    "receipt_sha256": "6f30a245a6096ff5e07ed5a2a589270e37ab1a1c08bcec940e8203dfa32b29f8",
+    "code_head": "ddfbad481b4e2e2d4e5a1873f47e43af92d711ef",
+    "binary_sha256": "64d3f76e608ed8431ad2a4a02081237bb94a87d3abe5bebee1cc7ae1cc260127",
+    "fixture": "synthetic typed inputs; actual compiled UI/input/rendering",
+    "observation": "independent image oracle passed"
+  },
+  {
+    "image": "76x30-quota-all.png",
+    "sha256": "5f22a5a14f755fe9bdb6971a7bfc67f097fad62b8457b61a18a2af33690ca613",
+    "receipt": "/private/tmp/2026-10-selector-iocraft-dialog/captures-run5/quota-filters-76x30/filter-receipt.json",
+    "receipt_sha256": "d9b927a0e6183ef8dee4cd25790c816f4ab1c7e37f9560749fb85b0efa04994c",
+    "code_head": "ddfbad481b4e2e2d4e5a1873f47e43af92d711ef",
+    "binary_sha256": "64d3f76e608ed8431ad2a4a02081237bb94a87d3abe5bebee1cc7ae1cc260127",
+    "fixture": "synthetic typed inputs; actual compiled UI/input/rendering",
+    "observation": "independent image oracle passed"
+  },
+  {
+    "image": "76x30-quota-chooser.png",
+    "sha256": "5bd3a111e371ef6c41dd9f06761a98648a9a139ba053af200343c7fbdf35cd49",
+    "receipt": "/private/tmp/2026-10-selector-iocraft-dialog/captures-run5/quota-filters-76x30/filter-receipt.json",
+    "receipt_sha256": "d9b927a0e6183ef8dee4cd25790c816f4ab1c7e37f9560749fb85b0efa04994c",
+    "code_head": "ddfbad481b4e2e2d4e5a1873f47e43af92d711ef",
+    "binary_sha256": "64d3f76e608ed8431ad2a4a02081237bb94a87d3abe5bebee1cc7ae1cc260127",
+    "fixture": "synthetic typed inputs; actual compiled UI/input/rendering",
+    "observation": "independent image oracle passed"
+  },
+  {
+    "image": "76x30-quota-openai.png",
+    "sha256": "504f1ba67c602f403a5b61a2c1240ed5680d2853fc317caa4e97b56865676db8",
+    "receipt": "/private/tmp/2026-10-selector-iocraft-dialog/captures-run5/quota-filters-76x30/filter-receipt.json",
+    "receipt_sha256": "d9b927a0e6183ef8dee4cd25790c816f4ab1c7e37f9560749fb85b0efa04994c",
+    "code_head": "ddfbad481b4e2e2d4e5a1873f47e43af92d711ef",
+    "binary_sha256": "64d3f76e608ed8431ad2a4a02081237bb94a87d3abe5bebee1cc7ae1cc260127",
+    "fixture": "synthetic typed inputs; actual compiled UI/input/rendering",
+    "observation": "independent image oracle passed"
+  },
+  {
+    "image": "76x30-quota-hidden.png",
+    "sha256": "d46649f51ab08bb673f334ae9da0adac05fe659c4fb87da6e2ed2f2ac8c65225",
+    "receipt": "/private/tmp/2026-10-selector-iocraft-dialog/captures-run5/quota-filters-76x30/filter-receipt.json",
+    "receipt_sha256": "d9b927a0e6183ef8dee4cd25790c816f4ab1c7e37f9560749fb85b0efa04994c",
+    "code_head": "ddfbad481b4e2e2d4e5a1873f47e43af92d711ef",
+    "binary_sha256": "64d3f76e608ed8431ad2a4a02081237bb94a87d3abe5bebee1cc7ae1cc260127",
+    "fixture": "synthetic typed inputs; actual compiled UI/input/rendering",
+    "observation": "independent image oracle passed"
+  },
+  {
+    "image": "76x30-quota-details.png",
+    "sha256": "d9cc56dd6189383b17a9f60252a2783e173a21ff9adbff9e0735b22d65c6c99a",
+    "receipt": "/private/tmp/2026-10-selector-iocraft-dialog/captures-run5/quota-filters-76x30/filter-receipt.json",
+    "receipt_sha256": "d9b927a0e6183ef8dee4cd25790c816f4ab1c7e37f9560749fb85b0efa04994c",
+    "code_head": "ddfbad481b4e2e2d4e5a1873f47e43af92d711ef",
+    "binary_sha256": "64d3f76e608ed8431ad2a4a02081237bb94a87d3abe5bebee1cc7ae1cc260127",
+    "fixture": "synthetic typed inputs; actual compiled UI/input/rendering",
+    "observation": "independent image oracle passed"
+  },
+  {
+    "image": "76x30-quota-details-closed.png",
+    "sha256": "d46649f51ab08bb673f334ae9da0adac05fe659c4fb87da6e2ed2f2ac8c65225",
+    "receipt": "/private/tmp/2026-10-selector-iocraft-dialog/captures-run5/quota-filters-76x30/filter-receipt.json",
+    "receipt_sha256": "d9b927a0e6183ef8dee4cd25790c816f4ab1c7e37f9560749fb85b0efa04994c",
+    "code_head": "ddfbad481b4e2e2d4e5a1873f47e43af92d711ef",
+    "binary_sha256": "64d3f76e608ed8431ad2a4a02081237bb94a87d3abe5bebee1cc7ae1cc260127",
+    "fixture": "synthetic typed inputs; actual compiled UI/input/rendering",
+    "observation": "independent image oracle passed"
+  },
+  {
+    "image": "76x30-quota-empty.png",
+    "sha256": "b2cad82362ea6b97ebc3dc415fd395bc632590415db34d439a9000e6cf4c5f85",
+    "receipt": "/private/tmp/2026-10-selector-iocraft-dialog/captures-run5/quota-empty-76x30/filter-receipt.json",
+    "receipt_sha256": "b3e1bc99fbfbd510b5d722660418092c30ddae3cb460083a58b1db06fd5377aa",
+    "code_head": "ddfbad481b4e2e2d4e5a1873f47e43af92d711ef",
+    "binary_sha256": "64d3f76e608ed8431ad2a4a02081237bb94a87d3abe5bebee1cc7ae1cc260127",
+    "fixture": "synthetic typed inputs; actual compiled UI/input/rendering",
+    "observation": "independent image oracle passed"
+  },
+  {
+    "image": "48x24-sessions-all.png",
+    "sha256": "8c6526ea4463dcad4bd66fdfc2b8c76d01112e7e27704d279851d3484c908fc3",
+    "receipt": "/private/tmp/2026-10-selector-iocraft-dialog/captures-run5/sessions-filters-48x24/filter-receipt.json",
+    "receipt_sha256": "52dda4d350a6173aea55c2be97df468cbf4ed706b1c67ba428b7a45a41ef46aa",
+    "code_head": "ddfbad481b4e2e2d4e5a1873f47e43af92d711ef",
+    "binary_sha256": "64d3f76e608ed8431ad2a4a02081237bb94a87d3abe5bebee1cc7ae1cc260127",
+    "fixture": "synthetic typed inputs; actual compiled UI/input/rendering",
+    "observation": "independent image oracle passed"
+  },
+  {
+    "image": "48x24-sessions-chooser.png",
+    "sha256": "03c9e331cbbe8f6eb576dd58a838be2e032a4ce38bf2ebd725410582313af411",
+    "receipt": "/private/tmp/2026-10-selector-iocraft-dialog/captures-run5/sessions-filters-48x24/filter-receipt.json",
+    "receipt_sha256": "52dda4d350a6173aea55c2be97df468cbf4ed706b1c67ba428b7a45a41ef46aa",
+    "code_head": "ddfbad481b4e2e2d4e5a1873f47e43af92d711ef",
+    "binary_sha256": "64d3f76e608ed8431ad2a4a02081237bb94a87d3abe5bebee1cc7ae1cc260127",
+    "fixture": "synthetic typed inputs; actual compiled UI/input/rendering",
+    "observation": "independent image oracle passed"
+  },
+  {
+    "image": "48x24-sessions-codex.png",
+    "sha256": "ecab2dacba5fd6b35a75254552ee7a0c34cf65a439cd9a9b6f0832db2bdf5b55",
+    "receipt": "/private/tmp/2026-10-selector-iocraft-dialog/captures-run5/sessions-filters-48x24/filter-receipt.json",
+    "receipt_sha256": "52dda4d350a6173aea55c2be97df468cbf4ed706b1c67ba428b7a45a41ef46aa",
+    "code_head": "ddfbad481b4e2e2d4e5a1873f47e43af92d711ef",
+    "binary_sha256": "64d3f76e608ed8431ad2a4a02081237bb94a87d3abe5bebee1cc7ae1cc260127",
+    "fixture": "synthetic typed inputs; actual compiled UI/input/rendering",
+    "observation": "independent image oracle passed"
+  },
+  {
+    "image": "48x24-sessions-details.png",
+    "sha256": "af20c01edfc3568464c8b3fffd1ff64aa11df4bf093444924adef72b6b5fac02",
+    "receipt": "/private/tmp/2026-10-selector-iocraft-dialog/captures-run5/sessions-filters-48x24/filter-receipt.json",
+    "receipt_sha256": "52dda4d350a6173aea55c2be97df468cbf4ed706b1c67ba428b7a45a41ef46aa",
+    "code_head": "ddfbad481b4e2e2d4e5a1873f47e43af92d711ef",
+    "binary_sha256": "64d3f76e608ed8431ad2a4a02081237bb94a87d3abe5bebee1cc7ae1cc260127",
+    "fixture": "synthetic typed inputs; actual compiled UI/input/rendering",
+    "observation": "independent image oracle passed"
+  },
+  {
+    "image": "48x24-sessions-details-closed.png",
+    "sha256": "ecab2dacba5fd6b35a75254552ee7a0c34cf65a439cd9a9b6f0832db2bdf5b55",
+    "receipt": "/private/tmp/2026-10-selector-iocraft-dialog/captures-run5/sessions-filters-48x24/filter-receipt.json",
+    "receipt_sha256": "52dda4d350a6173aea55c2be97df468cbf4ed706b1c67ba428b7a45a41ef46aa",
+    "code_head": "ddfbad481b4e2e2d4e5a1873f47e43af92d711ef",
+    "binary_sha256": "64d3f76e608ed8431ad2a4a02081237bb94a87d3abe5bebee1cc7ae1cc260127",
+    "fixture": "synthetic typed inputs; actual compiled UI/input/rendering",
+    "observation": "independent image oracle passed"
+  },
+  {
+    "image": "48x24-sessions-claude.png",
+    "sha256": "4405e3912eed2d3f1cf3fd5055c9fb12f587a26b8dd2cf57e5772f5beb97b95b",
+    "receipt": "/private/tmp/2026-10-selector-iocraft-dialog/captures-run5/sessions-filters-48x24/filter-receipt.json",
+    "receipt_sha256": "52dda4d350a6173aea55c2be97df468cbf4ed706b1c67ba428b7a45a41ef46aa",
+    "code_head": "ddfbad481b4e2e2d4e5a1873f47e43af92d711ef",
+    "binary_sha256": "64d3f76e608ed8431ad2a4a02081237bb94a87d3abe5bebee1cc7ae1cc260127",
+    "fixture": "synthetic typed inputs; actual compiled UI/input/rendering",
+    "observation": "independent image oracle passed"
+  },
+  {
+    "image": "48x24-quota-all.png",
+    "sha256": "b54044dd404ce939f02953406fa3b9baef4b0538fbcb48c33ba72ab9b2bcf6fe",
+    "receipt": "/private/tmp/2026-10-selector-iocraft-dialog/captures-run5/quota-filters-48x24/filter-receipt.json",
+    "receipt_sha256": "a98a46834806690c06efa47aa49edee2b81941fcfbc4751ec8b93d460bec09b2",
+    "code_head": "ddfbad481b4e2e2d4e5a1873f47e43af92d711ef",
+    "binary_sha256": "64d3f76e608ed8431ad2a4a02081237bb94a87d3abe5bebee1cc7ae1cc260127",
+    "fixture": "synthetic typed inputs; actual compiled UI/input/rendering",
+    "observation": "independent image oracle passed"
+  },
+  {
+    "image": "48x24-quota-chooser.png",
+    "sha256": "d8e853e7c834a448d1d979c5cb5a7553453a1f638ab10302627558b70fabacba",
+    "receipt": "/private/tmp/2026-10-selector-iocraft-dialog/captures-run5/quota-filters-48x24/filter-receipt.json",
+    "receipt_sha256": "a98a46834806690c06efa47aa49edee2b81941fcfbc4751ec8b93d460bec09b2",
+    "code_head": "ddfbad481b4e2e2d4e5a1873f47e43af92d711ef",
+    "binary_sha256": "64d3f76e608ed8431ad2a4a02081237bb94a87d3abe5bebee1cc7ae1cc260127",
+    "fixture": "synthetic typed inputs; actual compiled UI/input/rendering",
+    "observation": "independent image oracle passed"
+  },
+  {
+    "image": "48x24-quota-openai.png",
+    "sha256": "ebeb665710081b3f49715d99c987b9d4c1f9bac66cf9f144815fa84c6d234e85",
+    "receipt": "/private/tmp/2026-10-selector-iocraft-dialog/captures-run5/quota-filters-48x24/filter-receipt.json",
+    "receipt_sha256": "a98a46834806690c06efa47aa49edee2b81941fcfbc4751ec8b93d460bec09b2",
+    "code_head": "ddfbad481b4e2e2d4e5a1873f47e43af92d711ef",
+    "binary_sha256": "64d3f76e608ed8431ad2a4a02081237bb94a87d3abe5bebee1cc7ae1cc260127",
+    "fixture": "synthetic typed inputs; actual compiled UI/input/rendering",
+    "observation": "independent image oracle passed"
+  },
+  {
+    "image": "48x24-quota-hidden.png",
+    "sha256": "2577013d6cfb269b0287a8743ee879429336e561a4b9d877cea5981d3350c103",
+    "receipt": "/private/tmp/2026-10-selector-iocraft-dialog/captures-run5/quota-filters-48x24/filter-receipt.json",
+    "receipt_sha256": "a98a46834806690c06efa47aa49edee2b81941fcfbc4751ec8b93d460bec09b2",
+    "code_head": "ddfbad481b4e2e2d4e5a1873f47e43af92d711ef",
+    "binary_sha256": "64d3f76e608ed8431ad2a4a02081237bb94a87d3abe5bebee1cc7ae1cc260127",
+    "fixture": "synthetic typed inputs; actual compiled UI/input/rendering",
+    "observation": "independent image oracle passed"
+  },
+  {
+    "image": "48x24-quota-details.png",
+    "sha256": "f9ad9defac876b512b617cbaef9e1919384d0cbe9946f98335a8e6fd19d80b09",
+    "receipt": "/private/tmp/2026-10-selector-iocraft-dialog/captures-run5/quota-filters-48x24/filter-receipt.json",
+    "receipt_sha256": "a98a46834806690c06efa47aa49edee2b81941fcfbc4751ec8b93d460bec09b2",
+    "code_head": "ddfbad481b4e2e2d4e5a1873f47e43af92d711ef",
+    "binary_sha256": "64d3f76e608ed8431ad2a4a02081237bb94a87d3abe5bebee1cc7ae1cc260127",
+    "fixture": "synthetic typed inputs; actual compiled UI/input/rendering",
+    "observation": "independent image oracle passed"
+  },
+  {
+    "image": "48x24-quota-details-closed.png",
+    "sha256": "2577013d6cfb269b0287a8743ee879429336e561a4b9d877cea5981d3350c103",
+    "receipt": "/private/tmp/2026-10-selector-iocraft-dialog/captures-run5/quota-filters-48x24/filter-receipt.json",
+    "receipt_sha256": "a98a46834806690c06efa47aa49edee2b81941fcfbc4751ec8b93d460bec09b2",
+    "code_head": "ddfbad481b4e2e2d4e5a1873f47e43af92d711ef",
+    "binary_sha256": "64d3f76e608ed8431ad2a4a02081237bb94a87d3abe5bebee1cc7ae1cc260127",
+    "fixture": "synthetic typed inputs; actual compiled UI/input/rendering",
+    "observation": "independent image oracle passed"
+  },
+  {
+    "image": "48x24-quota-empty.png",
+    "sha256": "f3fce7261ca8655a5c82bd86548a8e7c9a31313d1d71e32fcb23a2c4e9b27dfc",
+    "receipt": "/private/tmp/2026-10-selector-iocraft-dialog/captures-run5/quota-empty-48x24/filter-receipt.json",
+    "receipt_sha256": "3f61ca8b68f172d8fd3fdf50fe4f76080ea65b1092a56952fda3a0b33f1ac4b5",
+    "code_head": "ddfbad481b4e2e2d4e5a1873f47e43af92d711ef",
+    "binary_sha256": "64d3f76e608ed8431ad2a4a02081237bb94a87d3abe5bebee1cc7ae1cc260127",
+    "fixture": "synthetic typed inputs; actual compiled UI/input/rendering",
+    "observation": "independent image oracle passed"
+  },
+  {
+    "image": "48x24-sessions-all-bottom.png",
+    "sha256": "a0707c23eb42169957d8d8ab582e6647de19d4b4c6e4c4ad56bb5b16e81f7da9",
+    "receipt": "/private/tmp/2026-10-selector-iocraft-dialog/captures-run5/sessions-filters-48x24/filter-receipt.json",
+    "receipt_sha256": "52dda4d350a6173aea55c2be97df468cbf4ed706b1c67ba428b7a45a41ef46aa",
+    "code_head": "ddfbad481b4e2e2d4e5a1873f47e43af92d711ef",
+    "binary_sha256": "64d3f76e608ed8431ad2a4a02081237bb94a87d3abe5bebee1cc7ae1cc260127",
+    "fixture": "synthetic typed inputs; actual compiled UI/input/rendering",
+    "observation": "independent image oracle passed"
+  }
+]

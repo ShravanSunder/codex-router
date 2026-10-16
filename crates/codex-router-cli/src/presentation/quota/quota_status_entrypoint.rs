@@ -9,6 +9,7 @@ use super::CreditUsagePolicySaver;
 use super::CreditUsageRefresher;
 use super::quota_browse_rendering::colorize_reset_pace_ansi;
 use super::quota_floor_editor::WeeklyQuotaFloorSaver;
+use super::quota_provider_filters::QuotaInteractionMode;
 use super::quota_status_component::LIVE_QUOTA_STATUS_RELOAD_INTERVAL;
 use super::quota_status_component::LIVE_QUOTA_STATUS_SPINNER_INTERVAL;
 use super::quota_status_component::MIN_QUOTA_WIDTH;
@@ -28,7 +29,7 @@ pub(crate) fn write_quota_status_view(
     let width = view_model.width.max(MIN_QUOTA_WIDTH);
     let height = quota_static_render_height(&view_model, width);
     let mut element = element! {
-        QuotaStatusComponent(view_model: view_model, width: width, height: height)
+        QuotaStatusComponent(view_model: view_model, width: width, height: height, interaction_mode: QuotaInteractionMode::Static)
     };
     let canvas = element.render(None);
     if ansi {

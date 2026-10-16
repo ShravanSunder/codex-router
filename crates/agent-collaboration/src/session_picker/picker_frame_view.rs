@@ -1,9 +1,12 @@
 //! Picker frame view.
 use super::{
-    COMPACT_PICKER_WIDTH, MIN_PICKER_WIDTH, NARROW_PICKER_WIDTH, SIDECAR_PICKER_WIDTH,
-    SessionConversationPreview, SessionsPickerModel, SessionsPickerOutcome, fit_line, footer_lines,
-    picker_body_budget, render_details, render_session_list, render_start_new_details, root_label,
-    runtime_view_label, session_visible_row_budget, sort_label, stacked_panel_heights,
+    MIN_PICKER_WIDTH, NARROW_PICKER_WIDTH, SIDECAR_PICKER_WIDTH, SessionConversationPreview,
+    SessionsPickerModel, SessionsPickerOutcome, fit_line, picker_body_budget, render_details,
+    render_session_list, render_start_new_details, root_label, runtime_view_label,
+    session_visible_row_budget, sort_label,
+};
+use codex_router_tui::{
+    DialogAction, DialogFrame, DialogHost, DialogMargins, DialogPresentation, SurfaceHeader,
 };
 use iocraft::prelude::*;
 use unicode_width::UnicodeWidthStr;
@@ -15,32 +18,59 @@ pub(super) fn render_picker_view(
     selected_conversation: Option<&SessionConversationPreview>,
     height: usize,
     minimum_render_height: usize,
+    session_id_copier: super::super::session_id_clipboard::SessionIdCopier,
 ) -> Element<'static, View> {
     let content_width = model.width.saturating_sub(4).max(MIN_PICKER_WIDTH);
-    let mut filter_controls = render_filter_controls(model, content_width);
+    let control_width = content_width.saturating_sub(2) / 2;
+    let mut filter_controls = vec![element! {
+        View(width: 100pct, column_gap: 2, flex_shrink: 0.0_f32) {
+            View(width: control_width as u32, min_width: 0, overflow: Overflow::Hidden) {
+                #(super::super::picker_machine_view::render_machine_control(model, model_state, control_width))
+            }
+            View(flex_grow: 1.0_f32, min_width: 0, overflow: Overflow::Hidden) {
+                #(super::super::provider_filter_view::render_provider_controls(model, model_state, control_width))
+            }
+        }
+    }.into_any()];
+    filter_controls.extend(render_filter_controls(model, content_width));
+    if model.machine_controls.filter
+        != super::super::picker_machine_controls::PickerMachineFilter::Default
+        && !model.source_progress.is_empty()
+    {
+        let status = model
+            .source_progress
+            .iter()
+            .map(|progress| progress.display_line())
+            .collect::<Vec<_>>()
+            .join(" | ");
+        filter_controls.push(element! { Text(content: fit_line(&status, content_width), color: Color::Grey, wrap: TextWrap::NoWrap) }.into_any());
+    }
+    if let Some(notice) = model
+        .machine_controls
+        .all_notice(&model.request.router_registry, &model.source_progress)
+    {
+        filter_controls.push(element! { Text(content: fit_line(&notice, content_width), color: Color::Yellow, wrap: TextWrap::NoWrap) }.into_any());
+    }
     if let Some(notice) = model.runtime_coverage.notice() {
         filter_controls.push(element! {
             Text(content: fit_line(notice, content_width), color: Color::Yellow, wrap: TextWrap::NoWrap)
         }.into_any());
     }
+    if let Some(error) = super::super::source_action_view::source_error(model) {
+        filter_controls.push(error);
+    }
     let control_height = filter_controls.len();
-    let footer_lines = footer_lines(content_width, model.show_help);
-    let body_budget = picker_body_budget(
-        height,
-        control_height,
-        footer_lines.len(),
-        minimum_render_height,
-    );
-    let mut children = vec![
-        element! {
-            Text(
-                content: "Resume a previous session",
-                color: Color::Cyan,
-                weight: Weight::Bold,
-            )
-        }
-        .into_any(),
-    ];
+    let body_budget = picker_body_budget(height, control_height, minimum_render_height);
+    let inactive = model.show_help
+        || model.provider_filter_draft.is_some()
+        || model.details_dialog.is_some()
+        || model.source_action.pending.is_some();
+    let mut details_model = model_state;
+    let mut children = vec![element! {
+        SurfaceHeader(title: format!("Sessions · {}/{}", model.visible_record_len(), model.request.records.len()), inactive,
+            help_action: Some(super::super::picker_help_view::help_action(model_state)),
+            children: vec![element!(DialogAction(label: "Details", handler: move |_| details_model.write().open_details_dialog())).into_any()])
+    }.into_any()];
     children.extend(filter_controls);
 
     let focused_record = model.focused_record();
@@ -54,17 +84,14 @@ pub(super) fn render_picker_view(
                     #(render_session_list(model, model_state, selected_outcome, list_width, visible_row_budget, body_budget))
                     View(width: 2) { Text(content: "") }
                     #(focused_record
-                        .map(|record| render_details(record, detail_width, selected_conversation, body_budget))
+                        .map(|record| render_details(record, detail_width, selected_conversation, Size::Length(body_budget as u32)))
                         .unwrap_or_else(|| render_start_new_details(model, detail_width, body_budget)))
                 }
             }
             .into_any(),
         );
     } else {
-        let stacked_heights = (model.width >= NARROW_PICKER_WIDTH)
-            .then(|| stacked_panel_heights(body_budget))
-            .flatten();
-        let list_height = stacked_heights.map_or(body_budget, |(list_height, _)| list_height);
+        let list_height = body_budget;
         let visible_row_budget = session_visible_row_budget(model, list_height);
         children.push(render_session_list(
             model,
@@ -74,22 +101,10 @@ pub(super) fn render_picker_view(
             visible_row_budget,
             list_height,
         ));
-        if let Some((_, details_height)) = stacked_heights {
-            children.push(
-                focused_record
-                    .map(|record| {
-                        render_details(record, content_width, selected_conversation, details_height)
-                    })
-                    .unwrap_or_else(|| {
-                        render_start_new_details(model, content_width, details_height)
-                    }),
-            );
-        }
     }
 
-    children.push(render_footer(content_width, footer_lines));
     let picker_height = height.max(minimum_render_height);
-    element! {
+    let background = element! {
         View(
             width: model.width as u32,
             height: picker_height as u32,
@@ -106,93 +121,112 @@ pub(super) fn render_picker_view(
             #(children)
         }
     }
+    .into_any();
+    let viewport_width = u16::try_from(model.width).unwrap_or(u16::MAX);
+    let viewport_height = u16::try_from(picker_height).unwrap_or(u16::MAX);
+    let dialog = if let Some(pending) = &model.source_action.pending {
+        Some(super::super::source_action_view::checking_dialog(
+            pending,
+            model_state,
+            picker_height,
+        ))
+    } else if model.show_help {
+        Some(super::super::picker_help_view::render_help(
+            model,
+            model_state,
+            picker_height,
+        ))
+    } else if model.provider_filter_draft.is_some() {
+        Some(element! {
+            DialogFrame(width: viewport_width, height: viewport_height,
+                title: "Session filters".to_owned(), help_action: Some(super::super::picker_help_view::help_action(model_state)),
+                presentation: if model.width < NARROW_PICKER_WIDTH { DialogPresentation::FullScreen } else { DialogPresentation::Framed { maximum_width: 72, maximum_height: 16 } },
+                margins: DialogMargins { top: 1, right: 2, bottom: 1, left: 2 },
+                actions: super::super::provider_filter_view::render_provider_actions(model, model_state)) {
+                #(super::super::provider_filter_view::render_provider_chooser(model, model_state))
+            }
+        }.into_any())
+    } else if model.details_dialog.is_some() {
+        Some(super::details_dialog_view::render_details_dialog(
+            model,
+            model_state,
+            selected_outcome,
+            selected_conversation,
+            viewport_width,
+            viewport_height,
+            session_id_copier,
+        ))
+    } else {
+        None
+    };
+    element! {
+        View(width: model.width as u32, height: picker_height as u32) {
+            DialogHost(width: viewport_width, height: viewport_height, background: vec![background], dialog)
+        }
+    }
 }
 
 pub(super) fn render_filter_controls(
     model: &SessionsPickerModel,
     width: usize,
 ) -> Vec<AnyElement<'static>> {
-    let filter = format!("Search: [{}]", model.search);
-    let scope = format!("[{}]", root_label(model.root));
-    let view = format!("View: [{}]", runtime_view_label(model.runtime_view));
-    let sort = format!("Sort: [{}]", sort_label(model.sort));
-
-    if one_line_filter_controls_fit_for_parts(width, [&filter, &scope, &view, &sort]) {
-        return vec![control_line(vec![filter, scope, view, sort])];
+    let mut controls = Vec::new();
+    if !model.search.is_empty() {
+        controls.push(control_line(vec![fit_line(
+            &format!("Search: [{}]", model.search),
+            width,
+        )]));
     }
-
-    if width < COMPACT_PICKER_WIDTH {
-        return [filter, scope, view, sort]
-            .into_iter()
-            .map(|line| control_line(vec![line]))
-            .collect();
+    let mut settings = Vec::new();
+    if model.root != super::SessionsPickerRoot::Any {
+        settings.push(format!("[{}]", root_label(model.root)));
     }
-
-    if width < NARROW_PICKER_WIDTH {
-        return vec![
-            control_line(vec![filter]),
-            control_line(vec![scope, view]),
-            control_line(vec![sort]),
-        ];
+    if model.runtime_view != super::super::picker_model::SessionsPickerRuntimeView::All {
+        settings.push(format!(
+            "View: [{}]",
+            runtime_view_label(model.runtime_view)
+        ));
     }
-
-    vec![
-        control_line(vec![filter]),
-        control_line(vec![scope, view, sort]),
-    ]
+    if model.sort != super::SessionsSort::Updated {
+        settings.push(format!("Sort: [{}]", sort_label(model.sort)));
+    }
+    if settings.is_empty() {
+        return controls;
+    }
+    if one_line_filter_controls_fit_for_parts(width, settings.iter().map(String::as_str)) {
+        controls.push(control_line(settings));
+    } else {
+        controls.extend(
+            settings
+                .into_iter()
+                .map(|setting| control_line(vec![setting])),
+        );
+    }
+    controls
 }
 
-pub(super) fn one_line_filter_controls_fit_for_parts<const N: usize>(
+pub(super) fn one_line_filter_controls_fit_for_parts<'a>(
     width: usize,
-    parts: [&str; N],
+    parts: impl IntoIterator<Item = &'a str>,
 ) -> bool {
-    UnicodeWidthStr::width(parts.join("    ").as_str()) <= width
+    let parts = parts.into_iter().collect::<Vec<_>>();
+    parts
+        .iter()
+        .map(|part| UnicodeWidthStr::width(*part))
+        .sum::<usize>()
+        + parts.len().saturating_sub(1) * 3
+        <= width
 }
 
 pub(super) fn control_line(parts: Vec<String>) -> AnyElement<'static> {
-    element! {
-        Text(
-            content: parts.join("    "),
-            color: Color::Grey,
-            weight: Weight::Normal,
-        )
-    }
-    .into_any()
-}
-
-pub(super) fn render_footer(width: usize, lines: Vec<String>) -> AnyElement<'static> {
-    let footer_text = lines
+    let children = parts
         .into_iter()
-        .map(|line| {
+        .map(|part| {
             element! {
-                Text(
-                    content: fit_line(&line, width),
-                    color: Color::Grey,
-                    weight: Weight::Light,
-                    wrap: TextWrap::NoWrap,
-                )
+                Text(content: part, color: Color::Grey, wrap: TextWrap::NoWrap)
             }
             .into_any()
         })
         .collect::<Vec<_>>();
-    element! {
-        View(
-            width: 100pct,
-            flex_grow: 1.0_f32,
-            flex_direction: FlexDirection::Column,
-            justify_content: JustifyContent::FlexEnd,
-        ) {
-            View(
-                width: 100pct,
-                flex_direction: FlexDirection::Column,
-                border_style: BorderStyle::Single,
-                border_edges: Edges::Top,
-                border_color: Color::DarkGrey,
-                padding_top: 0,
-            ) {
-                #(footer_text)
-            }
-        }
-    }
-    .into_any()
+    element! { View(column_gap: 3, flex_shrink: 0.0_f32) { #(children) } }.into_any()
 }

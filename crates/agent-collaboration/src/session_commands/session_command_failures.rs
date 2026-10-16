@@ -35,6 +35,26 @@ pub enum SessionsCommandError {
     /// Interactive picker cannot render inside the current terminal width.
     #[error("sessions interactive picker requires a wider terminal")]
     TerminalTooNarrow,
+    /// The selected configured source has no qualified native attachment/policy route.
+    #[error("selected machine execution route needs verification")]
+    SessionSourceUnqualified,
+    /// The selected source has no native route in this launch context.
+    #[error("selected session source is unavailable in this launch context")]
+    SessionSourceUnavailable,
+    /// Configured actions permit no caller override of identity, directory or policy.
+    #[error("configured launch accepts only model, effort and terminal display options")]
+    ConfiguredArgumentsUnsupported,
+    /// The source SSH process could not be started; no source handoff occurred.
+    #[error("could not start source SSH: {0}")]
+    SourceSshSpawn(std::io::Error),
+    /// A started SSH process cannot prove that a native action had no effect.
+    #[error(
+        "source SSH exited with {status}; session effect may be unknown; inspect the selected source before trying again"
+    )]
+    SourceHandoffUnknown {
+        /// SSH exit status, with no source-supplied diagnostic payload.
+        status: String,
+    },
     /// Codex failed to launch.
     #[error("failed to launch codex resume command: {0}")]
     CodexLaunch(std::io::Error),

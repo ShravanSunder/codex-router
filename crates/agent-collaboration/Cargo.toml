@@ -9,13 +9,14 @@ publish.workspace = true
 workspace = true
 
 [features]
-quota-reset-test-harness = []
+quota-reset-test-harness = ["dep:sqlx"]
 
 [[bin]]
 name = "agent-sessions"
 path = "src/bin/agent-sessions.rs"
 
 [dependencies]
+chrono.workspace = true
 tokio-util.workspace = true
 futures-util.workspace = true
 tokio-tungstenite.workspace = true
@@ -24,26 +25,35 @@ message-board = { path = "../message-board", version = "0.1.20" }
 codex-native-integration.workspace = true
 clap.workspace = true
 comfy-table.workspace = true
-crossterm.workspace = true
+crossterm = { workspace = true, features = ["osc52"] }
 iocraft.workspace = true
+codex-router-tui.workspace = true
+jsonc-parser.workspace = true
+reqwest = { workspace = true, features = ["json"] }
+rmcp = { workspace = true, features = ["client"] }
+url.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+toml = "1.1.2"
+tempfile = "3.27.0"
+sqlx = { workspace = true, features = ["sqlite"], optional = true }
 thiserror.workspace = true
-tokio = { workspace = true, features = ["io-std"] }
+tokio = { workspace = true, features = ["io-std", "fs"] }
 unicode-width.workspace = true
 
 [dev-dependencies]
+axum = { workspace = true, features = ["json"] }
 tokio = { workspace = true, features = ["test-util"] }
 codex-router-test-support = { path = "../codex-router-test-support", version = "0.1.4" }
 collaboration-mcp = { path = "../collaboration-mcp", version = "0.1.30", features = ["test-support"] }
 claude-code-peer-messaging = { path = "../claude-code-peer-messaging", version = "0.1.37" }
-tempfile = "3.27.0"
 jsonschema.workspace = true
 reqwest = { workspace = true, features = ["json"] }
 sha2.workspace = true
+rustls = { version = "=0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
+tokio-rustls = { version = "=0.26.4", default-features = false, features = ["ring", "tls12"] }
 sqlx = { workspace = true, features = ["sqlite"] }
 uuid.workspace = true
-chrono.workspace = true
 agent-automation = { path = "../agent-automation", version = "0.1.16" }
 automation-storage = { path = "../automation-storage", version = "0.1.16" }
 codex-router-host.workspace = true

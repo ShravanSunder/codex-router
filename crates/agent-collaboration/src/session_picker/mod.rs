@@ -1,14 +1,44 @@
+mod details_dialog_actions;
+mod details_dialog_state;
 mod interactive_row;
 mod picker_actions;
 mod picker_component;
 mod picker_filters;
+mod picker_fork_confirmation;
+mod picker_fork_view;
+mod picker_machine_controls;
+mod picker_machine_view;
 mod picker_model;
+mod provider_filter_input;
+mod provider_filter_model;
+#[cfg(feature = "quota-reset-test-harness")]
+mod provider_filter_storyboard_fixture;
+#[cfg(test)]
+mod provider_filter_tests;
+mod provider_filter_view;
+mod session_id_clipboard;
+pub(crate) use provider_filter_model::SessionProviderFamily;
+mod picker_source_view;
+pub(crate) use picker_machine_controls::PickerMachineSourceMode;
 #[cfg(test)]
 mod picker_model_tests;
 mod picker_rendering;
 mod picker_request;
+mod source_inventory_binding;
+mod source_inventory_request;
+pub(crate) use source_inventory_binding::{InventoryEndpointKind, SourceInventoryBinding};
+mod source_reload_progress;
+mod source_reload_worker;
+pub(crate) use source_inventory_request::{
+    InventoryPageProgress, PickerSourceContext, SourceContinuation, SourceInventoryRejection,
+    SourceInventoryRequest, SourceInventoryResult,
+};
+#[cfg(test)]
+mod picker_source_identity_tests;
 #[cfg(any(test, feature = "quota-reset-test-harness"))]
 mod test_support;
+#[cfg(feature = "quota-reset-test-harness")]
+pub(crate) use test_support::picker_request as terminal_fixture_request;
 
 pub(crate) use picker_actions::SessionsPickerOutcome;
 pub(crate) use picker_component::run_sessions_picker;
@@ -18,3 +48,13 @@ pub(crate) use picker_request::SessionsPickerDataQuery;
 pub(crate) use picker_request::SessionsPickerRecordLoader;
 pub(crate) use picker_request::SessionsPickerRequest;
 pub(crate) use picker_request::SessionsPickerRoot;
+
+mod picker_help_view;
+
+mod source_action_state;
+#[cfg(test)]
+mod source_action_tests;
+mod source_action_view;
+mod source_action_worker;
+
+mod source_reload_port;

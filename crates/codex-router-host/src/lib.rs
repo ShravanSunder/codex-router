@@ -89,6 +89,11 @@ pub use codex_update_preparation::UpdateDeadlines;
 pub use codex_update_preparation::UpdateResult;
 pub use host_configuration::HostConfig;
 pub use host_configuration::HostConfigInputs;
+mod remote_access;
+pub use remote_access::RemoteAccess;
+mod tailscale_exposure;
+mod tailscale_process;
+mod tailscale_status;
 pub use host_configuration::HostCoordinationPaths;
 pub use host_configuration::HostDeadlineError;
 pub use host_configuration::HostDeadlineInputs;
@@ -146,7 +151,7 @@ pub use backend_publication::BackendPublication;
 mod collaboration_runtime;
 pub(crate) use collaboration_runtime::HostCollaborationInputs;
 pub use collaboration_runtime::{
-    BackendSchemaEvidence, CollaborationRuntime, CollaborationRuntimeInputs,
+    BackendSchemaEvidence, CollaborationFailure, CollaborationRuntime, CollaborationRuntimeInputs,
     ExternalProviderLaunchBinding,
 };
 

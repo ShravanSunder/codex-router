@@ -10,7 +10,9 @@ const AGE_COLUMN_WIDTH: usize = 6;
 
 fn session_column_widths(width: usize) -> (usize, usize, usize) {
     let inner_width = width.saturating_sub(2);
-    let status_width = STATUS_COLUMN_WIDTH;
+    // Compact rows show a status icon, so preserve identity space instead of
+    // reserving the full desktop heading width for that one-cell value.
+    let status_width = if width < 43 { 2 } else { STATUS_COLUMN_WIDTH };
     let age_width = if width < 43 { 3 } else { AGE_COLUMN_WIDTH };
     let fixed_width = 2 + status_width + (age_width * 2) + 3;
     let title_width = inner_width.saturating_sub(fixed_width).max(2);
@@ -55,6 +57,7 @@ pub(super) fn render_session_list(
                 element! {
                     InteractiveSessionChoiceRow(
                         focus_handler: move |_| {
+                            model_state.write().machine_controls.control_focused = false;
                             let should_update_focus = {
                                 let model_value = model_state.read();
                                 model_value.focused_session_id().is_some()
@@ -65,7 +68,7 @@ pub(super) fn render_session_list(
                             }
                         },
                         activation_handler: move |_| {
-                            selected_outcome.set(Some(SessionsPickerOutcome::StartNewSession));
+                            selected_outcome.set(model_state.write().start_new_action());
                         },
                         activates_on_click: true,
                     ) {
@@ -81,6 +84,7 @@ pub(super) fn render_session_list(
                 element! {
                     InteractiveSessionChoiceRow(
                         focus_handler: move |_| {
+                            model_state.write().machine_controls.control_focused = false;
                             let should_update_focus = {
                                 let model_value = model_state.read();
                                 model_value.focused_identity() != Some(&identity)
@@ -169,7 +173,7 @@ pub(super) fn render_start_new_row(
         ) {
             View(width: 100pct) {
                 View(width: 2) { Text(content: title_prefix, color: if selected { Color::Yellow } else { foreground }, weight: Weight::Bold, wrap: TextWrap::NoWrap) }
-                View(width: title_width as u32, overflow: Overflow::Hidden) { Text(content: truncate_end("Start new session", title_width), color: if selected { Color::Yellow } else { foreground }, weight: Weight::Bold, wrap: TextWrap::NoWrap) }
+                View(width: title_width as u32, overflow: Overflow::Hidden) { Text(content: truncate_end("New Codex session", title_width), color: if selected { Color::Yellow } else { foreground }, weight: Weight::Bold, wrap: TextWrap::NoWrap) }
                 Text(content: " ")
                 View(width: status_width as u32, overflow: Overflow::Hidden) { Text(content: "-", color: foreground, weight: Weight::Bold, wrap: TextWrap::NoWrap) }
                 Text(content: " ")
@@ -210,14 +214,14 @@ pub(super) fn render_session_header(width: usize) -> AnyElement<'static> {
             padding_left: 1,
             padding_right: 1,
         ) {
-            View(width: 2) { Text(content: "  ", color: Color::Cyan, weight: Weight::Bold) }
-            View(width: title_width as u32) { Text(content: "Session", color: Color::Cyan, weight: Weight::Bold) }
+            View(width: 2) { Text(content: "  ", color: Color::White, weight: Weight::Bold) }
+            View(width: title_width as u32) { Text(content: "Session", color: Color::White, weight: Weight::Bold) }
             Text(content: " ")
-            View(width: status_width as u32, overflow: Overflow::Hidden) { Text(content: "Status", color: Color::Cyan, weight: Weight::Bold) }
+            View(width: status_width as u32, overflow: Overflow::Hidden) { Text(content: if width < 43 { "St" } else { "Status" }, color: Color::White, weight: Weight::Bold) }
             Text(content: " ")
-            View(width: age_width as u32, overflow: Overflow::Hidden, justify_content: JustifyContent::FlexEnd) { Text(content: "Upd", color: Color::Cyan, weight: Weight::Bold) }
+            View(width: age_width as u32, overflow: Overflow::Hidden, justify_content: JustifyContent::FlexEnd) { Text(content: "Upd", color: Color::White, weight: Weight::Bold) }
             Text(content: " ")
-            View(width: age_width as u32, overflow: Overflow::Hidden, justify_content: JustifyContent::FlexEnd) { Text(content: "New", color: Color::Cyan, weight: Weight::Bold) }
+            View(width: age_width as u32, overflow: Overflow::Hidden, justify_content: JustifyContent::FlexEnd) { Text(content: "New", color: Color::White, weight: Weight::Bold) }
         }
     }
     .into_any()
@@ -238,11 +242,7 @@ pub(super) fn render_record_row(
     width: usize,
 ) -> AnyElement<'static> {
     let foreground = if selected { Color::White } else { Color::Grey };
-    let metadata = if selected {
-        Color::Grey
-    } else {
-        Color::DarkGrey
-    };
+    let metadata = Color::Grey;
     let title_prefix = if selected { "❯ " } else { "  " };
     let (title_width, status_width, age_width) = session_column_widths(width);
     let title = truncate_end(&record.title, title_width);
@@ -274,7 +274,12 @@ pub(super) fn render_record_row(
                 Text(content: " ")
                 View(width: age_width as u32, overflow: Overflow::Hidden, justify_content: JustifyContent::FlexEnd) { Text(content: compact_age(&record.created), color: foreground, weight: Weight::Bold, wrap: TextWrap::NoWrap) }
             }
-            Text(content: second_line, color: metadata, weight: Weight::Light, wrap: TextWrap::NoWrap)
+            View(width: 100pct, column_gap: 1, overflow: Overflow::Hidden) {
+                Text(content: record.client_provider_family().label(), color: metadata, weight: Weight::Normal, wrap: TextWrap::NoWrap)
+                Text(content: record.machine_label(), color: metadata, weight: Weight::Normal, wrap: TextWrap::NoWrap)
+                Text(content: "·", color: metadata)
+                Text(content: second_line, color: metadata, weight: Weight::Normal, wrap: TextWrap::NoWrap)
+            }
         }
     }
     .into_any()

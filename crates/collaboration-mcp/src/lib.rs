@@ -40,5 +40,11 @@ mod provider_conversation_http_tests;
 mod provider_conversation_live_http_tests;
 #[cfg(test)]
 mod provider_stdio_diagnostic_http_tests;
+mod proxy_authority;
+#[cfg(test)]
+mod proxy_authority_tests;
 #[cfg(test)]
 mod thread_subscription_entry_tests;
+#[cfg(test)]
+mod unix_origin_tests;
+pub use proxy_authority::ProxyAuthority;

@@ -60,7 +60,69 @@ pub(super) struct QuotaResetFixture {
     secret_manifest_before: BTreeMap<String, String>,
 }
 
+#[derive(Clone, Copy)]
+pub(super) enum ProviderFilterFixtureScenario {
+    MixedAccounts,
+    ClaudeAccountsDisabled,
+}
+
 impl QuotaResetFixture {
+    pub(super) async fn create_provider_filters(
+        scenario: ProviderFilterFixtureScenario,
+    ) -> TestResult<Self> {
+        let mut fixture = Self::create().await?;
+        let state = AsyncSqliteStateStore::open(&fixture.root.join("state.sqlite")).await?;
+        let claude_enabled = matches!(scenario, ProviderFilterFixtureScenario::MixedAccounts);
+        for (provider, account_name, label, status, generation) in [
+            (
+                codex_router_core::provider::Provider::Openai,
+                "acct_pty_alpha",
+                "OpenAI Alpha",
+                AccountStatus::Enabled,
+                Some(7),
+            ),
+            (
+                codex_router_core::provider::Provider::Openai,
+                "acct_pty_beta",
+                "OpenAI Beta",
+                AccountStatus::Disabled,
+                Some(11),
+            ),
+            (
+                codex_router_core::provider::Provider::Claude,
+                "acct_filter_gamma",
+                "Claude Gamma",
+                if claude_enabled {
+                    AccountStatus::Enabled
+                } else {
+                    AccountStatus::Disabled
+                },
+                None,
+            ),
+            (
+                codex_router_core::provider::Provider::Claude,
+                "acct_filter_delta",
+                "Claude Delta",
+                AccountStatus::Disabled,
+                None,
+            ),
+        ] {
+            let account_id = AccountId::new(account_name)?;
+            let account = AccountRecord::new(provider, account_id, label, status);
+            let account = if let Some(generation) = generation {
+                account.with_active_credential_generation(generation)
+            } else {
+                account
+            };
+            state.upsert_account(&account).await?;
+        }
+        state.close().await?;
+        // Arrange must complete before the byte-level no-mutation baseline.
+        fixture.state_bytes_before = fs::read(fixture.root.join("state.sqlite"))?;
+        fixture.assert_secrets_unchanged()?;
+        Ok(fixture)
+    }
+
     pub(super) async fn create() -> TestResult<Self> {
         let sequence = FIXTURE_COUNTER.fetch_add(1, Ordering::Relaxed);
         let root = std::env::temp_dir().join(format!(

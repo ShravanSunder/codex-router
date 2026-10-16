@@ -66,6 +66,16 @@ impl RunArgumentsFailure {
 }
 
 pub fn run_arguments(arguments: Vec<OsString>) -> Result<(), RunArgumentsFailure> {
+    if arguments.first().is_some_and(|argument| {
+        argument == crate::sessions::source_ssh_protocol::SOURCE_REQUEST_SWITCH
+    }) {
+        let context = CliContext::new(std::env::vars().collect());
+        return crate::sessions::source_ssh_executor::run_source_entry(&arguments, &context)
+            .map_err(|error| RunArgumentsFailure {
+                message: error.to_string(),
+                exit_code: error.exit_code(),
+            });
+    }
     let command = crate::sessions::SessionsCommand::parse(arguments).map_err(|message| {
         RunArgumentsFailure {
             message,

@@ -388,16 +388,66 @@ impl HostRuntime {
                 };
                 if let Err(error) = result {
                     tracing::error!("collaboration lifecycle synchronization failed");
-                    let _shutdown = owner.shutdown().await;
+                    let cleanup = owner.shutdown().await;
+                    if config.remote_access().is_some() {
+                        let error = match cleanup {
+                            Ok(()) => error,
+                            Err(cleanup) => std::io::Error::other(format!(
+                                "{error}; exposure cleanup: {cleanup}"
+                            )),
+                        };
+                        state.phase = HostPhase::Stopping;
+                        return lifecycle_convergence::settle_failed_tailnet_exposure(
+                            error,
+                            lifecycle_convergence::ShutdownContext {
+                                activation: &mut active_host_replacement,
+                                active_update: &mut active_update,
+                                pending_identity: &mut pending_identity,
+                                retained_updater: &mut retained_updater,
+                                active_app_server_restart: &mut active_restart,
+                                active_router_restart: &mut active_router_restart,
+                                recovery: &mut recovery,
+                                app_server: &mut app_server,
+                                router: &mut router_child,
+                            },
+                        )
+                        .await;
+                    }
                     // Preserve lifecycle ownership and cleanup; no listener remains advertised.
                     let _reported = error;
                 }
             }
             tokio::select! {
                 failure = collaboration_lifecycle::wait_failure(&mut collaboration), if collaboration.is_some() => {
-                    tracing::error!("collaboration listener failed");
-                    let _failure = failure;
-                    if let Some(owner) = &mut collaboration { let _closed = owner.shutdown().await; }
+                    match failure {
+                        crate::CollaborationFailure::LocalListener(error) => {
+                            tracing::error!("collaboration listener failed");
+                            let _failure = error;
+                            if let Some(owner) = &mut collaboration { let _closed = owner.shutdown().await; }
+                        }
+                        crate::CollaborationFailure::TailnetExposure(error) => {
+                            let cleanup = match &mut collaboration {
+                                Some(owner) => owner.shutdown().await,
+                                None => Ok(()),
+                            };
+                            state.phase = HostPhase::Stopping;
+                            let error = match cleanup {
+                                Ok(()) => error,
+                                Err(cleanup) => std::io::Error::other(format!("{error}; exposure cleanup: {cleanup}")),
+                            };
+                            return lifecycle_convergence::settle_failed_tailnet_exposure(error, lifecycle_convergence::ShutdownContext {
+                                activation: &mut active_host_replacement,
+                                active_update: &mut active_update,
+                                pending_identity: &mut pending_identity,
+                                retained_updater: &mut retained_updater,
+                                active_app_server_restart: &mut active_restart,
+                                active_router_restart: &mut active_router_restart,
+                                recovery: &mut recovery,
+                                app_server: &mut app_server,
+                                router: &mut router_child,
+                            }).await;
+                        }
+                    }
                 }
                 accepted = instance.listener().accept() => {
                     if let Ok((stream, _peer)) = accepted
@@ -690,7 +740,10 @@ impl HostRuntime {
                     });
                 }
                 _ = interrupt.recv() => {
-                    if let Some(owner) = &mut collaboration { let _closed = owner.shutdown().await; }
+                    let collaboration_shutdown = match &mut collaboration {
+                        Some(owner) => owner.shutdown().await,
+                        None => Ok(()),
+                    };
                     state.phase = HostPhase::Stopping;
                     lifecycle_convergence::settle_for_shutdown(lifecycle_convergence::ShutdownContext {
                         activation: &mut active_host_replacement,
@@ -703,10 +756,16 @@ impl HostRuntime {
                         app_server: &mut app_server,
                         router: &mut router_child,
                     }).await?;
+                    if config.remote_access().is_some() {
+                        collaboration_shutdown.map_err(HostError::Collaboration)?;
+                    }
                     return Ok(HostExit::Signal);
                 }
                 _ = terminate.recv() => {
-                    if let Some(owner) = &mut collaboration { let _closed = owner.shutdown().await; }
+                    let collaboration_shutdown = match &mut collaboration {
+                        Some(owner) => owner.shutdown().await,
+                        None => Ok(()),
+                    };
                     state.phase = HostPhase::Stopping;
                     lifecycle_convergence::settle_for_shutdown(lifecycle_convergence::ShutdownContext {
                         activation: &mut active_host_replacement,
@@ -719,10 +778,16 @@ impl HostRuntime {
                         app_server: &mut app_server,
                         router: &mut router_child,
                     }).await?;
+                    if config.remote_access().is_some() {
+                        collaboration_shutdown.map_err(HostError::Collaboration)?;
+                    }
                     return Ok(HostExit::Signal);
                 }
                 _ = hangup.recv() => {
-                    if let Some(owner) = &mut collaboration { let _closed = owner.shutdown().await; }
+                    let collaboration_shutdown = match &mut collaboration {
+                        Some(owner) => owner.shutdown().await,
+                        None => Ok(()),
+                    };
                     state.phase = HostPhase::Stopping;
                     lifecycle_convergence::settle_for_shutdown(lifecycle_convergence::ShutdownContext {
                         activation: &mut active_host_replacement,
@@ -735,6 +800,9 @@ impl HostRuntime {
                         app_server: &mut app_server,
                         router: &mut router_child,
                     }).await?;
+                    if config.remote_access().is_some() {
+                        collaboration_shutdown.map_err(HostError::Collaboration)?;
+                    }
                     return Ok(HostExit::Signal);
                 }
             }

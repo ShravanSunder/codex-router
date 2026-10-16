@@ -105,20 +105,20 @@ async fn account_options_page_keys_use_rendered_capacity_and_ack_and_reinspectio
         ),
         (
             TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Esc)),
-            Some("enter inspect  tab credits  esc back"),
+            Some("Close"),
         ),
         (
             TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Esc)),
-            Some("ctrl-r account options"),
+            Some("Filters"),
         ),
         (TerminalEvent::Key(control_key('r')), Some("1-1 of 5")),
         (
             TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Esc)),
-            Some("enter inspect  tab credits  esc back"),
+            Some("Close"),
         ),
         (
             TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Esc)),
-            Some("ctrl-r account options"),
+            Some("Filters"),
         ),
         (
             TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Char('q'))),
@@ -130,7 +130,7 @@ async fn account_options_page_keys_use_rendered_capacity_and_ack_and_reinspectio
         QuotaStatusComponent(
             view_model: quota_two_account_view_model(),
             width: 100usize,
-            height: 19usize,
+            height: 18usize,
             reset_intent_sender: Some(ports.intent_sender),
             reset_snapshot_receiver: Some(ports.snapshot_receiver),
         )
@@ -146,8 +146,8 @@ async fn account_options_page_keys_use_rendered_capacity_and_ack_and_reinspectio
                 "4-4 of 5",
                 "5-5 of 5",
                 "Credit usage",
-                "enter inspect  tab credits  esc back",
-                "ctrl-r account options",
+                "Close",
+                "Filters",
             ] {
                 if frame.contains(marker) {
                     let _ = acknowledgement_sender.send(marker);
@@ -178,13 +178,7 @@ async fn account_options_page_keys_use_rendered_capacity_and_ack_and_reinspectio
     );
     assert_ordered_frame_markers(
         &frames,
-        &[
-            "Credit usage",
-            "enter inspect  tab credits  esc back",
-            "ctrl-r account options",
-            "enter inspect  tab credits  esc back",
-            "ctrl-r account options",
-        ],
+        &["Credit usage", "Close", "Filters", "Close", "Filters"],
     );
 }
 
@@ -394,4 +388,134 @@ fn assert_ordered_inventory_pages(frames: &[String], expected_pages: &[(&str, &s
         };
         next_frame_index = frame_index + 1;
     }
+}
+
+#[tokio::test]
+async fn cancellation_body_text_precedes_acknowledged_options_close_action() {
+    #[derive(Debug, PartialEq)]
+    enum CancellationProofPhase {
+        InitialBrowse,
+        Inspected,
+        CancellationPending,
+        BrowseAcknowledgement,
+        OptionsClosed,
+        Finished,
+    }
+
+    let (ports, mut intent_receiver, snapshot_sender) =
+        ResetSessionPorts::test_channels(options_paging_snapshot(WorkflowPhase::Browse));
+    let session_driver = tokio::spawn(async move {
+        expect_options_inspection_start(&mut intent_receiver).await;
+        snapshot_sender
+            .send(options_paging_snapshot(WorkflowPhase::Inspected))
+            .expect("publish inspected state");
+        assert_eq!(
+            intent_receiver.recv().await,
+            Some(ResetSessionIntent::Cancel)
+        );
+        // Hold the existing Inspected snapshot until an early Escape reaches
+        // the real handler. A body-text wait can advance during this interval.
+        assert_eq!(
+            intent_receiver.recv().await,
+            Some(ResetSessionIntent::Cancel),
+            "Escape before Browse acknowledgement cancels inspection again"
+        );
+        snapshot_sender
+            .send(options_paging_snapshot(WorkflowPhase::Browse))
+            .expect("acknowledge cancellation only after observing early Escape");
+    });
+    let (event_sender, event_receiver) = tokio::sync::mpsc::unbounded_channel();
+    let events = futures_util::stream::unfold(event_receiver, |mut receiver| async {
+        receiver.recv().await.map(|event| (event, receiver))
+    });
+    let mut terminal = element! {
+        QuotaStatusComponent(
+            view_model: quota_two_account_view_model(),
+            width: 170usize,
+            height: 48usize,
+            reset_intent_sender: Some(ports.intent_sender),
+            reset_snapshot_receiver: Some(ports.snapshot_receiver),
+        )
+    };
+    let frames = terminal.mock_terminal_render_loop(MockTerminalConfig::with_events(events));
+    tokio::pin!(frames);
+    let mut phase = CancellationProofPhase::InitialBrowse;
+    let mut last_frame = String::new();
+    let journey = async {
+        while let Some(canvas) = frames.next().await {
+            let frame = canvas.to_string();
+            match phase {
+                CancellationProofPhase::InitialBrowse if frame.contains("Filters") => {
+                    event_sender
+                        .send(TerminalEvent::Key(control_key('r')))
+                        .unwrap();
+                    phase = CancellationProofPhase::Inspected;
+                }
+                CancellationProofPhase::Inspected
+                    if frame.contains("voucher-1") && frame.contains("Review") =>
+                {
+                    event_sender
+                        .send(TerminalEvent::Key(control_key('r')))
+                        .unwrap();
+                    phase = CancellationProofPhase::CancellationPending;
+                }
+                CancellationProofPhase::CancellationPending
+                    if frame.contains("Inspect reset eligibility.") =>
+                {
+                    // This is the old PTY readiness marker, but the retained
+                    // snapshot still owns inspection input and offers Cancel.
+                    assert!(frame.contains("Inspect"), "{frame}");
+                    assert!(
+                        frame.contains("Review") && frame.contains("Cancel"),
+                        "{frame}"
+                    );
+                    assert!(!frame.contains("Close"), "premature Browse action: {frame}");
+                    assert!(
+                        !frame.contains("Filters"),
+                        "options already closed: {frame}"
+                    );
+                    event_sender
+                        .send(TerminalEvent::Key(KeyEvent::new(
+                            KeyEventKind::Press,
+                            KeyCode::Esc,
+                        )))
+                        .unwrap();
+                    phase = CancellationProofPhase::BrowseAcknowledgement;
+                }
+                CancellationProofPhase::BrowseAcknowledgement if frame.contains("Close") => {
+                    assert!(frame.contains("Inspect"), "{frame}");
+                    assert!(
+                        !frame.contains("Review") && !frame.contains("Cancel"),
+                        "{frame}"
+                    );
+                    event_sender
+                        .send(TerminalEvent::Key(KeyEvent::new(
+                            KeyEventKind::Press,
+                            KeyCode::Esc,
+                        )))
+                        .unwrap();
+                    phase = CancellationProofPhase::OptionsClosed;
+                }
+                CancellationProofPhase::OptionsClosed if frame.contains("Filters") => {
+                    assert!(!frame.contains("Inspect reset eligibility."), "{frame}");
+                    event_sender
+                        .send(TerminalEvent::Key(control_key('d')))
+                        .unwrap();
+                    phase = CancellationProofPhase::Finished;
+                }
+                _ => {}
+            }
+            last_frame = frame;
+        }
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(3), journey)
+        .await
+        .unwrap_or_else(|error| panic!("cancellation phase {phase:?}: {error}; {last_frame}"));
+    session_driver
+        .await
+        .expect("held cancellation acknowledgement driver");
+    assert_eq!(phase, CancellationProofPhase::Finished, "{last_frame}");
+    println!(
+        "PTY1 controlled interleaving: Inspect body precedes Browse; early Escape emits Cancel; acknowledged Close then Escape restores Filters"
+    );
 }

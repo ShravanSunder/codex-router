@@ -2,7 +2,14 @@
 
 mod quota_account_options;
 mod quota_browse_rendering;
+mod quota_detail_panel;
+mod quota_dialog_actions;
+mod quota_dialog_rendering;
 mod quota_floor_editor;
+mod quota_help_rendering;
+mod quota_provider_filter_rendering;
+mod quota_provider_filters;
+mod quota_reset_component_input;
 mod quota_reset_detail_content;
 mod quota_reset_detail_rendering;
 mod quota_reset_keyboard_interaction;
@@ -16,6 +23,8 @@ mod responsive_quota_layout;
 mod quota_browse_presentation_test;
 #[cfg(test)]
 mod quota_floor_editor_presentation_test;
+#[cfg(test)]
+mod quota_performance_test;
 #[cfg(test)]
 mod quota_reset_presentation_test;
 

@@ -58,10 +58,13 @@ pub struct CollaborationApiConfig {
 }
 
 /// The listener a router copy is served on, which decides the origins it accepts.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub enum CollaborationApiListener {
     /// Localhost TCP, for models; browsers on this machine may only use this exact origin.
-    LoopbackTcp(SocketAddr),
+    LoopbackTcp {
+        address: SocketAddr,
+        proxy_authority: Option<crate::ProxyAuthority>,
+    },
     /// The owner-only Unix socket, for the CLIs; no browser origin is accepted.
     UnixSocket,
 }
@@ -99,14 +102,29 @@ pub fn collaboration_api_router(
         .with_json_response(true)
         .with_max_request_body_bytes(MAX_REQUEST_BODY_BYTES)
         .with_cancellation_token(config.shutdown.child_token());
+    let normalization = match &listener {
+        CollaborationApiListener::LoopbackTcp {
+            proxy_authority, ..
+        } => proxy_authority.clone(),
+        CollaborationApiListener::UnixSocket => None,
+    };
     service_config = match listener {
-        CollaborationApiListener::LoopbackTcp(address) => service_config
-            .with_allowed_hosts([address.ip().to_string(), "localhost".to_owned()])
-            .with_allowed_origins([
-                format!("http://{address}"),
-                format!("http://localhost:{}", address.port()),
-            ])
-            .enforce_origin_validation(),
+        CollaborationApiListener::LoopbackTcp {
+            address,
+            proxy_authority,
+        } => {
+            let mut hosts = vec![address.ip().to_string(), "localhost".to_owned()];
+            if let Some(authority) = proxy_authority {
+                hosts.push(authority.authority());
+            }
+            service_config
+                .with_allowed_hosts(hosts)
+                .with_allowed_origins([
+                    format!("http://{address}"),
+                    format!("http://localhost:{}", address.port()),
+                ])
+                .enforce_origin_validation()
+        }
         CollaborationApiListener::UnixSocket => service_config.enforce_origin_validation(),
     };
     let server_config = config.clone();
@@ -126,12 +144,18 @@ pub fn collaboration_api_router(
             service_config,
         );
     let admission = Arc::new(Semaphore::new(config.concurrent_requests));
-    let router = Router::new()
+    let mut router = Router::new()
         .route_service(COLLABORATION_API_PATH, service)
         .layer(middleware::from_fn_with_state(
             admission,
             shed_past_capacity,
         ));
+    if let Some(authority) = normalization.filter(|authority| authority.https_port().get() == 443) {
+        router = router.layer(middleware::from_fn_with_state(
+            authority,
+            crate::proxy_authority::normalize_default_https_host,
+        ));
+    }
     CollaborationApiRouter {
         router,
         tool_calls,

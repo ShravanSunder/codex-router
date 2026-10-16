@@ -19,8 +19,9 @@ pub(crate) enum SessionsPickerKey {
 /// User action selected from the sessions picker.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum SessionsPickerOutcome {
-    ResumeSession(String),
-    ForkSession(String),
+    ResumeSession(crate::sessions::SessionActionSelection),
+    ForkSession(crate::sessions::SessionActionSelection),
     StartNewSession,
+    PreparedSourceSession(Box<crate::sessions::source_ssh_protocol::PreparedSourceSession>),
     TerminalTooNarrow,
 }

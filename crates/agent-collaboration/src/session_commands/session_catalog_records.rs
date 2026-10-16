@@ -5,8 +5,8 @@ use super::{
     format_recency_at_ms, normalize_path, session_context_from_cwd, truncate_end,
 };
 use collaboration_client::protocol::{
-    ClaudeCodeInteractiveStatus, EndpointRef, ProviderSessionState, ProviderSessionSummary,
-    SessionRef,
+    ChannelDescription, ClaudeCodeInteractiveStatus, EndpointDescription, EndpointRef,
+    NativeSessionSource, ProviderKind, ProviderSessionState, ProviderSessionSummary, SessionRef,
 };
 use collaboration_client::session_catalog::{
     SessionHistorySource, StoredSessionRecord, read_session_conversation_history,
@@ -14,6 +14,7 @@ use collaboration_client::session_catalog::{
 use std::path::Path;
 
 use crate::picker_runtime_status::PickerRuntimeStatus;
+use crate::presentation::session_picker::SessionProviderFamily;
 
 pub(super) type SessionRecord = StoredSessionRecord;
 pub(crate) type SessionConversationSource = SessionHistorySource;
@@ -31,9 +32,21 @@ impl SessionPickerIdentity {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SessionRowProvenance {
+    LocalHomeCatalog,
+    DefaultAttributed,
+    ObservedHosted,
+    ObservedProvider,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct SessionPickerRecord {
     pub(crate) identity: SessionPickerIdentity,
+    pub(crate) provider_family: SessionProviderFamily,
+    pub(crate) provenance: SessionRowProvenance,
+    pub(crate) source_context: Option<crate::presentation::session_picker::PickerSourceContext>,
+    pub(crate) machine_display_label: Option<String>,
     pub(crate) endpoint_label: Option<String>,
     pub(crate) provider_state: Option<ProviderSessionState>,
     pub(crate) session_id: String,
@@ -59,7 +72,13 @@ pub(crate) struct SessionPickerRecord {
     pub(crate) conversation_source: Option<SessionConversationSource>,
     pub(crate) source: Option<String>,
     pub(crate) thread_source: Option<String>,
+    pub(crate) native_source: Option<NativeSessionSource>,
     pub(crate) runtime_status: PickerRuntimeStatus,
+}
+
+enum SessionPathSpace {
+    InvokingMachine,
+    SourceMachine,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -69,6 +88,68 @@ pub(crate) struct SessionConversationPreview {
 }
 
 impl SessionPickerRecord {
+    pub(crate) fn client_provider_family(&self) -> SessionProviderFamily {
+        match self.identity {
+            SessionPickerIdentity::LocalCodex(_) | SessionPickerIdentity::HostedCodex(_) => {
+                SessionProviderFamily::Codex
+            }
+            SessionPickerIdentity::HostedProvider(_) => self.provider_family,
+        }
+    }
+
+    /// Classification uses typed, uniquely attributable endpoint evidence; it never changes inventory admission.
+    pub(crate) fn with_provider_endpoint(
+        mut self,
+        summary: &ProviderSessionSummary,
+        endpoint: &EndpointDescription,
+    ) -> Self {
+        if !self.identity.is_provider() {
+            return self;
+        }
+        let mut kinds = endpoint
+            .channels
+            .iter()
+            .filter_map(|channel| match channel {
+                ChannelDescription::ExternalProvider { runtime, .. } => Some(runtime.provider),
+                _ => None,
+            });
+        let kind = kinds.next();
+        let consistent = summary.target().endpoint == endpoint.endpoint
+            && matches!(&self.identity, SessionPickerIdentity::HostedProvider(target) if target == summary.target())
+            && kinds.next().is_none()
+            && !endpoint
+                .channels
+                .iter()
+                .any(|channel| matches!(channel, ChannelDescription::NativeCodex { .. }))
+            && !matches!(
+                (summary, kind),
+                (
+                    ProviderSessionSummary::ClaudeCodeInteractive { .. },
+                    Some(ProviderKind::Cursor)
+                )
+            );
+        self.provider_family = match (consistent, kind) {
+            (true, Some(kind)) => SessionProviderFamily::External(kind),
+            _ => SessionProviderFamily::Unclassified,
+        };
+        self
+    }
+
+    pub(crate) fn machine_label(&self) -> &str {
+        if let Some(label) = &self.machine_display_label {
+            return label;
+        }
+        match &self.source_context {
+            Some(crate::presentation::session_picker::PickerSourceContext::ConfiguredHosted(
+                profile,
+            )) => profile.name.as_str(),
+            Some(crate::presentation::session_picker::PickerSourceContext::LocalCodex) => {
+                "Local Codex"
+            }
+            Some(crate::presentation::session_picker::PickerSourceContext::DefaultHosted)
+            | None => "This machine",
+        }
+    }
     pub(crate) fn matches_search(
         &self,
         expression: &collaboration_client::session_catalog::SessionSearchExpression,
@@ -93,6 +174,10 @@ impl SessionPickerRecord {
     }
 
     pub(super) fn from_record(record: &SessionRecord) -> Self {
+        Self::from_record_in_path_space(record, SessionPathSpace::InvokingMachine)
+    }
+
+    fn from_record_in_path_space(record: &SessionRecord, path_space: SessionPathSpace) -> Self {
         let display_title = display_title_from_session_fields(
             record.name.as_deref(),
             record.title.as_deref(),
@@ -102,6 +187,10 @@ impl SessionPickerRecord {
         .unwrap_or_else(|| "Untitled session".to_owned());
         Self {
             identity: SessionPickerIdentity::LocalCodex(record.session_id.clone()),
+            provider_family: SessionProviderFamily::Codex,
+            source_context: None,
+            machine_display_label: None,
+            provenance: SessionRowProvenance::LocalHomeCatalog,
             endpoint_label: None,
             provider_state: None,
             session_id: record.session_id.clone(),
@@ -120,11 +209,14 @@ impl SessionPickerRecord {
                 .map(session_context_from_cwd)
                 .unwrap_or_else(|| "-".to_owned()),
             cwd: record.cwd.clone(),
-            normalized_cwd: record.cwd.as_deref().map(|cwd| {
-                normalize_path(Path::new(cwd))
-                    .to_string_lossy()
-                    .into_owned()
-            }),
+            normalized_cwd: match path_space {
+                SessionPathSpace::InvokingMachine => record.cwd.as_deref().map(|cwd| {
+                    normalize_path(Path::new(cwd))
+                        .to_string_lossy()
+                        .into_owned()
+                }),
+                SessionPathSpace::SourceMachine => None,
+            },
             git_origin_url: record.git_origin_url.clone(),
             provider: record.provider.clone(),
             model: record.model.clone(),
@@ -135,12 +227,14 @@ impl SessionPickerRecord {
             conversation_source: record.rollout_path.clone(),
             source: record.source.clone(),
             thread_source: record.thread_source.clone(),
+            native_source: None,
             runtime_status: PickerRuntimeStatus::Unknown,
         }
     }
 
     pub(crate) fn with_hosted_codex(mut self, endpoint: &EndpointRef) -> Self {
         if let Ok(session_id) = self.session_id.clone().try_into() {
+            self.provenance = SessionRowProvenance::DefaultAttributed;
             self.identity = SessionPickerIdentity::HostedCodex(SessionRef {
                 endpoint: endpoint.clone(),
                 session_id,
@@ -152,6 +246,29 @@ impl SessionPickerRecord {
     pub(crate) fn from_provider_summary(
         summary: &ProviderSessionSummary,
         endpoint_label: &str,
+    ) -> Self {
+        Self::provider_summary_in_path_space(
+            summary,
+            endpoint_label,
+            SessionPathSpace::InvokingMachine,
+        )
+    }
+
+    pub(crate) fn from_source_provider_summary(
+        summary: &ProviderSessionSummary,
+        endpoint_label: &str,
+    ) -> Self {
+        Self::provider_summary_in_path_space(
+            summary,
+            endpoint_label,
+            SessionPathSpace::SourceMachine,
+        )
+    }
+
+    fn provider_summary_in_path_space(
+        summary: &ProviderSessionSummary,
+        endpoint_label: &str,
+        path_space: SessionPathSpace,
     ) -> Self {
         let (
             target,
@@ -206,12 +323,27 @@ impl SessionPickerRecord {
         let session_id = String::from(target.session_id.clone());
         let cwd = String::from(working_directory.clone());
         let updated_at_ms = updated_at_seconds.saturating_mul(1_000);
+        let name = name.and_then(|name| {
+            let name = name.trim();
+            (!name.is_empty()).then(|| name.to_owned())
+        });
+        let context = session_context_from_cwd(&cwd);
         let title = name
             .clone()
-            .unwrap_or_else(|| format!("{endpoint_label} · {session_id}"));
-        let context = session_context_from_cwd(&cwd);
+            .unwrap_or_else(|| format!("{endpoint_label} session · {context}"));
         Self {
             identity: SessionPickerIdentity::HostedProvider(target.clone()),
+            provider_family: match summary {
+                ProviderSessionSummary::ClaudeCodeInteractive { .. } => {
+                    SessionProviderFamily::External(ProviderKind::ClaudeCode)
+                }
+                ProviderSessionSummary::HostedProvider { .. } => {
+                    SessionProviderFamily::Unclassified
+                }
+            },
+            source_context: None,
+            machine_display_label: None,
+            provenance: SessionRowProvenance::ObservedProvider,
             endpoint_label: Some(endpoint_label.to_owned()),
             provider_state,
             session_id,
@@ -229,7 +361,12 @@ impl SessionPickerRecord {
             persisted_branch: String::new(),
             context,
             cwd: Some(cwd.clone()),
-            normalized_cwd: Some(normalize_path(Path::new(&cwd)).display().to_string()),
+            normalized_cwd: match path_space {
+                SessionPathSpace::InvokingMachine => {
+                    Some(normalize_path(Path::new(&cwd)).display().to_string())
+                }
+                SessionPathSpace::SourceMachine => None,
+            },
             git_origin_url: None,
             provider: None,
             model: None,
@@ -242,10 +379,14 @@ impl SessionPickerRecord {
             conversation_source: None,
             source: None,
             thread_source: None,
+            native_source: None,
             runtime_status,
         }
     }
 }
+
+#[path = "native_summary_projection.rs"]
+mod native_summary_projection;
 
 impl SessionConversationPreview {
     pub(crate) fn from_rollout_source(source: Option<&SessionConversationSource>) -> Self {

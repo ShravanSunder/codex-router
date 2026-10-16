@@ -25,7 +25,7 @@ async fn compiled_credit_refresh_reports_focused_responses_failure_despite_parti
         HeldLoopbackProvider::bind_failing_usage_for_account("routing-pty-alpha", 2, 429)?;
     let mut terminal = spawn_fixture_terminal(&fixture, provider.address())?;
 
-    if let Err(error) = terminal.wait_for_text("ctrl-r account options", SEMANTIC_WAIT) {
+    if let Err(error) = terminal.wait_for_text("Filters", SEMANTIC_WAIT) {
         let diagnostics = terminal.safe_semantic_diagnostics(0);
         let startup_request = provider
             .wait_for_request_count(1, std::time::Duration::ZERO)
@@ -84,7 +84,7 @@ async fn compiled_credit_refresh_reports_focused_responses_failure_despite_parti
     let browse_frame_start = terminal.transcript_len();
     terminal.send(b"\x1b")?;
     stage(
-        terminal.wait_for_text_after("ctrl-r account options", browse_frame_start, SEMANTIC_WAIT),
+        terminal.wait_for_text_after("Filters", browse_frame_start, SEMANTIC_WAIT),
         "partial-refresh account-options close",
     )?;
     terminal.send(b"q")?;
@@ -159,7 +159,7 @@ async fn compiled_pending_refresh_tab_can_return_to_browse_and_exit_before_provi
     let mut terminal = spawn_fixture_terminal(&fixture, provider.address())?;
 
     stage(
-        terminal.wait_for_text("ctrl-r account options", SEMANTIC_WAIT),
+        terminal.wait_for_text("Filters", SEMANTIC_WAIT),
         "pending-refresh initial browse",
     )?;
     let inspection_start = terminal.transcript_len();
@@ -192,19 +192,13 @@ async fn compiled_pending_refresh_tab_can_return_to_browse_and_exit_before_provi
     let pending_switch_start = terminal.transcript_len();
     terminal.send(b"\t")?;
     stage(
-        terminal.wait_for_text_after(
-            "tab change pending  esc back  q/ctrl-c exit",
-            pending_switch_start,
-            SEMANTIC_WAIT,
-        ),
+        terminal.wait_for_text_after("Tab change pending", pending_switch_start, SEMANTIC_WAIT),
         "pending navigation renders its available cancellation and exit actions",
     )?;
 
     let browse_start = terminal.transcript_len();
     terminal.send(b"\x1b")?;
-    if let Err(error) =
-        terminal.wait_for_text_after("ctrl-r account options", browse_start, SEMANTIC_WAIT)
-    {
+    if let Err(error) = terminal.wait_for_text_after("Filters", browse_start, SEMANTIC_WAIT) {
         let diagnostics = terminal.safe_semantic_diagnostics(browse_start);
         provider.release_get_responses()?;
         return Err(std::io::Error::other(format!(
@@ -266,7 +260,7 @@ async fn compiled_disabled_account_refresh_reports_unavailable_without_provider_
     let provider = HeldLoopbackProvider::bind()?;
     let mut terminal = spawn_fixture_terminal(&fixture, provider.address())?;
     stage(
-        terminal.wait_for_text("ctrl-r account options", SEMANTIC_WAIT),
+        terminal.wait_for_text("Filters", SEMANTIC_WAIT),
         "ineligible-refresh initial browse",
     )?;
     let disabled_options_start = terminal.transcript_len();
@@ -299,7 +293,7 @@ async fn compiled_disabled_account_refresh_reports_unavailable_without_provider_
     let close_options_start = terminal.transcript_len();
     terminal.send(b"\x1b")?;
     stage(
-        terminal.wait_for_text_after("ctrl-r account options", close_options_start, SEMANTIC_WAIT),
+        terminal.wait_for_text_after("Filters", close_options_start, SEMANTIC_WAIT),
         "ineligible-refresh account-options close",
     )?;
     terminal.send(b"q")?;
@@ -316,7 +310,7 @@ async fn compiled_disabled_account_refresh_reports_unavailable_without_provider_
     ensure(
         !String::from_utf8_lossy(&transcript)
             .contains("Credit refresh failed; cached observation retained."),
-        "an unavailable refresh must not be reported as a failed provider refresh",
+        "an unavailable refresh must not be reported as a failed provideEdit",
     )?;
 
     let state = AsyncSqliteStateStore::open_read_only(&fixture.root().join("state.sqlite")).await?;

@@ -74,6 +74,79 @@ fn discovery_or_caller_text_does_not_grant_test_ownership() {
 }
 
 #[tokio::test]
+async fn owned_fork_preserves_source_contract_and_rejects_wrong_child_policy() {
+    for (sandbox, effort, succeeds) in [
+        ("readOnly", Some("medium"), true),
+        ("dangerFullAccess", Some("medium"), false),
+        ("readOnly", Some("low"), false),
+        ("readOnly", None, false),
+    ] {
+        let (client, server) = tokio::net::UnixStream::pair().unwrap();
+        let wire = tokio_tungstenite::WebSocketStream::from_raw_socket(
+            client,
+            tokio_tungstenite::tungstenite::protocol::Role::Client,
+            None,
+        )
+        .await;
+        let backend = tokio::spawn(async move {
+            let mut server = tokio_tungstenite::WebSocketStream::from_raw_socket(
+                server,
+                tokio_tungstenite::tungstenite::protocol::Role::Server,
+                None,
+            )
+            .await;
+            let request: Value =
+                serde_json::from_str(server.next().await.unwrap().unwrap().to_text().unwrap())
+                    .unwrap();
+            assert_eq!(request["method"], "thread/fork");
+            assert_eq!(
+                request["params"],
+                json!({"threadId":"owned-parent","cwd":"/source/fixture","deferGoalContinuation":true})
+            );
+            server.send(tokio_tungstenite::tungstenite::Message::Text(json!({"id":request["id"],"result":{"thread":{"id":"owned-child"},"model":PROOF_MODEL,"reasoningEffort":effort,"modelProvider":"codex-router-debug","cwd":"/source/fixture","sandbox":{"type":sandbox},"approvalPolicy":"never","approvalsReviewer":"user"}}).to_string().into())).await.unwrap();
+        });
+        let mut client = NativeProtocolConnection::from_websocket(wire);
+        let mut registry = OwnedThreadRegistry {
+            threads: BTreeSet::from(["owned-parent".to_owned()]),
+        };
+        let result = registry
+            .fork_owned_thread(&mut client, "owned-parent", Path::new("/source/fixture"))
+            .await;
+        assert_eq!(result.is_ok(), succeeds);
+        assert!(registry.require_owned("owned-parent").is_ok());
+        assert!(
+            registry.require_owned("owned-child").is_ok(),
+            "a created child remains identified even if policy validation fails"
+        );
+        backend.await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn unowned_fork_cannot_write_a_native_frame() {
+    let (client, server) = tokio::net::UnixStream::pair().unwrap();
+    let wire = tokio_tungstenite::WebSocketStream::from_raw_socket(
+        client,
+        tokio_tungstenite::tungstenite::protocol::Role::Client,
+        None,
+    )
+    .await;
+    let mut client = NativeProtocolConnection::from_websocket(wire);
+    let mut registry = OwnedThreadRegistry::default();
+    let result = tokio::time::timeout(
+        std::time::Duration::from_millis(100),
+        registry.fork_owned_thread(&mut client, "existing-user-thread", Path::new("/tmp")),
+    )
+    .await
+    .unwrap();
+    assert!(result.is_err());
+    let mut bytes = [0_u8; 128];
+    assert!(
+        matches!(server.try_read(&mut bytes), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock)
+    );
+}
+
+#[tokio::test]
 async fn terminal_error_for_the_owned_turn_does_not_wait_for_a_marker() {
     let (client, server) = tokio::net::UnixStream::pair().unwrap();
     let wire = tokio_tungstenite::WebSocketStream::from_raw_socket(

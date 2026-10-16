@@ -1,4 +1,5 @@
-use crossterm::event::MouseButton;
+use codex_router_tui::UseDialogInteraction;
+use iocraft::MouseButton;
 use iocraft::prelude::*;
 
 #[derive(Default, Props)]
@@ -14,7 +15,7 @@ pub(super) fn InteractiveSessionChoiceRow<'a>(
     props: &mut InteractiveSessionChoiceRowProps<'a>,
     mut hooks: Hooks,
 ) -> impl Into<AnyElement<'a>> {
-    hooks.use_local_terminal_events({
+    hooks.use_dialog_local_events({
         let mut focus_handler = props.focus_handler.take();
         let mut activation_handler = props.activation_handler.take();
         let activates_on_click = props.activates_on_click;

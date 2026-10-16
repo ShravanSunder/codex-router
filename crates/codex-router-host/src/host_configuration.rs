@@ -59,6 +59,7 @@ pub struct HostConfig {
     coordination_paths: HostCoordinationPaths,
     router_endpoint: SocketAddr,
     mcp_bind: SocketAddr,
+    remote_access: Option<crate::RemoteAccess>,
     app_server_socket: PathBuf,
     managed_executable: PathBuf,
     external_provider_startups: Vec<crate::ExternalProviderStartup>,
@@ -93,6 +94,7 @@ impl HostConfig {
             coordination_paths: inputs.coordination_paths,
             router_endpoint: inputs.router_endpoint,
             mcp_bind: inputs.mcp_bind,
+            remote_access: None,
             app_server_socket: inputs.app_server_socket,
             managed_executable: inputs.managed_executable,
             external_provider_startups: Vec::new(),
@@ -172,6 +174,17 @@ impl HostConfig {
     #[must_use]
     pub const fn mcp_bind(&self) -> SocketAddr {
         self.mcp_bind
+    }
+
+    #[must_use]
+    pub const fn with_remote_access(mut self, remote_access: crate::RemoteAccess) -> Self {
+        self.remote_access = Some(remote_access);
+        self
+    }
+
+    #[must_use]
+    pub const fn remote_access(&self) -> Option<crate::RemoteAccess> {
+        self.remote_access
     }
 
     /// Returns the conventional socket derived from normal Codex home.

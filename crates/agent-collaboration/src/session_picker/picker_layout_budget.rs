@@ -1,21 +1,16 @@
 //! Picker layout budget.
-use super::{MIN_STACKED_DETAILS_HEIGHT, SessionsPickerModel};
-
-const MIN_STACKED_LIST_HEIGHT: usize = 8;
+use super::SessionsPickerModel;
 
 pub(super) fn picker_body_budget(
     height: usize,
     control_height: usize,
-    footer_line_count: usize,
     minimum_render_height: usize,
 ) -> usize {
     let root_border_height = 2;
     let title_height = 1;
-    let footer_border_height = 1;
-    let footer_height = footer_border_height + footer_line_count;
     height
         .max(minimum_render_height)
-        .saturating_sub(root_border_height + title_height + control_height + footer_height)
+        .saturating_sub(root_border_height + title_height + control_height)
 }
 
 pub(super) fn session_visible_row_budget(
@@ -64,16 +59,6 @@ pub(super) fn session_list_height(
         + record_rows_height
         + record_gap_height
         + more_below_height
-}
-
-pub(super) fn stacked_panel_heights(available_height: usize) -> Option<(usize, usize)> {
-    let details_height = available_height.saturating_mul(2).div_ceil(5);
-    let list_height = available_height.saturating_sub(details_height);
-    if details_height < MIN_STACKED_DETAILS_HEIGHT || list_height < MIN_STACKED_LIST_HEIGHT {
-        return None;
-    }
-
-    Some((list_height, details_height))
 }
 
 const fn session_choice_row_height(visible_index: usize) -> usize {

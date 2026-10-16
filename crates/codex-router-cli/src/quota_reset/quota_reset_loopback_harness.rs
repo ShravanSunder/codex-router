@@ -222,6 +222,21 @@ where
     TFactoryBuilder: FnOnce(SocketAddr) -> TFactory,
 {
     let dispatch = HarnessDispatch::parse(args)?;
+    // Parse already qualified this private temporary root and its capability.
+    // Only this target's payload-free diagnostics enter the retained file.
+    let diagnostic_root = match &dispatch.command {
+        QuotaCommand::Status { router_root, .. } => router_root,
+        _ => return Err(QuotaResetTestHarnessError::InvalidSynthesizedCommand),
+    };
+    let diagnostic_file = fs::File::create(diagnostic_root.join("quota-completion-diagnostic.log"))
+        .map_err(CliError::Stdout)?;
+    let diagnostic_subscriber = tracing_subscriber::fmt()
+        .with_env_filter("off,quota_storyboard_diagnostic=warn")
+        .with_writer(std::sync::Mutex::new(diagnostic_file))
+        .without_time()
+        .with_ansi(false)
+        .finish();
+    let _diagnostic_guard = tracing::subscriber::set_default(diagnostic_subscriber);
     let reset_session_factory = build_factory(dispatch.provider_listener);
     crate::quota::run_quota_command_with_reset_session_factory(
         stdout,

@@ -1,4 +1,39 @@
 #[test]
+fn review_qstatic_preserves_original_narrow_primary_columns() {
+    let column_of = |line: &str, label: &str| {
+        line.find(label).map(|offset| {
+            unicode_width::UnicodeWidthStr::width(
+                line.get(..offset).expect("matched label is a UTF-8 boundary"),
+            )
+        })
+    };
+    let mut model = quota_two_account_view_model();
+    model.rows.truncate(1);
+    let row = model.rows.first_mut().expect("fixture account");
+    row.account = "Account".to_owned();
+    row.status = "Ready".to_owned();
+    row.reason = "reason 0123456789".to_owned();
+    row.active_clients = "Clients".to_owned();
+
+    let text = super::quota_browse_rendering::render_account_row(row, 46, false)
+        .render(None).to_string();
+    let primary = text.lines().find(|line| line.contains("Ready"))
+        .expect("primary account row");
+    // Original narrow contract: one inset + 13 account cells + 13 status cells.
+    assert_eq!(column_of(primary, "Ready"), Some(14), "{text}");
+    assert_eq!(column_of(primary, "reason 0123456789"), Some(27), "{text}");
+
+    let frame = render_quota_static_capture(model, 76, false);
+    let primary = frame.lines().find(|line| line.contains("Ready"))
+        .expect("static primary row");
+    let clients = frame.lines().find(|line| line.contains("Clients"))
+        .expect("static metadata row");
+    // The composed screen has five inset cells; primary and metadata stay aligned.
+    assert_eq!(column_of(primary, "Ready"), Some(18), "{frame}");
+    assert_eq!(column_of(clients, "Clients"), Some(18), "{frame}");
+}
+
+#[test]
 fn quota_status_selected_panel_renders_weekly_before_five_hour_window() {
     let text = render_quota_static_capture(quota_view_model(), 160, false);
     let lines = text.lines().collect::<Vec<_>>();
@@ -20,6 +55,17 @@ fn quota_status_selected_panel_renders_weekly_before_five_hour_window() {
         .unwrap_or_else(|| panic!("selected panel should render 5h quota:\n{text}"));
 
     assert!(weekly_index < five_hour_index, "{text}");
+}
+
+#[test]
+fn owner_feedback_phone_details_preserve_complete_exclusion_reason() {
+    let details = selected_account_details("Work account", "excluded: missing credential for this account");
+    let frame = super::quota_browse_rendering::render_selected_details(&details, 38, true).render(None).to_string();
+    let words = frame.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(words.contains("excluded: missing credential for this account"),
+        "Details must wrap the reason instead of clipping it: {frame}");
+    assert!(frame.lines().all(|line| unicode_width::UnicodeWidthStr::width(line) <= 38),
+        "detail content must remain within its allocated width: {frame}");
 }
 #[test]
 fn quota_status_selected_panel_spaces_activity_header_after_5h_pace() {
@@ -82,8 +128,7 @@ fn quota_status_ansi_colors_selected_reset_pace() {
 
 #[tokio::test]
 async fn quota_pool_headers_survive_preference_focus_and_scroll_changes() {
-    let route_summary =
-        "responses · degraded · 5 accounts · usable 1 · reserve 1 · blocked 1 · unknown 1 · excluded 1";
+    let route_summary = "responses · degraded · 5 accounts · usable 1 · reserve 1 · blocked 1 · unknown 1 · excluded 1";
     let freshness_summary = "fresh 2 · stale 2 · unknown 1";
     let mut observed_headers = Vec::new();
 
@@ -139,10 +184,7 @@ async fn quota_pool_headers_survive_preference_focus_and_scroll_changes() {
                 .find(|line| line.contains("responses · degraded"))
                 .unwrap_or_else(|| panic!("pool route summary should render:\n{frame}"));
             assert!(route_line.contains(route_summary), "{frame}");
-            observed_headers.push((
-                route_line.trim().to_owned(),
-                freshness_summary.to_owned(),
-            ));
+            observed_headers.push((route_line.trim().to_owned(), freshness_summary.to_owned()));
         }
 
         let expected_detail = if preferred_index == 0 {
@@ -184,7 +226,7 @@ async fn quota_status_down_arrow_focuses_next_account_details() {
     let frames = element! {
         QuotaStatusComponent(
             view_model: quota_two_account_view_model(),
-            width: 120usize,
+            width: 160usize,
             height: 48usize,
         )
     }
@@ -222,7 +264,7 @@ async fn quota_status_left_click_focuses_account_details_without_opening_an_acti
             TerminalEvent::FullscreenMouse(FullscreenMouseEvent::new(
                 MouseEventKind::Down(MouseButton::Left),
                 10,
-                9,
+                10,
             )),
             TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Esc)),
         ],
@@ -338,9 +380,7 @@ async fn quota_status_reloads_view_model_on_timer() {
         "quota status should render the reloaded route line: {frames:?}"
     );
     assert!(
-        frames
-            .iter()
-            .any(|frame| frame.contains("stale 1")),
+        frames.iter().any(|frame| frame.contains("stale 1")),
         "quota status title should render reloaded report-wide stale count: {frames:?}"
     );
 }
@@ -350,7 +390,7 @@ async fn quota_status_up_arrow_focuses_previous_account_details() {
     let frames = element! {
         QuotaStatusComponent(
             view_model: quota_two_account_view_model(),
-            width: 120usize,
+            width: 160usize,
             height: 48usize,
         )
     }
@@ -429,6 +469,7 @@ async fn quota_status_renderer_uses_reset_pace_fields_without_parsing_strings() 
         selection_projection_degraded: false,
         serving_clients: None,
         rows: vec![QuotaStatusAccountViewModel {
+            provider: codex_router_core::provider::Provider::Openai,
             account_id: test_account_id("ssdev"),
             account_tag: "test-tag".to_owned(),
             active_credential_generation: Some(1),
@@ -454,7 +495,7 @@ async fn quota_status_renderer_uses_reset_pace_fields_without_parsing_strings() 
     };
 
     let frames = element! {
-        QuotaStatusComponent(view_model: view_model, width: 120usize, height: 48usize)
+        QuotaStatusComponent(view_model: view_model, width: 160usize, height: 48usize)
     }
     .mock_terminal_render_loop(MockTerminalConfig::with_events(futures_util::stream::iter(
         vec![TerminalEvent::Key(KeyEvent::new(

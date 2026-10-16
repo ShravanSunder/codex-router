@@ -7,6 +7,8 @@ description: Verify a declared signed debug Codex Router through its real Host, 
 
 Drive an isolated debug Router and its real owning Host, preserving normal Codex home. All helper code lives once in `scripts/verification/`. Run from the repository root.
 
+For model-free private Tailnet MCP/board verification, follow the separate [Tailnet journey](references/tailnet-mcp.md) and its HostPlan/BoardPlan launch. That journey is draft until exercised on a declared real target.
+
 **Observed locally:** genuine Claude Question/Approval callbacks, actual Session test decisions, marker execution, owning SQLite reopen and exact cleanup on Sunclaw. The first unreachable native-Approver case remains negative evidence. **Portable cold entry and Cursor remain draft:** endpoint/settings/tool parameterization has structural and retained-Claude qualification; no Cursor model input or callback run has happened. Use [Cursor qualification](references/cursor-provider.md) before its first input. No successful journey is rerun merely to refresh the recipe.
 
 ## Launch and readiness
@@ -33,6 +35,7 @@ It checks recorded PID/UID/birth/group/executable, binary hash, health version a
 
 | Journey | Driver and deciding evidence |
 | --- | --- |
+| Private Tailnet boards and exposure lifecycle (draft) | [Tailnet MCP](references/tailnet-mcp.md): reciprocal real peer HTTPS operations, destination-local Unix/SQLite readback, Host/Origin controls and exact owned cleanup; separately declared after-ready exposure-loss negative. |
 | Stored native push | `native_correlation.py --help`: supply qualified CLI, explicit service directory, exact thread, accepted turn, Push ID and fresh output path. Only native initialize + `thread/read includeTurns`. Require one matching `userMessage.clientId` in the accepted turn; native `id` is separate. Retain IDs/count/text hash only. This does not run the complete native held/wake/full-body/order matrix. |
 | Real Question + private marker Approval | Follow [typed callbacks](references/typed-callbacks.md). Real emission, actual offered-option IDs, actual Session test actor, exact harmless marker command, actual allow-once option, provider callback/tool/turn and terminal rows. No fabricated Human or persistent grant. |
 | Owning SQLite reopen | After all exact operations/callers/observers settle, close Host A, start Host B on the same root/binary, and read identical public/SQLite terminal records, creation instants and global revision. Storage-only reopen or an acknowledgement is insufficient. |

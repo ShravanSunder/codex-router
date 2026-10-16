@@ -1,6 +1,33 @@
 use super::*;
 
 #[test]
+fn source_owned_projection_does_not_resolve_paths_on_the_invoking_machine() {
+    let root = tempfile::tempdir().unwrap();
+    let local_target = root.path().join("local-target");
+    fs::create_dir(&local_target).unwrap();
+    let source_alias = root.path().join("source-alias");
+    std::os::unix::fs::symlink(&local_target, &source_alias).unwrap();
+    let mut source_record = search_consistency_record(None, None);
+    source_record.cwd = Some(source_alias.display().to_string());
+    let summary = serde_json::from_value(serde_json::json!({
+        "target":{"endpoint":{"serviceId":"00000000-0000-4000-8000-000000000003","endpointId":"source-native"},"sessionId":source_record.session_id},
+        "name":null,"title":"Source title","source":"interactive","gitBranch":null,
+        "workingDirectory":source_record.cwd,"observation":{"kind":"stored","updatedAt":"2026-10-06T00:00:00Z"},"idleSeconds":0
+    })).unwrap();
+    let row = SessionPickerRecord::from_native_summary(&summary);
+    assert_eq!(row.cwd, source_record.cwd);
+    assert!(
+        row.normalized_cwd.is_none(),
+        "the local symlink is not source-machine metadata"
+    );
+    assert!(row.conversation_source.is_none());
+    assert!(row.provider.is_none() && row.model.is_none() && row.reasoning_effort.is_none());
+    assert!(row.git_origin_url.is_none() && row.preview.is_none() && row.created_at_ms.is_none());
+    assert_eq!(row.recency_at_ms, Some(1_791_244_800_000));
+    assert_eq!(row.provenance, SessionRowProvenance::ObservedHosted);
+}
+
+#[test]
 fn picker_search_uses_the_same_complete_persisted_fields_as_loader_search() {
     let record = search_consistency_record(None, Some("deploy\nrollback plan"));
     let picker_record = SessionPickerRecord::from_record(&record);

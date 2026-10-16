@@ -22,6 +22,7 @@ pub(super) fn quota_status_view_model(
             .iter()
             .map(|row| QuotaStatusAccountViewModel {
                 account_id: row.account_id.clone(),
+                provider: row.provider,
                 account_tag: account_display_tag(&row.account_id),
                 active_credential_generation: row.active_credential_generation,
                 enabled: row.account_status == "enabled",

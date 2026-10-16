@@ -191,6 +191,7 @@ fn quota_view_model() -> QuotaStatusViewModel {
         selection_projection_degraded: false,
         serving_clients: None,
         rows: vec![QuotaStatusAccountViewModel {
+            provider: codex_router_core::provider::Provider::Openai,
             account_id: test_account_id("ssdev"),
             account_tag: "test-tag".to_owned(),
             active_credential_generation: Some(1),
@@ -274,6 +275,7 @@ pub(super) fn quota_two_account_view_model() -> QuotaStatusViewModel {
         serving_clients: None,
         rows: vec![
             QuotaStatusAccountViewModel {
+                provider: codex_router_core::provider::Provider::Openai,
                 account_id: test_account_id("alpha"),
                 account_tag: "alpha-tag".to_owned(),
                 active_credential_generation: Some(1),
@@ -296,6 +298,7 @@ pub(super) fn quota_two_account_view_model() -> QuotaStatusViewModel {
                 details: alpha_details.clone(),
             },
             QuotaStatusAccountViewModel {
+                provider: codex_router_core::provider::Provider::Openai,
                 account_id: test_account_id("beta"),
                 account_tag: "beta-tag".to_owned(),
                 active_credential_generation: Some(1),
@@ -329,6 +332,7 @@ fn quota_many_account_view_model() -> QuotaStatusViewModel {
         let account = format!("acct{index:02}");
         let details = selected_account_details(&account, &format!("account {index:02} detail"));
         rows.push(QuotaStatusAccountViewModel {
+            provider: codex_router_core::provider::Provider::Openai,
             account_id: test_account_id(&account),
             account_tag: format!("tag-{index:02}"),
             active_credential_generation: Some(1),
@@ -519,6 +523,7 @@ fn quota_state_color_row(
         unavailable_reason: None,
     };
     QuotaStatusAccountViewModel {
+        provider: codex_router_core::provider::Provider::Openai,
         account_id: test_account_id(account),
         account_tag: format!("{account}-tag"),
         active_credential_generation: Some(1),
