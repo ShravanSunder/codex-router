@@ -3,13 +3,15 @@
 import http.client
 import json
 import os
+import re
 import socket
 import sqlite3
-import ssl
 import stat
+import subprocess
 import typing as t
 import urllib.parse
 from contextlib import closing
+from functools import cache
 from pathlib import Path
 
 from pydantic import (
@@ -64,24 +66,110 @@ class UnixHttpConnection(http.client.HTTPConnection):
         self.sock = connected
 
 
+@cache
+def require_system_curl() -> None:
+    version = subprocess.check_output(["/usr/bin/curl", "-q", "--version"], timeout=5)
+    parsed = re.match(rb"curl (\d+)\.(\d+)\.(\d+) ", version)
+    if parsed is None or tuple(int(part) for part in parsed.groups()) < (8, 4, 0):
+        raise ValueError("system curl >=8.4 required for bounded unknown-length bodies")
+
+
+def curl_post_arguments(target: HttpsEndpoint, headers: dict[str, str]) -> list[str]:
+    arguments = [
+        "/usr/bin/curl",
+        "-q",
+        "--silent",
+        "--show-error",
+        "--globoff",
+        "--http1.1",
+        "--proto",
+        "=https",
+        "--noproxy",
+        "*",
+        "--proxy",
+        "",
+        "--no-location",
+        "--max-redirs",
+        "0",
+        "--retry",
+        "0",
+        "--connect-timeout",
+        "5",
+        "--max-time",
+        "5",
+        "--max-filesize",
+        str(4 * 1024 * 1024),
+        "--request",
+        "POST",
+        "--data-binary",
+        "@-",
+        "--header",
+        "User-Agent:",
+        "--header",
+        "Expect:",
+        "--write-out",
+        "\n%{http_code}",
+        "--url",
+        target.url,
+    ]
+    for name, value in headers.items():
+        if not re.fullmatch(r"[A-Za-z0-9-]+", name) or any(
+            character in value for character in "\r\n\0"
+        ):
+            raise ValueError("invalid HTTP probe header")
+        arguments.extend(["--header", f"{name}: {value}"])
+    return arguments
+
+
+def curl_http_reply(completed: subprocess.CompletedProcess[bytes]) -> HttpReply:
+    if completed.returncode != 0:
+        raise RuntimeError(
+            f"HTTPS curl failed (exit {completed.returncode}): "
+            + completed.stderr[:4096].decode(errors="replace")
+        )
+    body, delimiter, status = completed.stdout.rpartition(b"\n")
+    if delimiter != b"\n" or not re.fullmatch(rb"[1-5][0-9]{2}", status):
+        raise ValueError("HTTPS curl returned no valid HTTP status")
+    if len(body) > 4 * 1024 * 1024:
+        raise ValueError("HTTP response exceeded evidence bound")
+    return HttpReply(status=int(status), body=body)
+
+
+def https_post(
+    target: HttpsEndpoint, body: bytes, headers: dict[str, str]
+) -> HttpReply:
+    require_system_curl()
+    arguments = curl_post_arguments(target, headers)
+    # Use ordinary system trust; do not inherit custom CA or TLS-secret outputs.
+    environment = {
+        name: value
+        for name, value in os.environ.items()
+        if name
+        not in {
+            "CURL_CA_BUNDLE",
+            "SSL_CERT_FILE",
+            "SSL_CERT_DIR",
+            "SSLKEYLOGFILE",
+            "CURL_SSL_BACKEND",
+        }
+    }
+    return curl_http_reply(
+        subprocess.run(
+            arguments,
+            input=body,
+            capture_output=True,
+            timeout=6,
+            check=False,
+            env=environment,
+        )
+    )
+
+
 def http_post(
     target: HttpsEndpoint | LoopbackEndpoint | Path,
     payload: JsonObject,
     probe_headers: ProbeHeaders | None = None,
 ) -> HttpReply:
-    if isinstance(target, Path):
-        connection = UnixHttpConnection(target)
-    elif isinstance(target, LoopbackEndpoint):
-        url = urllib.parse.urlsplit(target.url)
-        connection = http.client.HTTPConnection(url.hostname or "", url.port, timeout=5)
-    else:
-        url = urllib.parse.urlsplit(target.url)
-        connection = http.client.HTTPSConnection(
-            url.hostname or "",
-            url.port or 443,
-            timeout=5,
-            context=ssl.create_default_context(),
-        )
     headers = {
         "Content-Type": "application/json",
         "Accept": "application/json, text/event-stream",
@@ -94,8 +182,16 @@ def http_post(
             headers["Origin"] = probe_headers.origin
         if probe_headers.host_authority is not None:
             headers["Host"] = probe_headers.host_authority
+    body = json.dumps(payload)
+    if isinstance(target, HttpsEndpoint):
+        return https_post(target, body.encode(), headers)
+    if isinstance(target, Path):
+        connection = UnixHttpConnection(target)
+    else:
+        url = urllib.parse.urlsplit(target.url)
+        connection = http.client.HTTPConnection(url.hostname or "", url.port, timeout=5)
     try:
-        connection.request("POST", "/mcp", json.dumps(payload), headers)
+        connection.request("POST", "/mcp", body, headers)
         response = connection.getresponse()
         body = response.read(4 * 1024 * 1024 + 1)
         if len(body) > 4 * 1024 * 1024:

@@ -6,9 +6,11 @@ The outcome comes from [Tailnet Specification R1–R7](../../../../docs/specs/20
 
 ## Entry and required inputs
 
-Run from the repository/package root. The apparatus is the [CLI](../../../../scripts/verification/tailnet_mcp.py), [typed plans](../../../../scripts/verification/tailnet_mcp_models.py), [MCP client/readback](../../../../scripts/verification/tailnet_mcp_client.py), [Host lifecycle](../../../../scripts/verification/tailnet_mcp_host.py) and [permanent apparatus tests](../../../../scripts/tests/test_tailnet_mcp_verification.py). It reuses the existing ownership helpers; it does not implement SSH or inject faults. One agent owns each instance for its whole run. The caller sequences the two machines and any separately authorized transport.
+Run from the repository/package root. The apparatus is the [CLI](../../../../scripts/verification/tailnet_mcp.py), [typed plans](../../../../scripts/verification/tailnet_mcp_models.py), [MCP client/readback](../../../../scripts/verification/tailnet_mcp_client.py), [Host lifecycle](../../../../scripts/verification/tailnet_mcp_host.py), [permanent ownership/observation tests](../../../../scripts/tests/test_tailnet_mcp_verification.py) and [HTTPS transport tests](../../../../scripts/tests/test_tailnet_mcp_https_transport.py). It reuses the existing ownership helpers; it does not implement SSH or inject faults. One agent owns each instance for its whole run. The caller sequences the two machines and any separately authorized transport.
 
 Use Python 3.13 with Pydantic 2.14.1. A copied package needs the four Tailnet modules and their canonical `owned_runtime`, `process_ownership`, `runtime_qualification` and `typed_observations` dependencies. Bind their hashes on both machines; the Host run records them in `driver-binding.json`.
+
+HTTPS observations use the ordinary system `/usr/bin/curl`, version8.4 or newer; record its actual `--version` on each machine. This minimum makes the 4MiB transfer limit apply to unknown-length bodies too. The driver keeps normal system certificate/hostname validation, disables curl config, proxies, redirects and retries, sends the same JSON POST and explicit Host/Origin headers, and enforces a five-second connection/transfer budget with a six-second subprocess guard. It removes custom CA/backend and TLS-key-log environment overrides from the curl child only. It adds no CA file, certificate bypass, redirect target, DNS mapping or plaintext fallback. HTTP error status/body remain available to the negative probes; a nonzero curl exit, malformed status or oversized body fails. Unix and loopback HTTP observations keep their existing local transports. A failed Python HTTPS observation stays failed; changing its client supplies no replacement live result.
 
 Have the caller supply actual values for these plans before any live command:
 
@@ -85,9 +87,11 @@ To attribute cleanup to the Host, bind the pre-fault inventory to `host-before-f
 The permanent local suite is:
 
 ```sh
-uv run --offline --no-project --with pydantic==2.14.1 --python 3.13 python -m unittest scripts.tests.test_tailnet_mcp_verification -v
+uv run --offline --no-project --with pydantic==2.14.1 --python 3.13 python -m unittest scripts.tests.test_tailnet_mcp_verification scripts.tests.test_tailnet_mcp_https_transport -v
 ```
 
-Run scoped Ruff/format/basedpyright over the four Tailnet modules and that test file when changing them, using the repository’s qualified tool versions. These tests use literal protocol fixtures and harmless retained processes. They qualify the apparatus only. Preserve failed/unknown IDs and raw results; do not weaken an expected outcome to manufacture a pass.
+Run scoped Ruff/format/basedpyright over the four Tailnet modules and both test files when changing them, using the repository’s qualified tool versions. These tests use literal protocol fixtures and harmless retained processes. They qualify the apparatus only. Preserve failed/unknown IDs and raw results; do not weaken an expected outcome to manufacture a pass.
+
+The curl fixtures exercise real local HTTP POST/Origin/error/redirect/known-and-unknown-size behavior and ordinary TLS rejection of an untrusted local certificate. The HTTP fixtures change only their own test URL/protocol allowance; the TLS rejection fixture maps its own test name to its local socket. Neither route exists in the live driver, neither changes machine trust or networking, and neither proves successful private HTTPS, remote identity or board persistence. Those positive observations still require the declared Hosts and real certificate validation.
 
 **Open coverage:** final normal target and live-run lease; actual two-machine HTTPS/Origin/board readback, normal retirement and the separately declared R4 negative. Default-mode no-IO/no-alias, parser/replacement and full Host-supervisor product tests remain separate required gates. Fixtures, source inspection and this draft cannot close them. Return each real journey as supported, unsupported or unknown with machine/build/root/client, exact evidence paths and cleanup outcome. Acceptance remains with the caller.
