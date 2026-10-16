@@ -9,7 +9,8 @@ mod process_identity_guard;
 mod profile;
 
 use codex_native_integration::{
-    AppServerCommandSpec, CodexPaths, CodexRouterProfile, NativeProtocolConnection,
+    AppServerCommandSpec, CodexPaths, CodexRouterProfile, DEFAULT_ROUTER_PORT,
+    NativeProtocolConnection,
 };
 use codex_router_host::{APP_SERVER_SHUTDOWN_TIMEOUT, ProcessGroupChild, ROUTER_SHUTDOWN_TIMEOUT};
 use process_identity_guard::capture_production_identity;
@@ -74,7 +75,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 async fn run(options: Options) -> Result<(), Box<dyn std::error::Error>> {
-    if !cfg!(debug_assertions) || options.port == 0 || options.port == 8787 {
+    if !cfg!(debug_assertions) || options.port == 0 || options.port == DEFAULT_ROUTER_PORT {
         return Err("A debug build and an unused non-production port are required.".into());
     }
     if !options.router_binary.is_absolute() || !options.router_binary.is_file() {

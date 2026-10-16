@@ -29,6 +29,7 @@ pub struct CodexAppServerDeliveryRoute {
     endpoints: EndpointDirectory,
     backend: NativeControlBackend,
     holder: std::sync::Arc<crate::UnmaterializedThreadHolder>,
+    approval_broker: Option<std::sync::Weak<dyn codex_acp_adapter::ApprovalBroker>>,
 }
 
 struct NativeRouteDeliveryRequest {
@@ -54,7 +55,19 @@ impl CodexAppServerDeliveryRoute {
             endpoints,
             backend,
             holder,
+            approval_broker: None,
         }
+    }
+
+    /// Borrows the existing route owner without retaining the broker's delivery cycle.
+    #[must_use]
+    pub fn with_approval_broker(
+        mut self,
+        broker: &std::sync::Arc<crate::ServiceInteractionBroker>,
+    ) -> Self {
+        let broker_port: std::sync::Arc<dyn codex_acp_adapter::ApprovalBroker> = broker.clone();
+        self.approval_broker = Some(std::sync::Arc::downgrade(&broker_port));
+        self
     }
 
     async fn deliver_native(
@@ -71,6 +84,15 @@ impl CodexAppServerDeliveryRoute {
             return Ok(not_submitted("staleGeneration", false));
         }
         let generation = admission.generation().clone();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        let retirement = admission.retirement();
+        let recorded_route = tokio::select! {
+            biased;
+            () = retirement.cancelled() => crate::native_recorded_policy::RecordedNativeRouteClassification::UnresolvedAuthority,
+            result = tokio::time::timeout_at(deadline, crate::native_recorded_policy::classify_recorded_native_route(self.approval_broker.as_ref(), &request.target)) => {
+                result.unwrap_or(crate::native_recorded_policy::RecordedNativeRouteClassification::UnresolvedAuthority)
+            }
+        };
         let mut effects = NativeEffectEvidence {
             target: Some(request.target.clone()),
             generation: Some(generation.clone()),
@@ -78,7 +100,8 @@ impl CodexAppServerDeliveryRoute {
             native_turn_id: None,
             native_submission_id: None,
             allocation: PreparationEffect::NotRequested,
-            resume: if request.mode == MessageDelivery::Auto {
+            // This same classification pins dispatch; a generic queue cannot attach later.
+            resume: if request.mode == MessageDelivery::Auto || recorded_route.may_resume() {
                 PreparationEffect::Unknown
             } else {
                 PreparationEffect::NotRequested
@@ -134,6 +157,9 @@ impl CodexAppServerDeliveryRoute {
                         service_id: &self.service_id,
                         backend: &self.backend,
                         endpoints: &endpoints,
+                        approval_broker: self.approval_broker.as_ref(),
+                        recorded_route: Some(&recorded_route),
+                        attempt_deadline: Some(deadline),
                         held_connection: Some(binding.connection_mut()),
                         load_policy,
                     },
@@ -179,6 +205,9 @@ impl CodexAppServerDeliveryRoute {
                         service_id: &self.service_id,
                         backend: &self.backend,
                         endpoints: &endpoints,
+                        approval_broker: self.approval_broker.as_ref(),
+                        recorded_route: Some(&recorded_route),
+                        attempt_deadline: Some(deadline),
                         held_connection: None,
                         load_policy,
                     },
@@ -315,7 +344,8 @@ impl SessionDeliveryRoute for CodexAppServerDeliveryRoute {
             crate::CodexAppServerScheduledRuns::new(
                 self.backend.clone(),
                 std::sync::Arc::clone(&self.holder),
-            ),
+            )
+            .with_approval_broker(self.approval_broker.clone()),
         ))
     }
 
@@ -355,16 +385,8 @@ impl SessionDeliveryRoute for CodexAppServerDeliveryRoute {
             let expected_link =
                 RouterLink::new(MachineId::from(self.service_id.clone()), push_id.clone())
                     .to_string();
-            let prepared_header = request
-                .payload
-                .line
-                .as_str()
-                .lines()
-                .next()
-                .unwrap_or_default();
-            let line_has_expected_link = prepared_header
-                .rsplit_once(" · ")
-                .is_some_and(|(_, link)| link == expected_link);
+            let line_has_expected_link =
+                prepared_line_has_expected_link(request.payload.line.as_str(), &expected_link);
             if request.correlation.as_str() != push_id.as_str() || !line_has_expected_link {
                 return Err(DeliveryContractError::InvalidEvidence);
             }
@@ -392,6 +414,47 @@ impl SessionDeliveryRoute for CodexAppServerDeliveryRoute {
             Ok(crate::codex_queue_reconciliation::reconcile(&self.backend, context).await)
         })
     }
+}
+
+fn prepared_line_has_expected_link(line: &str, expected_link: &str) -> bool {
+    if line.contains(['\n', '\r']) {
+        return false;
+    }
+    let Some(prefix) = line.strip_suffix(expected_link) else {
+        return false;
+    };
+    let Some((_, preview_suffix)) = prefix.split_once(" · \"") else {
+        return prefix.strip_suffix(" · ").is_some();
+    };
+    if let Some(preview) = preview_suffix.strip_suffix("\" · ") {
+        return preview_has_only_escaped_quotes(preview);
+    }
+    let Some(truncated) = preview_suffix.strip_suffix(") 📖 Load full message → ") else {
+        return false;
+    };
+    let Some((preview, omitted_scalars)) = truncated.rsplit_once("…\" (+") else {
+        return false;
+    };
+    // The formatter owns the count's source-body semantics. This route only admits
+    // its exact positive decimal grammar before the exact service/push link.
+    omitted_scalars
+        .parse::<usize>()
+        .is_ok_and(|count| count > 0 && count.to_string() == omitted_scalars)
+        && preview_has_only_escaped_quotes(preview)
+}
+
+fn preview_has_only_escaped_quotes(preview: &str) -> bool {
+    let mut escaped = false;
+    for character in preview.chars() {
+        if escaped {
+            escaped = false;
+        } else if character == '\\' {
+            escaped = true;
+        } else if character == '"' {
+            return false;
+        }
+    }
+    !escaped
 }
 
 fn not_submitted(reason: &str, retryable: bool) -> DeliveryReceipt {

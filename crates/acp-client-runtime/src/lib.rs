@@ -40,6 +40,7 @@ mod interaction_port;
 mod provider_capability_report;
 mod provider_connection_activity;
 mod provider_item_projection;
+mod provider_model_picker;
 mod provider_persistence_target;
 mod provider_prompt_content;
 mod provider_prompt_observation;
@@ -48,6 +49,7 @@ mod provider_session_actor;
 mod provider_session_setting_update;
 mod provider_session_settings;
 mod provider_settings_catalog_codec;
+mod provider_transport_diagnostics;
 mod provider_update_kind;
 mod session_event_sink;
 
@@ -60,6 +62,7 @@ pub use interaction_port::{
     ApprovalPortOutcome, InteractionFuture, InteractionPort, RefusedApprovalOffer,
 };
 pub use provider_capability_report::ProviderCapabilityReport;
+pub use provider_model_picker::ProviderModelPicker;
 pub use provider_persistence_target::ProviderPersistenceTarget;
 pub use provider_prompt_content::ProviderPromptContent;
 pub use provider_session_actor::{

@@ -18,6 +18,10 @@ use native_permission_echo::applied_router_sandbox;
 mod conversation_operation_recorder;
 use conversation_operation_recorder::AcceptingConversationRecorder;
 
+#[cfg(target_os = "macos")]
+#[path = "session_creation/private_scratch_alias.rs"]
+mod private_scratch_alias;
+
 const TEST_SCRATCH: &str =
     "/tmp/router-acp-tests/scratch/session-00000000-0000-4000-8000-000000000099";
 fn ensure_test_scratch() {
@@ -103,9 +107,13 @@ async fn new_session_mints_scoped_configuration_receipt_and_checks_effective_cwd
                     request["params"]["config"]["permissions.router-write-restricted.extends"],
                     ":read-only"
                 );
+                let canonical_scratch = std::fs::canonicalize(TEST_SCRATCH)
+                    .unwrap_or_else(|error| panic!("canonical scratch: {error}"))
+                    .to_string_lossy()
+                    .into_owned();
                 assert_eq!(
                     request["params"]["config"]["permissions.router-write-restricted.filesystem"]
-                        [TEST_SCRATCH],
+                        [&canonical_scratch],
                     "write"
                 );
                 assert!(

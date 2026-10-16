@@ -79,6 +79,19 @@ pub(crate) async fn compose_provider_startup(
             ExternalProviderStartup::Launch(binding) => {
                 let executable = binding.launch.executable.display().to_string();
                 let mut launch = binding.launch;
+                if binding.provider == ProviderKind::ClaudeCode
+                    && !crate::global_claude_executable::bind_global_claude_executable(
+                        &mut launch.environment,
+                    )
+                {
+                    endpoints.push(unavailable_endpoint(
+                        service_id,
+                        binding.provider,
+                        text("global Claude executable is unavailable on the Host launch PATH")?,
+                        text("install Claude Code globally, ensure claude is on the Host PATH, then restart the Host")?,
+                    )?);
+                    continue;
+                }
                 launch.persistence_target = match binding.provider {
                     ProviderKind::Cursor => {
                         acp_client_runtime::ProviderPersistenceTarget::CursorAllowlist
@@ -103,6 +116,7 @@ pub(crate) async fn compose_provider_startup(
                 };
                 let runtime = ExternalProviderRuntime::initialize_with_mcp_http_and_hub(
                     launch,
+                    provider_model_picker(binding.provider),
                     "router-collaboration",
                     mcp_url.to_owned(),
                     Arc::clone(hub.as_ref().ok_or_else(|| {
@@ -257,6 +271,30 @@ fn generation_number(provider: ProviderKind) -> io::Result<GenerationNumber> {
         ProviderKind::Cursor => 2,
     };
     GenerationNumber::try_from(ordinal).map_err(io::Error::other)
+}
+
+fn provider_model_picker(provider: ProviderKind) -> acp_client_runtime::ProviderModelPicker {
+    match provider {
+        ProviderKind::Cursor => acp_client_runtime::ProviderModelPicker::CursorParameterized,
+        ProviderKind::ClaudeCode => acp_client_runtime::ProviderModelPicker::Standard,
+    }
+}
+
+#[cfg(test)]
+mod model_picker_tests {
+    use super::*;
+
+    #[test]
+    fn only_cursor_requests_parameterized_model_picker() {
+        assert_eq!(
+            provider_model_picker(ProviderKind::Cursor),
+            acp_client_runtime::ProviderModelPicker::CursorParameterized
+        );
+        assert_eq!(
+            provider_model_picker(ProviderKind::ClaudeCode),
+            acp_client_runtime::ProviderModelPicker::Standard
+        );
+    }
 }
 
 fn provider_capabilities(

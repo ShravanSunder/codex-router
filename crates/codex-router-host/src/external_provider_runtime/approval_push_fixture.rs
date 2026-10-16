@@ -43,8 +43,9 @@ impl ApprovalPushFixture {
         delivered_line: &str,
         approver: &SessionRef,
     ) -> TestResult<PushRecord> {
-        let (_, link_text) = delivered_line
-            .rsplit_once(" · ")
+        let link_text = delivered_line
+            .split_whitespace()
+            .last()
             .ok_or("approval push omitted its Router link")?;
         let link = RouterLink::parse(link_text)?;
         if link.machine_id() != &MachineId::from(self.machine_identity.service_id().clone()) {

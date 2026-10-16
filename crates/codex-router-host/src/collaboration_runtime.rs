@@ -420,6 +420,7 @@ impl CollaborationRuntime {
                     provider_endpoints,
                     directory: identity.endpoint_directory(),
                     native_backend: native_backend.clone(),
+                    approval_broker: approval_broker.clone(),
                     unmaterialized_threads: std::sync::Arc::clone(&unmaterialized_threads),
                     provider_supervisor: external_provider_supervisor.clone(),
                     provider_store: provider_store.clone(),

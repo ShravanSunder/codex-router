@@ -86,6 +86,10 @@ where
             .map_err(|_error| HttpProxyError::Selection {
                 reason: QuotaAwareAccountSelectorError::StateUnavailable,
             })?;
+        require_configured_openai_accounts(
+            route_profile.provider,
+            selector_inputs.iter().map(|input| input.provider()),
+        )?;
         let selector_inputs = selector_inputs_excluding_attempted(selector_inputs, request);
         let selector_accounts = selector_inputs
             .iter()

@@ -1,4 +1,5 @@
 //! Read-only production identity snapshots; never signal a discovered process.
+use codex_native_integration::DEFAULT_ROUTER_PORT;
 use std::{collections::BTreeMap, io, path::Path};
 use tokio::process::Command;
 
@@ -9,8 +10,9 @@ pub struct ProductionIdentity {
 }
 
 pub async fn capture_production_identity() -> io::Result<ProductionIdentity> {
+    let listener_filter = format!("-iTCP:{DEFAULT_ROUTER_PORT}");
     let listener = Command::new("/usr/sbin/lsof")
-        .args(["-nP", "-iTCP:8787", "-sTCP:LISTEN", "-Fp"])
+        .args(["-nP", listener_filter.as_str(), "-sTCP:LISTEN", "-Fp"])
         .output()
         .await?;
     if !listener.status.success() {

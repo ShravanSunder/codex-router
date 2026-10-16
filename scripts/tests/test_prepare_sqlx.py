@@ -98,7 +98,7 @@ class PrepareSqlxTests(unittest.TestCase):
         ]
         self.assertEqual(
             ["--ignore-missing" in command for command, _ in migration_calls],
-            [False, False, False, False, True, True],
+            [False, False, False, False, True, True, True],
         )
         self.assertEqual(
             [command[command.index("--source") + 1] for command, _ in migration_calls],
@@ -109,6 +109,7 @@ class PrepareSqlxTests(unittest.TestCase):
                 "crates/message-board-storage/migrations",
                 "crates/collaboration-service/migrations",
                 "crates/automation-storage/migrations",
+                "crates/collaboration-service/interaction-migrations",
             ],
         )
         self.assertEqual(

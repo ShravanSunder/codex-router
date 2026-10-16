@@ -133,6 +133,9 @@ mod codex_queue_reconciliation;
 mod interaction_broker;
 mod message_effect_state;
 mod native_message_dispatch;
+#[cfg(test)]
+mod native_recorded_permission_tests;
+mod native_recorded_policy;
 pub use codex_acp_adapter::BrokeredApprovalOutcome;
 pub use codex_app_server_delivery_route::CodexAppServerDeliveryRoute;
 pub use codex_app_server_scheduled_runs::CodexAppServerScheduledRuns;

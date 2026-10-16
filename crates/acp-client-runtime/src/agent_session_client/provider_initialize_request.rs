@@ -6,12 +6,23 @@ use serde_json::json;
 
 pub(super) async fn initialize_provider_connection(
     connection: &ConnectionTo<Agent>,
+    model_picker: crate::ProviderModelPicker,
 ) -> Result<InitializeResponse, Error> {
+    let mut capabilities = serde_json::Map::from_iter([
+        ("auth".to_owned(), json!({"terminal": false})),
+        ("elicitation".to_owned(), json!({"form": {}})),
+    ]);
+    if model_picker == crate::ProviderModelPicker::CursorParameterized {
+        capabilities.insert(
+            "_meta".to_owned(),
+            json!({"parameterizedModelPicker": true}),
+        );
+    }
     let request = UntypedMessage::new(
         "initialize",
         json!({
             "protocolVersion": 1,
-            "clientCapabilities": {"auth": {"terminal": false}, "elicitation": {"form": {}}},
+            "clientCapabilities": capabilities,
             "clientInfo": {"name": "codex-router", "version": env!("CARGO_PKG_VERSION")},
         }),
     )?;

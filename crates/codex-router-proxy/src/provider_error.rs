@@ -668,6 +668,45 @@ mod tests {
     }
 
     #[test]
+    fn mixed_responses_websocket_capacity_and_quota_tokens_keep_capacity_precedence() {
+        let envelopes = [
+            r#"{"type":"error","error":{"code":"server_is_overloaded","type":"usage_limit_reached"}}"#,
+            r#"{"type":"error","error":{"type":"slow_down","code":"quota_exceeded"}}"#,
+            r#"{"type":"response.failed","response":{"error":{"code":"server_is_overloaded","type":"insufficient_quota"}}}"#,
+            r#"{"type":"response.failed","response":{"error":{"type":"slow_down","code":"usage_limit_reached"}}}"#,
+        ];
+
+        for envelope in envelopes {
+            assert_eq!(
+                classify_responses_websocket_error_envelope(envelope.as_bytes()),
+                ProviderErrorClassification::ModelCapacity,
+                "capacity classification wins over mixed quota tokens: {envelope}"
+            );
+        }
+    }
+
+    #[test]
+    fn oversized_mixed_responses_websocket_tokens_keep_capacity_precedence() {
+        let padding = "x".repeat(128 * 1024);
+        let envelopes = [
+            format!(
+                r#"{{"type":"error","error":{{"code":"server_is_overloaded","type":"usage_limit_reached","message":"{padding}"}}}}"#
+            ),
+            format!(
+                r#"{{"type":"error","error":{{"code":"quota_exceeded","type":"slow_down","message":"{padding}"}}}}"#
+            ),
+        ];
+
+        for envelope in envelopes {
+            assert_eq!(
+                classify_responses_websocket_error_envelope(envelope.as_bytes()),
+                ProviderErrorClassification::ModelCapacity,
+                "oversized capacity classification wins over mixed quota tokens"
+            );
+        }
+    }
+
+    #[test]
     fn ambiguous_model_text_with_quota_words_is_not_classified() {
         let model_message = br#"{
             "type": "response.output_text.delta",

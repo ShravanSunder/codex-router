@@ -23,8 +23,12 @@ pub(crate) async fn reconcile(
     let RouteEffectEvidence::CodexAppServer(native) = recorded else {
         return AttemptReconciliation::StillUnknown;
     };
+    let resume_effect = match native.resume {
+        PreparationEffect::NotRequested => AcceptedResumeEffect::NotRequested,
+        PreparationEffect::Accepted => AcceptedResumeEffect::Accepted,
+        _ => return AttemptReconciliation::StillUnknown,
+    };
     if mode != MessageDelivery::Queue
-        || native.resume != PreparationEffect::NotRequested
         || native.allocation != PreparationEffect::NotRequested
         || native.target.as_ref() != Some(&target)
     {
@@ -71,7 +75,7 @@ pub(crate) async fn reconcile(
         input_kind,
         representation,
         client_user_message_id,
-        resume_effect: AcceptedResumeEffect::NotRequested,
+        resume_effect,
         acceptance: NativeSendAcceptance::QueueAccepted { submission_id },
     };
     AttemptReconciliation::Accepted(Box::new(DeliveryReceipt::from(receipt)))

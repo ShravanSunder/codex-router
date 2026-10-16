@@ -1,17 +1,20 @@
 //! Real API fixture with scripted native responses; never a live model backend.
 use automation_storage::AutomationStore;
-use collaboration_client::ClientError;
+use codex_acp_adapter::{ApprovalBroker, ApprovalRoute};
+use collaboration_client::{
+    ClientError, MessageSendError, MessageSendRequest, PublicMessageContent,
+};
 use collaboration_protocol::{
-    CodexGeneration, DeliveryReceipt, EndpointDescription, MessageContent, MessageDelivery,
-    SessionMessageSendParams, SessionRef,
+    CodexGeneration, DeliveryReceipt, EndpointDescription, MessageDelivery, PushMessageSendResult,
+    PushRecord, SessionRef,
 };
 use collaboration_service::{
     CodexAppServerDeliveryRoute, NativeControlBackend, NativeGenerationGate, ServiceIdentity,
-    SessionDeliveryRoute, SessionDeliveryRouter, SessionMessageDelivery, new_service_uuid,
+    ServiceInteractionBroker, SessionDeliveryRoute, SessionDeliveryRouter, SessionMessageDelivery,
 };
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
-use std::{collections::BTreeMap, os::unix::fs::DirBuilderExt, sync::Arc, time::Duration};
+use std::{collections::BTreeMap, path::Path, sync::Arc, time::Duration};
 use tokio::sync::Mutex;
 use tokio_tungstenite::tungstenite::Message;
 #[path = "../support/served_api.rs"]
@@ -33,16 +36,49 @@ pub struct MessageScenario {
     pub steps: Vec<NativeStep>,
 }
 type FixtureError = Box<dyn std::error::Error + Send + Sync>;
+pub struct RecordedMessageObservation {
+    pub result: Result<PushMessageSendResult, MessageSendError>,
+    pub requests: Vec<Value>,
+    pub stored: Option<PushRecord>,
+    pub target: SessionRef,
+    pub generation: CodexGeneration,
+}
+
 pub async fn exercise(
     scenario: MessageScenario,
 ) -> Result<(Result<DeliveryReceipt, ClientError>, Vec<Value>), FixtureError> {
-    let fixture_id = String::from(new_service_uuid()?);
-    // Keep the Unix socket path below SUN_LEN even when the host temp prefix is long.
-    let short_fixture_id = fixture_id
-        .get(24..)
-        .ok_or_else(|| std::io::Error::other("generated service UUID is shorter than 24 bytes"))?;
-    let root = std::env::temp_dir().join(format!("mf-{short_fixture_id}"));
-    std::fs::DirBuilder::new().mode(0o700).create(&root)?;
+    let observation = exercise_message(scenario, false).await?;
+    let result = observation
+        .result
+        .map(|push| push.receipt)
+        .map_err(|error| match error {
+            MessageSendError::Preparation(source) | MessageSendError::Submission { source, .. } => {
+                *source
+            }
+        });
+    Ok((result, observation.requests))
+}
+
+pub async fn exercise_recorded_loaded(
+    delivery: MessageDelivery,
+) -> Result<RecordedMessageObservation, FixtureError> {
+    exercise_message(
+        MessageScenario {
+            delivery,
+            steps: Vec::new(),
+        },
+        true,
+    )
+    .await
+}
+
+async fn exercise_message(
+    mut scenario: MessageScenario,
+    recorded: bool,
+) -> Result<RecordedMessageObservation, FixtureError> {
+    // Private RAII ownership keeps the native socket short and cleans broker/store sidecars too.
+    let directory = tempfile::Builder::new().prefix("mf-").tempdir()?;
+    let root = directory.path().to_path_buf();
     let socket_path = root.join("n.sock");
     let listener = tokio::net::UnixListener::bind(&socket_path)?;
     let service_id = "00000000-0000-4000-8000-000000000001";
@@ -86,16 +122,52 @@ pub async fn exercise(
     let automation_store = Arc::new(Mutex::new(
         AutomationStore::open(&root.join("automation.sqlite")).await?,
     ));
+    let broker = if recorded {
+        let scratch = root.join("scratch");
+        tokio::fs::create_dir(&scratch).await?;
+        let path = root.join("approval-routes.json");
+        let broker = ServiceInteractionBroker::load(
+            service_id.to_owned().try_into()?,
+            native_backend.clone(),
+            path.clone(),
+        )
+        .await?;
+        broker
+            .register_route(ApprovalRoute {
+                thread_id: "target".into(),
+                created_by: target.clone(),
+                approver: target.clone(),
+                access: collaboration_protocol::RouterAccess::WorkspaceWrite,
+                scratch_path: scratch.to_string_lossy().into_owned(),
+                root_message_id: None,
+            })
+            .await?;
+        drop(broker);
+        let broker = ServiceInteractionBroker::load(
+            service_id.to_owned().try_into()?,
+            native_backend.clone(),
+            path,
+        )
+        .await?;
+        scenario.steps = recorded_loaded_steps(scenario.delivery, &root, &scratch)?;
+        Some(broker)
+    } else {
+        None
+    };
     let identity = ServiceIdentity::new(service_id, service_id)?
         .with_automation_store(Arc::clone(&automation_store))
         .with_endpoints(vec![description])?
         .with_native_backend(native_backend.clone())?;
-    let route: Arc<dyn SessionDeliveryRoute> = Arc::new(CodexAppServerDeliveryRoute::new(
+    let route = CodexAppServerDeliveryRoute::new(
         service_id.to_owned().try_into()?,
         identity.endpoint_directory(),
         native_backend,
         Arc::new(collaboration_service::UnmaterializedThreadHolder::new()),
-    ));
+    );
+    let route: Arc<dyn SessionDeliveryRoute> = Arc::new(match &broker {
+        Some(broker) => route.with_approval_broker(broker),
+        None => route,
+    });
     let delivery: Arc<dyn SessionMessageDelivery> =
         Arc::new(SessionDeliveryRouter::new(vec![route]));
     let presence = Arc::new(RunningPresence);
@@ -198,14 +270,14 @@ pub async fn exercise(
     let client = served.client("message-proof").await?;
     let result = tokio::time::timeout(
         Duration::from_secs(3),
-        client.send_agent_message(SessionMessageSendParams {
+        client.send_message(MessageSendRequest {
             target: target.clone(),
-            generation_guard: Some(generation),
-            message: MessageContent::Agent {
-                sender: target,
+            generation_guard: Some(generation.clone()),
+            message: PublicMessageContent::Agent {
+                sender: target.clone(),
                 text: "A finding".to_owned().try_into()?,
             },
-            mode: scenario.delivery,
+            delivery: scenario.delivery,
         }),
     )
     .await?;
@@ -213,15 +285,37 @@ pub async fn exercise(
     served.stop().await?;
     owner.shutdown().await;
     drop(owner);
-    let requests = backend.await??;
+    let requests = backend.await?;
+    let stored = if recorded {
+        match requests.as_ref().ok().and_then(|requests| {
+            requests.iter().find_map(|request| {
+                request
+                    .pointer("/params/clientUserMessageId")
+                    .and_then(Value::as_str)
+            })
+        }) {
+            Some(correlation) => {
+                let push = collaboration_protocol::PushId::try_from(correlation.to_owned())?;
+                automation_store.lock().await.get_push_record(&push).await
+            }
+            None => Ok(None),
+        }
+    } else {
+        Ok(None)
+    };
+    drop(broker);
     let automation_store = Arc::try_unwrap(automation_store)
         .map_err(|_| std::io::Error::other("service retained automation store"))?
         .into_inner();
     automation_store.close().await?;
-    std::fs::remove_file(root.join("automation.sqlite"))?;
-    std::fs::remove_file(socket_path)?;
-    std::fs::remove_dir(root)?;
-    Ok((result, requests))
+    drop(directory);
+    Ok(RecordedMessageObservation {
+        result,
+        requests: requests?,
+        stored: stored?,
+        target,
+        generation,
+    })
 }
 
 struct RunningPresence;
@@ -246,4 +340,93 @@ pub fn outcome_data(result: Result<DeliveryReceipt, ClientError>) -> Result<Valu
         Ok(receipt) => serde_json::to_value(receipt.outcome).map_err(|_| "invalid outcome"),
         Err(_) => Err("expected a typed delivery outcome"),
     }
+}
+
+/// Independent upstream-shaped reply: literal grants, never projected from production or RPC input.
+fn recorded_loaded_steps(
+    delivery: MessageDelivery,
+    root: &Path,
+    scratch: &Path,
+) -> Result<Vec<NativeStep>, FixtureError> {
+    let home = std::env::var("HOME")?;
+    let mut roots = vec![
+        std::fs::canonicalize(scratch)?
+            .to_string_lossy()
+            .into_owned(),
+    ];
+    for location in [
+        "Library/Caches",
+        ".cache",
+        "Library/pnpm",
+        ".local/share/pnpm",
+        ".local/state/pnpm",
+        ".pnpm-store",
+        ".npm",
+        ".yarn",
+        ".bun/install/cache",
+        ".cargo",
+        ".rustup",
+        "go/pkg",
+        ".gradle",
+        ".m2",
+        "Library/org.swift.swiftpm",
+        ".swiftpm",
+        "Library/Developer",
+        ".local/share/uv",
+        "Library/Application Support/uv",
+        ".local/share/mise",
+        ".local/state/mise",
+    ] {
+        let symlinked = Path::new(location)
+            .ancestors()
+            .filter(|part| !part.as_os_str().is_empty())
+            .any(|part| {
+                std::fs::symlink_metadata(Path::new(&home).join(part))
+                    .is_ok_and(|metadata| metadata.file_type().is_symlink())
+            });
+        if !symlinked {
+            roots.push(format!("{home}/{location}"));
+        }
+    }
+    let cwd = std::fs::canonicalize(root)?.to_string_lossy().into_owned();
+    let status = if delivery == MessageDelivery::Steer {
+        "active"
+    } else {
+        "idle"
+    };
+    let mut steps = vec![
+        NativeStep {
+            method: "thread/read",
+            reply: NativeReply::Result(json!({"thread":{
+            "id":"target","cwd":cwd,"status":{"type":status}}})),
+        },
+        NativeStep {
+            method: "thread/resume",
+            reply: NativeReply::Result(json!({
+                "thread":{"id":"target","cwd":cwd},"cwd":cwd,
+                "activePermissionProfile":{"id":"router-workspace-write"},
+                "sandbox":{"type":"workspaceWrite","networkAccess":true,"writableRoots":roots}
+            })),
+        },
+    ];
+    match delivery {
+        MessageDelivery::Queue => steps.push(NativeStep {
+            method: "thread/queue/add",
+            reply: NativeReply::Result(json!({"queuedSubmission":{"id":"recorded-queue-1"}})),
+        }),
+        MessageDelivery::Steer => steps.extend([
+            NativeStep {
+                method: "thread/turns/list",
+                reply: NativeReply::Result(json!({
+                "data":[{"id":"recorded-turn-1","status":"inProgress"}],
+                "nextCursor":null,"backwardsCursor":null})),
+            },
+            NativeStep {
+                method: "turn/steer",
+                reply: NativeReply::Result(json!({"turnId":"recorded-turn-1"})),
+            },
+        ]),
+        MessageDelivery::Auto => return Err("recorded fixture requires Queue or Steer".into()),
+    }
+    Ok(steps)
 }

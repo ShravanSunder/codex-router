@@ -615,12 +615,17 @@ async fn live_composed_cursor_native_mcp_requires_typed_call_and_router_result()
             remote_control_server_name: None,
             owner_human_id: None,
         },
-        vec![crate::ExternalProviderStartup::Launch(
-            crate::ExternalProviderLaunchBinding::claude(
+        vec![crate::ExternalProviderStartup::Launch({
+            let mut binding = crate::ExternalProviderLaunchBinding::claude(
                 owned_host_endpoint_fixture().executable,
                 owned_host_endpoint_fixture().arguments,
-            )?,
-        )],
+            )?;
+            codex_router_test_support::global_claude_fixture::declare_global_claude_fixture(
+                root.path(),
+                &mut binding.launch.environment,
+            )?;
+            binding
+        })],
     )
     .await?;
     let manifest: collaboration_protocol::ServiceManifest =
@@ -650,6 +655,7 @@ async fn live_composed_cursor_native_mcp_requires_typed_call_and_router_result()
             arguments,
             environment: Vec::new(),
         },
+        acp_client_runtime::ProviderModelPicker::CursorParameterized,
         "router-collaboration",
         manifest.mcp.url,
     )

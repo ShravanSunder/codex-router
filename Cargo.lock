@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "acp-client-runtime"
-version = "0.1.93"
+version = "0.1.95"
 dependencies = [
  "agent-client-protocol",
  "futures-util",
@@ -17,6 +17,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+ "tracing-subscriber",
  "uuid",
 ]
 
@@ -110,7 +111,7 @@ dependencies = [
 
 [[package]]
 name = "agent-automation"
-version = "0.1.93"
+version = "0.1.95"
 dependencies = [
  "chrono",
  "chrono-tz",
@@ -175,7 +176,7 @@ dependencies = [
 
 [[package]]
 name = "agent-collaboration"
-version = "0.1.93"
+version = "0.1.95"
 dependencies = [
  "agent-automation",
  "automation-storage",
@@ -184,6 +185,7 @@ dependencies = [
  "claude-code-peer-messaging",
  "codex-native-integration",
  "codex-router-host",
+ "codex-router-test-support",
  "collaboration-client",
  "collaboration-mcp",
  "collaboration-protocol",
@@ -523,7 +525,7 @@ checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 
 [[package]]
 name = "automation-storage"
-version = "0.1.93"
+version = "0.1.95"
 dependencies = [
  "agent-automation",
  "chrono",
@@ -949,7 +951,7 @@ checksum = "c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9"
 
 [[package]]
 name = "claude-code-peer-messaging"
-version = "0.1.93"
+version = "0.1.95"
 dependencies = [
  "agent-automation",
  "collaboration-protocol",
@@ -970,7 +972,7 @@ checksum = "0c9ea0ac24bc397ab3c98583a3c9ba74fa56b09a4449bbe172b9b1ddb016027a"
 
 [[package]]
 name = "codex-acp-adapter"
-version = "0.1.93"
+version = "0.1.95"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -992,7 +994,7 @@ dependencies = [
 
 [[package]]
 name = "codex-native-integration"
-version = "0.1.93"
+version = "0.1.95"
 dependencies = [
  "futures-util",
  "jsonschema",
@@ -1012,7 +1014,7 @@ dependencies = [
 
 [[package]]
 name = "codex-router-auth"
-version = "0.1.93"
+version = "0.1.95"
 dependencies = [
  "base64 0.22.1",
  "codex-router-core",
@@ -1032,7 +1034,7 @@ dependencies = [
 
 [[package]]
 name = "codex-router-cli"
-version = "0.1.93"
+version = "0.1.95"
 dependencies = [
  "agent-collaboration",
  "base64 0.22.1",
@@ -1070,6 +1072,7 @@ dependencies = [
  "tokio",
  "tokio-tungstenite",
  "tokio-util",
+ "toml 1.1.2+spec-1.1.0",
  "tracing",
  "tracing-opentelemetry",
  "tracing-subscriber",
@@ -1079,7 +1082,7 @@ dependencies = [
 
 [[package]]
 name = "codex-router-core"
-version = "0.1.93"
+version = "0.1.95"
 dependencies = [
  "hmac 0.12.1",
  "serde",
@@ -1091,7 +1094,7 @@ dependencies = [
 
 [[package]]
 name = "codex-router-host"
-version = "0.1.93"
+version = "0.1.95"
 dependencies = [
  "acp-client-runtime",
  "agent-automation",
@@ -1132,7 +1135,7 @@ dependencies = [
 
 [[package]]
 name = "codex-router-proxy"
-version = "0.1.93"
+version = "0.1.95"
 dependencies = [
  "async-compression",
  "bytes",
@@ -1167,7 +1170,7 @@ dependencies = [
 
 [[package]]
 name = "codex-router-quota"
-version = "0.1.93"
+version = "0.1.95"
 dependencies = [
  "codex-router-core",
  "thiserror 2.0.18",
@@ -1175,7 +1178,7 @@ dependencies = [
 
 [[package]]
 name = "codex-router-quota-reset-test-harness"
-version = "0.1.93"
+version = "0.1.95"
 dependencies = [
  "codex-router-cli",
  "codex-router-core",
@@ -1188,7 +1191,7 @@ dependencies = [
 
 [[package]]
 name = "codex-router-secret-store"
-version = "0.1.93"
+version = "0.1.95"
 dependencies = [
  "aes-gcm 0.11.1",
  "apple-native-keyring-store",
@@ -1210,7 +1213,7 @@ dependencies = [
 
 [[package]]
 name = "codex-router-selection"
-version = "0.1.93"
+version = "0.1.95"
 dependencies = [
  "base64 0.22.1",
  "codex-router-core",
@@ -1225,7 +1228,7 @@ dependencies = [
 
 [[package]]
 name = "codex-router-state"
-version = "0.1.93"
+version = "0.1.95"
 dependencies = [
  "codex-router-core",
  "codex-router-selection",
@@ -1238,7 +1241,7 @@ dependencies = [
 
 [[package]]
 name = "codex-router-test-support"
-version = "0.1.93"
+version = "0.1.95"
 dependencies = [
  "codex-native-integration",
  "codex-router-cli",
@@ -1258,14 +1261,14 @@ dependencies = [
 
 [[package]]
 name = "codex-router-ux-prototype"
-version = "0.1.93"
+version = "0.1.95"
 dependencies = [
  "iocraft",
 ]
 
 [[package]]
 name = "collaboration-client"
-version = "0.1.93"
+version = "0.1.95"
 dependencies = [
  "automation-storage",
  "codex-acp-adapter",
@@ -1292,7 +1295,7 @@ dependencies = [
 
 [[package]]
 name = "collaboration-mcp"
-version = "0.1.93"
+version = "0.1.95"
 dependencies = [
  "agent-collaboration",
  "automation-storage",
@@ -1324,7 +1327,7 @@ dependencies = [
 
 [[package]]
 name = "collaboration-protocol"
-version = "0.1.93"
+version = "0.1.95"
 dependencies = [
  "agent-automation",
  "chrono",
@@ -1343,7 +1346,7 @@ dependencies = [
 
 [[package]]
 name = "collaboration-service"
-version = "0.1.93"
+version = "0.1.95"
 dependencies = [
  "agent-automation",
  "automation-storage",
@@ -3141,7 +3144,7 @@ dependencies = [
 
 [[package]]
 name = "lifecycle-observation"
-version = "0.1.93"
+version = "0.1.95"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -3278,7 +3281,7 @@ dependencies = [
 
 [[package]]
 name = "message-board"
-version = "0.1.93"
+version = "0.1.95"
 dependencies = [
  "chrono",
  "schemars 1.2.2",
@@ -3290,7 +3293,7 @@ dependencies = [
 
 [[package]]
 name = "message-board-storage"
-version = "0.1.93"
+version = "0.1.95"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -3914,14 +3917,15 @@ dependencies = [
 
 [[package]]
 name = "quinn-proto"
-version = "0.11.15"
+version = "0.11.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4fcb935c5bec503c2f0e306bdd3e58bb9029dcb14fa8d9ac76e3a5256ac0763e"
+checksum = "a9746dbde176634f4f2f1faf2404e30a31b2bc1e9cafb5329c95d8177a18c9fc"
 dependencies = [
  "bytes",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "lru-slab",
- "rand 0.9.4",
+ "rand 0.10.2",
+ "rand_pcg 0.10.2",
  "ring",
  "rustc-hash 2.1.2",
  "rustls",
@@ -4057,6 +4061,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "59cad018caf63deb318e5a4586d99a24424a364f40f1e5778c29aca23f4fc73e"
 dependencies = [
  "rand_core 0.6.4",
+]
+
+[[package]]
+name = "rand_pcg"
+version = "0.10.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "caa0f4137e1c0a72f4c651489402276c8e8e1cf081f3b0ba156d2cbeef09e86a"
+dependencies = [
+ "rand_core 0.10.1",
 ]
 
 [[package]]
@@ -4372,9 +4385,9 @@ dependencies = [
 
 [[package]]
 name = "rustls"
-version = "0.23.45"
+version = "0.23.46"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0d41d731c7d2f962d1ccc364cec258de3c0e93b38c2fb3ba97ac74513048d634"
+checksum = "48e13bd8c0e9365c43cfa5c9e8f9ad49d3c8444926c9aac819e0e4dc503c8fdf"
 dependencies = [
  "once_cell",
  "ring",
@@ -4677,7 +4690,7 @@ dependencies = [
 
 [[package]]
 name = "session-event-model"
-version = "0.1.93"
+version = "0.1.95"
 dependencies = [
  "base64 0.22.1",
  "message-board",
@@ -4788,7 +4801,7 @@ dependencies = [
  "owo-colors",
  "rand 0.8.8",
  "rand_core 0.6.4",
- "rand_pcg",
+ "rand_pcg 0.3.1",
  "scoped-tls",
  "smallvec",
  "tracing",
@@ -5074,7 +5087,7 @@ dependencies = [
 
 [[package]]
 name = "sqlx-turso"
-version = "0.1.93"
+version = "0.1.95"
 dependencies = [
  "chrono",
  "serde",
@@ -5089,7 +5102,7 @@ dependencies = [
 
 [[package]]
 name = "sqlx-turso-core"
-version = "0.1.93"
+version = "0.1.95"
 dependencies = [
  "chrono",
  "either",
@@ -5112,7 +5125,7 @@ dependencies = [
 
 [[package]]
 name = "sqlx-turso-macros"
-version = "0.1.93"
+version = "0.1.95"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",

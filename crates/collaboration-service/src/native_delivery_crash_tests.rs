@@ -19,9 +19,13 @@ use std::{
 use tokio_tungstenite::tungstenite::Message;
 use tokio_util::sync::CancellationToken;
 
+#[path = "native_generic_queue_crash_tests.rs"]
+mod generic_queue_tests;
+
 const ROOT_ENV: &str = "NATIVE_DELIVERY_TEST_CRASH_ROOT";
 const STAGE_ENV: &str = "NATIVE_DELIVERY_TEST_CRASH_STAGE";
 const ID_ENV: &str = "NATIVE_DELIVERY_TEST_CRASH_ID";
+const GENERIC_QUEUE_ENV: &str = "NATIVE_DELIVERY_TEST_GENERIC_QUEUE";
 const SERVICE: &str = "00000000-0000-4000-8000-000000000001";
 const OLD_EPOCH: &str = "00000000-0000-4000-8000-000000000002";
 const NEW_EPOCH: &str = "00000000-0000-4000-8000-000000000003";
@@ -361,9 +365,10 @@ async fn native_delivery_crash_child() -> TestResult<()> {
     let store = Arc::new(Mutex::new(
         AutomationStore::open(&root.join("automation.sqlite")).await?,
     ));
+    let generic_queue = std::env::var(GENERIC_QUEUE_ENV).as_deref() == Ok("true");
     let saved: SavedMessage = serde_json::from_value(json!({
         "target":{"endpoint":{"serviceId":SERVICE,"endpointId":"codex-local"},"sessionId":"fixture-thread"},
-        "content":{"kind":"humanUser","text":"fixture work"},"delivery":"auto","generationGuard":null
+        "content":{"kind":"humanUser","text":"fixture work"},"delivery":if generic_queue {"queue"} else {"auto"},"generationGuard":null
     }))?;
     let wake = store
         .lock()
@@ -425,7 +430,14 @@ async fn native_delivery_crash_child() -> TestResult<()> {
             ))
             .await?;
         let _initialized = socket.next().await.ok_or("missing initialized")??;
-        for method in ["thread/read", "turn/start"] {
+        for method in [
+            "thread/read",
+            if generic_queue {
+                "thread/queue/add"
+            } else {
+                "turn/start"
+            },
+        ] {
             let request: Value = serde_json::from_str(
                 socket
                     .next()
@@ -444,10 +456,17 @@ async fn native_delivery_crash_child() -> TestResult<()> {
                 std::fs::write(
                     &witness,
                     serde_json::to_vec(
-                        &json!({"clientUserMessageId":request.pointer("/params/clientUserMessageId")}),
+                        &json!({"clientUserMessageId":request.pointer("/params/clientUserMessageId"),"input":request.pointer("/params/input")}),
                     )?,
                 )?;
-                json!({"turn":{"id":"fixture-turn"}})
+                if generic_queue {
+                    checkpoint("queue-before-response");
+                }
+                if generic_queue {
+                    json!({"queuedSubmission":{"id":"fixture-queue"}})
+                } else {
+                    json!({"turn":{"id":"fixture-turn"}})
+                }
             };
             socket
                 .send(Message::Text(
@@ -460,7 +479,33 @@ async fn native_delivery_crash_child() -> TestResult<()> {
         std::future::pending::<()>().await;
         Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
     });
-    let identity = identity(&root, Arc::clone(&store), OLD_EPOCH)?;
+    let mut identity = identity(&root, Arc::clone(&store), OLD_EPOCH)?;
+    // Retain the real configured broker through dispatch; no recorded route exists.
+    let recorded_owner = if generic_queue {
+        Some(
+            crate::ServiceInteractionBroker::load(
+                SERVICE.to_owned().try_into()?,
+                identity.native_backend.clone().ok_or("backend missing")?,
+                root.join("approval-routes.json"),
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
+    if let Some(broker) = &recorded_owner {
+        let route: Arc<dyn SessionDeliveryRoute> = Arc::new(
+            CodexAppServerDeliveryRoute::new(
+                SERVICE.to_owned().try_into()?,
+                identity.endpoint_directory(),
+                identity.native_backend.clone().ok_or("backend missing")?,
+                Arc::new(crate::UnmaterializedThreadHolder::new()),
+            )
+            .with_approval_broker(broker),
+        );
+        identity =
+            identity.with_session_delivery(Arc::new(SessionDeliveryRouter::new(vec![route])));
+    }
     let sender = WakeDeliverySender {
         delivery: identity
             .session_delivery
@@ -486,6 +531,8 @@ fn identity(
         "TurnStart",
         "TurnSteer",
         "TurnInterrupt",
+        "ThreadQueueAdd",
+        "ThreadQueueList",
     ] {
         definitions.insert(format!("{name}Params"), json!({"type":"object"}));
         definitions.insert(format!("{name}Response"), json!({"type":"object"}));

@@ -4,6 +4,8 @@
     clippy::panic_in_result_fn
 )]
 //! Recipient-observed push-format matrix on an isolated debug Host.
+#[path = "delivery_matrix/cli_process.rs"]
+mod cli_process;
 #[path = "automation_live_support/debug_backend_restart.rs"]
 mod debug_backend_restart;
 #[path = "delivery_matrix/support.rs"]
@@ -13,9 +15,23 @@ mod delivery_matrix_support;
 mod held_cells;
 #[path = "delivery_matrix/held_subscription_producer.rs"]
 mod held_subscription_producer;
+#[path = "delivery_matrix/native_push_correlation.rs"]
+mod native_push_correlation;
+#[path = "delivery_matrix/native_push_receipt.rs"]
+mod native_push_receipt;
+#[path = "delivery_matrix/owned_resource_cleanup.rs"]
+mod owned_resource_cleanup;
+#[path = "delivery_matrix/owned_resources.rs"]
+mod owned_resources;
+#[path = "delivery_matrix/peer_fixture.rs"]
+mod peer_fixture;
 #[path = "automation_live_support/proof_context.rs"]
 #[allow(dead_code)]
 mod proof_context;
+#[path = "delivery_matrix/public_push_receipt.rs"]
+mod public_push_receipt;
+#[path = "delivery_matrix/runner_finalization.rs"]
+mod runner_finalization;
 #[path = "delivery_matrix/subscription_notice_observer.rs"]
 mod subscription;
 
@@ -27,6 +43,7 @@ use collaboration_protocol::{
 };
 #[path = "delivery_matrix/push_matrix_driver.rs"]
 mod push_matrix_driver;
+use native_push_receipt::record_push_input_correlation;
 use proof_context::{ProofContext, ProofResult};
 use push_matrix_driver::*;
 use serde_json::json;
@@ -35,6 +52,25 @@ use std::time::Duration;
 const OBSERVATION_TIMEOUT: Duration = Duration::from_secs(120);
 const ACP_TARGET_EXPECTED_PROMPTS: usize = 9;
 const SUBSCRIPTION_NOTICE_LABEL: &str = "🧵 Router: new thread activity";
+
+fn assert_long_preview_literal(observed: &str, body: &str, link: &str) -> ProofResult<()> {
+    let source_scalars = body.chars().count();
+    if source_scalars <= 100 || body.contains(['"', '\\', '\n', '\r']) {
+        return Err("matrix preview oracle requires a long body without escaped fields".into());
+    }
+    let source_prefix = body.chars().take(100).collect::<String>();
+    let expected_tail = format!(
+        "\"{source_prefix}…\" (+{}) 📖 Load full message → {link}",
+        source_scalars - 100
+    );
+    if !observed.ends_with(&expected_tail) {
+        return Err(format!(
+            "recipient output omitted literal preview/link tail {expected_tail:?}"
+        )
+        .into());
+    }
+    Ok(())
+}
 
 #[test]
 #[ignore = "creates an isolated debug Host root and scripted ACP provider fixture"]
@@ -52,22 +88,39 @@ fn prepare_delivery_matrix_acp_target_fixture() -> ProofResult<()> {
 #[ignore = "requires an isolated debug Host with the delivery-matrix provider fixture"]
 async fn push_delivery_matrix_covers_codex_and_claude_peer() -> ProofResult<()> {
     let config_guard = delivery_matrix_support::ConfigHashGuard::capture()?;
-    let result = exercise_push_delivery_matrix(&config_guard).await;
-    config_guard.verify()?;
-    result
+    let mut peer_owner: Option<delivery_matrix_support::PeerFixture> = None;
+    runner_finalization::run_matrix_scenario(
+        &mut peer_owner,
+        async |owner: &mut &mut Option<delivery_matrix_support::PeerFixture>| {
+            exercise_push_delivery_matrix(&config_guard, owner).await
+        },
+        |owner: &mut Option<delivery_matrix_support::PeerFixture>| async move {
+            match owner.take() {
+                Some(peer) => peer.shutdown().await,
+                None => Ok(()),
+            }
+        },
+        || config_guard.verify(),
+    )
+    .await
 }
 
 async fn exercise_push_delivery_matrix(
     config_guard: &delivery_matrix_support::ConfigHashGuard,
+    peer_owner: &mut Option<delivery_matrix_support::PeerFixture>,
 ) -> ProofResult<()> {
     let mut proof = ProofContext::connect().await?;
     proof.record(
         "pushDeliveryMatrixRun",
         json!({"runId":uuid::Uuid::now_v7().to_string(),
-        "cells":["S1","S2","S3","S4","S5","S6","S7","S8","S9","S10"]}),
+        "cells":["S1","S1-long","S2","S3","S4","S5","S6","S7","S8","S9","S10"]}),
     )?;
-    let mut peer = delivery_matrix_support::PeerFixture::start(&proof).await?;
-    let mut automation = AutomationStore::open(&proof.root.join("automation.sqlite")).await?;
+    *peer_owner = Some(delivery_matrix_support::PeerFixture::start(&proof).await?);
+    let peer = peer_owner
+        .as_mut()
+        .ok_or("actual peer missing from runner owner")?;
+    let mut automation =
+        AutomationStore::open(&proof.service_directory.join("automation.sqlite")).await?;
     let sender = proof.start_thread("Push matrix sender").await?;
     let mut covered_cells = Vec::new();
 
@@ -76,12 +129,59 @@ async fn exercise_push_delivery_matrix(
     let s1_body = "S1 is green";
     let s1_receipt = cli_send(&proof, Some(&sender), &codex_recipient, s1_body, false).await?;
     let s1_push_id = receipt_push_id(&s1_receipt)?;
-    let (_, s1_expected) = dm_notice_and_show(&mut proof, &codex_recipient, &s1_push_id).await?;
+    let (s1_show, s1_expected) =
+        dm_notice_and_show(&mut proof, &codex_recipient, &s1_push_id).await?;
     let s1_item =
         wait_for_codex_input(&mut proof, &codex_recipient, s1_body, OBSERVATION_TIMEOUT).await?;
-    assert_exact_notice_line(&user_message_text(&s1_item)?, &s1_expected)?;
-    record_passed_matrix_cell(&proof, config_guard, "S1", &[user_message_text(&s1_item)?])?;
-    covered_cells.push("S1 Codex app-server");
+    let s1_observed = user_message_text(&s1_item)?;
+    assert_exact_notice_line(&s1_observed, &s1_expected)?;
+    assert!(s1_observed.contains("\"S1 is green\" · router://"));
+    let s1_fetched = cli_show(&proof, &codex_recipient, &s1_show.link).await?;
+    assert_eq!(
+        s1_fetched.pointer("/result/record/body"),
+        Some(&json!(s1_body))
+    );
+    assert!(s1_fetched.pointer("/result/record/preview").is_none());
+    record_passed_matrix_cell(&proof, config_guard, "S1", &[s1_observed])?;
+    covered_cells.push("S1 Codex app-server short message");
+
+    // S1-long: native delivery also retains the independently checked truncation grammar.
+    let s1_long_prefix = matrix_marker("native-long");
+    let s1_long_body = format!(
+        "{s1_long_prefix} {}",
+        "N".repeat(1_339 - s1_long_prefix.chars().count())
+    );
+    assert_eq!(s1_long_body.chars().count(), 1_340);
+    let s1_long_receipt = cli_send(
+        &proof,
+        Some(&sender),
+        &codex_recipient,
+        &s1_long_body,
+        false,
+    )
+    .await?;
+    let s1_long_push_id = receipt_push_id(&s1_long_receipt)?;
+    let (s1_long_show, s1_long_expected) =
+        dm_notice_and_show(&mut proof, &codex_recipient, &s1_long_push_id).await?;
+    let s1_long_item = wait_for_codex_input(
+        &mut proof,
+        &codex_recipient,
+        &s1_long_prefix,
+        OBSERVATION_TIMEOUT,
+    )
+    .await?;
+    let s1_long_observed = user_message_text(&s1_long_item)?;
+    assert_exact_notice_line(&s1_long_observed, &s1_long_expected)?;
+    assert_long_preview_literal(&s1_long_expected, &s1_long_body, &s1_long_show.link)?;
+    assert_long_preview_literal(&s1_long_observed, &s1_long_body, &s1_long_show.link)?;
+    let s1_long_fetched = cli_show(&proof, &codex_recipient, &s1_long_show.link).await?;
+    assert_eq!(
+        s1_long_fetched.pointer("/result/record/body"),
+        Some(&json!(s1_long_body))
+    );
+    assert!(s1_long_fetched.pointer("/result/record/preview").is_none());
+    record_passed_matrix_cell(&proof, config_guard, "S1-long", &[s1_long_observed])?;
+    covered_cells.push("S1-long Codex app-server truncation");
 
     // S2: a long receipt is shortened to 100 Unicode scalars, linked, and fetchable in full.
     let s2_prefix = matrix_marker("long-receipt");
@@ -97,16 +197,14 @@ async fn exercise_push_delivery_matrix(
         .expect_text_with_timeout(&s2_prefix, OBSERVATION_TIMEOUT)
         .await?;
     assert_exact_notice_line(&s2_observed, &s2_expected)?;
-    assert!(s2_expected.contains(&format!(
-        "\"{}\" (+1240)",
-        s2_body.chars().take(100).collect::<String>()
-    )));
-    assert!(s2_expected.contains("(+1240)"));
+    assert_long_preview_literal(&s2_expected, &s2_body, &s2_show.link)?;
+    assert_long_preview_literal(&s2_observed, &s2_body, &s2_show.link)?;
     let s2_fetched = cli_show(&proof, &peer.target, &s2_show.link).await?;
     assert_eq!(
         s2_fetched.pointer("/result/record/body"),
         Some(&json!(s2_body))
     );
+    assert!(s2_fetched.pointer("/result/record/preview").is_none());
     record_passed_matrix_cell(&proof, config_guard, "S2", &[s2_observed])?;
     covered_cells.push("S2 Claude peer");
 
@@ -214,6 +312,11 @@ async fn exercise_push_delivery_matrix(
             created_at: Utc::now() - ChronoDuration::days(31),
         })
         .await?;
+    let stale_before_prune = cli_show(&proof, &peer.target, stale_push_id.as_str()).await?;
+    assert_eq!(
+        stale_before_prune.pointer("/result/record/pushId"),
+        Some(&json!(stale_push_id))
+    );
     automation.prune_push_records(Utc::now(), 500).await?;
     let stale_record = automation.get_push_record(&stale_push_id).await?;
     if stale_record.is_some() {
@@ -236,7 +339,6 @@ async fn exercise_push_delivery_matrix(
         "pushDeliveryMatrix",
         json!({"coveredCells":covered_cells,"separateModelCells":["S3","S5","S6"]}),
     )?;
-    peer.shutdown().await?;
     config_guard.verify()?;
     Ok(())
 }
@@ -245,9 +347,13 @@ async fn exercise_push_delivery_matrix(
 #[ignore = "requires a fresh isolated debug Host with the scripted ACP target fixture"]
 async fn push_delivery_matrix_reaches_scripted_acp_target() -> ProofResult<()> {
     let config_guard = delivery_matrix_support::ConfigHashGuard::capture()?;
-    let result = exercise_scripted_acp_target(&config_guard).await;
-    config_guard.verify()?;
-    result
+    runner_finalization::run_matrix_scenario(
+        (),
+        async |_: &mut ()| exercise_scripted_acp_target(&config_guard).await,
+        |_| async { Ok(()) },
+        || config_guard.verify(),
+    )
+    .await
 }
 
 async fn exercise_scripted_acp_target(
@@ -257,7 +363,9 @@ async fn exercise_scripted_acp_target(
     let sender = proof.start_thread("ACP push matrix sender").await?;
     let target = create_provider_session(&mut proof, &sender).await?;
     let marker = matrix_marker("acp-target");
-    delivery_matrix_support::mcp_send(&proof, &sender, &target, &marker).await?;
+    let body = format!("{marker} {}", "A".repeat(1_339 - marker.chars().count()));
+    assert_eq!(body.chars().count(), 1_340);
+    delivery_matrix_support::mcp_send(&proof, &sender, &target, &body).await?;
 
     let inbox = proof
         .client
@@ -272,6 +380,7 @@ async fn exercise_scripted_acp_target(
         .find(|notice| notice.line.contains(&marker))
         .cloned()
         .ok_or("ACP target push is missing from the recipient inbox")?;
+    assert_long_preview_literal(&notice.line, &body, &notice.link)?;
     let show = proof
         .client
         .router_show(PushRecordShowParams {
@@ -279,6 +388,12 @@ async fn exercise_scripted_acp_target(
             reference: notice.push_id.as_str().to_owned(),
         })
         .await?;
+    assert_eq!(show.record.body.as_deref(), Some(body.as_str()));
+    assert!(
+        serde_json::to_value(&show)?
+            .pointer("/record/preview")
+            .is_none()
+    );
     let expected = expected_push_line(&show, &machine_label(&proof)?)?;
     assert_eq!(notice.line, expected);
     let observed = wait_for_acp_input(
@@ -289,6 +404,7 @@ async fn exercise_scripted_acp_target(
     )
     .await?;
     assert_exact_notice_line(&observed, &expected)?;
+    assert_long_preview_literal(&observed, &body, &show.link)?;
     proof.record(
         "pushDeliveryMatrixAcp",
         json!({"pushId":show.record.push_id,"target":target,"firstLine":observed}),
@@ -300,141 +416,177 @@ async fn exercise_scripted_acp_target(
 #[tokio::test]
 #[ignore = "requires the documented automation-debug-host with existing debug model access"]
 async fn push_delivery_matrix_holds_codex_recipients() -> ProofResult<()> {
-    let mut proof = ProofContext::connect().await?;
     let config_guard = delivery_matrix_support::ConfigHashGuard::capture()?;
-    let result = async {
-        proof.record(
-            "pushDeliveryMatrixRun",
-            json!({
-                "runId":uuid::Uuid::now_v7().to_string(),"cells":["S3","S5","S6"],
-                "route":"documentedAcceptanceHost",
-            }),
-        )?;
-        let unloaded_targets = held_cells::prepare_unloaded_targets(&mut proof).await?;
-        let sender = proof.start_thread("Held matrix sender").await?;
-        let machine_label = machine_label(&proof)?;
-        let mut automation = AutomationStore::open(&proof.root.join("automation.sqlite")).await?;
-        let mut covered_cells = Vec::new();
-        // S3: a DM sent to an unloaded Codex conversation is stored as held and
-        // arrives as the same line after an explicit conversation load.
-        held_cells::cover_held_dm_cell(&mut proof, &sender, &unloaded_targets.held_dm).await?;
-        config_guard.verify()?;
-        covered_cells.push("S3 held DM delivered after Codex load");
+    let mut resource_owner: Option<owned_resource_cleanup::OwnedMatrixScope> = None;
+    runner_finalization::run_matrix_scenario(
+        &mut resource_owner,
+        async |owner: &mut &mut Option<owned_resource_cleanup::OwnedMatrixScope>| {
+            exercise_held_codex_recipients(&config_guard, owner).await
+        },
+        |owner: &mut Option<owned_resource_cleanup::OwnedMatrixScope>| async move {
+            match owner.take() {
+                Some(scope) => scope.cleanup().await,
+                None => Ok(()),
+            }
+        },
+        || config_guard.verify(),
+    )
+    .await
+}
 
-        // S5: two independently subscribed roots are held as one batch, then
-        // delivered as one notice after loading the Codex recipient.
-        held_cells::cover_held_subscription_batch_cell(
-            &mut proof,
-            &sender,
-            &unloaded_targets.held_subscription,
-        )
-        .await?;
-        config_guard.verify()?;
-        covered_cells.push("S5 held two-thread subscription batch delivered after Codex load");
-
-        // S6: an unloaded Codex session resumes for a wake; a scheduled run then targets
-        // a separate existing native session. Both inputs are matched back to their PushId.
-        let wake_target = unloaded_targets.wake;
-        let wake_marker = matrix_marker("wake");
-        let wake_receipt = cli_wake_send(&proof, &sender, &wake_target, &wake_marker).await?;
-        let fire: FireReceipt = serde_json::from_value(
-            wake_receipt
-                .pointer("/result/record/firstFire")
-                .cloned()
-                .ok_or("wake receipt omitted firstFire")?,
-        )?;
-        let wake_origin = RouterOriginRef::Wake {
-            wakeup_id: fire.wakeup_id,
-            occurrence_id: fire.occurrence_id,
-        };
-        let wake_record = automation
-            .get_push_record_by_origin_reference(&wake_origin)
-            .await?
-            .ok_or("fired wake has no stored push record")?;
-        let wake_show = proof
-            .client
-            .router_show(PushRecordShowParams {
-                caller: wake_target.clone(),
-                reference: wake_record.push_id.as_str().to_owned(),
-            })
-            .await?;
-        let wake_expected = expected_push_line(&wake_show, &machine_label)?;
-        let wake_item =
-            wait_for_codex_input(&mut proof, &wake_target, &wake_marker, OBSERVATION_TIMEOUT)
-                .await?;
-        assert_exact_notice_line(&user_message_text(&wake_item)?, &wake_expected)?;
-        let wake_correlation = record_push_input_correlation(
-            &mut proof,
-            "wake",
-            &wake_show.record.push_id,
-            &wake_item,
-        )?;
-
-        let schedule_target = proof
-            .start_thread("S6 scheduled existing-session recipient")
-            .await?;
-        let schedule_marker = matrix_marker("schedule-run");
-        let schedule_id =
-            create_existing_session_schedule(&mut proof, &schedule_target, &schedule_marker)
-                .await?;
-        let (schedule_origin, schedule_record) = wait_for_schedule_push(
-            &mut proof,
-            &mut automation,
-            schedule_id,
-            OBSERVATION_TIMEOUT,
-        )
-        .await?;
-        let schedule_show = proof
-            .client
-            .router_show(PushRecordShowParams {
-                caller: schedule_target.clone(),
-                reference: schedule_record.push_id.as_str().to_owned(),
-            })
-            .await?;
-        let schedule_expected = expected_push_line(&schedule_show, &machine_label)?;
-        let schedule_item = wait_for_codex_input(
-            &mut proof,
-            &schedule_target,
-            &schedule_marker,
-            OBSERVATION_TIMEOUT,
-        )
-        .await?;
-        assert_exact_notice_line(&user_message_text(&schedule_item)?, &schedule_expected)?;
-        let schedule_correlation = record_push_input_correlation(
-            &mut proof,
-            "schedule-run",
-            &schedule_show.record.push_id,
-            &schedule_item,
-        )?;
-        proof.record(
-            "pushDeliveryCorrelation",
-            json!({
-                "wake":wake_correlation,
-                "scheduleRun":schedule_correlation,
-                "scheduleOrigin":schedule_origin,
-            }),
-        )?;
-        record_passed_matrix_cell(
-            &proof,
-            &config_guard,
-            "S6",
-            &[
-                user_message_text(&wake_item)?,
-                user_message_text(&schedule_item)?,
-            ],
-        )?;
-        covered_cells.push("S6 wake and existing-session schedule run");
-
-        config_guard.verify()?;
-        proof.record(
-            "pushDeliveryModelMatrix",
-            json!({"coveredCells":covered_cells}),
-        )?;
-        Ok(())
-    }
-    .await;
+async fn exercise_held_codex_recipients(
+    config_guard: &delivery_matrix_support::ConfigHashGuard,
+    resource_owner: &mut Option<owned_resource_cleanup::OwnedMatrixScope>,
+) -> ProofResult<()> {
+    let mut proof = ProofContext::connect().await?;
+    *resource_owner = Some(owned_resource_cleanup::OwnedMatrixScope::new(
+        proof.client.clone(),
+    ));
+    let resources = &mut resource_owner
+        .as_mut()
+        .ok_or("actual cleanup client and resources missing from runner owner")?
+        .resources;
+    proof.record(
+        "pushDeliveryMatrixRun",
+        json!({
+            "runId":uuid::Uuid::now_v7().to_string(),"cells":["S3","S5","S6"],
+            "route":"documentedAcceptanceHost",
+        }),
+    )?;
+    let unloaded_targets = held_cells::prepare_unloaded_targets(&mut proof).await?;
+    let sender = proof.start_thread("Held matrix sender").await?;
+    let machine_label = machine_label(&proof)?;
+    let mut automation =
+        AutomationStore::open(&proof.service_directory.join("automation.sqlite")).await?;
+    let mut covered_cells = Vec::new();
+    // S3: a DM sent to an unloaded Codex conversation is stored as held and
+    // arrives as the same line after an explicit conversation load.
+    held_cells::cover_held_dm_cell(&mut proof, &sender, &unloaded_targets.held_dm).await?;
     config_guard.verify()?;
-    result
+    covered_cells.push("S3 held DM delivered after Codex load");
+
+    // S5: two independently subscribed roots are held as one batch, then
+    // delivered as one notice after loading the Codex recipient.
+    held_cells::cover_held_subscription_batch_cell(
+        &mut proof,
+        &sender,
+        &unloaded_targets.held_subscription,
+        resources,
+    )
+    .await?;
+    config_guard.verify()?;
+    covered_cells.push("S5 held two-thread subscription batch delivered after Codex load");
+
+    // S6: an unloaded Codex session resumes for a wake; a scheduled run then targets
+    // a separate existing native session. Both inputs are matched back to their PushId.
+    let wake_target = unloaded_targets.wake;
+    let wake_marker = matrix_marker("wake");
+    let wake_receipt =
+        cli_wake_send(&proof, &sender, &wake_target, &wake_marker, resources).await?;
+    let fire: FireReceipt = serde_json::from_value(
+        wake_receipt
+            .pointer("/result/record/firstFire")
+            .cloned()
+            .ok_or("wake receipt omitted firstFire")?,
+    )?;
+    let wake_origin = RouterOriginRef::Wake {
+        wakeup_id: fire.wakeup_id,
+        occurrence_id: fire.occurrence_id,
+    };
+    let wake_record = automation
+        .get_push_record_by_origin_reference(&wake_origin)
+        .await?
+        .ok_or("fired wake has no stored push record")?;
+    let wake_show = proof
+        .client
+        .router_show(PushRecordShowParams {
+            caller: wake_target.clone(),
+            reference: wake_record.push_id.as_str().to_owned(),
+        })
+        .await?;
+    let wake_expected = expected_push_line(&wake_show, &machine_label)?;
+    let wake_deadline = tokio::time::Instant::now() + OBSERVATION_TIMEOUT;
+    let wake_item = wait_for_codex_input(
+        &mut proof,
+        &wake_target,
+        &wake_marker,
+        wake_deadline.saturating_duration_since(tokio::time::Instant::now()),
+    )
+    .await?;
+    assert_exact_notice_line(&user_message_text(&wake_item)?, &wake_expected)?;
+    let wake_correlation = record_push_input_correlation(
+        &mut proof,
+        "wake",
+        &wake_show.record,
+        &wake_item,
+        wake_deadline,
+    )
+    .await?;
+
+    let schedule_target = proof
+        .start_thread("S6 scheduled existing-session recipient")
+        .await?;
+    let schedule_marker = matrix_marker("schedule-run");
+    let schedule_id =
+        create_existing_session_schedule(&mut proof, &schedule_target, &schedule_marker, resources)
+            .await?;
+    let (schedule_origin, schedule_record) = wait_for_schedule_push(
+        &mut proof,
+        &mut automation,
+        schedule_id,
+        OBSERVATION_TIMEOUT,
+    )
+    .await?;
+    let schedule_show = proof
+        .client
+        .router_show(PushRecordShowParams {
+            caller: schedule_target.clone(),
+            reference: schedule_record.push_id.as_str().to_owned(),
+        })
+        .await?;
+    let schedule_expected = expected_push_line(&schedule_show, &machine_label)?;
+    let schedule_deadline = tokio::time::Instant::now() + OBSERVATION_TIMEOUT;
+    let schedule_item = wait_for_codex_input(
+        &mut proof,
+        &schedule_target,
+        &schedule_marker,
+        schedule_deadline.saturating_duration_since(tokio::time::Instant::now()),
+    )
+    .await?;
+    assert_exact_notice_line(&user_message_text(&schedule_item)?, &schedule_expected)?;
+    let schedule_correlation = record_push_input_correlation(
+        &mut proof,
+        "schedule-run",
+        &schedule_show.record,
+        &schedule_item,
+        schedule_deadline,
+    )
+    .await?;
+    proof.record(
+        "pushDeliveryCorrelation",
+        json!({
+            "wake":wake_correlation,
+            "scheduleRun":schedule_correlation,
+            "scheduleOrigin":schedule_origin,
+        }),
+    )?;
+    record_passed_matrix_cell(
+        &proof,
+        config_guard,
+        "S6",
+        &[
+            user_message_text(&wake_item)?,
+            user_message_text(&schedule_item)?,
+        ],
+    )?;
+    covered_cells.push("S6 wake and existing-session schedule run");
+
+    config_guard.verify()?;
+    proof.record(
+        "pushDeliveryModelMatrix",
+        json!({"coveredCells":covered_cells}),
+    )?;
+    Ok(())
 }
 
 fn record_passed_matrix_cell(

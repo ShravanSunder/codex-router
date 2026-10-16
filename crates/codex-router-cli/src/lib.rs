@@ -8,6 +8,7 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::time::Duration;
 
+use codex_native_integration::DEFAULT_ROUTER_PORT;
 use codex_router_auth::live_quota::DEFAULT_CHATGPT_BACKEND_BASE_URL;
 use codex_router_core::local_auth::LocalRouterTokenRecord;
 use codex_router_proxy::server::LoopbackBindAddress;
@@ -63,7 +64,6 @@ mod cli_argument_parsing;
 pub(crate) use cli_argument_parsing::ArgumentParser;
 use cli_argument_parsing::{CliCommand, ProfileCommand, TokenCommand};
 
-const DEFAULT_PROFILE_PORT: u16 = 8787;
 const DEFAULT_MAX_SNAPSHOT_AGE_SECONDS: u64 = 300;
 const DEFAULT_QUOTA_REFRESH_INTERVAL_SECONDS: u64 = 180;
 const DEFAULT_SESSION_PIN_IDLE_TTL_SECONDS: u64 = DEFAULT_SESSION_PIN_IDLE_TTL.as_secs();

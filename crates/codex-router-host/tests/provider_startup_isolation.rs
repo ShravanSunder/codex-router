@@ -56,13 +56,19 @@ async fn missing_executable_isolated_from_other_provider_and_codex() {
     let mut runtime = CollaborationRuntime::start_with_external_providers(
         runtime_inputs(root.path()),
         vec![
-            ExternalProviderStartup::Launch(
-                ExternalProviderLaunchBinding::claude(
+            ExternalProviderStartup::Launch({
+                let mut binding = ExternalProviderLaunchBinding::claude(
                     root.path().join("missing-claude-agent-acp"),
                     Vec::new(),
                 )
-                .expect("Claude binding"),
-            ),
+                .expect("Claude binding");
+                codex_router_test_support::global_claude_fixture::declare_global_claude_fixture(
+                    root.path(),
+                    &mut binding.launch.environment,
+                )
+                .expect("declare test-owned global Claude executable");
+                binding
+            }),
             ExternalProviderStartup::Launch(
                 ExternalProviderLaunchBinding::cursor(cursor, Vec::new()).expect("Cursor binding"),
             ),
@@ -127,9 +133,16 @@ async fn failed_initialize_isolated_from_other_provider() {
     let runtime = CollaborationRuntime::start_with_external_providers(
         runtime_inputs(root.path()),
         vec![
-            ExternalProviderStartup::Launch(
-                ExternalProviderLaunchBinding::claude(failing, Vec::new()).expect("Claude binding"),
-            ),
+            ExternalProviderStartup::Launch({
+                let mut binding = ExternalProviderLaunchBinding::claude(failing, Vec::new())
+                    .expect("Claude binding");
+                codex_router_test_support::global_claude_fixture::declare_global_claude_fixture(
+                    root.path(),
+                    &mut binding.launch.environment,
+                )
+                .expect("declare test-owned global Claude executable");
+                binding
+            }),
             ExternalProviderStartup::Launch(
                 ExternalProviderLaunchBinding::cursor(cursor, Vec::new()).expect("Cursor binding"),
             ),

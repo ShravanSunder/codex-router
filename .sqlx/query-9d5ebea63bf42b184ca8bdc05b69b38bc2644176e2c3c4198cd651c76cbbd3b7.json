@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE interaction_history_revision SET revision = ? WHERE metadata_id = 1 AND revision = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "9d5ebea63bf42b184ca8bdc05b69b38bc2644176e2c3c4198cd651c76cbbd3b7"
+}

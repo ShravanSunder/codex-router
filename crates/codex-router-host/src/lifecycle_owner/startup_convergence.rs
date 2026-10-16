@@ -29,14 +29,22 @@ pub(super) async fn start_router(
             crate::router_credential_migration::migrate_before_router_spawn(&secret_root).await;
             let mut command = command.command();
             let mut child = RouterChild::spawn(&mut command)?;
+            #[cfg(debug_assertions)]
+            let readiness_started = std::time::Instant::now();
             let probe_result = match await_router_readiness(
                 config.router_endpoint(),
                 config.deadlines().router_start(),
             )
             .await
             {
-                Ok(result) => result,
+                Ok(result) => {
+                    #[cfg(debug_assertions)]
+                    record_router_startup_observation(&mut child, readiness_started, Some(result));
+                    result
+                }
                 Err(error) => {
+                    #[cfg(debug_assertions)]
+                    record_router_startup_observation(&mut child, readiness_started, None);
                     let _shutdown_outcome = child.shutdown().await?;
                     return Err(HostError::RouterProbe(error));
                 }
@@ -60,6 +68,48 @@ pub(super) async fn start_router(
                 }
             }
         }
+    }
+}
+
+#[cfg(debug_assertions)]
+fn record_router_startup_observation(
+    child: &mut RouterChild,
+    started: std::time::Instant,
+    readiness: Option<RouterProbeResult>,
+) {
+    use std::os::unix::process::ExitStatusExt;
+    let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    let child_pid = child.process_id();
+    match child.observe_startup_status() {
+        Ok(Some(status)) => tracing::debug!(target: "codex_router_host::startup_diagnostics", {
+            event.name = "codex_router.host.router_startup_child",
+            stage = "router_readiness",
+            child_state = "exited",
+            child_pid,
+            exit_code = ?status.code(),
+            exit_signal = ?status.signal(),
+            readiness = ?readiness,
+            elapsed_ms,
+            }, "Observed retained Router child"
+        ),
+        Ok(None) => tracing::debug!(target: "codex_router_host::startup_diagnostics", {
+            event.name = "codex_router.host.router_startup_child",
+            stage = "router_readiness",
+            child_state = "running",
+            child_pid,
+            readiness = ?readiness,
+            elapsed_ms,
+            }, "Observed retained Router child"
+        ),
+        Err(_) => tracing::debug!(target: "codex_router_host::startup_diagnostics", {
+            event.name = "codex_router.host.router_startup_child",
+            stage = "router_readiness",
+            child_state = "observation_failed",
+            child_pid,
+            readiness = ?readiness,
+            elapsed_ms,
+            }, "Retained Router status unavailable"
+        ),
     }
 }
 
@@ -131,6 +181,11 @@ pub(super) async fn shutdown_owned_router_after_startup_failure(
     }
     Ok(())
 }
+
+#[cfg(test)]
+#[cfg(debug_assertions)]
+#[path = "startup_diagnostic_tests.rs"]
+mod diagnostic_tests;
 
 #[cfg(test)]
 mod tests {

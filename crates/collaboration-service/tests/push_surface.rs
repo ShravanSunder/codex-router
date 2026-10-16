@@ -307,6 +307,52 @@ async fn message_send_persists_before_delivery_and_submits_one_linked_line() {
 }
 
 #[tokio::test]
+async fn truncated_dispatch_cue_links_to_the_original_body_through_public_show() {
+    let (_directory, _store, delivery, mut control) = setup().await;
+    let sender = session("claude-local", "sender-session");
+    let target = session("codex-local", "target-session");
+    let body = format!("{}\"\\\n{}", "🪿".repeat(97), "界".repeat(1_240));
+    assert_eq!(body.chars().count(), 1_340);
+
+    let sent = control
+        .call("message/send", send_params(&target, &sender, &body))
+        .await;
+    let result = sent.get("result").expect("message send accepted");
+    let push_id = result["pushId"].as_str().expect("stored push id");
+    let link = format!("router://{SERVICE_ID}/push/{push_id}");
+    assert_eq!(result["link"], link);
+
+    // RecordingDelivery observes the production dispatch boundary, not peer/native IO.
+    let dispatched = {
+        let requests = delivery
+            .requests
+            .lock()
+            .expect("prepared delivery requests");
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].target, target);
+        assert_eq!(requests[0].payload.push_id.as_str(), push_id);
+        requests[0].payload.line.as_str().to_owned()
+    };
+    let expected_line = format!(
+        r#"✉️ ✳️ claude-local/sender-s @push-surface-test → you · "{}\"\\⏎…" (+1240) 📖 Load full message → {link}"#,
+        "🪿".repeat(97),
+    );
+    assert_eq!(dispatched, expected_line);
+    assert!(dispatched.len() <= 1_024);
+    assert_eq!(dispatched.lines().count(), 1);
+    assert!(!dispatched.contains('界'));
+
+    let shown = control
+        .call("router/show", json!({"caller":target,"reference":link}))
+        .await;
+    assert_eq!(shown.pointer("/result/record/body"), Some(&json!(body)));
+    assert_eq!(shown.pointer("/result/link"), Some(&json!(link)));
+    assert!(shown.pointer("/result/record/preview").is_none());
+    assert!(!shown["result"]["record"]["readAt"].is_null());
+    control.close().await;
+}
+
+#[tokio::test]
 async fn show_returns_stored_rejected_and_unknown_delivery_outcomes() {
     for (outcome, expected_state, expected_kind, expected_claims) in [
         (

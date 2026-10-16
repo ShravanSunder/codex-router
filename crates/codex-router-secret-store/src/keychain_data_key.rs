@@ -90,12 +90,17 @@ impl KeychainAccess for PlatformKeychainAccess {
         ensure_router_keychain_service(service)?;
         use apple_native_keyring_store::keychain::{Cred, MacKeychainDomain};
 
-        let entry = Cred::build(MacKeychainDomain::User, service, account)
-            .map_err(|_| KeychainAccessError::Unavailable)?;
+        let entry = Cred::build(MacKeychainDomain::User, service, account).map_err(|error| {
+            record_keychain_read_failure("entry_build", &error);
+            KeychainAccessError::Unavailable
+        })?;
         match entry.get_secret() {
             Ok(secret) => Ok(Some(secret)),
             Err(keyring_core::Error::NoEntry) => Ok(None),
-            Err(_) => Err(KeychainAccessError::Unavailable),
+            Err(error) => {
+                record_keychain_read_failure("get_secret", &error);
+                Err(KeychainAccessError::Unavailable)
+            }
         }
     }
 
@@ -114,6 +119,46 @@ impl KeychainAccess for PlatformKeychainAccess {
             .add_generic_password(service, account, secret)
             .map_err(|_| KeychainAccessError::Unavailable)
     }
+}
+
+#[cfg(all(target_os = "macos", not(any(test, feature = "keychain-test-guard"))))]
+fn record_keychain_read_failure(stage: &'static str, error: &keyring_core::Error) {
+    let (failure_class, os_status) = keychain_failure_metadata(error);
+    tracing::warn!(
+        keychain_stage = stage,
+        keychain_failure_class = failure_class,
+        keychain_os_status = os_status,
+        "Router Keychain read failed"
+    );
+}
+
+#[cfg(all(target_os = "macos", any(test, not(feature = "keychain-test-guard"))))]
+fn keychain_failure_metadata(error: &keyring_core::Error) -> (&'static str, Option<i32>) {
+    use keyring_core::Error;
+    let failure_class = match error {
+        Error::PlatformFailure(_) => "platform_failure",
+        Error::NoStorageAccess(_) => "no_storage_access",
+        Error::NoEntry => "no_entry",
+        Error::BadEncoding(_) => "bad_encoding",
+        Error::BadDataFormat(_, _) => "bad_data_format",
+        Error::BadStoreFormat(_) => "bad_store_format",
+        Error::TooLong(_, _) => "attribute_too_long",
+        Error::Invalid(_, _) => "invalid_attribute",
+        Error::Ambiguous(_) => "ambiguous_entry",
+        Error::NoDefaultStore => "no_default_store",
+        Error::NotSupportedByStore(_) => "unsupported_operation",
+        _ => "unclassified",
+    };
+    // Borrow only the concrete error's numeric status. Display/Debug can call
+    // platform APIs and can retain arbitrary backend or credential payloads.
+    let os_status = match error {
+        Error::PlatformFailure(platform) | Error::NoStorageAccess(platform) => platform
+            .as_ref()
+            .downcast_ref::<security_framework::base::Error>()
+            .map(|error| error.code()),
+        _ => None,
+    };
+    (failure_class, os_status)
 }
 
 #[cfg(all(
@@ -271,6 +316,76 @@ pub(crate) mod temporary_keychain_tests;
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn keychain_failure_metadata_preserves_returned_os_status() {
+        for (os_status, expected_class) in [
+            (-61, "no_storage_access"),
+            (-25293, "platform_failure"),
+            (-25308, "platform_failure"),
+            (-128, "platform_failure"),
+        ] {
+            let error = apple_native_keyring_store::keychain::decode_error(
+                security_framework::base::Error::from_code(os_status),
+            );
+            assert_eq!(
+                super::keychain_failure_metadata(&error),
+                (expected_class, Some(os_status))
+            );
+        }
+        assert_eq!(
+            super::keychain_failure_metadata(&keyring_core::Error::NoEntry),
+            ("no_entry", None)
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn keychain_failure_metadata_never_formats_backend_payloads() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        struct PrivateBackendFailure(Arc<AtomicBool>);
+        impl std::fmt::Display for PrivateBackendFailure {
+            fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                self.0.store(true, Ordering::SeqCst);
+                formatter.write_str("PRIVATE_BACKEND_CANARY")
+            }
+        }
+        impl std::fmt::Debug for PrivateBackendFailure {
+            fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                std::fmt::Display::fmt(self, formatter)
+            }
+        }
+        impl std::error::Error for PrivateBackendFailure {}
+        let formatted = Arc::new(AtomicBool::new(false));
+        for (error, expected_class) in [
+            (
+                keyring_core::Error::PlatformFailure(Box::new(PrivateBackendFailure(Arc::clone(
+                    &formatted,
+                )))),
+                "platform_failure",
+            ),
+            (
+                keyring_core::Error::BadDataFormat(
+                    b"PRIVATE_SECRET_CANARY".to_vec(),
+                    Box::new(PrivateBackendFailure(Arc::clone(&formatted))),
+                ),
+                "bad_data_format",
+            ),
+            (
+                keyring_core::Error::Invalid("PRIVATE_ACCOUNT".into(), "PRIVATE_PATH".into()),
+                "invalid_attribute",
+            ),
+        ] {
+            assert_eq!(
+                super::keychain_failure_metadata(&error),
+                (expected_class, None)
+            );
+            assert!(!formatted.load(Ordering::SeqCst));
+        }
+    }
+
     use std::collections::HashMap;
     use std::sync::Mutex;
 

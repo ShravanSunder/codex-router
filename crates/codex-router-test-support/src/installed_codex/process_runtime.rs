@@ -75,9 +75,7 @@ pub(super) fn start_router_process_with_options(
     let mut command = Command::new(&binary_path);
     command.args(&argv);
     if cfg!(debug_assertions) {
-        command
-            .env("CODEX_ROUTER_TEST_CAPACITY_RETRY_DELAY_SECONDS", "2")
-            .env("CODEX_ROUTER_TEST_SHORT_QUOTA_WAIT_JITTER_SECONDS", "2");
+        command.env("CODEX_ROUTER_TEST_SHORT_QUOTA_WAIT_JITTER_SECONDS", "2");
     }
     command
         .stdin(Stdio::null())

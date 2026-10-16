@@ -244,6 +244,9 @@ impl<P: InteractionPort> HandleDispatchFrom<Agent> for ProviderFormElicitationHa
                 retry: false,
             });
         }
+        crate::provider_transport_diagnostics::record_callback_entered(
+            crate::provider_transport_diagnostics::ProviderFrameKind::Elicitation,
+        );
         let request =
             match serde_json::from_value::<CreateElicitationRequest>(request.params().clone()) {
                 Ok(request) => request,

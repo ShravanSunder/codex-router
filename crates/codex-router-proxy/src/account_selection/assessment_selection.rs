@@ -297,6 +297,20 @@ pub(super) fn filter_selector_accounts_for_provider(
         .collect()
 }
 
+pub(super) fn require_configured_openai_accounts(
+    route_provider: Provider,
+    mut configured_providers: impl Iterator<Item = Provider>,
+) -> Result<(), HttpProxyError> {
+    if route_provider == Provider::Openai
+        && !configured_providers.any(|provider| provider == Provider::Openai)
+    {
+        return Err(HttpProxyError::Selection {
+            reason: QuotaAwareAccountSelectorError::NoConfiguredOpenaiAccounts,
+        });
+    }
+    Ok(())
+}
+
 fn account_input_from_quota_state(
     account: &QuotaAwareAccountState,
     now_unix_seconds: u64,

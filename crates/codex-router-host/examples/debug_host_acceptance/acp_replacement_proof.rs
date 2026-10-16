@@ -38,7 +38,7 @@ pub async fn run_replacement_proof(
         .ok_or("backend generation unavailable")?;
     println!(
         "{}",
-        json!({"kind":"ownedReplacementThreadCreated","threadId":target,"model":"gpt-5.6-luna","generation":before})
+        json!({"kind":"ownedReplacementThreadCreated","threadId":target,"model":super::owned_thread_registry::PROOF_MODEL,"generation":before})
     );
     let diagnostics = std::fs::OpenOptions::new()
         .write(true)
@@ -119,7 +119,9 @@ pub async fn run_replacement_proof(
     owned.require_owned(&target)?;
     let mut successor = NativeProtocolConnection::connect(request.native_socket).await?;
     let thread = successor.inspect_thread(&target).await?;
-    if thread.get("model").and_then(Value::as_str) != Some("gpt-5.6-luna") {
+    if thread.get("model").and_then(Value::as_str)
+        != Some(super::owned_thread_registry::PROOF_MODEL)
+    {
         return Err("recovered ACP target model is not Luna; no prompt sent".into());
     }
     input.write_all(b"prompt\n").await?;

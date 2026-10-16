@@ -242,6 +242,7 @@ async fn text_prompt_reaches_agent_without_optional_prompt_capabilities() {
 async fn configured_router_mcp_is_injected_into_create_and_load_requests() {
     let create_runtime = ExternalProviderRuntime::initialize_with_mcp_http(
         mcp_session_setup_fixture("session/new"),
+        acp_client_runtime::ProviderModelPicker::Standard,
         "router-collaboration",
         "http://127.0.0.1:19090/mcp",
     )
@@ -259,6 +260,7 @@ async fn configured_router_mcp_is_injected_into_create_and_load_requests() {
 
     let load_runtime = ExternalProviderRuntime::initialize_with_mcp_http(
         mcp_session_setup_fixture("session/load"),
+        acp_client_runtime::ProviderModelPicker::Standard,
         "router-collaboration",
         "http://127.0.0.1:19090/mcp",
     )

@@ -59,7 +59,9 @@ pub use prompt_content_translation::{
     PromptContentError, TranslatedPrompt, translate_prompt_content,
 };
 pub use prompt_settlement::{NativeInterruptionState, NativePromptTerminal, PromptSettlement};
-pub use session_creation::{AcpSessionBinding, SessionSetupError, SessionSetupInputs};
+pub use session_creation::{
+    AcpSessionBinding, RecordedSessionResume, SessionSetupError, SessionSetupInputs,
+};
 pub use tool_progress_projection::{ToolProjectionError, project_tool_progress};
 
 mod session_setup_task;

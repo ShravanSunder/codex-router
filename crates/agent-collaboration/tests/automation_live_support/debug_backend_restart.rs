@@ -1,6 +1,6 @@
 //! Restart only the verified acceptance Host's retained native child through its existing CLI.
 use super::proof_context::{ProofContext, ProofResult};
-use codex_native_integration::NativeProtocolConnection;
+use codex_native_integration::{DEFAULT_ROUTER_PORT, NativeProtocolConnection};
 use collaboration_client::protocol::ChannelDescription;
 use serde_json::{Value, json};
 use std::{path::Path, time::Duration};
@@ -38,7 +38,9 @@ pub async fn restart(proof: &mut ProofContext) -> ProofResult<()> {
     let port = marker
         .get("port")
         .and_then(Value::as_u64)
-        .filter(|port| *port > 0 && *port <= u64::from(u16::MAX) && *port != 8787)
+        .filter(|port| {
+            *port > 0 && *port <= u64::from(u16::MAX) && *port != u64::from(DEFAULT_ROUTER_PORT)
+        })
         .ok_or("Debug provider port missing")?;
     let binary =
         Path::new(env!("CARGO_BIN_EXE_agent-collaboration")).with_file_name("codex-router");
@@ -53,7 +55,7 @@ pub async fn restart(proof: &mut ProofContext) -> ProofResult<()> {
     let output = tokio::time::timeout(
         Duration::from_secs(130),
         tokio::process::Command::new(binary)
-            .args(["host", "restart", "--router-root"])
+            .args(["host", "app-server", "restart", "--router-root"])
             .arg(&proof.root)
             .args(["--port", &port.to_string(), "--require-debug-isolation"])
             .kill_on_drop(true)
@@ -61,7 +63,7 @@ pub async fn restart(proof: &mut ProofContext) -> ProofResult<()> {
     )
     .await??;
     let succeeded = output.status.success()
-        && String::from_utf8_lossy(&output.stdout).contains("result: Succeeded");
+        && String::from_utf8_lossy(&output.stdout).contains("result: succeeded");
     proof.record("ownedBackendRestartResult", json!({"exitCode":output.status.code(),"succeeded":succeeded,"stdout":String::from_utf8_lossy(&output.stdout)}))?;
     if !succeeded {
         return Err(

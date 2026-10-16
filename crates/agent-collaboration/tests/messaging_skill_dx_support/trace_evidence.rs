@@ -130,7 +130,7 @@ pub(super) fn has_incoming_message_followed_by_agent_text(
                         let Some(header) = parse_push_line_header(text) else {
                             return false;
                         };
-                        let Some((_, link_text)) = text.rsplit_once(" · ") else {
+                        let Some(link_text) = text.split_whitespace().last() else {
                             return false;
                         };
                         let Ok(link) = RouterLink::parse(link_text) else {
@@ -247,16 +247,17 @@ mod tests {
             }
         });
         let incoming = render_push_line(&PushLineInput {
-            link,
+            link: link.clone(),
             machine_label: MachineLabel::try_from("fixture-host".to_owned())
                 .expect("machine label"),
             origin: PushOrigin::Session(sender.clone()),
             header_facts: PushHeaderFacts::DirectMessage {
                 sender_display_name: None,
             },
-            body: Some("FIXTURE_MARKER".to_owned()),
+            body: Some(format!("FIXTURE_MARKER {}", "N".repeat(150))),
         })
         .expect("render prepared push line");
+        assert!(incoming.ends_with(&format!("\" (+65) 📖 Load full message → {link}")));
         let turns = vec![json!({
             "status":"completed",
             "items":[

@@ -32,7 +32,7 @@ pub async fn run_permission_proof(
     let target = owned.create_with_user_review(native, cwd).await?;
     println!(
         "{}",
-        json!({"kind":"ownedPermissionThreadCreated","threadId":target,"model":"gpt-5.6-luna","approvalsReviewer":"user","approvalPolicy":"untrusted"})
+        json!({"kind":"ownedPermissionThreadCreated","threadId":target,"model":super::owned_thread_registry::PROOF_MODEL,"approvalsReviewer":"user","approvalPolicy":"untrusted"})
     );
     let preparation = owned
         .submit_text(

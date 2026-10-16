@@ -2,6 +2,7 @@ use super::*;
 
 pub(super) const CODEX_WEBSOCKET_RECONNECT_SIGNAL: &str = r#"{"type":"error","status":400,"error":{"type":"invalid_request_error","code":"websocket_connection_limit_reached","message":"Responses websocket connection limit reached (60 minutes). Create a new websocket connection to continue."}}"#;
 pub(crate) const ROUTER_ALL_ACCOUNTS_EXHAUSTED_SIGNAL: &str = r#"{"type":"error","status":429,"error":{"type":"usage_limit_reached","code":"codex_router_all_accounts_exhausted","message":"All configured codex-router accounts are out of usable quota."}}"#;
+pub(crate) const ROUTER_NO_OPENAI_ACCOUNTS_SIGNAL: &str = r#"{"type":"error","status":503,"error":{"type":"configuration_error","code":"codex_router_no_openai_accounts","message":"No OpenAI accounts are configured for this Router. Add an OpenAI account to this Router and sign in."}}"#;
 pub(crate) const ROUTER_QUOTA_STATE_UNAVAILABLE_SIGNAL: &str = r#"{"type":"error","status":503,"error":{"type":"codex_router_quota_state_unavailable","code":"codex_router_quota_state_unavailable","message":"codex-router cannot safely rotate accounts because quota state is unavailable."}}"#;
 pub(super) const POST_EXHAUSTION_ALTERNATIVE_SELECTION_TIMEOUT: Duration =
     Duration::from_millis(250);
@@ -12,11 +13,6 @@ pub(super) fn short_quota_wait_signal(retry_after_seconds: u64) -> String {
     )
 }
 
-pub(super) fn model_capacity_wait_signal(retry_after_seconds: u64) -> String {
-    format!(
-        r#"{{"type":"response.failed","response":{{"id":"resp_router_model_capacity_wait","status":"failed","error":{{"code":"rate_limit_exceeded","message":"Rate limit exceeded. Try again in {retry_after_seconds} seconds."}}}}}}"#
-    )
-}
 pub(super) fn selection_close_reason_from_http_error(
     error: HttpProxyError,
 ) -> WebSocketCloseReason {
@@ -38,25 +34,6 @@ pub(super) async fn maybe_replace_account_quota_exhaustion_with_reconnect_signal
     provider_error_body: Option<&[u8]>,
     context: &UpstreamToLocalPumpContext,
 ) -> UpstreamMessageOutcome {
-    if classification == ProviderErrorClassification::ModelCapacity {
-        return match context
-            .session_registry
-            .record_capacity_retry(context.session_id)
-        {
-            Some(CapacityRetryOutcome::Retry {
-                retry_after_seconds,
-            }) => UpstreamMessageOutcome {
-                message: Message::text(model_capacity_wait_signal(retry_after_seconds)),
-                close_after_send: true,
-            },
-            Some(CapacityRetryOutcome::Exhausted | CapacityRetryOutcome::Full) | None => {
-                UpstreamMessageOutcome {
-                    message: upstream_message,
-                    close_after_send: false,
-                }
-            }
-        };
-    }
     if classification != ProviderErrorClassification::AccountQuotaExhausted {
         return UpstreamMessageOutcome {
             message: upstream_message,

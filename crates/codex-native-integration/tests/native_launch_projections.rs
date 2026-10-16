@@ -10,6 +10,11 @@ use codex_native_integration::SessionLaunch;
 use codex_native_integration::profile_remote_resume_permission_keys;
 
 #[test]
+fn default_router_port_is_the_public_production_literal() {
+    assert_eq!(codex_native_integration::DEFAULT_ROUTER_PORT, 19741);
+}
+
+#[test]
 fn codex_paths_keep_native_state_under_normal_codex_home() {
     let paths = CodexPaths::from_codex_home(PathBuf::from("/Users/owner/.codex"));
 
